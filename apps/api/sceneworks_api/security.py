@@ -14,6 +14,10 @@ PUBLIC_PATHS = {
 
 
 def token_from_request(request: Request) -> str:
+    query_token = request.query_params.get("token", "").strip()
+    if query_token:
+        return query_token
+
     header_token = request.headers.get("x-sceneworks-token", "").strip()
     if header_token:
         return header_token

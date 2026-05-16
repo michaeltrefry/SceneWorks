@@ -11,3 +11,4 @@ class WorkerSettings:
         self.config_dir = Path(os.getenv("SCENEWORKS_CONFIG_DIR", "config")).resolve()
         self.access_token = os.getenv("SCENEWORKS_ACCESS_TOKEN", "").strip()
         self.heartbeat_seconds = int(os.getenv("SCENEWORKS_WORKER_HEARTBEAT_SECONDS", "30"))
+        self.poll_seconds = int(os.getenv("SCENEWORKS_WORKER_POLL_SECONDS", "3"))

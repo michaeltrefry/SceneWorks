@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-
+from .events import EventHub
+from .jobs import router as jobs_router
+from .jobs_store import JobsStore
 from .projects import ensure_data_dirs, router as projects_router
 from .security import access_control_middleware
 from .settings import Settings, get_settings
@@ -10,6 +11,9 @@ from .settings import Settings, get_settings
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     ensure_data_dirs(settings)
+    jobs_store = JobsStore(settings.jobs_db_path)
+    jobs_store.initialize()
+    interrupted_jobs = jobs_store.mark_interrupted_on_startup()
 
     app = FastAPI(
         title="SceneWorks API",
@@ -18,6 +22,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
+    app.state.jobs_store = jobs_store
+    app.state.event_hub = EventHub()
 
     app.add_middleware(
         CORSMiddleware,
@@ -42,7 +48,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "data": str(settings.data_dir),
                 "config": str(settings.config_dir),
                 "projects": str(settings.projects_dir),
+                "jobsDb": str(settings.jobs_db_path),
             },
+            "interruptedJobsOnStartup": len(interrupted_jobs),
         }
 
     @app.get("/api/v1/access", tags=["system"])
@@ -58,15 +66,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return {"ok": is_authorized(request, settings)}
 
-    @app.get("/api/v1/jobs/events", tags=["jobs"])
-    async def job_events() -> StreamingResponse:
-        async def stream():
-            yield "event: ready\n"
-            yield 'data: {"status":"placeholder","message":"Job event stream ready"}\n\n'
-
-        return StreamingResponse(stream(), media_type="text/event-stream")
-
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(jobs_router, prefix="/api/v1")
     return app
 
 

@@ -215,6 +215,9 @@ apps/web/dist/
 data/projects/*
 !data/projects/.gitkeep
 data/recent-projects.json
+data/*.db
+data/*.db-shm
+data/*.db-wal
 data/models/*
 !data/models/.gitkeep
 data/loras/*

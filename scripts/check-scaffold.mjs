@@ -43,7 +43,7 @@ for (const requiredPath of requiredPaths) {
 
 await assertContains("apps/web/src/main.jsx", "/api/v1/health");
 await assertContains("apps/api/sceneworks_api/main.py", "/api/v1/health");
-await assertContains("apps/api/sceneworks_api/main.py", "/api/v1/jobs/events");
+await assertContains("apps/api/sceneworks_api/jobs.py", "/jobs/events");
 await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 
