@@ -206,6 +206,22 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Node / web
+node_modules/
+apps/web/node_modules/
+apps/web/dist/
+
+# SceneWorks local runtime data
+data/projects/*
+!data/projects/.gitkeep
+data/recent-projects.json
+data/models/*
+!data/models/.gitkeep
+data/loras/*
+!data/loras/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+
 # PyPI configuration file
 .pypirc
 

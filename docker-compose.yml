@@ -1,0 +1,70 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      SCENEWORKS_API_HOST: ${SCENEWORKS_API_HOST:-0.0.0.0}
+      SCENEWORKS_API_PORT: ${SCENEWORKS_API_PORT:-8000}
+      SCENEWORKS_DATA_DIR: /sceneworks/data
+      SCENEWORKS_CONFIG_DIR: /sceneworks/config
+      SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
+      SCENEWORKS_CORS_ORIGINS: ${SCENEWORKS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/sceneworks/data
+      - ./config:/sceneworks/config:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3).read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    environment:
+      SCENEWORKS_API_URL: http://api:8000
+      SCENEWORKS_DATA_DIR: /sceneworks/data
+      SCENEWORKS_CONFIG_DIR: /sceneworks/config
+      SCENEWORKS_WORKER_ID: worker-gpu-auto-0
+      SCENEWORKS_GPU_ID: auto
+      SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+    volumes:
+      - ./data:/sceneworks/data
+      - ./config:/sceneworks/config:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

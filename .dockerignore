@@ -1,0 +1,16 @@
+.git
+.env
+node_modules
+apps/web/node_modules
+apps/web/dist
+__pycache__
+*.pyc
+data/projects/*
+!data/projects/.gitkeep
+data/models/*
+!data/models/.gitkeep
+data/loras/*
+!data/loras/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+data/recent-projects.json

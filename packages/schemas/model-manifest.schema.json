@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/model-manifest.schema.json",
+  "title": "SceneWorks Model Manifest",
+  "type": "object",
+  "required": ["schemaVersion", "models"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "models": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  }
+}

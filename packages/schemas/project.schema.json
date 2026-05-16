@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/project.schema.json",
+  "title": "SceneWorks Project",
+  "type": "object",
+  "required": ["schemaVersion", "appVersion", "id", "name", "createdAt", "folders"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "appVersion": { "type": "string" },
+    "id": { "type": "string", "pattern": "^project_[a-z0-9_]+$" },
+    "name": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "folders": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}
