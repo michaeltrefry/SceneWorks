@@ -20,7 +20,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -197,7 +198,10 @@ button {
 }
 
 .project-pill,
-.form-row button {
+.form-row button,
+.queue-chip,
+.job-composer button,
+.job-actions button {
   min-height: 38px;
   border: 1px solid #4b463d;
   background: #292722;
@@ -206,7 +210,8 @@ button {
 }
 
 .project-pill.active,
-.form-row button {
+.form-row button,
+.job-composer button {
   border-color: #6ec6b8;
   background: #183f3a;
 }
@@ -231,7 +236,16 @@ input {
   padding: 9px 10px;
 }
 
+select {
+  min-width: 0;
+  border: 1px solid #4b463d;
+  background: #191815;
+  color: #f3f0e8;
+  padding: 9px 10px;
+}
+
 input:focus,
+select:focus,
 button:focus-visible {
   outline: 2px solid #f8d78c;
   outline-offset: 2px;
@@ -248,6 +262,155 @@ button:disabled {
   gap: 18px;
   padding: 24px;
   min-height: 420px;
+}
+
+.queue-chip {
+  border-color: #6ec6b8;
+  color: #f3f0e8;
+}
+
+.job-composer {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(108px, 140px) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.job-composer label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.job-composer.compact {
+  grid-template-columns: minmax(0, 1fr) minmax(104px, 140px) auto;
+  max-width: 760px;
+}
+
+.queue-surface {
+  gap: 16px;
+}
+
+.queue-header {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(360px, 1.4fr);
+  gap: 18px;
+  align-items: end;
+}
+
+.queue-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.worker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.worker-card,
+.empty-panel,
+.job-row {
+  border: 1px solid #3c3a34;
+  background: #23221f;
+}
+
+.worker-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+}
+
+.worker-card span,
+.worker-card small {
+  color: #aaa397;
+}
+
+.job-list {
+  display: grid;
+  gap: 10px;
+}
+
+.empty-panel {
+  padding: 18px;
+  color: #aaa397;
+}
+
+.job-row {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.job-main,
+.job-meta,
+.job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.job-main {
+  justify-content: space-between;
+}
+
+.job-main h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.job-meta {
+  color: #aaa397;
+  font-size: 13px;
+}
+
+.status-badge {
+  border: 1px solid #4b463d;
+  background: #191815;
+  color: #f8d78c;
+  padding: 4px 8px;
+  text-transform: capitalize;
+}
+
+.job-row.completed .status-badge {
+  color: #6ec6b8;
+}
+
+.job-row.failed .status-badge,
+.job-row.interrupted .status-badge {
+  color: #e28e78;
+}
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  background: #191815;
+  border: 1px solid #3c3a34;
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  background: #6ec6b8;
+  transition: width 180ms ease;
+}
+
+.job-message {
+  margin: 0;
+  color: #c7bfb2;
+}
+
+.error-text {
+  color: #e28e78;
+}
+
+.job-actions button:disabled {
+  opacity: 0.45;
 }
 
 .view-copy {
@@ -305,7 +468,10 @@ button:disabled {
 
   .nav-list,
   .project-band,
-  .media-grid {
+  .media-grid,
+  .queue-header,
+  .job-composer,
+  .job-composer.compact {
     grid-template-columns: 1fr;
   }
 
