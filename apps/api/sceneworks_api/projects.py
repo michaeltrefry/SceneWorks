@@ -117,6 +117,22 @@ def create_project_db(project_path: Path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            create table if not exists timelines (
+              id text primary key,
+              name text not null,
+              file_path text not null,
+              aspect_ratio text not null,
+              width integer not null,
+              height integer not null,
+              fps integer not null,
+              duration real not null default 0,
+              created_at text not null,
+              updated_at text not null
+            )
+            """
+        )
 
 
 def write_project_file(settings: Settings, project_path: Path, project_id: str, name: str) -> dict:

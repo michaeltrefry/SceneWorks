@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/timeline.schema.json",
+  "title": "SceneWorks Timeline",
+  "type": "object",
+  "required": ["schemaVersion", "id", "projectId", "name", "aspectRatio", "width", "height", "fps", "tracks"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "pattern": "^timeline_[a-z0-9_]+$" },
+    "projectId": { "type": "string", "pattern": "^project_[a-z0-9_]+$" },
+    "name": { "type": "string", "minLength": 1 },
+    "aspectRatio": { "enum": ["16:9", "9:16", "1:1"] },
+    "width": { "type": "integer", "minimum": 256 },
+    "height": { "type": "integer", "minimum": 256 },
+    "fps": { "type": "integer", "minimum": 1, "maximum": 60 },
+    "duration": { "type": "number", "minimum": 0 },
+    "tracks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind", "items"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "kind": { "enum": ["video", "overlay", "audio"] },
+          "locked": { "type": "boolean" },
+          "muted": { "type": "boolean" },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "trackId", "assetId", "type", "displayName", "sourceIn", "sourceOut", "timelineStart", "timelineEnd", "speed"],
+              "properties": {
+                "id": { "type": "string" },
+                "trackId": { "type": "string" },
+                "assetId": { "type": "string" },
+                "type": { "enum": ["video", "image", "audio"] },
+                "displayName": { "type": "string" },
+                "sourceIn": { "type": "number", "minimum": 0 },
+                "sourceOut": { "type": "number", "exclusiveMinimum": 0 },
+                "timelineStart": { "type": "number", "minimum": 0 },
+                "timelineEnd": { "type": "number", "exclusiveMinimum": 0 },
+                "speed": { "type": "number", "minimum": 0.1 },
+                "fit": { "enum": ["fit", "fill", "stretch"] },
+                "volume": { "type": "number", "minimum": 0 },
+                "versionAssetIds": { "type": "array", "items": { "type": "string" } },
+                "transitionIn": { "$ref": "#/$defs/transition" },
+                "transitionOut": { "$ref": "#/$defs/transition" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transition" }
+    },
+    "createdAt": { "type": ["string", "null"], "format": "date-time" },
+    "updatedAt": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "$defs": {
+    "transition": {
+      "type": ["object", "null"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "enum": ["cut", "crossfade", "fade_from_black", "fade_to_black"] },
+        "fromItemId": { "type": ["string", "null"] },
+        "toItemId": { "type": ["string", "null"] },
+        "duration": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

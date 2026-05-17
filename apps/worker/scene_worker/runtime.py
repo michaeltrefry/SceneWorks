@@ -10,6 +10,7 @@ import httpx
 from .gpu import discover_gpu
 from .image_adapters import create_image_adapter
 from .settings import WorkerSettings
+from .timeline_exporter import run_timeline_export
 from .video_adapters import ProceduralVideoAdapter
 
 
@@ -46,6 +47,7 @@ def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict) -> None
         "gpuName": gpu["name"],
         "capabilities": sorted(
             set([*gpu["capabilities"], "image_generate", "image_edit", "video_generate", "video_extend", "video_bridge"])
+            | {"timeline_export"}
         ),
         "loadedModels": [],
     }
@@ -266,6 +268,68 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         heartbeat(api, settings, "idle")
 
 
+def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": status,
+                "stage": stage,
+                "progress": value,
+                "message": message,
+            },
+        )
+
+    try:
+        progress("preparing", "preparing", 0.06, "Preparing timeline export.")
+        result = run_timeline_export(
+            settings=settings,
+            job=job,
+            progress=progress,
+            cancel_requested=lambda: job_cancel_requested(api, job_id),
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Timeline MP4 export saved.",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Timeline export failed.",
+                "error": str(exc),
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def main() -> None:
     settings = WorkerSettings()
     gpu = discover_gpu(settings.gpu_id)
@@ -295,6 +359,8 @@ def main() -> None:
                 run_image_job(api, settings, job)
             elif job["type"] in ("video_generate", "video_extend", "video_bridge"):
                 run_video_job(api, settings, job)
+            elif job["type"] == "timeline_export":
+                run_timeline_export_job(api, settings, job)
             else:
                 update_job(
                     api,

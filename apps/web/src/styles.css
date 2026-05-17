@@ -542,6 +542,261 @@ button:disabled {
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 }
 
+.editor-surface {
+  gap: 16px;
+}
+
+.editor-header,
+.editor-actions,
+.timeline-create,
+.playback-bar,
+.bin-actions,
+.export-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+}
+
+.editor-actions button,
+.timeline-create button,
+.playback-bar button,
+.bin-actions button,
+.danger-action {
+  min-height: 36px;
+  border: 1px solid #4b463d;
+  background: #292722;
+  color: #f3f0e8;
+  padding: 7px 10px;
+}
+
+.timeline-create {
+  padding: 12px;
+  border: 1px solid #3c3a34;
+  background: #23221f;
+}
+
+.timeline-create label,
+.export-strip label,
+.bin-controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.editor-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.25fr) minmax(260px, 0.75fr);
+  gap: 14px;
+}
+
+.editor-preview,
+.editor-inspector,
+.timeline-panel,
+.asset-bin,
+.export-strip {
+  border: 1px solid #3c3a34;
+  background: #23221f;
+}
+
+.editor-preview,
+.editor-inspector,
+.asset-bin,
+.export-strip {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  padding: 14px;
+}
+
+.preview-canvas {
+  display: grid;
+  place-items: center;
+  width: min(100%, 760px);
+  max-height: 58vh;
+  overflow: hidden;
+  background: #0f0f0e;
+  color: #aaa397;
+}
+
+.preview-canvas.aspect-16-9 {
+  aspect-ratio: 16 / 9;
+}
+
+.preview-canvas.aspect-9-16 {
+  aspect-ratio: 9 / 16;
+  width: min(54vh, 100%);
+  justify-self: center;
+}
+
+.preview-canvas.aspect-1-1 {
+  aspect-ratio: 1;
+  width: min(58vh, 100%);
+  justify-self: center;
+}
+
+.preview-canvas img,
+.preview-canvas video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.playback-bar {
+  color: #c7bfb2;
+}
+
+.editor-inspector {
+  grid-template-columns: 1fr;
+}
+
+.editor-inspector label {
+  display: grid;
+  gap: 6px;
+}
+
+.compact-controls {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.danger-action {
+  border-color: #7f4d47;
+  background: #30211f;
+}
+
+.timeline-panel,
+.export-strip {
+  grid-column: 1 / -1;
+}
+
+.timeline-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.timeline-ruler {
+  display: flex;
+  justify-content: space-between;
+  min-width: 680px;
+  color: #aaa397;
+  font-size: 12px;
+}
+
+.timeline-tracks {
+  display: grid;
+  gap: 8px;
+  min-width: 680px;
+}
+
+.timeline-track {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.timeline-track strong {
+  color: #d8d2c7;
+  font-size: 13px;
+}
+
+.track-lane {
+  position: relative;
+  min-height: 58px;
+  border: 1px solid #3c3a34;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 79px, rgba(255, 255, 255, 0.05) 80px),
+    #191815;
+}
+
+.timeline-item {
+  position: absolute;
+  top: 7px;
+  display: grid;
+  gap: 2px;
+  align-content: center;
+  height: 42px;
+  min-width: 52px;
+  overflow: hidden;
+  border: 1px solid #6ec6b8;
+  background: #183f3a;
+  color: #ffffff;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.timeline-item.active {
+  border-color: #f8d78c;
+}
+
+.timeline-item span,
+.timeline-item small,
+.bin-asset strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-item span {
+  font-size: 12px;
+}
+
+.timeline-item small {
+  color: #c7bfb2;
+  font-size: 11px;
+}
+
+.asset-bin {
+  max-height: 650px;
+  overflow: auto;
+}
+
+.asset-bin-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.bin-asset {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+  border: 1px solid #3c3a34;
+  background: #191815;
+  padding: 8px;
+}
+
+.bin-asset > button {
+  min-height: 80px;
+  border: 0;
+  background: #0f0f0e;
+  padding: 0;
+}
+
+.bin-asset img,
+.bin-asset video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+}
+
+.bin-asset strong {
+  color: #f3f0e8;
+  font-size: 13px;
+}
+
+.bin-actions {
+  gap: 6px;
+}
+
+.bin-actions button {
+  min-height: 30px;
+  padding: 5px 7px;
+  font-size: 12px;
+}
+
 .asset-tray {
   display: grid;
   gap: 12px;
@@ -842,11 +1097,18 @@ button:disabled {
   }
 
   .control-grid,
-  .advanced-panel {
+  .advanced-panel,
+  .editor-layout,
+  .compact-controls {
     grid-template-columns: 1fr;
   }
 
   .asset-detail {
     position: static;
+  }
+
+  .timeline-panel,
+  .export-strip {
+    grid-column: auto;
   }
 }
