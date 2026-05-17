@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -20,6 +20,9 @@ from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, crea
 from .settings import WorkerSettings
 from .timeline_exporter import run_timeline_export
 from .video_adapters import ProceduralVideoAdapter, run_frame_extract, run_person_detect, run_person_track
+
+
+LoadedModelsSource = list[str] | Callable[[], list[str]] | None
 
 
 def now() -> str:
@@ -91,6 +94,14 @@ def heartbeat(
         f"/api/v1/workers/{settings.worker_id}/heartbeat",
         {"status": status, "currentJobId": current_job_id, "loadedModels": loaded_models or []},
     )
+
+
+def resolve_loaded_models(source: LoadedModelsSource) -> list[str]:
+    if source is None:
+        return []
+    if callable(source):
+        return source()
+    return source
 
 
 def update_job(api: ApiClient, job_id: str, payload: dict[str, Any]) -> dict:
@@ -291,11 +302,18 @@ def keep_job_alive(
     job_id: str,
     status: str,
     stop_event: threading.Event,
+    loaded_models: LoadedModelsSource = None,
 ) -> None:
     interval = max(5, min(settings.heartbeat_seconds, 30))
     while not stop_event.wait(interval):
         try:
-            heartbeat(api, settings, status, job_id)
+            heartbeat(
+                api,
+                settings,
+                status,
+                job_id,
+                loaded_models=resolve_loaded_models(loaded_models),
+            )
         except httpx.HTTPError as exc:
             emit({"event": "heartbeat_failed", "jobId": job_id, "error": str(exc), "reportedAt": now()})
 
@@ -306,11 +324,12 @@ def run_blocking_job_step(
     job_id: str,
     status: str,
     callback: Any,
+    loaded_models: LoadedModelsSource = None,
 ) -> Any:
     stop_event = threading.Event()
     thread = threading.Thread(
         target=keep_job_alive,
-        args=(api, settings, job_id, status, stop_event),
+        args=(api, settings, job_id, status, stop_event, loaded_models),
         daemon=True,
     )
     thread.start()
@@ -570,6 +589,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=adapter_loaded_models,
         )
         update_job(
             api,

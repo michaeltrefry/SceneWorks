@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from scene_worker.image_adapters import MODEL_TARGETS, build_asset_sidecar, image_request_from_job, resolve_seed
-from scene_worker.runtime import download_progress_payload, format_bytes, heartbeat, loaded_models_from_adapters, worker_capabilities
+from scene_worker.runtime import (
+    download_progress_payload,
+    format_bytes,
+    heartbeat,
+    keep_job_alive,
+    loaded_models_from_adapters,
+    worker_capabilities,
+)
 from scene_worker.video_adapters import VIDEO_MODEL_TARGETS, build_video_asset_sidecar, video_request_from_job
 
 
@@ -67,6 +74,48 @@ def test_heartbeat_loaded_models_are_not_sent_as_current_job():
 
     assert api.path == "/api/v1/workers/worker-1/heartbeat"
     assert api.payload == {"status": "idle", "currentJobId": None, "loadedModels": ["model-a"]}
+
+
+def test_keepalive_heartbeat_reports_current_loaded_models(monkeypatch):
+    calls = []
+
+    class StopAfterOneHeartbeat:
+        def __init__(self):
+            self.calls = 0
+
+        def wait(self, _interval):
+            self.calls += 1
+            return self.calls > 1
+
+    class Settings:
+        worker_id = "worker-1"
+        heartbeat_seconds = 1
+
+    def capture_heartbeat(api, settings, status, current_job_id=None, loaded_models=None):
+        calls.append(
+            {
+                "api": api,
+                "settings": settings,
+                "status": status,
+                "current_job_id": current_job_id,
+                "loaded_models": loaded_models,
+            }
+        )
+
+    monkeypatch.setattr("scene_worker.runtime.heartbeat", capture_heartbeat)
+
+    keep_job_alive(
+        api=object(),
+        settings=Settings(),
+        job_id="job-1",
+        status="busy",
+        stop_event=StopAfterOneHeartbeat(),
+        loaded_models=lambda: ["Tongyi-MAI/Z-Image-Turbo"],
+    )
+
+    assert calls[0]["status"] == "busy"
+    assert calls[0]["current_job_id"] == "job-1"
+    assert calls[0]["loaded_models"] == ["Tongyi-MAI/Z-Image-Turbo"]
 
 
 def test_random_batch_seeds_are_used_per_image():
