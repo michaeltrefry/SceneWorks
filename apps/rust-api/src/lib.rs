@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
@@ -20,6 +20,9 @@ use sceneworks_core::contracts::{
 use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
     WorkerHeartbeat, JOB_STATUSES,
+};
+use sceneworks_core::project_store::{
+    AssetStatusPatch, ProjectStore, ProjectStoreError, UploadAsset,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -101,6 +104,7 @@ impl Settings {
 pub struct AppState {
     settings: Settings,
     jobs_store: Arc<JobsStore>,
+    project_store: Arc<ProjectStore>,
     events: Arc<EventHub>,
     event_tickets: Arc<EventTicketStore>,
     interrupted_jobs_on_startup: usize,
@@ -204,9 +208,14 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
+    let project_store = Arc::new(ProjectStore::new(
+        settings.data_dir.clone(),
+        settings.app_version.clone(),
+    ));
     let state = AppState {
         settings,
         jobs_store,
+        project_store,
         events: Arc::new(EventHub::default()),
         event_tickets: Arc::new(EventTicketStore::new(30)),
         interrupted_jobs_on_startup,
@@ -217,6 +226,32 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/health", get(health))
         .route("/api/v1/access", get(access))
         .route("/api/v1/auth/verify", post(verify_access))
+        .route("/api/v1/projects", get(list_projects).post(create_project))
+        .route("/api/v1/projects/:project_id", get(get_project))
+        .route(
+            "/api/v1/projects/:project_id/reindex",
+            post(reindex_project_endpoint),
+        )
+        .route(
+            "/api/v1/projects/:project_id/assets",
+            get(list_assets).post(import_asset),
+        )
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id",
+            get(get_asset).delete(delete_asset),
+        )
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/purge",
+            delete(purge_asset),
+        )
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/status",
+            patch(update_asset_status),
+        )
+        .route(
+            "/api/v1/projects/:project_id/files/*relative_path",
+            get(get_project_file),
+        )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
         .route("/api/v1/jobs/events", get(job_events))
@@ -233,6 +268,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_worker),
         )
+        .fallback(route_not_found)
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state, access_control))
         .layer(cors))
@@ -244,6 +280,13 @@ struct JobsQuery {
     project_id: Option<String>,
     status: Option<String>,
     limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetsQuery {
+    include_rejected: Option<bool>,
+    include_trashed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,6 +326,11 @@ struct VerifyResponse {
     ok: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProjectCreateRequest {
+    name: String,
+}
+
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
@@ -310,6 +358,178 @@ async fn verify_access(State(state): State<AppState>, headers: HeaderMap) -> Jso
     Json(VerifyResponse {
         ok: is_authorized(&headers, &state.settings),
     })
+}
+
+async fn list_projects(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<sceneworks_core::project_store::ProjectSummary>>, ApiError> {
+    Ok(Json(
+        project_call(state, |store| store.list_projects()).await?,
+    ))
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    Json(payload): Json<ProjectCreateRequest>,
+) -> Result<
+    (
+        StatusCode,
+        Json<sceneworks_core::project_store::ProjectSummary>,
+    ),
+    ApiError,
+> {
+    let project = project_call(state, move |store| store.create_project(&payload.name)).await?;
+    Ok((StatusCode::CREATED, Json(project)))
+}
+
+async fn get_project(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<sceneworks_core::project_store::ProjectSummary>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| store.get_project(&project_id)).await?,
+    ))
+}
+
+async fn reindex_project_endpoint(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<sceneworks_core::project_store::ReindexResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| store.reindex_project(&project_id)).await?,
+    ))
+}
+
+async fn list_assets(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<AssetsQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.list_assets(
+                &project_id,
+                query.include_rejected.unwrap_or(false),
+                query.include_trashed.unwrap_or(false),
+            )
+        })
+        .await?,
+    ))
+}
+
+async fn get_asset(
+    State(state): State<AppState>,
+    Path((project_id, asset_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| store.get_asset(&project_id, &asset_id)).await?,
+    ))
+}
+
+async fn import_asset(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field.file_name().unwrap_or("upload").to_owned();
+        let content_type = field.content_type().map(str::to_owned);
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+            .to_vec();
+        let asset = project_call(state, move |store| {
+            store.import_asset(
+                &project_id,
+                UploadAsset {
+                    filename,
+                    content_type,
+                    bytes,
+                },
+            )
+        })
+        .await?;
+        return Ok((StatusCode::CREATED, Json(asset)));
+    }
+    Err(ApiError::bad_request("Upload file field is required"))
+}
+
+async fn update_asset_status(
+    State(state): State<AppState>,
+    Path((project_id, asset_id)): Path<(String, String)>,
+    Json(payload): Json<AssetStatusPatch>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_asset_status(&project_id, &asset_id, payload)
+        })
+        .await?,
+    ))
+}
+
+async fn delete_asset(
+    State(state): State<AppState>,
+    Path((project_id, asset_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::project_store::AssetMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.delete_asset(&project_id, &asset_id)
+        })
+        .await?,
+    ))
+}
+
+async fn purge_asset(
+    State(state): State<AppState>,
+    Path((project_id, asset_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::project_store::AssetMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.purge_asset(&project_id, &asset_id)
+        })
+        .await?,
+    ))
+}
+
+async fn get_project_file(
+    State(state): State<AppState>,
+    Path((project_id, relative_path)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let project_file = project_call(state, move |store| {
+        store.project_file(&project_id, &relative_path)
+    })
+    .await?;
+    let bytes = tokio::fs::read(&project_file.path)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(([(header::CONTENT_TYPE, project_file.content_type)], bytes).into_response())
+}
+
+async fn route_not_found(request: Request<axum::body::Body>) -> Response {
+    let path = request.uri().path();
+    let lower_path = path.to_ascii_lowercase();
+    if path.contains("/files/")
+        && (path.contains("..") || lower_path.contains("%2e") || lower_path.contains("%2f"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": "Invalid project file path" })),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "detail": "Not Found" })),
+    )
+        .into_response()
 }
 
 async fn list_jobs(
@@ -635,6 +855,18 @@ where
         .map_err(Into::into)
 }
 
+async fn project_call<T, F>(state: AppState, operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<ProjectStore>) -> Result<T, ProjectStoreError> + Send + 'static,
+{
+    let store = state.project_store.clone();
+    tokio::task::spawn_blocking(move || operation(store))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(Into::into)
+}
+
 async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiError> {
     store_call(state, |store, timeout| {
         store.mark_stale_workers_interrupted(timeout)?;
@@ -735,6 +967,19 @@ impl From<JobsStoreError> for ApiError {
     }
 }
 
+impl From<ProjectStoreError> for ApiError {
+    fn from(error: ProjectStoreError) -> Self {
+        match error {
+            ProjectStoreError::BadRequest(detail) => Self::bad_request(detail),
+            ProjectStoreError::NotFound(detail) => Self {
+                status: StatusCode::NOT_FOUND,
+                detail,
+            },
+            other => Self::internal(other.to_string()),
+        }
+    }
+}
+
 fn prune_tickets(tickets: &mut HashMap<String, Instant>, now: Instant) {
     tickets.retain(|_, expires_at| *expires_at >= now);
 }
@@ -812,6 +1057,62 @@ mod tests {
         (status, value)
     }
 
+    async fn request_raw(
+        app: axum::Router,
+        method: &str,
+        uri: &str,
+        body: impl Into<Body>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = app
+            .oneshot(builder.body(body.into()).expect("request builds"))
+            .await
+            .expect("response returns");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body buffers")
+            .to_vec();
+        (status, headers, bytes)
+    }
+
+    async fn request_multipart_upload(
+        app: axum::Router,
+        uri: &str,
+        filename: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> (StatusCode, Value) {
+        let boundary = "SCENEWORKS_BOUNDARY";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let (status, _, bytes) = request_raw(
+            app,
+            "POST",
+            uri,
+            body,
+            &[(
+                "content-type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )],
+        )
+        .await;
+        let value = serde_json::from_slice(&bytes).expect("json body parses");
+        (status, value)
+    }
+
     #[tokio::test]
     async fn worker_can_register_claim_and_complete_job_through_http() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -880,6 +1181,163 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queue["counts"]["completed"], 1);
         assert_eq!(queue["workers"][0]["status"], "idle");
+    }
+
+    #[tokio::test]
+    async fn project_and_asset_routes_persist_python_compatible_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "My Project" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(created["id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("project_")));
+        assert!(created["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("my-project.sceneworks"));
+
+        let project_id = created["id"].as_str().expect("project id").to_owned();
+        let (status, projects) = request(app.clone(), "GET", "/api/v1/projects", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(projects[0]["id"], project_id);
+
+        let (status, uploaded) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Hero Image.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(uploaded["projectId"], project_id);
+        assert_eq!(uploaded["type"], "image");
+        assert_eq!(uploaded["status"]["trashed"], false);
+        assert!(uploaded["url"]
+            .as_str()
+            .unwrap()
+            .contains("/files/assets/uploads/"));
+
+        let asset_id = uploaded["id"].as_str().expect("asset id").to_owned();
+        let (status, assets) = request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/projects/{project_id}/assets?includeRejected=true&includeTrashed=true"
+            ),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(assets.as_array().unwrap().len(), 1);
+
+        let (status, detail) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/assets/{asset_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["id"], asset_id);
+
+        let (status, updated) = request(
+            app.clone(),
+            "PATCH",
+            &format!("/api/v1/projects/{project_id}/assets/{asset_id}/status"),
+            json!({ "favorite": true, "rating": 4, "rejected": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["status"]["favorite"], true);
+        assert_eq!(updated["status"]["rating"], 4);
+        assert_eq!(updated["status"]["rejected"], true);
+
+        let (status, deleted) = request(
+            app.clone(),
+            "DELETE",
+            &format!("/api/v1/projects/{project_id}/assets/{asset_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted, json!({ "id": asset_id, "status": "trashed" }));
+
+        let (status, reindex) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/reindex"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reindex["assets"], 1);
+
+        let (status, purged) = request(
+            app,
+            "DELETE",
+            &format!("/api/v1/projects/{project_id}/assets/{asset_id}/purge"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(purged, json!({ "id": asset_id, "status": "purged" }));
+    }
+
+    #[tokio::test]
+    async fn project_file_route_serves_files_and_rejects_traversal() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Files" }),
+        )
+        .await;
+        let project_id = created["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+        let media_path = project_path.join("assets/images/image.png");
+        std::fs::write(&media_path, b"image-bytes").expect("media writes");
+        let outside_path = temp_dir.path().join("data").join("outside.txt");
+        std::fs::write(outside_path, b"nope").expect("outside writes");
+
+        let (status, headers, bytes) = request_raw(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/files/assets/images/image.png"),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"image-bytes");
+        assert_eq!(
+            headers
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("image/png")
+        );
+
+        let (status, _, bytes) = request_raw(
+            app,
+            "GET",
+            &format!("/api/v1/projects/{project_id}/files/%2E%2E%5C%2E%2E%5Coutside.txt"),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        let error: Value = serde_json::from_slice(&bytes).expect("json error parses");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["detail"], "Invalid project file path");
     }
 
     #[tokio::test]
