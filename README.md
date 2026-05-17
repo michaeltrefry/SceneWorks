@@ -1,6 +1,6 @@
 # SceneWorks
 
-SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains the runtime skeleton for the first epic: a Vite/React web shell, FastAPI backend, placeholder Python worker, shared config/data folders, and Docker Compose wiring.
+SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains a Vite/React web shell, FastAPI backend, Python inference worker, Rust utility worker, shared config/data folders, and Docker Compose wiring.
 
 ## Quick Start
 
@@ -40,9 +40,10 @@ Or run the full Rust verification sequence:
 npm run rust:check
 ```
 
-To point the existing Python worker at the Rust API during migration testing,
-start the Rust binary on port 8000 and run the worker with
-`SCENEWORKS_API_URL=http://localhost:8000`.
+To point workers at the Rust API during migration testing, start the Rust API
+binary on port 8000 and run the worker with `SCENEWORKS_API_URL=http://localhost:8000`.
+The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads
+and LoRA imports.
 
 ## Local Access Control
 
@@ -77,6 +78,7 @@ apps/
   web/       React + Vite app shell
   api/       FastAPI service and backend filesystem owner
   rust-api/  Rust backend migration scaffold, not in the default runtime
+  rust-worker/ Rust CPU utility worker for model downloads and LoRA imports
   worker/    Placeholder worker package
 crates/
   sceneworks-core/ Shared Rust contract/domain helpers

@@ -22,7 +22,7 @@ def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
 
     assert "image_generate" not in capabilities
     assert "video_generate" not in capabilities
-    assert "model_download" in capabilities
+    assert "model_download" not in capabilities
     assert "timeline_export" in capabilities
 
 
@@ -50,6 +50,15 @@ def test_cpu_worker_advertises_person_tracking_utility_capabilities():
 
     assert "person_detect" in capabilities
     assert "person_track" in capabilities
+
+
+def test_python_worker_can_advertise_legacy_model_lora_jobs(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "1")
+
+    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
+
+    assert "model_download" in capabilities
+    assert "lora_import" in capabilities
 
 
 def test_loaded_models_are_collected_from_adapter_cache():

@@ -50,6 +50,21 @@ services:
               count: all
               capabilities: [gpu]
 
+  rust-worker:
+    build:
+      context: .
+      dockerfile: docker/rust-worker.Dockerfile
+    environment:
+      SCENEWORKS_API_URL: http://api:8000
+      SCENEWORKS_DATA_DIR: /sceneworks/data
+      SCENEWORKS_WORKER_ID: rust-utility-worker-0
+      SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
+    volumes:
+      - ./data:/sceneworks/data
+    depends_on:
+      api:
+        condition: service_healthy
+
   web:
     build:
       context: .

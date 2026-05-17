@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/rust-api",
+    "apps/rust-worker",
     "crates/sceneworks-core",
 ]
 

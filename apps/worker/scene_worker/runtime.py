@@ -54,9 +54,12 @@ class ApiClient:
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
     utility_jobs_enabled = os.getenv("SCENEWORKS_UTILITY_JOBS", "1").strip() != "0"
+    legacy_model_lora_jobs_enabled = os.getenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "0").strip() != "0"
     capabilities = set(gpu["capabilities"])
     if utility_jobs_enabled:
-        capabilities |= {"timeline_export", "model_download", "lora_import", "frame_extract", "person_detect", "person_track"}
+        capabilities |= {"timeline_export", "frame_extract", "person_detect", "person_track"}
+        if legacy_model_lora_jobs_enabled:
+            capabilities |= {"model_download", "lora_import"}
     if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
         capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge", "person_replace"}
     return sorted(capabilities)
