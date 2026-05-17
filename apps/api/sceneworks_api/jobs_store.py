@@ -32,14 +32,34 @@ class JobsStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._lock = threading.RLock()
+        self._use_wal = True
 
     def connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
-        connection.row_factory = sqlite3.Row
-        connection.execute("pragma journal_mode = wal")
+        connection = self.open_connection()
+        if self._use_wal:
+            try:
+                connection.execute("pragma journal_mode = wal")
+            except sqlite3.OperationalError:
+                connection.close()
+                self._use_wal = False
+                self.remove_sqlite_sidecars()
+                connection = self.open_connection()
+                connection.execute("pragma journal_mode = delete")
         connection.execute("pragma foreign_keys = on")
         return connection
+
+    def open_connection(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def remove_sqlite_sidecars(self) -> None:
+        for suffix in ("-wal", "-shm"):
+            try:
+                self.db_path.with_name(f"{self.db_path.name}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def initialize(self) -> None:
         with self._lock, self.connect() as connection:
