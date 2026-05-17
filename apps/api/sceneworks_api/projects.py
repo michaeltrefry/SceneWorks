@@ -20,6 +20,7 @@ PROJECT_FOLDERS = [
     "assets/frames",
     "assets/renders",
     "characters",
+    "generation-sets",
     "loras",
     "recipes",
     "timelines",
@@ -88,6 +89,34 @@ def create_project_db(project_path: Path) -> None:
             "insert or replace into project_metadata (key, value) values (?, ?)",
             ("schemaVersion", "1"),
         )
+        connection.execute(
+            """
+            create table if not exists assets (
+              id text primary key,
+              type text not null,
+              display_name text not null,
+              file_path text not null,
+              generation_set_id text,
+              created_at text not null,
+              favorite integer not null default 0,
+              rating integer not null default 0,
+              rejected integer not null default 0,
+              trashed integer not null default 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            create table if not exists generation_sets (
+              id text primary key,
+              mode text not null,
+              model text not null,
+              prompt text not null,
+              created_at text not null,
+              job_id text
+            )
+            """
+        )
 
 
 def write_project_file(settings: Settings, project_path: Path, project_id: str, name: str) -> dict:
@@ -120,6 +149,17 @@ def read_project_summary(project_path: Path) -> ProjectSummary:
         path=str(project_path),
         createdAt=payload["createdAt"],
     )
+
+
+def find_project_path(settings: Settings, project_id: str) -> Path:
+    for item in load_registry(settings):
+        if item.get("id") == project_id:
+            project_path = Path(item["path"])
+            if project_path.exists():
+                return project_path
+            break
+
+    raise HTTPException(status_code=404, detail="Project not found")
 
 
 @router.get("", response_model=list[ProjectSummary])
@@ -162,8 +202,4 @@ def create_project(payload: ProjectCreateRequest, request: Request) -> ProjectSu
 @router.get("/{project_id}", response_model=ProjectSummary)
 def get_project(project_id: str, request: Request) -> ProjectSummary:
     settings = get_settings_from_request(request)
-    for item in load_registry(settings):
-        if item.get("id") == project_id:
-            return read_project_summary(Path(item["path"]))
-
-    raise HTTPException(status_code=404, detail="Project not found")
+    return read_project_summary(find_project_path(settings, project_id))

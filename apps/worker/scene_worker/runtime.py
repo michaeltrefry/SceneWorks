@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from .gpu import discover_gpu
+from .image_adapters import ProceduralImageAdapter
 from .settings import WorkerSettings
 
 
@@ -42,7 +43,7 @@ def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict) -> None
         "workerId": settings.worker_id,
         "gpuId": gpu["id"],
         "gpuName": gpu["name"],
-        "capabilities": gpu["capabilities"],
+        "capabilities": sorted(set([*gpu["capabilities"], "image_generate", "image_edit"])),
         "loadedModels": [],
     }
     worker = api.post("/api/v1/workers/register", payload)
@@ -122,6 +123,70 @@ def run_placeholder_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
     heartbeat(api, settings, "idle")
 
 
+def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+    adapter = ProceduralImageAdapter()
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": status,
+                "stage": stage,
+                "progress": value,
+                "message": message,
+            },
+        )
+
+    try:
+        progress("preparing", "preparing", 0.08, "Preparing Image Studio request.")
+        progress("loading_model", "loading_model", 0.16, "Resolving image adapter target.")
+        result = adapter.generate(
+            settings=settings,
+            job=job,
+            progress=progress,
+            cancel_requested=lambda: job_cancel_requested(api, job_id),
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Image generation assets saved.",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Image generation failed.",
+                "error": str(exc),
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def main() -> None:
     settings = WorkerSettings()
     gpu = discover_gpu(settings.gpu_id)
@@ -147,6 +212,8 @@ def main() -> None:
             emit({"event": "claimed", "jobId": job["id"], "gpuId": job["assignedGpu"], "reportedAt": now()})
             if job["type"] == "placeholder":
                 run_placeholder_job(api, settings, job)
+            elif job["type"] in ("image_generate", "image_edit"):
+                run_image_job(api, settings, job)
             else:
                 update_job(
                     api,
