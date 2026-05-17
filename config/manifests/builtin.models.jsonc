@@ -1,5 +1,116 @@
 {
   "$schema": "../../packages/schemas/model-manifest.schema.json",
   "schemaVersion": 1,
-  "models": []
+  "models": [
+    {
+      "id": "z_image_turbo",
+      "name": "Z-Image-Turbo",
+      "family": "z-image",
+      "type": "image",
+      "adapter": "z_image",
+      "capabilities": ["text_to_image", "character_image", "style_variations"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "foyoux/Z-Image-Turbo",
+          "files": []
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/foyoux/Z-Image-Turbo"
+      },
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 8,
+        "guidanceScale": 0,
+        "count": 4
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4, 8]
+      },
+      "loraCompatibility": {
+        "families": ["z-image"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Z-Image-Turbo",
+        "description": "Fast first image target for local text-to-image generation.",
+        "recommendedFor": ["text_to_image", "style_variations"]
+      }
+    },
+    {
+      "id": "z_image_edit",
+      "name": "Z-Image-Edit",
+      "family": "z-image",
+      "type": "image",
+      "adapter": "z_image",
+      "capabilities": ["edit_image"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "foyoux/Z-Image-Edit",
+          "files": []
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/foyoux/Z-Image-Edit"
+      },
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 8,
+        "guidanceScale": 0,
+        "count": 4
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4, 8]
+      },
+      "loraCompatibility": {
+        "families": ["z-image"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Z-Image-Edit",
+        "description": "Edit-capable Z-Image target for source-image workflows.",
+        "recommendedFor": ["edit_image"]
+      }
+    },
+    {
+      "id": "qwen_image_edit",
+      "name": "Qwen Image Edit",
+      "family": "qwen-image",
+      "type": "image",
+      "adapter": "qwen_image",
+      "capabilities": ["text_to_image", "edit_image", "style_variations"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-Edit",
+          "files": []
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit"
+      },
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 20,
+        "count": 4
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        "families": ["qwen-image"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Qwen Image Edit",
+        "description": "Higher-control image edit target kept behind the same adapter contract.",
+        "recommendedFor": ["edit_image"]
+      }
+    }
+  ]
 }

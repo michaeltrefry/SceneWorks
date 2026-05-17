@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/generation-set.schema.json",
+  "title": "SceneWorks GenerationSet",
+  "type": "object",
+  "required": ["schemaVersion", "id", "projectId", "mode", "model", "prompt", "count", "createdAt"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "pattern": "^genset_[a-z0-9_]+$" },
+    "projectId": { "type": "string", "pattern": "^project_[a-z0-9_]+$" },
+    "jobId": { "type": ["string", "null"] },
+    "mode": { "type": "string" },
+    "model": { "type": "string" },
+    "prompt": { "type": "string" },
+    "negativePrompt": { "type": "string" },
+    "count": { "type": "integer", "minimum": 1 },
+    "createdAt": { "type": "string", "format": "date-time" }
+  }
+}

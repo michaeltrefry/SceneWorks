@@ -1,8 +1,11 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from .assets import router as assets_router
 from .events import EventHub
+from .image_generation import router as image_router
 from .jobs import router as jobs_router
 from .jobs_store import JobsStore
+from .models import router as models_router
 from .projects import ensure_data_dirs, router as projects_router
 from .security import access_control_middleware
 from .settings import Settings, get_settings
@@ -67,6 +70,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": is_authorized(request, settings)}
 
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(assets_router, prefix="/api/v1")
+    app.include_router(models_router, prefix="/api/v1")
+    app.include_router(image_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
     return app
 

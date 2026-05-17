@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/job.schema.json",
+  "title": "SceneWorks Job",
+  "type": "object",
+  "required": ["id", "type", "status", "payload", "requestedGpu", "progress", "stage", "createdAt", "updatedAt"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^job_[a-z0-9_]+$" },
+    "type": { "type": "string" },
+    "status": {
+      "enum": ["queued", "preparing", "downloading", "loading_model", "running", "saving", "completed", "failed", "canceled", "interrupted"]
+    },
+    "projectId": { "type": ["string", "null"] },
+    "projectName": { "type": ["string", "null"] },
+    "payload": { "type": "object" },
+    "result": { "type": "object" },
+    "requestedGpu": { "type": "string" },
+    "assignedGpu": { "type": ["string", "null"] },
+    "workerId": { "type": ["string", "null"] },
+    "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+    "stage": { "type": "string" },
+    "message": { "type": "string" },
+    "error": { "type": ["string", "null"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}

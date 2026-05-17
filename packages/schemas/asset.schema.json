@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/asset.schema.json",
+  "title": "SceneWorks Asset",
+  "type": "object",
+  "required": ["schemaVersion", "id", "projectId", "type", "displayName", "createdAt", "file", "status"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "pattern": "^asset_[a-z0-9_]+$" },
+    "projectId": { "type": "string", "pattern": "^project_[a-z0-9_]+$" },
+    "generationSetId": { "type": ["string", "null"] },
+    "type": { "enum": ["image", "video", "upload", "frame", "render"] },
+    "displayName": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "file": {
+      "type": "object",
+      "required": ["path", "mimeType"],
+      "properties": {
+        "path": { "type": "string" },
+        "mimeType": { "type": "string" },
+        "width": { "type": ["integer", "null"] },
+        "height": { "type": ["integer", "null"] },
+        "duration": { "type": ["number", "null"] },
+        "fps": { "type": ["number", "null"] }
+      }
+    },
+    "status": {
+      "type": "object",
+      "required": ["favorite", "rating", "rejected", "trashed"],
+      "properties": {
+        "favorite": { "type": "boolean" },
+        "rating": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "rejected": { "type": "boolean" },
+        "trashed": { "type": "boolean" }
+      }
+    },
+    "recipe": { "$ref": "recipe.schema.json" },
+    "lineage": {
+      "type": "object",
+      "properties": {
+        "parents": { "type": "array", "items": { "type": "string" } },
+        "sourceAssetId": { "type": ["string", "null"] },
+        "sourceTimestamp": { "type": ["number", "null"] },
+        "jobId": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
