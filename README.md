@@ -45,6 +45,12 @@ binary on port 8000 and run the worker with `SCENEWORKS_API_URL=http://localhost
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads
 and LoRA imports.
 
+When running the stack outside Docker Compose, start `sceneworks-rust-worker`
+alongside the API if you want `model_download` and `lora_import` jobs to be
+claimed. As a temporary fallback, set `SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1`
+before starting the Python worker to let it claim those two legacy utility jobs.
+Set `HF_TOKEN` when downloading from gated Hugging Face repositories.
+
 ## Local Access Control
 
 Local-only development is open by default. To require a simple pairing token for LAN or shared-machine use, copy `.env.example` to `.env` and set:

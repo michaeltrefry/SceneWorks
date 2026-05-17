@@ -179,6 +179,12 @@ def test_job_protocol_fixture_matches_python_contracts(tmp_path, monkeypatch):
         {"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]}
     )
 
+    monkeypatch.setenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "1")
+    assert fixture["workerCapabilityProfiles"]["cpuLegacy"] == worker_capabilities(
+        {"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]}
+    )
+
+    monkeypatch.delenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS")
     monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "0")
     assert fixture["workerCapabilityProfiles"]["gpuChild"] == worker_capabilities(
         {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]}

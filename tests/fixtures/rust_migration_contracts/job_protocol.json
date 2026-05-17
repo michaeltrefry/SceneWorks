@@ -52,7 +52,8 @@
   ],
   "sseEvents": ["ready", "heartbeat", "job.updated", "queue.updated", "worker.updated"],
   "workerCapabilityProfiles": {
-    "cpu": ["cpu", "frame_extract", "lora_import", "model_download", "person_detect", "person_track", "placeholder", "timeline_export"],
+    "cpu": ["cpu", "frame_extract", "person_detect", "person_track", "placeholder", "timeline_export"],
+    "cpuLegacy": ["cpu", "frame_extract", "lora_import", "model_download", "person_detect", "person_track", "placeholder", "timeline_export"],
     "gpuChild": ["gpu", "image_edit", "image_generate", "person_replace", "placeholder", "video_bridge", "video_extend", "video_generate"]
   },
   "requests": {

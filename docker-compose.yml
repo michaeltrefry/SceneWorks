@@ -54,11 +54,13 @@ services:
     build:
       context: .
       dockerfile: docker/rust-worker.Dockerfile
+    restart: unless-stopped
     environment:
       SCENEWORKS_API_URL: http://api:8000
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_WORKER_ID: rust-utility-worker-0
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ./data:/sceneworks/data
     depends_on:

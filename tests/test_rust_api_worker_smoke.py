@@ -39,6 +39,24 @@ def wait_for_health(base_url: str, process: subprocess.Popen) -> None:
     raise AssertionError(f"Rust API did not become healthy: {last_error}")
 
 
+def wait_for_job_status(base_url: str, job_id: str, status: str, process: subprocess.Popen) -> dict:
+    deadline = time.monotonic() + 30
+    last_job: dict | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stderr = process.stderr.read() if process.stderr else ""
+            raise AssertionError(f"Rust worker exited early with code {process.returncode}: {stderr}")
+        response = httpx.get(f"{base_url}/api/v1/jobs/{job_id}", timeout=5)
+        response.raise_for_status()
+        last_job = response.json()
+        if last_job["status"] == status:
+            return last_job
+        if last_job["status"] in {"failed", "canceled", "interrupted"}:
+            raise AssertionError(f"Job reached terminal status {last_job['status']}: {last_job}")
+        time.sleep(0.25)
+    raise AssertionError(f"Job did not reach {status}: {last_job}")
+
+
 @pytest.fixture()
 def rust_api(tmp_path):
     if shutil.which("cargo") is None:
@@ -130,3 +148,51 @@ def test_python_worker_protocol_round_trips_against_rust_api_binary(rust_api):
     )
     assert completed["status"] == "canceled"
     assert completed["cancelRequested"] is True
+
+
+def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(rust_api, tmp_path):
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo is required for the Rust worker smoke test")
+
+    source = tmp_path / "tiny.safetensors"
+    source.write_bytes(b"lora")
+    env = os.environ.copy()
+    env.update(
+        {
+            "SCENEWORKS_API_URL": rust_api,
+            "SCENEWORKS_DATA_DIR": str(tmp_path / "data"),
+            "SCENEWORKS_WORKER_ID": "rust-worker-smoke",
+            "SCENEWORKS_POLL_SECONDS": "1",
+            "SCENEWORKS_HEARTBEAT_SECONDS": "5",
+        }
+    )
+    worker = subprocess.Popen(
+        ["cargo", "run", "-q", "-p", "sceneworks-rust-worker"],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        created = httpx.post(
+            f"{rust_api}/api/v1/loras/import",
+            json={"sourcePath": str(source), "name": "Smoke LoRA"},
+            timeout=5,
+        )
+        created.raise_for_status()
+        job = created.json()
+
+        completed = wait_for_job_status(rust_api, job["id"], "completed", worker)
+
+        assert completed["workerId"] == "rust-worker-smoke"
+        assert completed["result"]["repo"] is None
+        assert completed["result"]["path"].endswith("Smoke__LoRA")
+        assert (tmp_path / "data" / "loras" / "Smoke__LoRA" / "tiny.safetensors").read_bytes() == b"lora"
+    finally:
+        worker.terminate()
+        try:
+            worker.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            worker.kill()
+            worker.wait(timeout=5)

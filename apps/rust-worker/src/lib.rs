@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use reqwest::header;
 use reqwest::StatusCode;
 use sceneworks_core::contracts::{
     ClaimRequest, ClaimResponse, ContractNumber, JobSnapshot, JobStatus, JobType, JsonObject,
@@ -14,6 +15,7 @@ use serde_json::{json, Number, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
+use tokio::time::MissedTickBehavior;
 
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
 const DEFAULT_API_URL: &str = "http://localhost:8000";
@@ -28,6 +30,7 @@ pub struct Settings {
     pub poll_seconds: u64,
     pub heartbeat_seconds: u64,
     pub huggingface_base_url: String,
+    pub huggingface_token: Option<String>,
 }
 
 impl Settings {
@@ -40,12 +43,25 @@ impl Settings {
                 .filter(|value| !value.is_empty()),
             data_dir: env_path("SCENEWORKS_DATA_DIR", "data"),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
-            poll_seconds: env_u64("SCENEWORKS_POLL_SECONDS", 2),
-            heartbeat_seconds: env_u64("SCENEWORKS_HEARTBEAT_SECONDS", 10),
+            poll_seconds: env_u64_any(
+                &["SCENEWORKS_POLL_SECONDS", "SCENEWORKS_WORKER_POLL_SECONDS"],
+                2,
+            ),
+            heartbeat_seconds: env_u64_any(
+                &[
+                    "SCENEWORKS_HEARTBEAT_SECONDS",
+                    "SCENEWORKS_WORKER_HEARTBEAT_SECONDS",
+                ],
+                10,
+            ),
             huggingface_base_url: env_string(
                 "SCENEWORKS_HUGGINGFACE_BASE_URL",
                 DEFAULT_HUGGINGFACE_BASE_URL,
             ),
+            huggingface_token: std::env::var("HF_TOKEN")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
         }
     }
 }
@@ -164,24 +180,54 @@ where
 pub async fn run() -> WorkerResult<()> {
     let settings = Settings::from_env();
     let api = ApiClient::new(&settings);
-    register_worker(&api, &settings).await?;
+    let http_client = reqwest::Client::new();
+    register_worker_with_retry(&api, &settings).await;
     loop {
-        heartbeat(&api, &settings, WorkerStatus::Idle, None).await?;
-        let claim: ClaimResponse = api
-            .post_json(
-                "/api/v1/jobs/claim",
-                &ClaimRequest {
-                    worker_id: settings.worker_id.clone(),
-                    extra: BTreeMap::new(),
-                },
-            )
-            .await?;
-        let Some(job) = claim.job else {
-            tokio::time::sleep(Duration::from_secs(settings.poll_seconds)).await;
-            continue;
-        };
-        run_utility_job(&api, &settings, job).await;
+        if let Err(error) = poll_once(&api, &settings, &http_client).await {
+            eprintln!("rust_worker_poll_failed: {error}");
+            tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))).await;
+        }
     }
+}
+
+async fn register_worker_with_retry(api: &ApiClient, settings: &Settings) {
+    let mut attempt = 0_u32;
+    loop {
+        match register_worker(api, settings).await {
+            Ok(_) => return,
+            Err(error) => {
+                attempt = attempt.saturating_add(1);
+                let delay = retry_delay(settings.poll_seconds, attempt);
+                eprintln!(
+                    "rust_worker_register_failed: attempt={attempt} retryInSeconds={delay} error={error}"
+                );
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+        }
+    }
+}
+
+async fn poll_once(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Idle, None).await?;
+    let claim: ClaimResponse = api
+        .post_json(
+            "/api/v1/jobs/claim",
+            &ClaimRequest {
+                worker_id: settings.worker_id.clone(),
+                extra: BTreeMap::new(),
+            },
+        )
+        .await?;
+    let Some(job) = claim.job else {
+        tokio::time::sleep(Duration::from_secs(settings.poll_seconds)).await;
+        return Ok(());
+    };
+    run_utility_job(api, settings, http_client, job).await;
+    Ok(())
 }
 
 async fn register_worker(api: &ApiClient, settings: &Settings) -> WorkerResult<WorkerSnapshot> {
@@ -221,12 +267,17 @@ async fn heartbeat(
     .await
 }
 
-async fn run_utility_job(api: &ApiClient, settings: &Settings, job: JobSnapshot) {
+async fn run_utility_job(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: JobSnapshot,
+) {
     let result = match job.job_type {
-        JobType::ModelDownload => run_model_download_job(api, settings, &job)
+        JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model download failed.", error)),
-        JobType::LoraImport => run_lora_import_job(api, settings, &job)
+        JobType::LoraImport => run_lora_import_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("LoRA import failed.", error)),
         _ => {
@@ -258,6 +309,7 @@ async fn run_utility_job(api: &ApiClient, settings: &Settings, job: JobSnapshot)
 async fn run_model_download_job(
     api: &ApiClient,
     settings: &Settings,
+    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let repo = match required_payload_string(&job.payload, "repo") {
@@ -306,7 +358,8 @@ async fn run_model_download_job(
     )
     .await?;
 
-    let snapshot = HuggingFaceSnapshot::resolve(settings, repo, revision, &files).await?;
+    let snapshot =
+        HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
     if let Some(total_bytes) = snapshot.total_bytes() {
         update_job(
             api,
@@ -331,13 +384,16 @@ async fn run_model_download_job(
         progress_report_interval(settings),
     );
     download_snapshot(
-        api,
-        settings,
-        &job.id,
+        &DownloadContext {
+            api,
+            client: http_client,
+            settings,
+            job_id: &job.id,
+            cancel_message: "Model download canceled by user.",
+        },
         &target_dir,
         &snapshot,
         &mut progress,
-        "Model download canceled by user.",
     )
     .await?;
     write_model_install_marker(&target_dir, &job.payload, repo, &job.id).await?;
@@ -373,6 +429,7 @@ async fn run_model_download_job(
 async fn run_lora_import_job(
     api: &ApiClient,
     settings: &Settings,
+    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let repo = optional_payload_string(&job.payload, "repo");
@@ -418,21 +475,26 @@ async fn run_lora_import_job(
     if let Some(repo) = repo {
         let files = payload_string_array(&job.payload, "files");
         let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
-        let snapshot = HuggingFaceSnapshot::resolve(settings, repo, revision, &files).await?;
+        let snapshot =
+            HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
         let mut progress = DownloadProgress::new(
             repo,
             directory_size(&target_dir).await,
             snapshot.total_bytes(),
             progress_report_interval(settings),
         );
+        // LoRA HF imports intentionally skip the model install marker for parity with the Python worker.
         download_snapshot(
-            api,
-            settings,
-            &job.id,
+            &DownloadContext {
+                api,
+                client: http_client,
+                settings,
+                job_id: &job.id,
+                cancel_message: "LoRA import canceled by user.",
+            },
             &target_dir,
             &snapshot,
             &mut progress,
-            "LoRA import canceled by user.",
         )
         .await?;
     } else if let Some(source_path) = source_path {
@@ -543,6 +605,7 @@ struct HuggingFaceSnapshot {
 
 impl HuggingFaceSnapshot {
     async fn resolve(
+        client: &reqwest::Client,
         settings: &Settings,
         repo: &str,
         revision: &str,
@@ -554,8 +617,7 @@ impl HuggingFaceSnapshot {
             quote_path(repo),
             quote_path(revision)
         );
-        let payload = reqwest::Client::new()
-            .get(tree_url)
+        let payload = with_hf_auth(settings, client.get(tree_url))
             .send()
             .await?
             .error_for_status()?
@@ -613,42 +675,87 @@ fn snapshot_file_from_entry(
     })
 }
 
+struct DownloadContext<'a> {
+    api: &'a ApiClient,
+    client: &'a reqwest::Client,
+    settings: &'a Settings,
+    job_id: &'a str,
+    cancel_message: &'a str,
+}
+
 async fn download_snapshot(
-    api: &ApiClient,
-    settings: &Settings,
-    job_id: &str,
+    context: &DownloadContext<'_>,
     target_dir: &Path,
     snapshot: &HuggingFaceSnapshot,
     progress: &mut DownloadProgress<'_>,
-    cancel_message: &str,
 ) -> WorkerResult<()> {
     tokio::fs::create_dir_all(target_dir).await?;
-    let client = reqwest::Client::new();
     for file in &snapshot.files {
-        check_cancel(api, job_id, cancel_message).await?;
+        check_cancel(context.api, context.job_id, context.cancel_message).await?;
         let target_path = safe_join(target_dir, &file.path)?;
         if let Some(parent) = target_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let mut response = client
-            .get(&file.download_url)
-            .send()
-            .await?
-            .error_for_status()?;
-        let mut output = tokio::fs::File::create(&target_path).await?;
-        while let Some(chunk) = response.chunk().await? {
-            output.write_all(&chunk).await?;
-            progress.transferred_bytes = progress
-                .transferred_bytes
-                .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-            if progress.should_report() {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
-                update_job(api, job_id, progress.payload()).await?;
-                check_cancel(api, job_id, cancel_message).await?;
+        let existing_bytes = existing_download_bytes(&target_path, file.size).await?;
+        if file.size.is_some_and(|size| existing_bytes == size) {
+            continue;
+        }
+        let mut request = context.client.get(&file.download_url);
+        if existing_bytes > 0 {
+            request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
+        }
+        let response = with_hf_auth(context.settings, request).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(WorkerError::Http(response.error_for_status().unwrap_err()));
+        }
+        let appending = existing_bytes > 0 && status == StatusCode::PARTIAL_CONTENT;
+        if existing_bytes > 0 && !appending {
+            progress.discard_started_bytes(existing_bytes);
+        }
+        let mut response = response;
+        let mut output = if appending {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&target_path)
+                .await?
+        } else {
+            tokio::fs::File::create(&target_path).await?
+        };
+        let mut interval = tokio::time::interval(progress.report_interval());
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                chunk = response.chunk() => {
+                    let Some(chunk) = chunk? else {
+                        break;
+                    };
+                    output.write_all(&chunk).await?;
+                    progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                }
+                _ = interval.tick() => {
+                    report_download_progress(context, progress).await?;
+                }
             }
         }
     }
     Ok(())
+}
+
+async fn report_download_progress(
+    context: &DownloadContext<'_>,
+    progress: &DownloadProgress<'_>,
+) -> WorkerResult<()> {
+    heartbeat(
+        context.api,
+        context.settings,
+        WorkerStatus::Busy,
+        Some(context.job_id),
+    )
+    .await?;
+    update_job(context.api, context.job_id, progress.payload()).await?;
+    check_cancel(context.api, context.job_id, context.cancel_message).await
 }
 
 struct DownloadProgress<'a> {
@@ -657,7 +764,6 @@ struct DownloadProgress<'a> {
     transferred_bytes: u64,
     total_bytes: Option<u64>,
     started_at: Instant,
-    last_reported_at: Instant,
     report_interval: Duration,
 }
 
@@ -675,7 +781,6 @@ impl<'a> DownloadProgress<'a> {
             transferred_bytes: 0,
             total_bytes,
             started_at: now,
-            last_reported_at: now - Duration::from_secs(10),
             report_interval,
         }
     }
@@ -684,12 +789,16 @@ impl<'a> DownloadProgress<'a> {
         self.started_bytes.saturating_add(self.transferred_bytes)
     }
 
-    fn should_report(&mut self) -> bool {
-        if self.last_reported_at.elapsed() < self.report_interval {
-            return false;
-        }
-        self.last_reported_at = Instant::now();
-        true
+    fn record_transferred(&mut self, bytes: u64) {
+        self.transferred_bytes = self.transferred_bytes.saturating_add(bytes);
+    }
+
+    fn discard_started_bytes(&mut self, bytes: u64) {
+        self.started_bytes = self.started_bytes.saturating_sub(bytes);
+    }
+
+    fn report_interval(&self) -> Duration {
+        self.report_interval
     }
 
     fn payload(&self) -> ProgressRequest {
@@ -858,8 +967,15 @@ async fn directory_size(path: &Path) -> u64 {
     let mut total = 0_u64;
     let mut stack = vec![path.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let Ok(mut entries) = tokio::fs::read_dir(path).await else {
-            continue;
+        let mut entries = match tokio::fs::read_dir(&path).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!(
+                    "rust_worker_directory_size_failed: path={} error={error}",
+                    path.display()
+                );
+                continue;
+            }
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let Ok(file_type) = entry.file_type().await else {
@@ -982,8 +1098,34 @@ fn quote_path(value: &str) -> String {
 
 fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+}
+
+async fn existing_download_bytes(path: &Path, expected_size: Option<u64>) -> WorkerResult<u64> {
+    let Ok(metadata) = tokio::fs::metadata(path).await else {
+        return Ok(0);
+    };
+    let existing = metadata.len();
+    if expected_size.is_some_and(|expected_size| existing > expected_size) {
+        tokio::fs::remove_file(path).await?;
+        return Ok(0);
+    }
+    Ok(existing)
+}
+
+fn with_hf_auth(settings: &Settings, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    match &settings.huggingface_token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    }
+}
+
+fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
+    let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1).min(4));
+    poll_seconds.max(1).saturating_mul(multiplier).clamp(1, 30)
 }
 
 fn env_string(key: &str, default: &str) -> String {
@@ -1001,23 +1143,29 @@ fn env_path(key: &str, default: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(default))
 }
 
-fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| value.parse().ok())
+fn env_u64_any(keys: &[&str], default: u64) -> u64 {
+    keys.iter()
+        .find_map(|key| std::env::var(key).ok().and_then(|value| value.parse().ok()))
         .unwrap_or(default)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::Duration;
 
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode as AxumStatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::get;
+    use axum::{Json, Router};
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
-        allow_pattern_matches, copy_lora_source, download_progress_payload, safe_download_dir,
-        write_model_install_marker, INSTALL_MARKER,
+        allow_pattern_matches, copy_lora_source, download_progress_payload, now_rfc3339,
+        safe_download_dir, write_model_install_marker, HuggingFaceSnapshot, Settings,
+        INSTALL_MARKER,
     };
 
     #[test]
@@ -1105,5 +1253,122 @@ mod tests {
                 .unwrap(),
             b"adapter"
         );
+    }
+
+    #[test]
+    fn now_matches_python_second_precision() {
+        let value = now_rfc3339();
+
+        assert!(value.ends_with('Z'));
+        assert!(!value.trim_end_matches('Z').contains('.'));
+    }
+
+    #[tokio::test]
+    async fn huggingface_snapshot_resolve_accepts_tree_and_sibling_shapes_with_auth() {
+        let array_url = spawn_hf_stub(
+            json!([
+                { "type": "file", "path": "nested/model.safetensors", "size": 7 },
+                { "type": "file", "path": "nested/model.ckpt", "size": 9 },
+                { "type": "directory", "path": "nested" }
+            ]),
+            Some("hf_test"),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let array_settings = test_settings(array_url, Some("hf_test"));
+
+        let snapshot = HuggingFaceSnapshot::resolve(
+            &client,
+            &array_settings,
+            "owner/model",
+            "main",
+            &["*.safetensors".to_owned()],
+        )
+        .await
+        .expect("tree snapshot resolves");
+
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files[0].path, "nested/model.safetensors");
+        assert_eq!(snapshot.total_bytes(), Some(7));
+
+        let siblings_url = spawn_hf_stub(
+            json!({
+                "siblings": [
+                    { "rfilename": "adapter.safetensors", "size": "5" }
+                ]
+            }),
+            None,
+        )
+        .await;
+        let siblings_settings = test_settings(siblings_url, None);
+
+        let snapshot = HuggingFaceSnapshot::resolve(
+            &client,
+            &siblings_settings,
+            "owner/lora",
+            "main",
+            &["*.safetensors".to_owned()],
+        )
+        .await
+        .expect("siblings snapshot resolves");
+
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files[0].path, "adapter.safetensors");
+        assert_eq!(snapshot.total_bytes(), Some(5));
+    }
+
+    #[derive(Clone)]
+    struct HfStubState {
+        payload: serde_json::Value,
+        token: Option<String>,
+    }
+
+    async fn spawn_hf_stub(payload: serde_json::Value, token: Option<&str>) -> String {
+        let state = HfStubState {
+            payload,
+            token: token.map(str::to_owned),
+        };
+        let app = Router::new()
+            .route("/api/models/:owner/:repo/tree/:revision", get(hf_stub))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener has address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("stub serves");
+        });
+        format!("http://{address}")
+    }
+
+    async fn hf_stub(State(state): State<HfStubState>, headers: HeaderMap) -> Response {
+        if let Some(token) = &state.token {
+            let expected = format!("Bearer {token}");
+            let authorized = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some(expected.as_str());
+            if !authorized {
+                return (
+                    AxumStatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "missing token" })),
+                )
+                    .into_response();
+            }
+        }
+        Json(state.payload).into_response()
+    }
+
+    fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:8000".to_owned(),
+            access_token: None,
+            data_dir: PathBuf::from("data"),
+            worker_id: "test-worker".to_owned(),
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            huggingface_base_url,
+            huggingface_token: huggingface_token.map(str::to_owned),
+        }
     }
 }
