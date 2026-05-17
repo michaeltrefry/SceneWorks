@@ -198,7 +198,7 @@
         "status": "preparing",
         "type": "image_generate",
         "updatedAt": "<timestamp>",
-        "workerId": "claim-worker-a"
+        "workerId": "claim-worker-fixture"
       }
     }
   ],

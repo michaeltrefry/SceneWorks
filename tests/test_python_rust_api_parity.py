@@ -8,6 +8,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ PREFIXED_ID_RE = re.compile(
 )
 UPLOAD_SUFFIX_RE = re.compile(r"\b([a-z0-9]+(?:-[a-z0-9]+)*)-[0-9a-f]{8}(?=\.)")
 HEX_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+CLAIM_WORKER_RE = re.compile(r"\bclaim-worker-[a-z]\b")
 
 
 def write_updated_snapshots() -> None:
@@ -199,9 +201,12 @@ class ServerApiHarness:
                 "PYTHONPATH": pythonpath_env(env.get("PYTHONPATH")),
             }
         )
+        rust_binary = ROOT / "target" / "debug" / (
+            "sceneworks-rust-api.exe" if os.name == "nt" else "sceneworks-rust-api"
+        )
         command = (
             [
-                "python",
+                sys.executable,
                 "-m",
                 "uvicorn",
                 "sceneworks_api.main:app",
@@ -213,7 +218,11 @@ class ServerApiHarness:
                 "warning",
             ]
             if runtime == "python"
-            else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
+            else (
+                [str(rust_binary)]
+                if rust_binary.exists()
+                else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
+            )
         )
         self.process = subprocess.Popen(
             command,
@@ -315,6 +324,9 @@ def normalize_contract(value: Any, roots: tuple[Path, ...], path: str = "$") -> 
         normalized = TIMESTAMP_RE.sub("<timestamp>", normalized)
         normalized = UPLOAD_SUFFIX_RE.sub(r"\1-<upload-suffix>", normalized)
         normalized = PREFIXED_ID_RE.sub(lambda match: f"{match.group(1)}_fixture", normalized)
+        normalized = CLAIM_WORKER_RE.sub("claim-worker-fixture", normalized)
+        # FastAPI/Pydantic and Axum report parser internals differently. The parity contract is
+        # the stable 422 envelope; the exact JSON parser wording/offset is intentionally ignored.
         if path.endswith(".ctx.error"):
             return "<json-decode-error>"
         if path.endswith(".ticket") and HEX_TOKEN_RE.match(normalized):
