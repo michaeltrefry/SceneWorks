@@ -11,11 +11,10 @@ from sceneworks_api.assets import (
     AssetStatusUpdate,
     delete_asset,
     get_project_file,
-    index_asset_db,
     purge_deleted_asset,
     update_asset_status,
-    write_json,
 )
+from sceneworks_shared import index_asset, write_json
 
 
 def request_for_project(tmp_path, project_path):
@@ -56,7 +55,7 @@ def test_status_patch_updates_project_db(tmp_path):
         "status": {"favorite": False, "rating": 0, "rejected": False, "trashed": False},
     }
     write_json(image_dir / "image.sceneworks.json", asset)
-    index_asset_db(project_path, asset)
+    index_asset(project_path, asset)
 
     update_asset_status(
         "project-1",
@@ -89,7 +88,7 @@ def test_delete_soft_trashes_asset_and_purge_removes_it(tmp_path):
     }
     sidecar_path = image_dir / "image.sceneworks.json"
     write_json(sidecar_path, asset)
-    index_asset_db(project_path, asset)
+    index_asset(project_path, asset)
     request = request_for_project(tmp_path, project_path)
 
     deleted = delete_asset("project-1", "asset-1", request)

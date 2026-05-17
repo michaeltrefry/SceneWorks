@@ -69,15 +69,16 @@ def strip_jsonc_comments(value: str) -> str:
     return "".join(output)
 
 
-def manifest_mtime(path: Path) -> int:
+def manifest_signature(path: Path) -> tuple[int, int]:
     try:
-        return path.stat().st_mtime_ns
+        stat = path.stat()
     except FileNotFoundError:
-        return 0
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 @lru_cache(maxsize=16)
-def load_manifest_cached(path_text: str, mtime_ns: int, key: str) -> tuple[dict[str, Any], ...]:
+def load_manifest_cached(path_text: str, signature: tuple[int, int], key: str) -> tuple[dict[str, Any], ...]:
     path = Path(path_text)
     if not path.exists():
         return ()
@@ -87,11 +88,11 @@ def load_manifest_cached(path_text: str, mtime_ns: int, key: str) -> tuple[dict[
 
 
 def load_manifest(path: Path) -> list[dict[str, Any]]:
-    return [dict(item) for item in load_manifest_cached(str(path), manifest_mtime(path), "models")]
+    return [dict(item) for item in load_manifest_cached(str(path), manifest_signature(path), "models")]
 
 
 def load_lora_manifest(path: Path) -> list[dict[str, Any]]:
-    return [dict(item) for item in load_manifest_cached(str(path), manifest_mtime(path), "loras")]
+    return [dict(item) for item in load_manifest_cached(str(path), manifest_signature(path), "loras")]
 
 
 def safe_download_dir(repo: str) -> str:

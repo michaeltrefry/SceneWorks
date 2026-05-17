@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from sceneworks_shared import find_asset_sidecar_path, read_json, safe_float, slugify, utc_now
+from sceneworks_shared import find_asset_sidecar_path, index_asset, read_json, safe_float, slugify, utc_now
 
-from .image_adapters import find_project_path, index_project_db, write_json
+from .image_adapters import find_project_path, write_json
 from .settings import WorkerSettings
 
 
@@ -122,7 +122,7 @@ def run_timeline_export(
     sidecar_path = output_path.with_suffix(".sceneworks.json")
     write_json(sidecar_path, asset)
     write_json(project_path / "recipes" / f"{asset['id']}.recipe.json", asset["recipe"])
-    index_project_db(project_path, asset)
+    index_asset(project_path, asset)
     return {
         "assetIds": [asset["id"]],
         "assets": [asset],

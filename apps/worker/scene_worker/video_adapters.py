@@ -11,9 +11,9 @@ from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-from sceneworks_shared import find_asset_sidecar_path, read_json, safe_float, safe_int, slugify, utc_now
+from sceneworks_shared import find_asset_sidecar_path, index_asset, read_json, safe_float, safe_int, slugify, utc_now
 
-from .image_adapters import find_project_path, index_project_db, write_json
+from .image_adapters import find_project_path, write_json
 from .settings import WorkerSettings
 
 
@@ -202,7 +202,7 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
         write_json(sidecar_path, asset)
         write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-        index_project_db(project_path, asset)
+        index_asset(project_path, asset)
         return {
             "generationSetId": generation_set_id,
             "assetIds": [asset_id],
@@ -298,7 +298,6 @@ def load_source_image(project_path: Path, asset_id: str | None, width: int, heig
     canvas = Image.new("RGB", (width, height), (18, 17, 15))
     canvas.paste(image, ((width - image.width) // 2, (height - image.height) // 2))
     return canvas
-    return None
 
 
 def render_preview_frames(

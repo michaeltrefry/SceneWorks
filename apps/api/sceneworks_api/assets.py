@@ -19,6 +19,7 @@ from sceneworks_shared import (
     index_asset,
     purge_asset,
     read_json,
+    reindex_project,
     utc_now,
     write_json,
 )
@@ -55,8 +56,11 @@ def media_type_for_mime(mime_type: str) -> str:
     raise HTTPException(status_code=400, detail="Only image and video uploads are supported")
 
 
-def index_asset_db(project_path: Path, asset: dict[str, Any]) -> None:
-    index_asset(project_path, asset, (project_path / asset["file"]["path"]).with_suffix(".sceneworks.json"))
+def project_has_sidecars(project_path: Path) -> bool:
+    for folder in MEDIA_FOLDERS:
+        if any((project_path / folder).glob(ASSET_SIDECAR_PATTERN)):
+            return True
+    return False
 
 
 def normalize_asset(project_id: str, project_path: Path, sidecar_path: Path) -> dict[str, Any]:
@@ -86,6 +90,10 @@ def list_assets(
     project_path = find_project_path(request.app.state.settings, project_id)
     assets = []
     ensure_project_db_ready(project_path)
+    with sqlite3.connect(project_path / "project.db") as connection:
+        total = connection.execute("select count(*) from assets").fetchone()[0]
+    if total == 0 and project_has_sidecars(project_path):
+        reindex_project(project_path)
     with sqlite3.connect(project_path / "project.db") as connection:
         rows = connection.execute(
             """
@@ -190,7 +198,7 @@ def import_asset(project_id: str, request: Request, file: UploadFile = File(...)
     }
     sidecar_path = media_path.with_suffix(".sceneworks.json")
     write_json(sidecar_path, asset)
-    index_asset_db(project_path, asset)
+    index_asset(project_path, asset)
     return normalize_asset(project_id, project_path, sidecar_path)
 
 
@@ -208,7 +216,7 @@ def update_asset_status(
     changes = payload.model_dump(exclude_none=True)
     status.update(changes)
     write_json(sidecar_path, asset)
-    index_asset_db(project_path, asset)
+    index_asset(project_path, asset)
     return normalize_asset(project_id, project_path, sidecar_path)
 
 

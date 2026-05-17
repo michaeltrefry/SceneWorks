@@ -81,9 +81,9 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
 
 
 def index_asset(project_path: Path, asset: dict[str, Any], sidecar_path: Path | None = None) -> None:
-    sidecar_rel = None
-    if sidecar_path is not None:
-        sidecar_rel = str(sidecar_path.relative_to(project_path)).replace("\\", "/")
+    if sidecar_path is None:
+        sidecar_path = (project_path / asset["file"]["path"]).with_suffix(".sceneworks.json")
+    sidecar_rel = str(sidecar_path.relative_to(project_path)).replace("\\", "/")
     with sqlite3.connect(project_path / "project.db") as connection:
         apply_project_migrations(connection)
         _index_asset_on_connection(connection, asset, sidecar_rel)

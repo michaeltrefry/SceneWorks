@@ -181,7 +181,7 @@ class ImageAssetWriter:
             )
             write_json(sidecar_path, asset)
             write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-            index_project_db(project_path, asset, sidecar_path)
+            index_asset(project_path, asset, sidecar_path)
             assets.append(asset)
             progress(
                 "saving",
@@ -550,5 +550,3 @@ def build_asset_sidecar(
     }
 
 
-def index_project_db(project_path: Path, asset: dict[str, Any], sidecar_path: Path | None = None) -> None:
-    index_asset(project_path, asset, sidecar_path or (project_path / asset["file"]["path"]).with_suffix(".sceneworks.json"))
