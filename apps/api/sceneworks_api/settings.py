@@ -38,7 +38,10 @@ class Settings:
 
     @property
     def jobs_db_path(self) -> Path:
-        return self.data_dir / "jobs.db"
+        configured = os.getenv("SCENEWORKS_JOBS_DB_PATH", "").strip()
+        if configured:
+            return Path(configured).resolve()
+        return self.data_dir / "cache" / "jobs.db"
 
 
 @lru_cache(maxsize=1)
