@@ -790,6 +790,96 @@ button:disabled {
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 }
 
+.replace-person-panel,
+.comparison-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.replace-actions,
+.comparison-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.replace-actions span {
+  color: #c7bfb2;
+}
+
+.person-selection-frame {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #4b463d;
+  background: #10100e;
+  aspect-ratio: 16 / 9;
+}
+
+.person-selection-frame img,
+.person-selection-frame video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.person-box {
+  position: absolute;
+  min-width: 38px;
+  min-height: 38px;
+  padding: 0;
+  border: 2px solid #f8d570;
+  background: rgba(248, 213, 112, 0.14);
+  color: #fff6d8;
+}
+
+.person-box.active {
+  border-color: #6ec6b8;
+  background: rgba(110, 198, 184, 0.24);
+}
+
+.person-box span {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 2px 4px;
+  background: rgba(12, 12, 12, 0.78);
+  font-size: 0.72rem;
+}
+
+.compact-segment {
+  padding: 2px;
+}
+
+.compact-segment button {
+  min-height: 30px;
+  padding: 6px 10px;
+}
+
+.comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.comparison-grid > div,
+.comparison-single {
+  display: grid;
+  gap: 8px;
+}
+
+.comparison-grid img,
+.comparison-grid video,
+.comparison-single img,
+.comparison-single video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #10100e;
+  border: 1px solid #4b463d;
+}
+
 .editor-surface {
   gap: 16px;
 }

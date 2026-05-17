@@ -64,3 +64,16 @@ def find_project_path(registry_path: Path, project_id: str) -> Path:
                 return project_path
             break
     raise ProjectNotFound(f"Project not found: {project_id}")
+
+
+def load_asset_with_media(project_path: Path, asset_id: str) -> tuple[dict[str, Any], Path]:
+    from .project_db import find_asset_sidecar_path
+
+    sidecar_path = find_asset_sidecar_path(project_path, asset_id)
+    if sidecar_path is None:
+        raise FileNotFoundError(f"Asset not found: {asset_id}")
+    asset = read_json(sidecar_path)
+    media_path = project_path / asset.get("file", {}).get("path", "")
+    if not media_path.exists():
+        raise FileNotFoundError(f"Asset media not found: {media_path}")
+    return asset, media_path

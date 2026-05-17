@@ -14,7 +14,16 @@ from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-from sceneworks_shared import find_asset_sidecar_path, index_asset, read_json, safe_float, safe_int, slugify, utc_now
+from sceneworks_shared import (
+    find_asset_sidecar_path,
+    index_asset,
+    load_asset_with_media,
+    read_json,
+    safe_float,
+    safe_int,
+    slugify,
+    utc_now,
+)
 
 from .image_adapters import find_project_path, write_json
 from .settings import WorkerSettings
@@ -52,6 +61,9 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
 
 
 ASSET_FOLDERS = ("assets/images", "assets/videos", "assets/uploads", "assets/frames", "assets/renders")
+PERSON_TRACK_SAMPLE_RATE_FPS = 2
+PERSON_TRACK_MAX_SAMPLES = 24
+PERSON_TRACK_X_DRIFT = 0.018
 
 
 @dataclass(frozen=True)
@@ -68,6 +80,10 @@ class VideoRequest:
     quality: str
     seed: int | None
     loras: list[dict[str, Any]]
+    character_id: str | None
+    character_look_id: str | None
+    person_track_id: str | None
+    replacement_mode: str
     source_asset_id: str | None
     last_frame_asset_id: str | None
     source_clip_asset_id: str | None
@@ -174,6 +190,8 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
             right_timestamp = safe_float(context.get("rightTimestamp"), 0, 0, 3600)
             first_image = load_source_frame(project_path, request.source_clip_asset_id, left_timestamp, request.width, request.height)
             last_image = load_source_frame(project_path, request.bridge_right_clip_asset_id, right_timestamp, request.width, request.height)
+        if request.mode == "replace_person" and first_image is None:
+            first_image = load_source_frame(project_path, request.source_clip_asset_id, 0, request.width, request.height)
         if cancel_requested():
             raise InterruptedError("Video generation canceled before rendering.")
 
@@ -262,6 +280,10 @@ def video_request_from_job(job: dict[str, Any]) -> VideoRequest:
         quality=payload.get("quality", "balanced"),
         seed=payload.get("seed"),
         loras=payload.get("loras", []),
+        character_id=payload.get("characterId"),
+        character_look_id=payload.get("characterLookId"),
+        person_track_id=payload.get("personTrackId"),
+        replacement_mode=payload.get("replacementMode", "face_only"),
         source_asset_id=payload.get("sourceAssetId"),
         last_frame_asset_id=payload.get("lastFrameAssetId"),
         source_clip_asset_id=payload.get("sourceClipAssetId"),
@@ -408,6 +430,8 @@ def render_preview_frames(
         t = index / max(1, frame_count - 1)
         frame = Image.blend(base, end, t * 0.55 if last_image else t * 0.24)
         draw_motion(frame, digest, index, frame_count)
+        if request.mode == "replace_person":
+            draw_replacement_overlay(frame, request, digest, index, frame_count)
         draw_caption(frame, request, target, seed, index, frame_count)
         frames.append(frame)
         if index % max(1, frame_count // 8) == 0 or index == frame_count - 1:
@@ -456,6 +480,35 @@ def draw_motion(frame: Image.Image, digest: bytes, index: int, frame_count: int)
         fill=(248, 215, 140, 90),
         width=max(2, width // 180),
     )
+
+
+def draw_replacement_overlay(frame: Image.Image, request: VideoRequest, digest: bytes, index: int, frame_count: int) -> None:
+    draw = ImageDraw.Draw(frame, "RGBA")
+    width, height = frame.size
+    t = index / max(1, frame_count - 1)
+    drift = ((digest[7] % 21) - 10) / 1000
+    box_width = int(width * 0.24)
+    box_height = int(height * 0.58)
+    center_x = int(width * (0.48 + (t - 0.5) * 0.08 + drift))
+    top = int(height * 0.18)
+    left = max(8, min(width - box_width - 8, center_x - box_width // 2))
+    right = left + box_width
+    bottom = min(height - 8, top + box_height)
+    colors = {
+        "face_only": (88, 214, 179, 92),
+        "full_person_keep_outfit": (248, 213, 112, 82),
+        "full_person_replace_outfit": (222, 143, 246, 82),
+    }
+    fill = colors.get(request.replacement_mode, colors["face_only"])
+    outline = (255, 255, 255, 190)
+    draw.rounded_rectangle((left, top, right, bottom), radius=max(8, width // 80), fill=fill, outline=outline, width=max(2, width // 240))
+    if request.replacement_mode == "face_only":
+        face_top = top + int(box_height * 0.08)
+        draw.ellipse((left + box_width * 0.3, face_top, right - box_width * 0.3, face_top + box_width * 0.38), fill=(255, 244, 214, 130))
+    else:
+        draw.line((left + 12, top + box_height * 0.52, right - 12, top + box_height * 0.52), fill=(255, 255, 255, 95), width=max(2, width // 220))
+    label = request.replacement_mode.replace("_", " ")
+    draw.text((left + 10, max(8, top - 20)), label, fill=(255, 255, 255, 230), font=ImageFont.load_default())
 
 
 def draw_caption(
@@ -519,6 +572,31 @@ def build_video_asset_sidecar(
         if asset_id
     ]
     timeline_context = request.advanced.get("timelineContext", {})
+    normalized_settings = {
+        "duration": request.duration,
+        "fps": request.fps,
+        "width": request.width,
+        "height": request.height,
+        "quality": request.quality,
+        "family": target["family"],
+        "sourceAssetId": request.source_asset_id,
+        "lastFrameAssetId": request.last_frame_asset_id,
+        "sourceClipAssetId": request.source_clip_asset_id,
+        "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
+        "characterId": request.character_id,
+        "characterLookId": request.character_look_id,
+        "personTrackId": request.person_track_id,
+        "replacementMode": request.replacement_mode,
+        "timelineContextRef": "lineage.timeline",
+    }
+    if request.mode == "replace_person":
+        normalized_settings.update(
+            {
+                "personDetectionActive": False,
+                "personTrackingActive": False,
+                "replacementActive": False,
+            }
+        )
     return {
         "schemaVersion": 1,
         "id": asset_id,
@@ -549,19 +627,7 @@ def build_video_asset_sidecar(
             "negativePrompt": request.negative_prompt,
             "seed": seed,
             "loras": request.loras,
-            "normalizedSettings": {
-                "duration": request.duration,
-                "fps": request.fps,
-                "width": request.width,
-                "height": request.height,
-                "quality": request.quality,
-                "family": target["family"],
-                "sourceAssetId": request.source_asset_id,
-                "lastFrameAssetId": request.last_frame_asset_id,
-                "sourceClipAssetId": request.source_clip_asset_id,
-                "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
-                "timelineContextRef": "lineage.timeline",
-            },
+            "normalizedSettings": normalized_settings,
             "rawAdapterSettings": raw_settings,
         },
         "lineage": {
@@ -570,11 +636,241 @@ def build_video_asset_sidecar(
             "lastFrameAssetId": request.last_frame_asset_id,
             "sourceClipAssetId": request.source_clip_asset_id,
             "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
+            "personTrackId": request.person_track_id,
+            "characterId": request.character_id,
+            "characterLookId": request.character_look_id,
+            "replacementMode": request.replacement_mode,
             "sourceTimestamp": None,
             "timeline": timeline_context,
             "jobId": job_id,
         },
     }
+
+
+def source_asset_payload(project_path: Path, asset_id: str | None) -> tuple[dict[str, Any], Path]:
+    if not asset_id:
+        raise FileNotFoundError("Source asset is required.")
+    return load_asset_with_media(project_path, asset_id)
+
+
+def candidate_people(width: int, height: int, source_asset_id: str, timestamp: float) -> list[dict[str, Any]]:
+    digest = hashlib.sha256(f"{source_asset_id}:{timestamp:.3f}:{width}x{height}".encode("utf-8")).digest()
+    templates = [
+        (0.34, 0.16, 0.24, 0.68, 0.91),
+        (0.58, 0.2, 0.2, 0.58, 0.78),
+        (0.14, 0.26, 0.17, 0.5, 0.66),
+    ]
+    detections = []
+    for index, (x, y, box_width, box_height, confidence) in enumerate(templates):
+        jitter = ((digest[index] % 13) - 6) / 1000
+        detections.append(
+            {
+                "id": f"person_{index + 1}",
+                "label": f"Person {index + 1}",
+                "confidence": round(confidence - index * 0.04, 2),
+                "box": {
+                    "x": max(0.02, min(0.92, x + jitter)),
+                    "y": y,
+                    "width": box_width,
+                    "height": box_height,
+                },
+                "maskState": "deferred",
+                "frameWidth": width,
+                "frameHeight": height,
+            }
+        )
+    return detections
+
+
+def run_person_detect(
+    *,
+    settings: WorkerSettings,
+    job: dict[str, Any],
+    progress: ProgressCallback,
+    cancel_requested: CancelCallback,
+) -> dict[str, Any]:
+    payload = job["payload"]
+    project_id = payload["projectId"]
+    source_asset_id = payload["sourceAssetId"]
+    project_path = find_project_path(settings, project_id)
+    frames_dir = project_path / "assets" / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    (project_path / "recipes").mkdir(parents=True, exist_ok=True)
+
+    source_asset, source_media_path = source_asset_payload(project_path, source_asset_id)
+    duration = safe_float(source_asset.get("file", {}).get("duration"), 6, 0, 3600)
+    timestamp = safe_float(payload.get("sourceTimestamp"), duration * 0.25 if duration else 0, 0, max(3600, duration))
+    progress("running", "extracting", 0.25, "Extracting representative frame.")
+    if cancel_requested():
+        raise InterruptedError("Person detection canceled before frame extraction.")
+
+    image = load_source_frame(project_path, source_asset_id, timestamp, 1280, 720)
+    if image is None:
+        raise RuntimeError("Could not decode a representative frame from the selected clip.")
+
+    asset_id = f"asset_{uuid4().hex}"
+    created_at = utc_now()
+    filename = f"{created_at[:10]}_person-frame_{asset_id[-8:]}.png"
+    media_rel = f"assets/frames/{filename}"
+    media_path = project_path / media_rel
+    temp_path = media_path.with_suffix(".tmp.png")
+    image.save(temp_path, "PNG")
+    temp_path.replace(media_path)
+
+    detections = candidate_people(image.width, image.height, source_asset_id, timestamp)
+    asset = {
+        "schemaVersion": 1,
+        "id": asset_id,
+        "projectId": project_id,
+        "generationSetId": None,
+        "type": "frame",
+        "displayName": f"Person selection frame from {source_asset.get('displayName', 'clip')}",
+        "createdAt": created_at,
+        "file": {
+            "path": media_rel,
+            "mimeType": "image/png",
+            "width": image.width,
+            "height": image.height,
+            "duration": None,
+            "fps": None,
+        },
+        "status": {"favorite": False, "rating": 0, "rejected": False, "trashed": False},
+        "recipe": {
+            "mode": "person_detect",
+            "model": "procedural-person-detector",
+            "adapter": "procedural_person_tracking",
+            "prompt": "Detect selectable people in representative frame",
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {
+                "sourceTimestamp": timestamp,
+                "detectionCount": len(detections),
+                "personDetectionActive": False,
+            },
+            "rawAdapterSettings": {"sourcePath": str(source_media_path.relative_to(project_path)).replace("\\", "/")},
+        },
+        "lineage": {
+            "parents": [source_asset_id],
+            "sourceAssetId": source_asset_id,
+            "sourceTimestamp": timestamp,
+            "jobId": job["id"],
+        },
+    }
+    progress("saving", "saving", 0.78, "Saving representative frame and candidate boxes.")
+    if cancel_requested():
+        media_path.unlink(missing_ok=True)
+        raise InterruptedError("Person detection canceled before asset promotion.")
+    sidecar_path = media_path.with_suffix(".sceneworks.json")
+    write_json(sidecar_path, asset)
+    write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
+    index_asset(project_path, asset)
+    return {
+        "frameAssetId": asset_id,
+        "frameAsset": asset,
+        "sourceAssetId": source_asset_id,
+        "sourceTimestamp": timestamp,
+        "detections": detections,
+        "limits": {
+            "maskStorage": "deferred",
+            "correction": "single selected box corrections can be added to the track sidecar later",
+        },
+    }
+
+
+def track_frames_from_detection(
+    detection: dict[str, Any],
+    duration: float,
+    fps: float = PERSON_TRACK_SAMPLE_RATE_FPS,
+) -> list[dict[str, Any]]:
+    box = detection.get("box", {})
+    sample_count = max(3, min(PERSON_TRACK_MAX_SAMPLES, int(round(max(duration, 1) * fps))))
+    frames = []
+    for index in range(sample_count):
+        t = index / max(1, sample_count - 1)
+        frames.append(
+            {
+                "timestamp": round(t * max(duration, 0), 3),
+                "box": {
+                    "x": round(safe_float(box.get("x"), 0.35, 0, 1) + (t - 0.5) * PERSON_TRACK_X_DRIFT, 4),
+                    "y": round(safe_float(box.get("y"), 0.16, 0, 1), 4),
+                    "width": round(safe_float(box.get("width"), 0.24, 0.01, 1), 4),
+                    "height": round(safe_float(box.get("height"), 0.68, 0.01, 1), 4),
+                },
+                "confidence": max(0.5, round(safe_float(detection.get("confidence"), 0.82, 0, 1) - index * 0.006, 3)),
+                "mask": None,
+            }
+        )
+    return frames
+
+
+def run_person_track(
+    *,
+    settings: WorkerSettings,
+    job: dict[str, Any],
+    progress: ProgressCallback,
+    cancel_requested: CancelCallback,
+) -> dict[str, Any]:
+    payload = job["payload"]
+    project_id = payload["projectId"]
+    source_asset_id = payload["sourceAssetId"]
+    project_path = find_project_path(settings, project_id)
+    track_dir = project_path / "person-tracks"
+    track_dir.mkdir(parents=True, exist_ok=True)
+    source_asset, _ = source_asset_payload(project_path, source_asset_id)
+    duration = safe_float(source_asset.get("file", {}).get("duration"), 6, 1, 3600)
+    detection = payload.get("detection", {})
+
+    progress("running", "tracking", 0.35, "Tracking selected person through sampled frames.")
+    if cancel_requested():
+        raise InterruptedError("Person tracking canceled before saving.")
+    frames = track_frames_from_detection(detection, duration)
+    track_id = f"track_{uuid4().hex}"
+    created_at = utc_now()
+    track = {
+        "schemaVersion": 1,
+        "id": track_id,
+        "projectId": project_id,
+        "name": payload.get("trackName") or "Selected person",
+        "createdAt": created_at,
+        "sourceAssetId": source_asset_id,
+        "sourceDisplayName": source_asset.get("displayName"),
+        "representativeFrameAssetId": payload.get("representativeFrameAssetId"),
+        "selectedDetection": detection,
+        "frames": frames,
+        "corrections": [],
+        "status": {
+            "sampleRateFps": PERSON_TRACK_SAMPLE_RATE_FPS,
+            "maskState": "deferred",
+            "averageConfidence": round(sum(frame["confidence"] for frame in frames) / len(frames), 3),
+            "correctionState": "ready_for_box_corrections",
+            "personTrackingActive": False,
+        },
+        "recipe": {
+            "mode": "person_track",
+            "model": "procedural-person-tracker",
+            "adapter": "procedural_person_tracking",
+            "prompt": f"Track {payload.get('trackName') or 'selected person'}",
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {
+                "sampleRateFps": PERSON_TRACK_SAMPLE_RATE_FPS,
+                "personDetectionActive": False,
+                "personTrackingActive": False,
+            },
+            "rawAdapterSettings": {"selectedDetection": detection},
+        },
+        "lineage": {"jobId": job["id"], "parents": [source_asset_id, payload.get("representativeFrameAssetId")]},
+    }
+    progress("saving", "saving", 0.82, "Saving reusable person track metadata.")
+    if cancel_requested():
+        raise InterruptedError("Person tracking canceled before sidecar write.")
+    track_path = track_dir / f"{track_id}.sceneworks.person-track.json"
+    write_json(track_path, track)
+    return {"trackId": track_id, "track": track, "path": str(track_path.relative_to(project_path)).replace("\\", "/")}
 
 
 def run_frame_extract(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scene_worker.image_adapters import MODEL_TARGETS, build_asset_sidecar, image_request_from_job, resolve_seed
 from scene_worker.runtime import download_progress_payload, format_bytes, heartbeat, loaded_models_from_adapters, worker_capabilities
+from scene_worker.video_adapters import VIDEO_MODEL_TARGETS, build_video_asset_sidecar, video_request_from_job
 
 
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
@@ -18,6 +19,7 @@ def test_gpu_worker_advertises_generation_capabilities():
 
     assert "image_generate" in capabilities
     assert "video_generate" in capabilities
+    assert "person_replace" in capabilities
 
 
 def test_auto_gpu_worker_can_disable_utility_capabilities(monkeypatch):
@@ -28,6 +30,14 @@ def test_auto_gpu_worker_can_disable_utility_capabilities(monkeypatch):
     assert "image_generate" in capabilities
     assert "model_download" not in capabilities
     assert "lora_import" not in capabilities
+    assert "person_track" not in capabilities
+
+
+def test_cpu_worker_advertises_person_tracking_utility_capabilities():
+    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
+
+    assert "person_detect" in capabilities
+    assert "person_track" in capabilities
 
 
 def test_loaded_models_are_collected_from_adapter_cache():
@@ -101,6 +111,47 @@ def test_character_image_recipe_marks_conditioning_inactive():
     assert normalized["characterId"] == "character-1"
     assert normalized["characterLookId"] == "look-1"
     assert normalized["characterConditioningActive"] is False
+
+
+def test_replace_person_video_sidecar_preserves_lineage():
+    job = {
+        "id": "job-1",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "replace_person",
+            "prompt": "Replace the hero",
+            "model": "wan_2_2",
+            "sourceClipAssetId": "asset-video",
+            "personTrackId": "track-1",
+            "characterId": "character-1",
+            "characterLookId": "look-1",
+            "replacementMode": "full_person_keep_outfit",
+            "advanced": {},
+        },
+    }
+    request = video_request_from_job(job)
+
+    asset = build_video_asset_sidecar(
+        asset_id="asset-output",
+        project_id="project-1",
+        generation_set_id="genset-1",
+        request=request,
+        job_id="job-1",
+        media_rel="assets/videos/replacement.webp",
+        created_at="2026-05-17T00:00:00Z",
+        seed=44,
+        target=VIDEO_MODEL_TARGETS["wan_2_2"],
+        raw_settings={},
+    )
+
+    assert asset["recipe"]["mode"] == "replace_person"
+    assert asset["recipe"]["normalizedSettings"]["personTrackId"] == "track-1"
+    assert asset["recipe"]["normalizedSettings"]["replacementMode"] == "full_person_keep_outfit"
+    assert asset["recipe"]["normalizedSettings"]["personDetectionActive"] is False
+    assert asset["recipe"]["normalizedSettings"]["personTrackingActive"] is False
+    assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
+    assert asset["lineage"]["sourceClipAssetId"] == "asset-video"
+    assert asset["lineage"]["characterId"] == "character-1"
 
 
 def test_download_progress_payload_reports_remaining_bytes(monkeypatch):

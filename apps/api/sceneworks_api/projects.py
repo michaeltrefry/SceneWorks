@@ -33,6 +33,7 @@ PROJECT_FOLDERS = [
     "characters",
     "generation-sets",
     "loras",
+    "person-tracks",
     "recipes",
     "timelines",
     "trash",

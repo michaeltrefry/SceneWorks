@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/person-track.schema.json",
+  "title": "SceneWorks Person Track",
+  "type": "object",
+  "required": ["schemaVersion", "id", "projectId", "name", "sourceAssetId", "representativeFrameAssetId", "frames", "status"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "pattern": "^track_[a-z0-9_]+$" },
+    "projectId": { "type": "string" },
+    "name": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "sourceAssetId": { "type": "string" },
+    "sourceDisplayName": { "type": ["string", "null"] },
+    "representativeFrameAssetId": { "type": "string" },
+    "selectedDetection": { "type": "object" },
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["timestamp", "box", "confidence"],
+        "properties": {
+          "timestamp": { "type": "number", "minimum": 0 },
+          "box": {
+            "type": "object",
+            "required": ["x", "y", "width", "height"],
+            "properties": {
+              "x": { "type": "number", "minimum": 0, "maximum": 1 },
+              "y": { "type": "number", "minimum": 0, "maximum": 1 },
+              "width": { "type": "number", "minimum": 0, "maximum": 1 },
+              "height": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "mask": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "corrections": { "type": "array" },
+    "recipe": { "$ref": "recipe.schema.json" },
+    "status": {
+      "type": "object",
+      "properties": {
+        "sampleRateFps": { "type": "number" },
+        "maskState": { "type": "string" },
+        "averageConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "correctionState": { "type": "string" }
+      }
+    },
+    "lineage": { "type": "object" }
+  }
+}

@@ -1,18 +1,23 @@
 import React, { useEffect, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 
 export function VideoStudio({
   activeProject,
   assets,
   characters,
+  createPersonDetectionJob,
+  createPersonTrackJob,
   createVideoJob,
   deleteAsset,
   purgeAsset,
   gpuOptions,
   latestAssets,
   launchRequest,
+  jobs = [],
   onPreview,
+  personTracks = [],
   requestedGpu,
   selectedAsset,
   setRequestedGpu,
@@ -37,6 +42,15 @@ export function VideoStudio({
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
+  const [personTrackId, setPersonTrackId] = useState("");
+  const [replacementMode, setReplacementMode] = useState("face_only");
+  const [selectedDetectionId, setSelectedDetectionId] = useState("");
+  const [trackName, setTrackName] = useState("Selected person");
+  const [comparisonMode, setComparisonMode] = useState("side_by_side");
+  const [abSide, setAbSide] = useState("replacement");
+  const capabilities = selectedModel?.capabilities ?? [];
+  const supportsMode = capabilities.includes(mode);
+  const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
@@ -100,6 +114,26 @@ export function VideoStudio({
     });
   }, [selectedModel?.id]);
 
+  useEffect(() => {
+    if (mode !== "replace_person" || supportsMode) {
+      return;
+    }
+    const replacementModel = findReplacementModel(videoModels);
+    if (replacementModel) {
+      setModel(replacementModel.id);
+    }
+  }, [mode, supportsMode, videoModels]);
+
+  useEffect(() => {
+    if (mode !== "replace_person") {
+      return;
+    }
+    const firstMatchingTrack = personTracks.find((track) => track.sourceAssetId === sourceClipAssetId);
+    if (firstMatchingTrack && !personTracks.some((track) => track.id === personTrackId)) {
+      setPersonTrackId(firstMatchingTrack.id);
+    }
+  }, [mode, personTracks, personTrackId, sourceClipAssetId]);
+
   const modeOptions = [
     ["image_to_video", "Image to Video"],
     ["text_to_video", "Text to Video"],
@@ -107,15 +141,28 @@ export function VideoStudio({
     ["extend_clip", "Extend Clip"],
     ["replace_person", "Replace Person"],
   ];
-  const capabilities = selectedModel?.capabilities ?? [];
-  const supportsMode = capabilities.includes(mode);
-  const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip"].includes(mode);
+  const matchingTracks = personTracks.filter((track) => track.sourceAssetId === sourceClipAssetId);
+  const latestDetectionJob = jobs
+    .filter(
+      (job) =>
+        job.type === "person_detect" &&
+        job.status === "completed" &&
+        job.projectId === activeProject?.id &&
+        job.payload?.sourceAssetId === sourceClipAssetId,
+    )
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const detectionResult = latestDetectionJob?.result ?? null;
+  const representativeFrame = assets.find((asset) => asset.id === detectionResult?.frameAssetId);
+  const selectedDetection = detectionResult?.detections?.find((item) => item.id === selectedDetectionId) ?? detectionResult?.detections?.[0];
+  const selectedTrack = personTracks.find((track) => track.id === personTrackId);
+  const comparisonAsset = latestAssets.find((asset) => asset.recipe?.mode === "replace_person");
+  const comparisonSource = assets.find((asset) => asset.id === comparisonAsset?.lineage?.sourceClipAssetId);
   const hasInputs =
     mode === "text_to_video" ||
     (mode === "image_to_video" && sourceAssetId) ||
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
-    mode === "replace_person";
+    (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId);
   const canSubmit = Boolean(activeProject && prompt.trim() && supportsMode && implementedMode && hasInputs);
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
@@ -131,6 +178,11 @@ export function VideoStudio({
       : !hasInputs
         ? "Required inputs are missing."
         : "";
+  const replacementModeLabels = {
+    face_only: "Face Only",
+    full_person_keep_outfit: "Full Person, Keep Outfit",
+    full_person_replace_outfit: "Full Person, Replace Outfit",
+  };
 
   function submit(event) {
     event.preventDefault();
@@ -149,9 +201,16 @@ export function VideoStudio({
       characterLookId: characterLookId || null,
       sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
       lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
-      sourceClipAssetId: mode === "extend_clip" ? sourceClipAssetId || null : null,
+      sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
+      personTrackId: mode === "replace_person" ? personTrackId || null : null,
+      replacementMode: mode === "replace_person" ? replacementMode : "face_only",
       loras: [],
-      advanced: { resolution, durationHint },
+      advanced: {
+        resolution,
+        durationHint,
+        selectedPersonTrack: selectedTrack ?? null,
+        replacementModeLabel: replacementModeLabels[replacementMode],
+      },
     });
   }
 
@@ -216,7 +275,25 @@ export function VideoStudio({
           ) : null}
 
           {mode === "replace_person" ? (
-            <div className="empty-panel compact-panel">Replacement is staged as a placeholder mode.</div>
+            <ReplacePersonPanel
+              createPersonDetectionJob={createPersonDetectionJob}
+              createPersonTrackJob={createPersonTrackJob}
+              detectionResult={detectionResult}
+              matchingTracks={matchingTracks}
+              personTrackId={personTrackId}
+              replacementMode={replacementMode}
+              representativeFrame={representativeFrame}
+              selectedDetection={selectedDetection}
+              selectedTrack={selectedTrack}
+              setPersonTrackId={setPersonTrackId}
+              setReplacementMode={setReplacementMode}
+              setSelectedDetectionId={setSelectedDetectionId}
+              setSourceClipAssetId={setSourceClipAssetId}
+              setTrackName={setTrackName}
+              sourceClipAssetId={sourceClipAssetId}
+              trackName={trackName}
+              videoAssets={videoAssets}
+            />
           ) : null}
 
           <div className="control-grid compact-controls">
@@ -340,7 +417,7 @@ export function VideoStudio({
 
           {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
           <button className="primary-action" disabled={!canSubmit} type="submit">
-            Generate Clip
+            {mode === "replace_person" ? "Replace Person" : "Generate Clip"}
           </button>
         </section>
 
@@ -365,6 +442,48 @@ export function VideoStudio({
           ) : (
             <div className="empty-panel">No fresh video clip</div>
           )}
+
+          {comparisonAsset?.recipe?.mode === "replace_person" && comparisonSource ? (
+            <div className="comparison-panel">
+              <div className="comparison-toolbar">
+                <div className="segmented-control compact-segment" aria-label="Comparison mode">
+                  <button className={comparisonMode === "side_by_side" ? "active" : ""} onClick={() => setComparisonMode("side_by_side")} type="button">
+                    Side by Side
+                  </button>
+                  <button className={comparisonMode === "ab" ? "active" : ""} onClick={() => setComparisonMode("ab")} type="button">
+                    A/B
+                  </button>
+                </div>
+                {comparisonMode === "ab" ? (
+                  <div className="segmented-control compact-segment" aria-label="A/B source">
+                    <button className={abSide === "original" ? "active" : ""} onClick={() => setAbSide("original")} type="button">
+                      A
+                    </button>
+                    <button className={abSide === "replacement" ? "active" : ""} onClick={() => setAbSide("replacement")} type="button">
+                      B
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+              {comparisonMode === "side_by_side" ? (
+                <div className="comparison-grid">
+                  <div>
+                    <p className="eyebrow">Original</p>
+                    <AssetMedia asset={comparisonSource} />
+                  </div>
+                  <div>
+                    <p className="eyebrow">Replacement</p>
+                    <AssetMedia asset={comparisonAsset} />
+                  </div>
+                </div>
+              ) : (
+                <div className="comparison-single">
+                  <p className="eyebrow">{abSide === "original" ? "A Original" : "B Replacement"}</p>
+                  <AssetMedia asset={abSide === "original" ? comparisonSource : comparisonAsset} />
+                </div>
+              )}
+            </div>
+          ) : null}
 
           <div className="asset-tray">
             <div className="section-heading">

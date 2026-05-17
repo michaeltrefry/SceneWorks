@@ -28,6 +28,7 @@ export function App() {
   const [loras, setLoras] = useState([]);
   const [assets, setAssets] = useState([]);
   const [characters, setCharacters] = useState([]);
+  const [personTracks, setPersonTracks] = useState([]);
   const [timelines, setTimelines] = useState([]);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
   const [activeTimeline, setActiveTimeline] = useState(null);
@@ -119,6 +120,7 @@ export function App() {
     if (!activeProject || !authenticated) {
       setAssets([]);
       setCharacters([]);
+      setPersonTracks([]);
       setTimelines([]);
       setSelectedTimelineId(null);
       setActiveTimeline(null);
@@ -126,6 +128,7 @@ export function App() {
     }
     refreshAssets(activeProject.id);
     refreshCharacters(activeProject.id);
+    refreshPersonTracks(activeProject.id);
     refreshTimelines(activeProject.id);
   }, [activeProject?.id, authenticated, token]);
 
@@ -157,6 +160,12 @@ export function App() {
         if (job.projectId) {
           refreshAssets(job.projectId);
         }
+      }
+      if (job.status === "completed" && job.projectId && job.type === "person_track") {
+        refreshPersonTracks(job.projectId);
+      }
+      if (job.status === "completed" && job.projectId && job.type === "person_detect") {
+        refreshAssets(job.projectId);
       }
     }
 
@@ -268,6 +277,19 @@ export function App() {
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token);
       setCharacters(items);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function refreshPersonTracks(projectId = activeProject?.id) {
+    if (!projectId) {
+      return;
+    }
+    try {
+      const items = await apiFetch(`/api/v1/projects/${projectId}/person-tracks`, token);
+      setPersonTracks(items);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -638,6 +660,52 @@ export function App() {
       setStudioLaunch({ id: crypto.randomUUID(), view: "Video", assetId: asset.id, mode });
     }
     setActiveView("Video");
+  }
+
+  async function createPersonDetectionJob(payload, options = {}) {
+    const { navigateToQueue = false } = options;
+    if (!activeProject) {
+      setError("Create or open a project first.");
+      return null;
+    }
+    try {
+      const job = await apiFetch(`/api/v1/projects/${activeProject.id}/person-tracks/detections`, token, {
+        method: "POST",
+        body: JSON.stringify({ ...payload, requestedGpu }),
+      });
+      if (navigateToQueue) {
+        setActiveView("Queue");
+      }
+      setError("");
+      refreshData();
+      return job;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function createPersonTrackJob(payload, options = {}) {
+    const { navigateToQueue = false } = options;
+    if (!activeProject) {
+      setError("Create or open a project first.");
+      return null;
+    }
+    try {
+      const job = await apiFetch(`/api/v1/projects/${activeProject.id}/person-tracks/jobs`, token, {
+        method: "POST",
+        body: JSON.stringify({ ...payload, requestedGpu }),
+      });
+      if (navigateToQueue) {
+        setActiveView("Queue");
+      }
+      setError("");
+      refreshData();
+      return job;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
   }
 
   function sendCharacterToImage(character, lookId = null) {
@@ -1027,13 +1095,17 @@ export function App() {
             activeProject={activeProject}
             assets={assets}
             characters={characters}
+            createPersonDetectionJob={createPersonDetectionJob}
+            createPersonTrackJob={createPersonTrackJob}
             createVideoJob={createVideoJob}
             deleteAsset={deleteAsset}
             purgeAsset={purgeAsset}
             gpuOptions={gpuOptions}
             latestAssets={latestVideoAssets}
             launchRequest={studioLaunch}
+            jobs={jobs}
             onPreview={setPreviewAsset}
+            personTracks={personTracks}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}
             setRequestedGpu={setRequestedGpu}

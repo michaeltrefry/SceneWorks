@@ -3,8 +3,13 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from sceneworks_api.projects import PROJECT_FOLDERS
 from sceneworks_api.timelines import find_timeline_file
 from sceneworks_shared import reindex_project, write_json
+
+
+def test_project_folders_include_person_tracks():
+    assert "person-tracks" in PROJECT_FOLDERS
 
 
 def test_find_timeline_file_heals_stale_db_path(tmp_path):

@@ -19,7 +19,7 @@ from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .settings import WorkerSettings
 from .timeline_exporter import run_timeline_export
-from .video_adapters import ProceduralVideoAdapter, run_frame_extract
+from .video_adapters import ProceduralVideoAdapter, run_frame_extract, run_person_detect, run_person_track
 
 
 def now() -> str:
@@ -53,9 +53,9 @@ def worker_capabilities(gpu: dict) -> list[str]:
     utility_jobs_enabled = os.getenv("SCENEWORKS_UTILITY_JOBS", "1").strip() != "0"
     capabilities = set(gpu["capabilities"])
     if utility_jobs_enabled:
-        capabilities |= {"timeline_export", "model_download", "lora_import", "frame_extract"}
+        capabilities |= {"timeline_export", "model_download", "lora_import", "frame_extract", "person_detect", "person_track"}
     if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
-        capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge"}
+        capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge", "person_replace"}
     return sorted(capabilities)
 
 
@@ -827,6 +827,142 @@ def run_frame_extract_job(api: ApiClient, settings: WorkerSettings, job: dict) -
         heartbeat(api, settings, "idle")
 
 
+def run_person_detect_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": status,
+                "stage": stage,
+                "progress": value,
+                "message": message,
+            },
+        )
+
+    try:
+        progress("preparing", "preparing", 0.08, "Preparing representative frame analysis.")
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: run_person_detect(
+                settings=settings,
+                job=job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Person candidates detected.",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Person detection failed.",
+                "error": str(exc),
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
+def run_person_track_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": status,
+                "stage": stage,
+                "progress": value,
+                "message": message,
+            },
+        )
+
+    try:
+        progress("preparing", "preparing", 0.08, "Preparing selected-person tracking.")
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: run_person_track(
+                settings=settings,
+                job=job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Reusable person track saved.",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Person tracking failed.",
+                "error": str(exc),
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def run_worker_loop(settings: WorkerSettings) -> None:
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
@@ -870,8 +1006,12 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_placeholder_job(api, settings, job)
             elif job["type"] in ("image_generate", "image_edit"):
                 run_image_job(api, settings, job, image_adapters)
-            elif job["type"] in ("video_generate", "video_extend", "video_bridge"):
+            elif job["type"] in ("video_generate", "video_extend", "video_bridge", "person_replace"):
                 run_video_job(api, settings, job)
+            elif job["type"] == "person_detect":
+                run_person_detect_job(api, settings, job)
+            elif job["type"] == "person_track":
+                run_person_track_job(api, settings, job)
             elif job["type"] == "frame_extract":
                 run_frame_extract_job(api, settings, job)
             elif job["type"] == "timeline_export":

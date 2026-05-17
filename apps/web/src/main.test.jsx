@@ -74,6 +74,26 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Queue");
   });
 
+  it("switches Replace Person to the replacement-capable video model", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace Person").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Wan2.2");
+    expect(container.textContent).toContain("V1 placeholder tracking");
+  });
+
   it("adds the SSE ticket as a query parameter", () => {
     expect(eventUrl("/api/v1/jobs/events", "stream-ticket")).toContain("ticket=stream-ticket");
   });
