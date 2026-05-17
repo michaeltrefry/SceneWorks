@@ -50,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "status": "ok",
             "service": "sceneworks-api",
+            "runtime": settings.api_runtime,
             "version": settings.app_version,
             "authRequired": bool(settings.access_token),
             "directories": {

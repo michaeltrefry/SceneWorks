@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "id": "character_fixture",
+  "projectId": "project_fixture",
+  "name": "Mira",
+  "type": "person",
+  "description": "Lead character reference.",
+  "createdAt": "2026-05-17T13:00:00Z",
+  "updatedAt": "2026-05-17T13:00:00Z",
+  "status": {
+    "archived": false
+  },
+  "references": [
+    {
+      "assetId": "asset_image_fixture",
+      "approved": true,
+      "role": "reference",
+      "notes": "",
+      "addedAt": "2026-05-17T13:00:00Z",
+      "approvedAt": "2026-05-17T13:00:00Z"
+    }
+  ],
+  "looks": [
+    {
+      "id": "look_fixture",
+      "name": "Rain coat",
+      "description": "Dark rain coat and wet hair.",
+      "approvedReferenceIds": ["asset_image_fixture"],
+      "recipeSettings": { "style": "noir" },
+      "createdAt": "2026-05-17T13:00:00Z",
+      "updatedAt": "2026-05-17T13:00:00Z"
+    }
+  ],
+  "loras": [
+    {
+      "id": "character_lora_fixture",
+      "loraId": "lora_fixture",
+      "name": "Mira LoRA",
+      "sourcePath": "loras/mira.safetensors",
+      "projectPath": "loras/characters/character_fixture/mira.safetensors",
+      "copiedIntoProject": true,
+      "category": "character",
+      "scope": "project",
+      "triggerWords": ["mira_person"],
+      "defaultWeight": 0.8,
+      "compatibility": { "families": ["z-image", "wan-video"] },
+      "createdAt": "2026-05-17T13:00:00Z",
+      "updatedAt": "2026-05-17T13:00:00Z"
+    }
+  ],
+  "trainedLoras": []
+}

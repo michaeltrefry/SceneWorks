@@ -448,6 +448,8 @@ class JobsStore:
                 """,
                 (*NON_GPU_JOB_TYPES, gpu_id, int(active_gpu_job is not None), *NON_GPU_JOB_TYPES),
             ).fetchall()
+            # Keep this bounded while the queue is still small; revisit before large multi-tenant queues
+            # so capability-incompatible jobs cannot hide a later compatible job indefinitely.
             queued = next((row for row in queued_rows if row["type"] in capabilities), None)
             if queued is None:
                 return None

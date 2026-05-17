@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fnmatch import fnmatch
 import json
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -140,6 +141,8 @@ def download_size_from_siblings(siblings: list[dict[str, Any]], files: list[str]
 
 @lru_cache(maxsize=64)
 def estimate_huggingface_download_size(repo: str, files_key: tuple[str, ...]) -> int | None:
+    if os.getenv("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "").strip().lower() in {"1", "true", "yes"}:
+        return None
     url = f"https://huggingface.co/api/models/{quote(repo, safe='/')}?blobs=true"
     try:
         with urlopen(url, timeout=8) as response:

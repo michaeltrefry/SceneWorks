@@ -97,7 +97,7 @@ def run_timeline_export(
                     "path": segment_path,
                     "duration": duration,
                     "transition": (item.get("transitionIn") or {}).get("type"),
-                    "transitionDuration": safe_float((item.get("transitionIn") or {}).get("duration"), 0),
+                    "transitionDuration": safe_float((item.get("transitionIn") or {}).get("duration"), 0.5),
                 }
             )
             cursor = max(cursor, safe_float(item.get("timelineEnd"), start + duration))

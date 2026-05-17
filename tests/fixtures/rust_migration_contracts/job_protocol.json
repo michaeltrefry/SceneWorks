@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "jobTypes": [
+    "placeholder",
+    "image_generate",
+    "image_edit",
+    "video_generate",
+    "video_extend",
+    "video_bridge",
+    "person_detect",
+    "person_track",
+    "person_replace",
+    "frame_extract",
+    "timeline_export",
+    "model_download",
+    "lora_import"
+  ],
+  "statuses": [
+    "queued",
+    "preparing",
+    "downloading",
+    "loading_model",
+    "running",
+    "saving",
+    "completed",
+    "failed",
+    "canceled",
+    "interrupted"
+  ],
+  "activeStatuses": ["preparing", "downloading", "loading_model", "running", "saving"],
+  "terminalStatuses": ["completed", "failed", "canceled", "interrupted"],
+  "nonGpuJobTypes": ["model_download", "lora_import"],
+  "workerStatuses": ["idle", "busy", "offline"],
+  "progressStages": [
+    "queued",
+    "preparing",
+    "downloading",
+    "importing",
+    "loading_model",
+    "estimating",
+    "generating",
+    "running",
+    "rendering",
+    "extracting",
+    "tracking",
+    "muxing",
+    "saving",
+    "completed",
+    "failed",
+    "canceled",
+    "interrupted"
+  ],
+  "sseEvents": ["ready", "heartbeat", "job.updated", "queue.updated", "worker.updated"],
+  "workerCapabilityProfiles": {
+    "cpu": ["cpu", "person_detect", "person_track", "placeholder"],
+    "cpuLegacy": ["cpu", "frame_extract", "lora_import", "model_download", "person_detect", "person_track", "placeholder", "timeline_export"],
+    "gpuChild": ["gpu", "image_edit", "image_generate", "person_replace", "placeholder", "video_bridge", "video_extend", "video_generate"]
+  },
+  "requests": {
+    "createJob": {
+      "type": "image_generate",
+      "projectId": "project_fixture",
+      "projectName": "Fixture Project",
+      "payload": { "prompt": "mist over hills", "model": "z_image_turbo" },
+      "requestedGpu": "auto"
+    },
+    "registerWorker": {
+      "workerId": "worker-gpu-0",
+      "gpuId": "gpu-0",
+      "gpuName": "Fixture GPU",
+      "capabilities": ["placeholder", "gpu", "image_generate", "image_edit", "video_generate"],
+      "loadedModels": ["Tongyi-MAI/Z-Image-Turbo"]
+    },
+    "heartbeat": {
+      "status": "busy",
+      "currentJobId": "job_fixture",
+      "loadedModels": ["Tongyi-MAI/Z-Image-Turbo"]
+    },
+    "progress": {
+      "status": "running",
+      "stage": "rendering",
+      "progress": 0.42,
+      "message": "Rendering preview frames.",
+      "etaSeconds": 12.5
+    }
+  },
+  "jobSnapshot": {
+    "id": "job_fixture",
+    "type": "image_generate",
+    "status": "running",
+    "projectId": "project_fixture",
+    "projectName": "Fixture Project",
+    "payload": { "prompt": "mist over hills", "model": "z_image_turbo" },
+    "result": {},
+    "requestedGpu": "auto",
+    "assignedGpu": "gpu-0",
+    "workerId": "worker-gpu-0",
+    "progress": 0.42,
+    "stage": "rendering",
+    "message": "Rendering preview frames.",
+    "error": null,
+    "etaSeconds": 12.5,
+    "elapsedSeconds": 4,
+    "attempts": 1,
+    "sourceJobId": null,
+    "duplicateOfJobId": null,
+    "cancelRequested": false,
+    "createdAt": "2026-05-17T13:00:00Z",
+    "updatedAt": "2026-05-17T13:00:04Z",
+    "startedAt": "2026-05-17T13:00:01Z",
+    "completedAt": null,
+    "canceledAt": null,
+    "lastHeartbeatAt": "2026-05-17T13:00:04Z"
+  }
+}

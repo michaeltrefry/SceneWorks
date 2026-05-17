@@ -11,7 +11,13 @@ const requiredPaths = [
   "apps/api/sceneworks_api/main.py",
   "apps/api/sceneworks_api/projects.py",
   "apps/api/sceneworks_api/security.py",
+  "apps/rust-api/Cargo.toml",
+  "apps/rust-api/src/main.rs",
   "apps/worker/scene_worker/runtime.py",
+  "crates/sceneworks-core/Cargo.toml",
+  "crates/sceneworks-core/src/lib.rs",
+  "Cargo.toml",
+  "rust-toolchain.toml",
   "packages/schemas/project.schema.json",
   "config/manifests/builtin.models.jsonc",
   "config/manifests/builtin.loras.jsonc",
@@ -21,6 +27,7 @@ const requiredPaths = [
   "data/cache/.gitkeep",
   "docker-compose.yml",
   "docker/api.Dockerfile",
+  "docker/rust-api.Dockerfile",
   "docker/web.Dockerfile",
   "docker/worker.Dockerfile",
 ];
@@ -44,7 +51,18 @@ for (const requiredPath of requiredPaths) {
 await assertContains("apps/web/src/App.jsx", "/api/v1/health");
 await assertContains("apps/api/sceneworks_api/main.py", "/api/v1/health");
 await assertContains("apps/api/sceneworks_api/jobs.py", "/jobs/events");
+await assertContains("Cargo.toml", "apps/rust-api");
+await assertContains("crates/sceneworks-core/src/lib.rs", "/api/v1/health");
 await assertContains("docker-compose.yml", "NVIDIA_VISIBLE_DEVICES");
+await assertContains("docker-compose.yml", "SCENEWORKS_API_DOCKERFILE:-docker/rust-api.Dockerfile");
+await assertContains("docker-compose.yml", "SCENEWORKS_API_RUNTIME:-rust");
+await assertContains("docker-compose.yml", "SCENEWORKS_PYTHON_UTILITY_JOBS:-1");
+await assertContains("docker-compose.yml", "/sceneworks/data/cache/jobs.db");
+await assertContains(".env.example", "SCENEWORKS_API_RUNTIME=rust");
+await assertContains(".env.example", "SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile");
+await assertContains(".env.example", "SCENEWORKS_PYTHON_UTILITY_JOBS=1");
+await assertContains("docker/rust-api.Dockerfile", "sceneworks-rust-api");
+await assertContains("scripts/check-docker-api-runtime.mjs", "SCENEWORKS_API_RUNTIME");
 await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 
 console.log("SceneWorks scaffold check passed.");

@@ -5,7 +5,8 @@ from pathlib import Path
 
 class Settings:
     def __init__(self) -> None:
-        self.app_version = os.getenv("SCENEWORKS_APP_VERSION", "0.1.0")
+        self.api_runtime = os.getenv("SCENEWORKS_API_RUNTIME", "python").strip() or "python"
+        self.app_version = os.getenv("SCENEWORKS_APP_VERSION", "0.2.0")
         self.host = os.getenv("SCENEWORKS_API_HOST", "0.0.0.0")
         self.port = int(os.getenv("SCENEWORKS_API_PORT", "8000"))
         self.data_dir = Path(os.getenv("SCENEWORKS_DATA_DIR", "data")).resolve()

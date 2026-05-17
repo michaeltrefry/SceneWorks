@@ -1,0 +1,1132 @@
+{
+  "access response": {
+    "authRequired": false,
+    "tokenHeader": "X-SceneWorks-Token"
+  },
+  "asset delete response": {
+    "id": "asset_fixture",
+    "status": "trashed"
+  },
+  "asset list after delete response": [],
+  "asset list response": [
+    {
+      "createdAt": "<timestamp>",
+      "displayName": "fixture image.png",
+      "file": {
+        "duration": null,
+        "fps": null,
+        "height": null,
+        "mimeType": "image/png",
+        "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+        "width": null
+      },
+      "generationSetId": null,
+      "id": "asset_fixture",
+      "lineage": {
+        "jobId": null,
+        "parents": [],
+        "sourceAssetId": null,
+        "sourceTimestamp": null
+      },
+      "projectId": "project_fixture",
+      "recipe": {
+        "adapter": "api-upload",
+        "loras": [],
+        "mode": "upload",
+        "model": "manual-import",
+        "negativePrompt": "",
+        "normalizedSettings": {},
+        "prompt": "fixture image.png",
+        "rawAdapterSettings": {
+          "contentType": "image/png"
+        },
+        "seed": 0,
+        "stylePreset": "none"
+      },
+      "schemaVersion": 1,
+      "sidecarPath": "assets/uploads/fixture-image-<upload-suffix>.sceneworks.json",
+      "status": {
+        "favorite": true,
+        "rating": 4,
+        "rejected": false,
+        "trashed": false
+      },
+      "type": "image",
+      "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+    }
+  ],
+  "asset purge response": {
+    "id": "asset_fixture",
+    "status": "purged"
+  },
+  "asset status project DB update response": {
+    "createdAt": "<timestamp>",
+    "displayName": "fixture image.png",
+    "file": {
+      "duration": null,
+      "fps": null,
+      "height": null,
+      "mimeType": "image/png",
+      "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+      "width": null
+    },
+    "generationSetId": null,
+    "id": "asset_fixture",
+    "lineage": {
+      "jobId": null,
+      "parents": [],
+      "sourceAssetId": null,
+      "sourceTimestamp": null
+    },
+    "projectId": "project_fixture",
+    "recipe": {
+      "adapter": "api-upload",
+      "loras": [],
+      "mode": "upload",
+      "model": "manual-import",
+      "negativePrompt": "",
+      "normalizedSettings": {},
+      "prompt": "fixture image.png",
+      "rawAdapterSettings": {
+        "contentType": "image/png"
+      },
+      "seed": 0,
+      "stylePreset": "none"
+    },
+    "schemaVersion": 1,
+    "sidecarPath": "assets/uploads/fixture-image-<upload-suffix>.sceneworks.json",
+    "status": {
+      "favorite": true,
+      "rating": 4,
+      "rejected": false,
+      "trashed": false
+    },
+    "type": "image",
+    "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+  },
+  "asset upload sidecar response": {
+    "createdAt": "<timestamp>",
+    "displayName": "fixture image.png",
+    "file": {
+      "duration": null,
+      "fps": null,
+      "height": null,
+      "mimeType": "image/png",
+      "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+      "width": null
+    },
+    "generationSetId": null,
+    "id": "asset_fixture",
+    "lineage": {
+      "jobId": null,
+      "parents": [],
+      "sourceAssetId": null,
+      "sourceTimestamp": null
+    },
+    "projectId": "project_fixture",
+    "recipe": {
+      "adapter": "api-upload",
+      "loras": [],
+      "mode": "upload",
+      "model": "manual-import",
+      "negativePrompt": "",
+      "normalizedSettings": {},
+      "prompt": "fixture image.png",
+      "rawAdapterSettings": {
+        "contentType": "image/png"
+      },
+      "seed": 0,
+      "stylePreset": "none"
+    },
+    "schemaVersion": 1,
+    "sidecarPath": "assets/uploads/fixture-image-<upload-suffix>.sceneworks.json",
+    "status": {
+      "favorite": false,
+      "rating": 0,
+      "rejected": false,
+      "trashed": false
+    },
+    "type": "image",
+    "url": "/api/v1/projects/project_fixture/files/assets/uploads/fixture-image-<upload-suffix>.png"
+  },
+  "auth verify response": {
+    "ok": true
+  },
+  "busy worker heartbeat response": {
+    "capabilities": [
+      "image_generate"
+    ],
+    "currentJobId": "job_fixture",
+    "gpuId": "gpu-0",
+    "gpuName": "Fixture GPU",
+    "id": "parity-worker",
+    "lastSeenAt": "<timestamp>",
+    "loadedModels": [
+      "Tongyi-MAI/Z-Image-Turbo"
+    ],
+    "registeredAt": "<timestamp>",
+    "status": "busy"
+  },
+  "concurrent claim response set": [
+    {
+      "job": null
+    },
+    {
+      "job": {
+        "assignedGpu": "gpu-0",
+        "attempts": 1,
+        "cancelRequested": false,
+        "canceledAt": null,
+        "completedAt": null,
+        "createdAt": "<timestamp>",
+        "duplicateOfJobId": null,
+        "elapsedSeconds": 0,
+        "error": null,
+        "etaSeconds": null,
+        "id": "job_fixture",
+        "lastHeartbeatAt": null,
+        "message": "Worker claimed job.",
+        "payload": {},
+        "progress": 0.0,
+        "projectId": null,
+        "projectName": null,
+        "requestedGpu": "auto",
+        "result": {},
+        "sourceJobId": null,
+        "stage": "preparing",
+        "startedAt": "<timestamp>",
+        "status": "preparing",
+        "type": "image_generate",
+        "updatedAt": "<timestamp>",
+        "workerId": "claim-worker-fixture"
+      }
+    }
+  ],
+  "event ticket response": {
+    "expiresInSeconds": 30,
+    "ticket": "<event-ticket>"
+  },
+  "health response": {
+    "authRequired": false,
+    "directories": {
+      "config": "<runtime-root>/config",
+      "data": "<runtime-root>/data",
+      "jobsDb": "<runtime-root>/data/cache/jobs.db",
+      "projects": "<runtime-root>/data/projects"
+    },
+    "interruptedJobsOnStartup": 0,
+    "runtime": "<runtime>",
+    "service": "sceneworks-api",
+    "status": "ok",
+    "version": "0.2.0"
+  },
+  "image job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "advanced": {},
+      "characterId": null,
+      "characterLookId": null,
+      "count": 4,
+      "height": 1024,
+      "loras": [],
+      "mode": "text_to_image",
+      "model": "base-model",
+      "negativePrompt": "",
+      "projectId": "project_fixture",
+      "projectName": "Parity Project",
+      "prompt": "mist over hills",
+      "seed": 101,
+      "sourceAssetId": null,
+      "stylePreset": "cinematic",
+      "width": 1024
+    },
+    "progress": 0.0,
+    "projectId": "project_fixture",
+    "projectName": "Parity Project",
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "image_generate",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "invalid job status error response": {
+    "detail": "Unsupported job status"
+  },
+  "job cancel request response": {
+    "assignedGpu": "gpu-0",
+    "attempts": 1,
+    "cancelRequested": true,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": 1,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": "<timestamp>",
+    "message": "Cancellation requested. Waiting for worker acknowledgement.",
+    "payload": {
+      "advanced": {},
+      "characterId": null,
+      "characterLookId": null,
+      "count": 4,
+      "height": 1024,
+      "loras": [],
+      "mode": "text_to_image",
+      "model": "base-model",
+      "negativePrompt": "",
+      "projectId": "project_fixture",
+      "projectName": "Parity Project",
+      "prompt": "mist over hills",
+      "seed": 101,
+      "sourceAssetId": null,
+      "stylePreset": "cinematic",
+      "width": 1024
+    },
+    "progress": 0.0,
+    "projectId": "project_fixture",
+    "projectName": "Parity Project",
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "preparing",
+    "startedAt": "<timestamp>",
+    "status": "preparing",
+    "type": "image_generate",
+    "updatedAt": "<timestamp>",
+    "workerId": "parity-worker"
+  },
+  "job claim response": {
+    "job": {
+      "assignedGpu": "gpu-0",
+      "attempts": 1,
+      "cancelRequested": false,
+      "canceledAt": null,
+      "completedAt": null,
+      "createdAt": "<timestamp>",
+      "duplicateOfJobId": null,
+      "elapsedSeconds": 0,
+      "error": null,
+      "etaSeconds": null,
+      "id": "job_fixture",
+      "lastHeartbeatAt": null,
+      "message": "Worker claimed job.",
+      "payload": {
+        "advanced": {},
+        "characterId": null,
+        "characterLookId": null,
+        "count": 4,
+        "height": 1024,
+        "loras": [],
+        "mode": "text_to_image",
+        "model": "base-model",
+        "negativePrompt": "",
+        "projectId": "project_fixture",
+        "projectName": "Parity Project",
+        "prompt": "mist over hills",
+        "seed": 101,
+        "sourceAssetId": null,
+        "stylePreset": "cinematic",
+        "width": 1024
+      },
+      "progress": 0.0,
+      "projectId": "project_fixture",
+      "projectName": "Parity Project",
+      "requestedGpu": "auto",
+      "result": {},
+      "sourceJobId": null,
+      "stage": "preparing",
+      "startedAt": "<timestamp>",
+      "status": "preparing",
+      "type": "image_generate",
+      "updatedAt": "<timestamp>",
+      "workerId": "parity-worker"
+    }
+  },
+  "job terminal progress response": {
+    "assignedGpu": "gpu-0",
+    "attempts": 1,
+    "cancelRequested": true,
+    "canceledAt": "<timestamp>",
+    "completedAt": "<timestamp>",
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": 1,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": "<timestamp>",
+    "message": "Worker canceled the job before completion.",
+    "payload": {
+      "advanced": {},
+      "characterId": null,
+      "characterLookId": null,
+      "count": 4,
+      "height": 1024,
+      "loras": [],
+      "mode": "text_to_image",
+      "model": "base-model",
+      "negativePrompt": "",
+      "projectId": "project_fixture",
+      "projectName": "Parity Project",
+      "prompt": "mist over hills",
+      "seed": 101,
+      "sourceAssetId": null,
+      "stylePreset": "cinematic",
+      "width": 1024
+    },
+    "progress": 1.0,
+    "projectId": "project_fixture",
+    "projectName": "Parity Project",
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "canceled",
+    "startedAt": "<timestamp>",
+    "status": "canceled",
+    "type": "image_generate",
+    "updatedAt": "<timestamp>",
+    "workerId": "parity-worker"
+  },
+  "lora import job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "files": [
+        "adapter.safetensors"
+      ],
+      "name": "Imported LoRA",
+      "repo": "owner/style-lora"
+    },
+    "progress": 0.0,
+    "projectId": null,
+    "projectName": null,
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "lora_import",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "lora manifest response": [
+    {
+      "compatibility": {
+        "families": [
+          "z-image",
+          "wan-video"
+        ]
+      },
+      "family": "z-image",
+      "id": "style-lora",
+      "name": "Style LoRA",
+      "source": {
+        "path": "loras/style.safetensors",
+        "provider": "local"
+      },
+      "triggerWords": [
+        "style"
+      ]
+    }
+  ],
+  "malformed json error response": {
+    "detail": [
+      {
+        "ctx": {
+          "error": "<json-decode-error>"
+        },
+        "input": {},
+        "loc": [
+          "body",
+          "<json-error-offset>"
+        ],
+        "msg": "JSON decode error",
+        "type": "json_invalid"
+      }
+    ]
+  },
+  "missing project error response": {
+    "detail": "Project not found"
+  },
+  "model download job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "files": [
+        "*.safetensors"
+      ],
+      "modelId": "base-model",
+      "modelName": "User Model",
+      "provider": "huggingface",
+      "repo": "owner/base-model",
+      "targetDir": "<runtime-root>/data/models/owner__base-model"
+    },
+    "progress": 0.0,
+    "projectId": null,
+    "projectName": null,
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "model_download",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "model manifest response": [
+    {
+      "adapter": "z_image_diffusers",
+      "capabilities": [
+        "text_to_image"
+      ],
+      "defaults": {
+        "height": 1024,
+        "width": 1024
+      },
+      "downloadSizeBytes": null,
+      "downloadSizeLabel": null,
+      "downloadable": true,
+      "downloads": [
+        {
+          "files": [
+            "*.safetensors"
+          ],
+          "provider": "huggingface",
+          "repo": "owner/base-model"
+        }
+      ],
+      "family": "z-image",
+      "id": "base-model",
+      "installState": "missing",
+      "installedPath": "<runtime-root>/data/models/owner__base-model",
+      "limits": {},
+      "loraCompatibility": {
+        "families": [
+          "z-image"
+        ]
+      },
+      "name": "User Model",
+      "paths": {},
+      "type": "image",
+      "ui": {
+        "label": "User"
+      }
+    }
+  ],
+  "persisted upload sidecar": {
+    "createdAt": "<timestamp>",
+    "displayName": "fixture image.png",
+    "file": {
+      "duration": null,
+      "fps": null,
+      "height": null,
+      "mimeType": "image/png",
+      "path": "assets/uploads/fixture-image-<upload-suffix>.png",
+      "width": null
+    },
+    "generationSetId": null,
+    "id": "asset_fixture",
+    "lineage": {
+      "jobId": null,
+      "parents": [],
+      "sourceAssetId": null,
+      "sourceTimestamp": null
+    },
+    "projectId": "project_fixture",
+    "recipe": {
+      "adapter": "api-upload",
+      "loras": [],
+      "mode": "upload",
+      "model": "manual-import",
+      "negativePrompt": "",
+      "normalizedSettings": {},
+      "prompt": "fixture image.png",
+      "rawAdapterSettings": {
+        "contentType": "image/png"
+      },
+      "seed": 0,
+      "stylePreset": "none"
+    },
+    "schemaVersion": 1,
+    "status": {
+      "favorite": true,
+      "rating": 4,
+      "rejected": false,
+      "trashed": false
+    },
+    "type": "image"
+  },
+  "person detection job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "projectId": "project_fixture",
+      "sourceAssetId": "asset-video",
+      "sourceTimestamp": 1.25
+    },
+    "progress": 0.0,
+    "projectId": "project_fixture",
+    "projectName": "parity-project",
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "person_detect",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "person track detail response": {
+    "createdAt": "<timestamp>",
+    "frames": [],
+    "id": "track_fixture",
+    "name": "Hero",
+    "path": "person-tracks/track_fixture.sceneworks.person-track.json",
+    "projectId": "project_fixture",
+    "representativeFrameAssetId": "asset-frame",
+    "schemaVersion": 1,
+    "sourceAssetId": "asset-video",
+    "status": {}
+  },
+  "person track job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "detection": {
+        "box": {
+          "height": 0.6,
+          "width": 0.2,
+          "x": 0.3,
+          "y": 0.2
+        },
+        "id": "person_1"
+      },
+      "projectId": "project_fixture",
+      "representativeFrameAssetId": "asset-frame",
+      "sourceAssetId": "asset-video",
+      "trackName": "Hero"
+    },
+    "progress": 0.0,
+    "projectId": "project_fixture",
+    "projectName": "parity-project",
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "person_track",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "person track list response": [
+    {
+      "createdAt": "<timestamp>",
+      "frames": [],
+      "id": "track_fixture",
+      "name": "Hero",
+      "path": "person-tracks/track_fixture.sceneworks.person-track.json",
+      "projectId": "project_fixture",
+      "representativeFrameAssetId": "asset-frame",
+      "schemaVersion": 1,
+      "sourceAssetId": "asset-video",
+      "status": {}
+    }
+  ],
+  "project create response": {
+    "createdAt": "<timestamp>",
+    "id": "project_fixture",
+    "name": "Parity Project",
+    "path": "<runtime-root>/data/projects/parity-project.sceneworks"
+  },
+  "project list response": [
+    {
+      "createdAt": "<timestamp>",
+      "id": "project_fixture",
+      "name": "Parity Project",
+      "path": "<runtime-root>/data/projects/parity-project.sceneworks"
+    }
+  ],
+  "project reindex response": {
+    "assets": 1,
+    "generationSets": 0,
+    "projectId": "project_fixture",
+    "timelines": 0
+  },
+  "queue summary after transitions": {
+    "activeJobs": [],
+    "counts": {
+      "canceled": 1,
+      "completed": 0,
+      "downloading": 0,
+      "failed": 0,
+      "interrupted": 0,
+      "loading_model": 0,
+      "preparing": 0,
+      "queued": 0,
+      "running": 0,
+      "saving": 0
+    },
+    "maxJobAttempts": 5,
+    "workers": [
+      {
+        "capabilities": [
+          "image_generate"
+        ],
+        "currentJobId": null,
+        "gpuId": "gpu-0",
+        "gpuName": "Fixture GPU",
+        "id": "parity-worker",
+        "lastSeenAt": "<timestamp>",
+        "loadedModels": [
+          "Tongyi-MAI/Z-Image-Turbo"
+        ],
+        "registeredAt": "<timestamp>",
+        "status": "idle"
+      }
+    ]
+  },
+  "replace person job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "advanced": {},
+      "bridgeRightClipAssetId": null,
+      "characterId": "character_fixture",
+      "characterLookId": null,
+      "duration": 6,
+      "fps": 25,
+      "height": 512,
+      "lastFrameAssetId": null,
+      "loras": [],
+      "mode": "replace_person",
+      "model": "ltx_2_3",
+      "negativePrompt": "",
+      "personTrackId": "track_fixture",
+      "projectId": "project_fixture",
+      "projectName": "Parity Project",
+      "prompt": "hero walks through rain",
+      "quality": "balanced",
+      "replacementMode": "face_only",
+      "seed": null,
+      "sourceAssetId": null,
+      "sourceClipAssetId": "asset-video",
+      "width": 768
+    },
+    "progress": 0.0,
+    "projectId": "project_fixture",
+    "projectName": "Parity Project",
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "person_replace",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "timeline create response": {
+    "aspectRatio": "16:9",
+    "createdAt": "<timestamp>",
+    "duration": 0.0,
+    "fps": 24,
+    "height": 720,
+    "id": "timeline_fixture",
+    "name": "Main timeline",
+    "projectId": "project_fixture",
+    "schemaVersion": 1,
+    "tracks": [
+      {
+        "id": "track_main",
+        "items": [],
+        "kind": "video",
+        "locked": false,
+        "muted": false,
+        "name": "Main"
+      },
+      {
+        "id": "track_overlay",
+        "items": [],
+        "kind": "overlay",
+        "locked": false,
+        "muted": false,
+        "name": "Overlay"
+      },
+      {
+        "id": "track_audio",
+        "items": [],
+        "kind": "audio",
+        "locked": false,
+        "muted": false,
+        "name": "Audio"
+      }
+    ],
+    "transitions": [],
+    "updatedAt": "<timestamp>",
+    "width": 1280
+  },
+  "timeline detail response": {
+    "aspectRatio": "16:9",
+    "createdAt": "<timestamp>",
+    "duration": 1.0,
+    "fps": 24,
+    "height": 720,
+    "id": "timeline_fixture",
+    "name": "Main timeline",
+    "projectId": "project_fixture",
+    "schemaVersion": 1,
+    "tracks": [
+      {
+        "id": "track_main",
+        "items": [
+          {
+            "assetId": "asset_fixture",
+            "currentVersionAssetId": "asset_fixture",
+            "displayName": "Still",
+            "fit": "fit",
+            "id": "item-1",
+            "sourceIn": 0.0,
+            "sourceOut": 1.0,
+            "speed": 1.0,
+            "timelineEnd": 1.0,
+            "timelineStart": 0.0,
+            "trackId": "track_main",
+            "transitionIn": null,
+            "transitionOut": null,
+            "type": "image",
+            "versionAssetIds": [
+              "asset_fixture"
+            ],
+            "versionHistory": [
+              {
+                "assetId": "asset_fixture",
+                "createdAt": null,
+                "jobId": null,
+                "note": null,
+                "source": "original"
+              }
+            ],
+            "volume": 1.0
+          }
+        ],
+        "kind": "video",
+        "locked": false,
+        "muted": false,
+        "name": "Main"
+      },
+      {
+        "id": "track_overlay",
+        "items": [],
+        "kind": "overlay",
+        "locked": false,
+        "muted": false,
+        "name": "Overlay"
+      },
+      {
+        "id": "track_audio",
+        "items": [],
+        "kind": "audio",
+        "locked": false,
+        "muted": false,
+        "name": "Audio"
+      }
+    ],
+    "transitions": [],
+    "updatedAt": "<timestamp>",
+    "width": 1280
+  },
+  "timeline export job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "fps": 24,
+      "projectId": "project_fixture",
+      "resolution": 640,
+      "timelineId": "timeline_fixture",
+      "timelineName": "Main timeline",
+      "timelinePath": "timelines/main-timeline-<upload-suffix>.sceneworks.timeline.json"
+    },
+    "progress": 0.0,
+    "projectId": "project_fixture",
+    "projectName": null,
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "timeline_export",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "timeline frame job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "intendedUse": "reuse",
+      "playheadSeconds": 0.5,
+      "projectId": "project_fixture",
+      "sourceAssetId": "asset_fixture",
+      "sourceTimestamp": 0.5,
+      "timelineId": "timeline_fixture",
+      "timelineItemId": "item-1",
+      "timelineName": "Main timeline",
+      "timelinePath": "timelines/main-timeline-<upload-suffix>.sceneworks.timeline.json"
+    },
+    "progress": 0.0,
+    "projectId": "project_fixture",
+    "projectName": null,
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "frame_extract",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "timeline list response": [
+    {
+      "aspectRatio": "16:9",
+      "createdAt": "<timestamp>",
+      "duration": 1.0,
+      "filePath": "timelines/main-timeline-<upload-suffix>.sceneworks.timeline.json",
+      "fps": 24,
+      "height": 720,
+      "id": "timeline_fixture",
+      "name": "Main timeline",
+      "updatedAt": "<timestamp>",
+      "width": 1280
+    }
+  ],
+  "timeline update response": {
+    "aspectRatio": "16:9",
+    "createdAt": "<timestamp>",
+    "duration": 1.0,
+    "fps": 24,
+    "height": 720,
+    "id": "timeline_fixture",
+    "name": "Main timeline",
+    "projectId": "project_fixture",
+    "schemaVersion": 1,
+    "tracks": [
+      {
+        "id": "track_main",
+        "items": [
+          {
+            "assetId": "asset_fixture",
+            "currentVersionAssetId": "asset_fixture",
+            "displayName": "Still",
+            "fit": "fit",
+            "id": "item-1",
+            "sourceIn": 0.0,
+            "sourceOut": 1.0,
+            "speed": 1.0,
+            "timelineEnd": 1.0,
+            "timelineStart": 0.0,
+            "trackId": "track_main",
+            "transitionIn": null,
+            "transitionOut": null,
+            "type": "image",
+            "versionAssetIds": [
+              "asset_fixture"
+            ],
+            "versionHistory": [
+              {
+                "assetId": "asset_fixture",
+                "createdAt": null,
+                "jobId": null,
+                "note": null,
+                "source": "original"
+              }
+            ],
+            "volume": 1.0
+          }
+        ],
+        "kind": "video",
+        "locked": false,
+        "muted": false,
+        "name": "Main"
+      },
+      {
+        "id": "track_overlay",
+        "items": [],
+        "kind": "overlay",
+        "locked": false,
+        "muted": false,
+        "name": "Overlay"
+      },
+      {
+        "id": "track_audio",
+        "items": [],
+        "kind": "audio",
+        "locked": false,
+        "muted": false,
+        "name": "Audio"
+      }
+    ],
+    "transitions": [],
+    "updatedAt": "<timestamp>",
+    "width": 1280
+  },
+  "transition image job response": {
+    "assignedGpu": null,
+    "attempts": 1,
+    "cancelRequested": false,
+    "canceledAt": null,
+    "completedAt": null,
+    "createdAt": "<timestamp>",
+    "duplicateOfJobId": null,
+    "elapsedSeconds": null,
+    "error": null,
+    "etaSeconds": null,
+    "id": "job_fixture",
+    "lastHeartbeatAt": null,
+    "message": "Waiting for an available worker.",
+    "payload": {
+      "advanced": {},
+      "characterId": null,
+      "characterLookId": null,
+      "count": 4,
+      "height": 1024,
+      "loras": [],
+      "mode": "text_to_image",
+      "model": "base-model",
+      "negativePrompt": "",
+      "projectId": "project_fixture",
+      "projectName": "Parity Project",
+      "prompt": "mist over hills",
+      "seed": 101,
+      "sourceAssetId": null,
+      "stylePreset": "cinematic",
+      "width": 1024
+    },
+    "progress": 0.0,
+    "projectId": "project_fixture",
+    "projectName": "Parity Project",
+    "requestedGpu": "auto",
+    "result": {},
+    "sourceJobId": null,
+    "stage": "queued",
+    "startedAt": null,
+    "status": "queued",
+    "type": "image_generate",
+    "updatedAt": "<timestamp>",
+    "workerId": null
+  },
+  "worker registration response": {
+    "capabilities": [
+      "image_generate"
+    ],
+    "currentJobId": null,
+    "gpuId": "gpu-0",
+    "gpuName": "Fixture GPU",
+    "id": "parity-worker",
+    "lastSeenAt": "<timestamp>",
+    "loadedModels": [
+      "Tongyi-MAI/Z-Image-Turbo"
+    ],
+    "registeredAt": "<timestamp>",
+    "status": "idle"
+  }
+}

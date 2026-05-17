@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "id": "track_fixture",
+  "projectId": "project_fixture",
+  "name": "Hero",
+  "createdAt": "2026-05-17T13:00:00Z",
+  "sourceAssetId": "asset_source_clip",
+  "sourceDisplayName": "Source clip",
+  "representativeFrameAssetId": "asset_frame_fixture",
+  "selectedDetection": {
+    "id": "person_1",
+    "box": { "x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6 },
+    "confidence": 0.92
+  },
+  "frames": [
+    {
+      "timestamp": 0,
+      "box": { "x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6 },
+      "confidence": 0.92,
+      "mask": null
+    }
+  ],
+  "corrections": [],
+  "status": {
+    "sampleRateFps": 2,
+    "maskState": "deferred",
+    "averageConfidence": 0.92,
+    "correctionState": "ready_for_box_corrections",
+    "personTrackingActive": false
+  },
+  "recipe": {
+    "mode": "person_track",
+    "model": "procedural-person-tracker",
+    "adapter": "procedural_person_tracking",
+    "prompt": "Track Hero",
+    "negativePrompt": "",
+    "seed": 0,
+    "loras": [],
+    "stylePreset": "none",
+    "normalizedSettings": {
+      "sampleRateFps": 2,
+      "personDetectionActive": false,
+      "personTrackingActive": false
+    },
+    "rawAdapterSettings": {
+      "selectedDetection": {
+        "id": "person_1",
+        "box": { "x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6 },
+        "confidence": 0.92
+      }
+    }
+  },
+  "lineage": {
+    "jobId": "job_fixture",
+    "parents": ["asset_source_clip", "asset_frame_fixture"]
+  }
+}

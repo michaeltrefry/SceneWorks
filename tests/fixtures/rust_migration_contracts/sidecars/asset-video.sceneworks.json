@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "id": "asset_video_fixture",
+  "projectId": "project_fixture",
+  "generationSetId": "genset_fixture",
+  "type": "video",
+  "displayName": "Hero walks through rain",
+  "createdAt": "2026-05-17T13:00:00Z",
+  "file": {
+    "path": "assets/videos/2026-05-17_wan_2_2_hero-walks-through-rain.webp",
+    "mimeType": "image/webp",
+    "width": 768,
+    "height": 512,
+    "duration": 6,
+    "fps": 25
+  },
+  "status": {
+    "favorite": false,
+    "rating": 0,
+    "rejected": false,
+    "trashed": false
+  },
+  "recipe": {
+    "mode": "replace_person",
+    "model": "wan_2_2",
+    "adapter": "procedural_video",
+    "prompt": "Hero walks through rain",
+    "negativePrompt": "",
+    "seed": 44,
+    "loras": [],
+    "normalizedSettings": {
+      "duration": 6,
+      "fps": 25,
+      "width": 768,
+      "height": 512,
+      "quality": "balanced",
+      "family": "wan-video",
+      "sourceAssetId": null,
+      "lastFrameAssetId": null,
+      "sourceClipAssetId": "asset_source_clip",
+      "bridgeRightClipAssetId": null,
+      "characterId": "character_fixture",
+      "characterLookId": "look_fixture",
+      "personTrackId": "track_fixture",
+      "replacementMode": "full_person_keep_outfit",
+      "timelineContextRef": "lineage.timeline",
+      "personDetectionActive": false,
+      "personTrackingActive": false,
+      "replacementActive": false
+    },
+    "rawAdapterSettings": {}
+  },
+  "lineage": {
+    "parents": ["asset_source_clip"],
+    "sourceAssetId": null,
+    "lastFrameAssetId": null,
+    "sourceClipAssetId": "asset_source_clip",
+    "bridgeRightClipAssetId": null,
+    "personTrackId": "track_fixture",
+    "characterId": "character_fixture",
+    "characterLookId": "look_fixture",
+    "replacementMode": "full_person_keep_outfit",
+    "sourceTimestamp": null,
+    "timeline": {},
+    "jobId": "job_fixture"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "asset_image_fixture",
+  "projectId": "project_fixture",
+  "generationSetId": "genset_fixture",
+  "type": "image",
+  "displayName": "Mist over hills #1",
+  "createdAt": "2026-05-17T13:00:00Z",
+  "file": {
+    "path": "assets/images/2026-05-17_z_image_turbo_mist-over-hills_0001.png",
+    "mimeType": "image/png",
+    "width": 1024,
+    "height": 1024,
+    "duration": null,
+    "fps": null
+  },
+  "status": {
+    "favorite": false,
+    "rating": 0,
+    "rejected": false,
+    "trashed": false
+  },
+  "recipe": {
+    "mode": "text_to_image",
+    "model": "z_image_turbo",
+    "adapter": "procedural_preview",
+    "prompt": "mist over hills",
+    "negativePrompt": "",
+    "seed": 101,
+    "loras": [],
+    "stylePreset": "cinematic",
+    "normalizedSettings": {
+      "width": 1024,
+      "height": 1024,
+      "count": 4,
+      "family": "z-image",
+      "characterId": null,
+      "characterLookId": null,
+      "characterConditioningActive": false,
+      "characterConditioningNote": "Character metadata is recorded, but adapter-level character conditioning is not active in this build."
+    },
+    "rawAdapterSettings": {}
+  },
+  "lineage": {
+    "parents": [],
+    "sourceAssetId": null,
+    "sourceTimestamp": null,
+    "jobId": "job_fixture"
+  }
+}

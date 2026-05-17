@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "genset_fixture",
+  "projectId": "project_fixture",
+  "jobId": "job_fixture",
+  "mode": "text_to_image",
+  "model": "z_image_turbo",
+  "prompt": "mist over hills",
+  "negativePrompt": "",
+  "count": 4,
+  "createdAt": "2026-05-17T13:00:00Z"
+}
+

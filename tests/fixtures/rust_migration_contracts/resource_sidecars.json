@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "projectFolders": [
+    "assets/images",
+    "assets/videos",
+    "assets/uploads",
+    "assets/frames",
+    "assets/renders",
+    "characters",
+    "generation-sets",
+    "loras",
+    "person-tracks",
+    "recipes",
+    "timelines",
+    "trash",
+    "cache"
+  ],
+  "sidecarPatterns": {
+    "project": "project.json",
+    "asset": "*.sceneworks.json",
+    "character": "*.sceneworks.character.json",
+    "timeline": "*.sceneworks.timeline.json",
+    "personTrack": "*.sceneworks.person-track.json",
+    "generationSet": "generation-sets/*.json",
+    "recipe": "recipes/*.recipe.json",
+    "modelInstallMarker": ".sceneworks-download-complete.json"
+  },
+  "fixtures": [
+    {
+      "name": "project",
+      "path": "sidecars/project.json",
+      "requiredTopLevelKeys": ["schemaVersion", "appVersion", "id", "name", "createdAt", "folders"]
+    },
+    {
+      "name": "imageAsset",
+      "path": "sidecars/asset-image.sceneworks.json",
+      "requiredTopLevelKeys": ["schemaVersion", "id", "projectId", "generationSetId", "type", "displayName", "createdAt", "file", "status", "recipe", "lineage"]
+    },
+    {
+      "name": "videoAsset",
+      "path": "sidecars/asset-video.sceneworks.json",
+      "requiredTopLevelKeys": ["schemaVersion", "id", "projectId", "generationSetId", "type", "displayName", "createdAt", "file", "status", "recipe", "lineage"]
+    },
+    {
+      "name": "generationSet",
+      "path": "sidecars/generation-set.json",
+      "requiredTopLevelKeys": ["schemaVersion", "id", "projectId", "jobId", "mode", "model", "prompt", "negativePrompt", "count", "createdAt"]
+    },
+    {
+      "name": "recipe",
+      "path": "sidecars/recipe.json",
+      "requiredTopLevelKeys": ["mode", "model", "adapter", "prompt", "negativePrompt", "seed", "loras", "normalizedSettings", "rawAdapterSettings"]
+    },
+    {
+      "name": "character",
+      "path": "sidecars/character.sceneworks.character.json",
+      "requiredTopLevelKeys": ["schemaVersion", "id", "projectId", "name", "type", "description", "createdAt", "updatedAt", "status", "references", "looks", "loras", "trainedLoras"]
+    },
+    {
+      "name": "timeline",
+      "path": "sidecars/timeline.sceneworks.timeline.json",
+      "requiredTopLevelKeys": ["schemaVersion", "id", "projectId", "name", "aspectRatio", "width", "height", "fps", "duration", "tracks", "transitions", "createdAt", "updatedAt"]
+    },
+    {
+      "name": "personTrack",
+      "path": "sidecars/person-track.sceneworks.person-track.json",
+      "requiredTopLevelKeys": ["schemaVersion", "id", "projectId", "name", "createdAt", "sourceAssetId", "representativeFrameAssetId", "selectedDetection", "frames", "corrections", "status", "recipe", "lineage"]
+    },
+    {
+      "name": "modelManifestEntry",
+      "path": "sidecars/model-manifest-entry.json",
+      "requiredTopLevelKeys": ["id", "name", "family", "type", "adapter", "capabilities", "downloads", "paths", "defaults", "limits", "loraCompatibility", "ui"]
+    },
+    {
+      "name": "loraManifestEntry",
+      "path": "sidecars/lora-manifest-entry.json",
+      "requiredTopLevelKeys": ["id", "name", "family", "triggerWords", "compatibility", "source"]
+    },
+    {
+      "name": "modelInstallMarker",
+      "path": "sidecars/model-install-marker.json",
+      "requiredTopLevelKeys": ["repo", "modelId", "modelName", "jobId", "completedAt"]
+    }
+  ]
+}

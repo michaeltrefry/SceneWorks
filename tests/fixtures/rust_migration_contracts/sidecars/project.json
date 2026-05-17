@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "appVersion": "0.1.0",
+  "id": "project_fixture",
+  "name": "Fixture Project",
+  "createdAt": "2026-05-17T13:00:00Z",
+  "folders": {
+    "assets_images": "assets/images",
+    "assets_videos": "assets/videos",
+    "assets_uploads": "assets/uploads",
+    "assets_frames": "assets/frames",
+    "assets_renders": "assets/renders",
+    "characters": "characters",
+    "generation_sets": "generation-sets",
+    "loras": "loras",
+    "person_tracks": "person-tracks",
+    "recipes": "recipes",
+    "timelines": "timelines",
+    "trash": "trash",
+    "cache": "cache"
+  }
+}

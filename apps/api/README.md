@@ -1,6 +1,9 @@
-# SceneWorks API
+# SceneWorks Python API
 
-FastAPI service for versioned backend routes and all project filesystem writes.
+FastAPI rollback service for versioned backend routes and project filesystem
+writes. The default Docker Compose backend is the Rust API; select this service
+only by setting `SCENEWORKS_API_RUNTIME=python` and
+`SCENEWORKS_API_DOCKERFILE=docker/api.Dockerfile`.
 
 Current routes:
 

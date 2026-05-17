@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -20,6 +20,9 @@ from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, crea
 from .settings import WorkerSettings
 from .timeline_exporter import run_timeline_export
 from .video_adapters import ProceduralVideoAdapter, run_frame_extract, run_person_detect, run_person_track
+
+
+LoadedModelsSource = Callable[[], list[str]] | None
 
 
 def now() -> str:
@@ -51,20 +54,31 @@ class ApiClient:
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
     utility_jobs_enabled = os.getenv("SCENEWORKS_UTILITY_JOBS", "1").strip() != "0"
+    legacy_model_lora_jobs_enabled = os.getenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "0").strip() != "0"
+    legacy_ffmpeg_jobs_enabled = os.getenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "0").strip() != "0"
     capabilities = set(gpu["capabilities"])
     if utility_jobs_enabled:
-        capabilities |= {"timeline_export", "model_download", "lora_import", "frame_extract", "person_detect", "person_track"}
+        capabilities |= {"person_detect", "person_track"}
+        if legacy_ffmpeg_jobs_enabled:
+            capabilities |= {"timeline_export", "frame_extract"}
+        if legacy_model_lora_jobs_enabled:
+            capabilities |= {"model_download", "lora_import"}
     if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
         capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge", "person_replace"}
     return sorted(capabilities)
 
 
+def loaded_models_from_adapter(adapter: object, *, job_id: str | None = None) -> list[str]:
+    loaded_models = getattr(adapter, "loaded_models", None)
+    if not callable(loaded_models):
+        return []
+    return resolve_loaded_models(loaded_models, job_id=job_id)
+
+
 def loaded_models_from_adapters(adapters: dict[str, object]) -> list[str]:
     models: set[str] = set()
     for adapter in adapters.values():
-        loaded_models = getattr(adapter, "loaded_models", None)
-        if callable(loaded_models):
-            models.update(loaded_models())
+        models.update(loaded_models_from_adapter(adapter))
     return sorted(models)
 
 
@@ -90,6 +104,35 @@ def heartbeat(
     api.post(
         f"/api/v1/workers/{settings.worker_id}/heartbeat",
         {"status": status, "currentJobId": current_job_id, "loadedModels": loaded_models or []},
+    )
+
+
+def resolve_loaded_models(source: LoadedModelsSource, *, job_id: str | None = None) -> list[str]:
+    if source is None:
+        return []
+    try:
+        return source()
+    except Exception as exc:
+        payload = {"event": "loaded_models_failed", "error": str(exc), "reportedAt": now()}
+        if job_id:
+            payload["jobId"] = job_id
+        emit(payload)
+        return []
+
+
+def heartbeat_with_loaded_models(
+    api: ApiClient,
+    settings: WorkerSettings,
+    status: str,
+    current_job_id: str,
+    loaded_models: LoadedModelsSource,
+) -> None:
+    heartbeat(
+        api,
+        settings,
+        status,
+        current_job_id,
+        loaded_models=resolve_loaded_models(loaded_models, job_id=current_job_id),
     )
 
 
@@ -291,11 +334,12 @@ def keep_job_alive(
     job_id: str,
     status: str,
     stop_event: threading.Event,
+    loaded_models: LoadedModelsSource,
 ) -> None:
     interval = max(5, min(settings.heartbeat_seconds, 30))
     while not stop_event.wait(interval):
         try:
-            heartbeat(api, settings, status, job_id)
+            heartbeat_with_loaded_models(api, settings, status, job_id, loaded_models)
         except httpx.HTTPError as exc:
             emit({"event": "heartbeat_failed", "jobId": job_id, "error": str(exc), "reportedAt": now()})
 
@@ -306,11 +350,13 @@ def run_blocking_job_step(
     job_id: str,
     status: str,
     callback: Any,
+    *,
+    loaded_models: LoadedModelsSource,
 ) -> Any:
     stop_event = threading.Event()
     thread = threading.Thread(
         target=keep_job_alive,
-        args=(api, settings, job_id, status, stop_event),
+        args=(api, settings, job_id, status, stop_event, loaded_models),
         daemon=True,
     )
     thread.start()
@@ -434,6 +480,7 @@ def run_lora_import_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
                 job_id,
                 "busy",
                 lambda: snapshot_huggingface_repo(repo, target_dir, payload.get("files") or []),
+                loaded_models=None,
             )
         elif source_path:
             source = Path(source_path).expanduser().resolve()
@@ -540,11 +587,10 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
     adapter = create_image_adapter(job, image_adapters)
 
     def adapter_loaded_models() -> list[str]:
-        loaded_models = getattr(adapter, "loaded_models", None)
-        return loaded_models() if callable(loaded_models) else []
+        return loaded_models_from_adapter(adapter, job_id=job_id)
 
     def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id, adapter_loaded_models())
+        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
         update_job(
             api,
             job_id,
@@ -570,6 +616,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=adapter_loaded_models,
         )
         update_job(
             api,
@@ -613,8 +660,11 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     adapter = ProceduralVideoAdapter()
 
+    def adapter_loaded_models() -> list[str]:
+        return loaded_models_from_adapter(adapter, job_id=job_id)
+
     def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
+        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
         update_job(
             api,
             job_id,
@@ -650,6 +700,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=adapter_loaded_models,
         )
         update_job(
             api,
@@ -688,7 +739,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             },
         )
     finally:
-        heartbeat(api, settings, "idle")
+        heartbeat(api, settings, "idle", loaded_models=adapter_loaded_models())
 
 
 def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
@@ -720,6 +771,7 @@ def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict)
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=None,
         )
         update_job(
             api,
@@ -788,6 +840,7 @@ def run_frame_extract_job(api: ApiClient, settings: WorkerSettings, job: dict) -
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=None,
         )
         update_job(
             api,
@@ -856,6 +909,7 @@ def run_person_detect_job(api: ApiClient, settings: WorkerSettings, job: dict) -
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=None,
         )
         update_job(
             api,
@@ -924,6 +978,7 @@ def run_person_track_job(api: ApiClient, settings: WorkerSettings, job: dict) ->
                 progress=progress,
                 cancel_requested=lambda: job_cancel_requested(api, job_id),
             ),
+            loaded_models=None,
         )
         update_job(
             api,
@@ -1042,9 +1097,12 @@ def child_environment(settings: WorkerSettings, *, worker_id: str, gpu_id: str) 
     env["SCENEWORKS_WORKER_CHILD"] = "1"
     env["SCENEWORKS_WORKER_ID"] = worker_id
     env["SCENEWORKS_GPU_ID"] = gpu_id
+    # Compose exposes this as SCENEWORKS_PYTHON_UTILITY_JOBS, then maps it to
+    # the in-worker SCENEWORKS_UTILITY_JOBS flag for parent/child consistency.
+    utility_jobs = os.getenv("SCENEWORKS_UTILITY_JOBS")
     if gpu_id == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
-        env["SCENEWORKS_UTILITY_JOBS"] = "1"
+        env["SCENEWORKS_UTILITY_JOBS"] = utility_jobs if utility_jobs is not None else "1"
     else:
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
         env["SCENEWORKS_UTILITY_JOBS"] = "0"

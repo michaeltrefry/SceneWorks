@@ -1,0 +1,37 @@
+{
+  "id": "z_image_turbo",
+  "name": "Z-Image-Turbo",
+  "family": "z-image",
+  "type": "image",
+  "adapter": "z_image_diffusers",
+  "capabilities": ["text_to_image", "character_image", "style_variations"],
+  "downloads": [
+    {
+      "provider": "huggingface",
+      "repo": "Tongyi-MAI/Z-Image-Turbo",
+      "files": []
+    }
+  ],
+  "paths": {
+    "model": "${HF_CACHE}/Tongyi-MAI/Z-Image-Turbo"
+  },
+  "defaults": {
+    "resolution": "1024x1024",
+    "steps": 8,
+    "guidanceScale": 0,
+    "count": 4
+  },
+  "limits": {
+    "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+    "count": [1, 2, 4, 8]
+  },
+  "loraCompatibility": {
+    "families": ["z-image"],
+    "types": ["style", "enhance", "character"]
+  },
+  "ui": {
+    "label": "Z-Image-Turbo",
+    "description": "Fast first image target for local text-to-image generation.",
+    "recommendedFor": ["text_to_image", "style_variations"]
+  }
+}

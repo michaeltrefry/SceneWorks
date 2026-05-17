@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "id": "timeline_fixture",
+  "projectId": "project_fixture",
+  "name": "Main timeline",
+  "aspectRatio": "16:9",
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "duration": 4,
+  "tracks": [
+    {
+      "id": "track_main",
+      "name": "Main",
+      "kind": "video",
+      "locked": false,
+      "muted": false,
+      "items": [
+        {
+          "id": "item_fixture",
+          "trackId": "track_main",
+          "assetId": "asset_video_fixture",
+          "type": "video",
+          "displayName": "Hero walks through rain",
+          "sourceIn": 0,
+          "sourceOut": 4,
+          "timelineStart": 0,
+          "timelineEnd": 4,
+          "speed": 1,
+          "fit": "fit",
+          "volume": 1,
+          "versionAssetIds": ["asset_video_fixture"],
+          "currentVersionAssetId": "asset_video_fixture",
+          "versionHistory": [
+            {
+              "assetId": "asset_video_fixture",
+              "createdAt": "2026-05-17T13:00:00Z",
+              "source": "original",
+              "jobId": "job_fixture",
+              "note": null
+            }
+          ],
+          "transitionIn": null,
+          "transitionOut": null
+        }
+      ]
+    },
+    { "id": "track_overlay", "name": "Overlay", "kind": "overlay", "locked": false, "muted": false, "items": [] },
+    { "id": "track_audio", "name": "Audio", "kind": "audio", "locked": false, "muted": false, "items": [] }
+  ],
+  "transitions": [],
+  "createdAt": "2026-05-17T13:00:00Z",
+  "updatedAt": "2026-05-17T13:00:00Z"
+}
+
