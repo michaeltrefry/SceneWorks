@@ -693,13 +693,13 @@ def test_person_tracking_and_replace_person_contracts(parity_runtimes):
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/person-tracks")
         for runtime in parity_runtimes
     ]
-    assert_response_parity("person track list response", python_runtime, rust_runtime, listed_tracks[0], listed_tracks[1], expected_status=200)
+    assert_response_parity("person track list response", python_runtime, rust_runtime, listed_tracks[0], listed_tracks[1], expected_status=200, snapshot=True)
 
     track_details = [
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/person-tracks/track_fixture")
         for runtime in parity_runtimes
     ]
-    assert_response_parity("person track detail response", python_runtime, rust_runtime, track_details[0], track_details[1], expected_status=200)
+    assert_response_parity("person track detail response", python_runtime, rust_runtime, track_details[0], track_details[1], expected_status=200, snapshot=True)
 
     detection_jobs = [
         runtime.request(
@@ -709,7 +709,7 @@ def test_person_tracking_and_replace_person_contracts(parity_runtimes):
         )
         for runtime in parity_runtimes
     ]
-    assert_response_parity("person detection job response", python_runtime, rust_runtime, detection_jobs[0], detection_jobs[1], expected_status=201)
+    assert_response_parity("person detection job response", python_runtime, rust_runtime, detection_jobs[0], detection_jobs[1], expected_status=201, snapshot=True)
 
     track_jobs = [
         runtime.request(
@@ -727,7 +727,7 @@ def test_person_tracking_and_replace_person_contracts(parity_runtimes):
         )
         for runtime in parity_runtimes
     ]
-    assert_response_parity("person track job response", python_runtime, rust_runtime, track_jobs[0], track_jobs[1], expected_status=201)
+    assert_response_parity("person track job response", python_runtime, rust_runtime, track_jobs[0], track_jobs[1], expected_status=201, snapshot=True)
 
     replace_jobs = [
         runtime.request(
@@ -745,7 +745,7 @@ def test_person_tracking_and_replace_person_contracts(parity_runtimes):
         )
         for runtime in parity_runtimes
     ]
-    assert_response_parity("replace person job response", python_runtime, rust_runtime, replace_jobs[0], replace_jobs[1], expected_status=201)
+    assert_response_parity("replace person job response", python_runtime, rust_runtime, replace_jobs[0], replace_jobs[1], expected_status=201, snapshot=True)
 
 
 def test_model_lora_and_image_job_contracts(parity_runtimes):

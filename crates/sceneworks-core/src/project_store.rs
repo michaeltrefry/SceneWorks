@@ -549,12 +549,20 @@ impl ProjectStore {
             ));
         }
         let project_path = self.find_project_path(project_id)?;
+        let tracks_dir = project_path.join("person-tracks");
         let track_path = project_path
             .join("person-tracks")
             .join(format!("{track_id}.sceneworks.person-track.json"));
         if !track_path.exists() {
             return Err(ProjectStoreError::NotFound(
                 "Person track not found".to_owned(),
+            ));
+        }
+        let tracks_root = fs::canonicalize(&tracks_dir)?;
+        let resolved_path = fs::canonicalize(&track_path)?;
+        if !resolved_path.starts_with(&tracks_root) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid person track ID".to_owned(),
             ));
         }
         normalize_person_track(&project_path, &track_path)
@@ -1838,9 +1846,9 @@ fn is_safe_relative_path(relative_path: &str) -> bool {
 
 fn is_safe_track_id(track_id: &str) -> bool {
     !track_id.trim().is_empty()
-        && !track_id.contains('/')
-        && !track_id.contains('\\')
-        && !track_id.contains("..")
+        && track_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
 fn required_str<'a>(payload: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
@@ -2123,6 +2131,7 @@ mod tests {
             .expect("track detail");
         assert_eq!(track["name"], "Hero");
         assert!(store.get_person_track(&project.id, "../track_1").is_err());
+        assert!(store.get_person_track(&project.id, "track~1").is_err());
     }
 
     #[test]

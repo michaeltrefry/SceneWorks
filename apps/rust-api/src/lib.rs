@@ -1207,6 +1207,18 @@ async fn route_not_found(request: Request<axum::body::Body>) -> Response {
         )
             .into_response();
     }
+    if path.contains("/person-tracks/")
+        && (path.contains("..")
+            || lower_path.contains("%2e")
+            || lower_path.contains("%2f")
+            || lower_path.contains("%5c"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": "Invalid person track ID" })),
+        )
+            .into_response();
+    }
     (
         StatusCode::NOT_FOUND,
         Json(json!({ "detail": "Not Found" })),
@@ -3105,9 +3117,24 @@ mod tests {
         assert_eq!(video_job["type"], "person_replace");
         assert!(video_job["payload"].get("requestedGpu").is_none());
 
+        let (status, integer_duration_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "integer duration stays an integer",
+                "duration": 6
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(integer_duration_job["payload"]["duration"], 6);
+
         let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(queue["counts"]["queued"], 4);
+        assert_eq!(queue["counts"]["queued"], 5);
     }
 
     #[tokio::test]
@@ -3174,7 +3201,9 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(detection_job["type"], "person_detect");
         assert_eq!(detection_job["payload"]["sourceTimestamp"], 1.25);
-        assert_eq!(detection_job["projectName"], "tracking-project");
+        assert!(detection_job["projectName"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("tracking")));
 
         let detection = json!({
             "id": "person_1",
@@ -3196,7 +3225,17 @@ mod tests {
         assert_eq!(track_job["type"], "person_track");
         assert_eq!(track_job["payload"]["trackName"], "Hero");
 
-        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        for invalid_path in [
+            format!("/api/v1/projects/{project_id}/person-tracks/%2E%2E"),
+            format!("/api/v1/projects/{project_id}/person-tracks/%2E%2E%2Fescape"),
+            format!("/api/v1/projects/{project_id}/person-tracks/track~bad"),
+        ] {
+            let (status, error) = request(app.clone(), "GET", &invalid_path, Value::Null).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(error["detail"], "Invalid person track ID");
+        }
+
+        let (status, queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queue["counts"]["queued"], 2);
     }

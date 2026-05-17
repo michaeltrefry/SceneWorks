@@ -52,6 +52,9 @@ API volume contracts are shared across Python and Rust:
 
 Both API runtimes expose `GET /api/v1/health`; Compose checks it with `curl`
 inside the container so dependent services wait for the selected implementation.
+SceneWorks 0.2.0 also aligns Rust video job payloads with the Python wire
+shape for default clip duration: omitted or integer `duration` values are queued
+as JSON integers, while explicit fractional values remain fractional.
 To exercise the default Rust Docker path end to end, run:
 
 ```powershell
