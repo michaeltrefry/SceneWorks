@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, eventUrl } from "./api.js";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview } from "./components/assetPanels.jsx";
@@ -11,6 +11,7 @@ import { EditorScreen } from "./screens/EditorScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { PlaceholderSurface } from "./screens/PlaceholderSurface.jsx";
 import { sortNewest, sortWorkers } from "./sorters.js";
+import { ensureItemVersionFields } from "./timeline.js";
 
 export function App() {
   const [health, setHealth] = useState(null);
@@ -35,7 +36,10 @@ export function App() {
   const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const [latestGenerationSetId, setLatestGenerationSetId] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
+  const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
+  const selectedTimelineIdRef = useRef(null);
+  const timelineApplyQueueRef = useRef(Promise.resolve());
 
   const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
   const imageModels = useMemo(() => {
@@ -90,6 +94,10 @@ export function App() {
   );
 
   useEffect(() => {
+    selectedTimelineIdRef.current = selectedTimelineId;
+  }, [selectedTimelineId]);
+
+  useEffect(() => {
     apiFetch("/api/v1/health", "")
       .then(setHealth)
       .catch((err) => setError(err.message));
@@ -142,6 +150,7 @@ export function App() {
         if (job.result?.generationSetId) {
           setLatestGenerationSetId(job.result.generationSetId);
         }
+        enqueueTimelineGenerationApply(job);
         if (job.projectId) {
           refreshAssets(job.projectId);
         }
@@ -412,13 +421,14 @@ export function App() {
     }
   }
 
-  async function createVideoJob(payload) {
+  async function createVideoJob(payload, options = {}) {
+    const { navigateToQueue = true } = options;
     if (!activeProject) {
       setError("Create or open a project first.");
-      return;
+      return null;
     }
     try {
-      await apiFetch("/api/v1/video/jobs", token, {
+      const job = await apiFetch("/api/v1/video/jobs", token, {
         method: "POST",
         body: JSON.stringify({
           ...payload,
@@ -427,9 +437,177 @@ export function App() {
           requestedGpu,
         }),
       });
-      setActiveView("Queue");
+      if (navigateToQueue) {
+        setActiveView("Queue");
+      }
       setError("");
       refreshData();
+      return job;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  function sendAssetToImage(asset, mode = null) {
+    if (!asset) {
+      return;
+    }
+    setSelectedAssetId(asset.id);
+    if (mode) {
+      setStudioLaunch({ id: crypto.randomUUID(), view: "Image", assetId: asset.id, mode });
+    }
+    setActiveView("Image");
+  }
+
+  function sendAssetToVideo(asset, mode = null) {
+    if (!asset) {
+      return;
+    }
+    setSelectedAssetId(asset.id);
+    if (mode) {
+      setStudioLaunch({ id: crypto.randomUUID(), view: "Video", assetId: asset.id, mode });
+    }
+    setActiveView("Video");
+  }
+
+  async function extractTimelineFrame({ timeline, item, playheadSeconds, intendedUse }) {
+    if (!activeProject || !timeline || !item) {
+      return null;
+    }
+    try {
+      const job = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${timeline.id}/items/${item.id}/frames`, token, {
+        method: "POST",
+        body: JSON.stringify({ playheadSeconds, intendedUse, requestedGpu }),
+      });
+      setError("");
+      refreshData();
+      return job;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function queueTimelineVideoJob(payload) {
+    return createVideoJob(payload, { navigateToQueue: false });
+  }
+
+  function applyTimelineGenerationResult(timeline, job) {
+    const payload = job.payload ?? {};
+    const action = payload.advanced?.timelineAction;
+    const context = payload.advanced?.timelineContext ?? {};
+    const assetId = job.result?.assetIds?.[0];
+    if (!action || !assetId || context.timelineId !== timeline.id) {
+      return timeline;
+    }
+    const resultAsset = job.result?.assets?.[0];
+    const displayName = resultAsset?.displayName ?? "Generated clip";
+    const createdAt = resultAsset?.createdAt ?? new Date().toISOString();
+    const tracks = timeline.tracks.map((track) => {
+      if (track.id !== context.trackId) {
+        return track;
+      }
+      if (action === "bridge") {
+        const bridgeItem = ensureItemVersionFields({
+          id: `item_${crypto.randomUUID().replaceAll("-", "")}`,
+          trackId: track.id,
+          assetId,
+          type: "video",
+          displayName,
+          sourceIn: 0,
+          sourceOut: Number(payload.duration) || Math.max(0.1, Number(context.timelineEnd) - Number(context.timelineStart)),
+          timelineStart: Number(context.timelineStart),
+          timelineEnd: Number(context.timelineEnd),
+          speed: 1,
+          fit: "fit",
+          volume: 1,
+          versionAssetIds: [assetId],
+          currentVersionAssetId: assetId,
+          versionHistory: [{ assetId, createdAt, source: "bridge", jobId: job.id, note: "Generated bridge clip" }],
+          transitionIn: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
+          transitionOut: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
+        });
+        return { ...track, items: [...track.items, bridgeItem] };
+      }
+      if (action === "extend") {
+        const start = Number(context.timelineStart);
+        const duration = Number(payload.duration) || 4;
+        const extensionItem = ensureItemVersionFields({
+          id: `item_${crypto.randomUUID().replaceAll("-", "")}`,
+          trackId: track.id,
+          assetId,
+          type: "video",
+          displayName,
+          sourceIn: 0,
+          sourceOut: duration,
+          timelineStart: start,
+          timelineEnd: start + duration,
+          speed: 1,
+          fit: "fit",
+          volume: 1,
+          versionAssetIds: [assetId],
+          currentVersionAssetId: assetId,
+          versionHistory: [{ assetId, createdAt, source: "extension", jobId: job.id, note: "Generated extension" }],
+          transitionIn: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
+          transitionOut: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
+        });
+        return { ...track, items: [...track.items, extensionItem] };
+      }
+      if (action === "replace") {
+        return {
+          ...track,
+          items: track.items.map((item) => {
+            if (item.id !== context.itemId) {
+              return item;
+            }
+            const current = ensureItemVersionFields(item);
+            return {
+              ...current,
+              assetId,
+              currentVersionAssetId: assetId,
+              type: "video",
+              displayName,
+              versionAssetIds: Array.from(new Set([...current.versionAssetIds, assetId])),
+              versionHistory: [
+                ...current.versionHistory,
+                { assetId, createdAt, source: "replacement", jobId: job.id, note: "Generated replacement" },
+              ],
+            };
+          }),
+        };
+      }
+      return track;
+    });
+    return { ...timeline, tracks };
+  }
+
+  function enqueueTimelineGenerationApply(job) {
+    timelineApplyQueueRef.current = timelineApplyQueueRef.current
+      .then(() => applyCompletedTimelineGeneration(job))
+      .catch((err) => setError(err.message));
+  }
+
+  async function applyCompletedTimelineGeneration(job) {
+    const timelineId = job.payload?.advanced?.timelineContext?.timelineId;
+    const projectId = job.projectId;
+    if (!projectId || !timelineId || !job.result?.assetIds?.length) {
+      return;
+    }
+    try {
+      const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
+      const updated = applyTimelineGenerationResult(timeline, job);
+      if (updated === timeline) {
+        return;
+      }
+      const saved = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token, {
+        method: "PUT",
+        body: JSON.stringify({ timeline: updated }),
+      });
+      if (selectedTimelineIdRef.current === timelineId) {
+        setActiveTimeline(saved);
+      }
+      refreshTimelines(projectId);
     } catch (err) {
       setError(err.message);
     }
@@ -627,16 +805,10 @@ export function App() {
             purgeAsset={purgeAsset}
             importAsset={importAsset}
             onPreview={setPreviewAsset}
-            onSendImage={(asset) => {
-              setSelectedAssetId(asset.id);
-              setActiveView("Image");
-            }}
+            onSendImage={(asset) => sendAssetToImage(asset)}
             selectedAsset={selectedAsset}
             setSelectedAssetId={setSelectedAssetId}
-            onSendVideo={(asset) => {
-              setSelectedAssetId(asset.id);
-              setActiveView("Video");
-            }}
+            onSendVideo={(asset) => sendAssetToVideo(asset)}
             onSendEditor={(asset) => {
               setSelectedAssetId(asset.id);
               setActiveView("Editor");
@@ -653,6 +825,7 @@ export function App() {
             gpuOptions={gpuOptions}
             imageModels={imageModels}
             latestAssets={latestImageAssets}
+            launchRequest={studioLaunch}
             onPreview={setPreviewAsset}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}
@@ -672,6 +845,7 @@ export function App() {
             purgeAsset={purgeAsset}
             gpuOptions={gpuOptions}
             latestAssets={latestVideoAssets}
+            launchRequest={studioLaunch}
             onPreview={setPreviewAsset}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}
@@ -709,8 +883,12 @@ export function App() {
             activeTimeline={activeTimeline}
             assets={mediaAssets}
             createTimeline={createTimeline}
+            extractTimelineFrame={extractTimelineFrame}
             exportTimeline={exportTimeline}
             onPreview={setPreviewAsset}
+            onSendImage={(asset) => sendAssetToImage(asset, "edit_image")}
+            onSendVideo={(asset) => sendAssetToVideo(asset, asset?.type === "video" ? "extend_clip" : "image_to_video")}
+            queueTimelineVideoJob={queueTimelineVideoJob}
             refreshAssets={refreshAssets}
             saveTimeline={saveTimeline}
             selectedTimelineId={selectedTimelineId}

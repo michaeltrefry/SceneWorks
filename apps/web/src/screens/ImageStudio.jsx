@@ -10,6 +10,7 @@ export function ImageStudio({
   gpuOptions,
   imageModels,
   latestAssets,
+  launchRequest,
   onPreview,
   requestedGpu,
   selectedAsset,
@@ -38,6 +39,16 @@ export function ImageStudio({
       setSourceAssetId(selectedAsset.id);
     }
   }, [mode, selectedAsset?.id]);
+
+  useEffect(() => {
+    if (launchRequest?.view !== "Image" || launchRequest.assetId !== selectedAsset?.id) {
+      return;
+    }
+    setMode(launchRequest.mode);
+    if (launchRequest.mode === "edit_image" && selectedAsset?.id) {
+      setSourceAssetId(selectedAsset.id);
+    }
+  }, [launchRequest?.id, selectedAsset?.id]);
 
   const availableModels = imageModels.filter((item) => {
     const caps = item.capabilities ?? [];
@@ -95,7 +106,7 @@ export function ImageStudio({
               <select onChange={(event) => setSourceAssetId(event.target.value)} value={sourceAssetId}>
                 <option value="">Select image</option>
                 {assets
-                  .filter((asset) => asset.type === "image")
+                  .filter((asset) => asset.type === "image" || asset.type === "frame")
                   .map((asset) => (
                     <option key={asset.id} value={asset.id}>
                       {asset.displayName}

@@ -37,6 +37,14 @@ class Transition(BaseModel):
     duration: float = Field(default=0, ge=0, le=10)
 
 
+class TimelineItemVersion(BaseModel):
+    assetId: str = Field(min_length=1)
+    createdAt: str | None = None
+    source: Literal["original", "replacement", "extension", "bridge", "restore", "manual"] = "manual"
+    jobId: str | None = None
+    note: str | None = None
+
+
 class TimelineItem(BaseModel):
     id: str = Field(default_factory=lambda: f"item_{uuid4().hex}")
     trackId: str
@@ -51,15 +59,23 @@ class TimelineItem(BaseModel):
     fit: Literal["fit", "fill", "stretch"] = "fit"
     volume: float = Field(default=1, ge=0, le=2)
     versionAssetIds: list[str] = Field(default_factory=list)
+    currentVersionAssetId: str | None = None
+    versionHistory: list[TimelineItemVersion] = Field(default_factory=list)
     transitionIn: Transition | None = None
     transitionOut: Transition | None = None
 
     @model_validator(mode="after")
-    def validate_ranges(self) -> "TimelineItem":
+    def validate_ranges_and_populate_version_metadata(self) -> "TimelineItem":
         if self.sourceOut <= self.sourceIn:
             raise ValueError("sourceOut must be greater than sourceIn.")
         if self.timelineEnd <= self.timelineStart:
             raise ValueError("timelineEnd must be greater than timelineStart.")
+        if not self.currentVersionAssetId:
+            self.currentVersionAssetId = self.assetId
+        if self.assetId not in self.versionAssetIds:
+            self.versionAssetIds.append(self.assetId)
+        if not self.versionHistory:
+            self.versionHistory.append(TimelineItemVersion(assetId=self.assetId, source="original"))
         return self
 
 
@@ -110,6 +126,12 @@ class TimelineExportRequest(BaseModel):
         return self
 
 
+class FrameExtractRequest(BaseModel):
+    playheadSeconds: float = Field(ge=0)
+    intendedUse: Literal["reuse", "first_frame", "last_frame", "video_studio", "image_studio", "bridge", "extension"] = "reuse"
+    requestedGpu: str = "auto"
+
+
 def timeline_file_path(project_path: Path, timeline_id: str, name: str) -> Path:
     return project_path / "timelines" / f"{slugify(name, fallback='timeline', max_length=48)}-{timeline_id[-8:]}.sceneworks.timeline.json"
 
@@ -129,6 +151,19 @@ def default_tracks() -> list[TimelineTrack]:
 def compute_duration(timeline: TimelineDocument) -> float:
     ends = [item.timelineEnd for track in timeline.tracks for item in track.items]
     return max(ends, default=0)
+
+
+def find_timeline_item(timeline: TimelineDocument, item_id: str) -> TimelineItem:
+    for track in timeline.tracks:
+        for item in track.items:
+            if item.id == item_id:
+                return item
+    raise HTTPException(status_code=404, detail="Timeline item not found")
+
+
+def source_timestamp_for_item(item: TimelineItem, playhead_seconds: float) -> float:
+    clamped = min(max(playhead_seconds, item.timelineStart), item.timelineEnd)
+    return item.sourceIn + ((clamped - item.timelineStart) * item.speed)
 
 
 def index_timeline(project_path: Path, timeline: TimelineDocument, rel_path: str) -> None:
@@ -285,6 +320,41 @@ def create_timeline_export(
             "timelinePath": str(timeline_path.relative_to(project_path)).replace("\\", "/"),
             "resolution": payload.resolution,
             "fps": payload.fps,
+        },
+        requested_gpu=payload.requestedGpu,
+    )
+    request.app.state.event_hub.publish("job.updated", job)
+    request.app.state.event_hub.publish("queue.updated", queue_summary(request))
+    return job
+
+
+@router.post("/{timeline_id}/items/{item_id}/frames", status_code=201)
+def extract_timeline_frame(
+    project_id: str,
+    timeline_id: str,
+    item_id: str,
+    payload: FrameExtractRequest,
+    request: Request,
+) -> dict:
+    project_path = find_project_path(request.app.state.settings, project_id)
+    timeline_path = find_timeline_file(project_path, timeline_id)
+    timeline = TimelineDocument.model_validate(read_json(timeline_path))
+    item = find_timeline_item(timeline, item_id)
+    timestamp = source_timestamp_for_item(item, payload.playheadSeconds)
+    job = request.app.state.jobs_store.create_job(
+        job_type="frame_extract",
+        project_id=project_id,
+        project_name=None,
+        payload={
+            "projectId": project_id,
+            "timelineId": timeline_id,
+            "timelineName": timeline.name,
+            "timelinePath": str(timeline_path.relative_to(project_path)).replace("\\", "/"),
+            "timelineItemId": item_id,
+            "sourceAssetId": item.assetId,
+            "sourceTimestamp": timestamp,
+            "playheadSeconds": payload.playheadSeconds,
+            "intendedUse": payload.intendedUse,
         },
         requested_gpu=payload.requestedGpu,
     )

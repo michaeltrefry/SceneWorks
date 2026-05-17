@@ -89,6 +89,7 @@ def list_assets(
 ) -> list[dict[str, Any]]:
     project_path = find_project_path(request.app.state.settings, project_id)
     assets = []
+    seen_asset_ids = set()
     ensure_project_db_ready(project_path)
     with sqlite3.connect(project_path / "project.db") as connection:
         total = connection.execute("select count(*) from assets").fetchone()[0]
@@ -119,6 +120,9 @@ def list_assets(
                 asset = normalize_asset(project_id, project_path, sidecar_path)
             except (OSError, json.JSONDecodeError):
                 continue
+            if asset.get("id") in seen_asset_ids:
+                break
+            seen_asset_ids.add(asset.get("id"))
             assets.append(asset)
             break
 

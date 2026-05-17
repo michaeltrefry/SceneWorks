@@ -40,3 +40,23 @@ export function itemDuration(item) {
 export function trackItems(track) {
   return [...track.items].sort((a, b) => a.timelineStart - b.timelineStart);
 }
+
+export function sourceTimestampAtPlayhead(item, playheadSeconds) {
+  const start = Number(item.timelineStart) || 0;
+  const end = Math.max(start, Number(item.timelineEnd) || start);
+  const clamped = Math.min(Math.max(Number(playheadSeconds) || start, start), end);
+  return (Number(item.sourceIn) || 0) + (clamped - start) * (Number(item.speed) || 1);
+}
+
+export function ensureItemVersionFields(item) {
+  const versionAssetIds = Array.from(new Set([...(item.versionAssetIds ?? []), item.assetId].filter(Boolean)));
+  return {
+    ...item,
+    currentVersionAssetId: item.currentVersionAssetId ?? item.assetId,
+    versionAssetIds,
+    versionHistory:
+      item.versionHistory?.length > 0
+        ? item.versionHistory
+        : [{ assetId: item.assetId, createdAt: null, source: "original", jobId: null, note: null }],
+  };
+}

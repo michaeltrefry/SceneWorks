@@ -753,6 +753,48 @@ button:disabled {
   background: #30211f;
 }
 
+.generation-hook-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #3c3a34;
+  background: #191815;
+}
+
+.generation-hook-panel textarea {
+  min-height: 84px;
+}
+
+.hook-actions,
+.version-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hook-actions button,
+.version-list button {
+  min-height: 34px;
+  border: 1px solid #4b463d;
+  background: #292722;
+  color: #f3f0e8;
+  padding: 7px 10px;
+}
+
+.version-list {
+  align-items: center;
+}
+
+.version-list strong {
+  color: #d8d2c7;
+  font-size: 13px;
+}
+
+.version-list button.active {
+  border-color: #6ec6b8;
+  background: #183f3a;
+}
+
 .timeline-panel,
 .export-strip {
   grid-column: 1 / -1;

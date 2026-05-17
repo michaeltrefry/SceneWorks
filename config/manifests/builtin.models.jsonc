@@ -118,7 +118,7 @@
       "family": "ltx-video",
       "type": "video",
       "adapter": "ltx_video",
-      "capabilities": ["image_to_video", "text_to_video", "first_last_frame"],
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
       "downloads": [
         {
           "provider": "huggingface",
@@ -151,7 +151,7 @@
       "ui": {
         "label": "LTX-2.3",
         "description": "First-class short-shot video target for image-to-video and text-to-video.",
-        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame"],
+        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
         "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow."
       }
     },
@@ -161,7 +161,7 @@
       "family": "wan-video",
       "type": "video",
       "adapter": "wan_video",
-      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "replace_person"],
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
       "downloads": [
         {
           "provider": "huggingface",

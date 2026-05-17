@@ -19,7 +19,7 @@ from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .settings import WorkerSettings
 from .timeline_exporter import run_timeline_export
-from .video_adapters import ProceduralVideoAdapter
+from .video_adapters import ProceduralVideoAdapter, run_frame_extract
 
 
 def now() -> str:
@@ -53,7 +53,7 @@ def worker_capabilities(gpu: dict) -> list[str]:
     utility_jobs_enabled = os.getenv("SCENEWORKS_UTILITY_JOBS", "1").strip() != "0"
     capabilities = set(gpu["capabilities"])
     if utility_jobs_enabled:
-        capabilities |= {"timeline_export", "model_download", "lora_import"}
+        capabilities |= {"timeline_export", "model_download", "lora_import", "frame_extract"}
     if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
         capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge"}
     return sorted(capabilities)
@@ -759,6 +759,74 @@ def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict)
         heartbeat(api, settings, "idle")
 
 
+def run_frame_extract_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": status,
+                "stage": stage,
+                "progress": value,
+                "message": message,
+            },
+        )
+
+    try:
+        progress("preparing", "preparing", 0.08, "Preparing frame extraction.")
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: run_frame_extract(
+                settings=settings,
+                job=job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Timeline frame saved as an asset.",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Frame extraction failed.",
+                "error": str(exc),
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def run_worker_loop(settings: WorkerSettings) -> None:
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
@@ -804,6 +872,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_image_job(api, settings, job, image_adapters)
             elif job["type"] in ("video_generate", "video_extend", "video_bridge"):
                 run_video_job(api, settings, job)
+            elif job["type"] == "frame_extract":
+                run_frame_extract_job(api, settings, job)
             elif job["type"] == "timeline_export":
                 run_timeline_export_job(api, settings, job)
             elif job["type"] == "model_download":

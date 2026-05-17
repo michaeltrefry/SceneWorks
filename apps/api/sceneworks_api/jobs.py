@@ -20,6 +20,7 @@ JobType = Literal[
     "video_generate",
     "video_extend",
     "video_bridge",
+    "frame_extract",
     "timeline_export",
     "model_download",
     "lora_import",

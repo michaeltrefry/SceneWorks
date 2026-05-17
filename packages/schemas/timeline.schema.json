@@ -44,6 +44,21 @@
                 "fit": { "enum": ["fit", "fill", "stretch"] },
                 "volume": { "type": "number", "minimum": 0 },
                 "versionAssetIds": { "type": "array", "items": { "type": "string" } },
+                "currentVersionAssetId": { "type": ["string", "null"] },
+                "versionHistory": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["assetId", "source"],
+                    "properties": {
+                      "assetId": { "type": "string" },
+                      "createdAt": { "type": ["string", "null"], "format": "date-time" },
+                      "source": { "enum": ["original", "replacement", "extension", "bridge", "restore", "manual"] },
+                      "jobId": { "type": ["string", "null"] },
+                      "note": { "type": ["string", "null"] }
+                    }
+                  }
+                },
                 "transitionIn": { "$ref": "#/$defs/transition" },
                 "transitionOut": { "$ref": "#/$defs/transition" }
               }

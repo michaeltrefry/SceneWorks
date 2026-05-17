@@ -3,6 +3,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import hashlib
+import shutil
+import subprocess
+import tempfile
 import warnings
 from pathlib import Path
 from textwrap import wrap
@@ -29,7 +32,7 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "label": "LTX-2.3",
         "family": "ltx-video",
         "adapter": "ltx_video",
-        "capabilities": ["image_to_video", "text_to_video", "first_last_frame"],
+        "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "steps": {"fast": 6, "balanced": 8, "best": 20},
@@ -39,7 +42,7 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "label": "Wan2.2",
         "family": "wan-video",
         "adapter": "wan_video",
-        "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "replace_person"],
+        "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
         "recommendedMaxDuration": 7,
         "hardMaxDuration": 8,
         "steps": {"fast": 12, "balanced": 20, "best": 30},
@@ -68,6 +71,7 @@ class VideoRequest:
     source_asset_id: str | None
     last_frame_asset_id: str | None
     source_clip_asset_id: str | None
+    bridge_right_clip_asset_id: str | None
     advanced: dict[str, Any]
 
 
@@ -161,6 +165,15 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
 
         first_image = load_source_image(project_path, request.source_asset_id, request.width, request.height)
         last_image = load_source_image(project_path, request.last_frame_asset_id, request.width, request.height)
+        context = request.advanced.get("timelineContext", {})
+        if request.mode == "extend_clip" and first_image is None:
+            timestamp = safe_float(context.get("endpointTimestamp"), 0, 0, 3600)
+            first_image = load_source_frame(project_path, request.source_clip_asset_id, timestamp, request.width, request.height)
+        if request.mode == "video_bridge":
+            left_timestamp = safe_float(context.get("leftTimestamp"), 0, 0, 3600)
+            right_timestamp = safe_float(context.get("rightTimestamp"), 0, 0, 3600)
+            first_image = load_source_frame(project_path, request.source_clip_asset_id, left_timestamp, request.width, request.height)
+            last_image = load_source_frame(project_path, request.bridge_right_clip_asset_id, right_timestamp, request.width, request.height)
         if cancel_requested():
             raise InterruptedError("Video generation canceled before rendering.")
 
@@ -252,6 +265,7 @@ def video_request_from_job(job: dict[str, Any]) -> VideoRequest:
         source_asset_id=payload.get("sourceAssetId"),
         last_frame_asset_id=payload.get("lastFrameAssetId"),
         source_clip_asset_id=payload.get("sourceClipAssetId"),
+        bridge_right_clip_asset_id=payload.get("bridgeRightClipAssetId"),
         advanced=payload.get("advanced", {}),
     )
 
@@ -298,6 +312,78 @@ def load_source_image(project_path: Path, asset_id: str | None, width: int, heig
     canvas = Image.new("RGB", (width, height), (18, 17, 15))
     canvas.paste(image, ((width - image.width) // 2, (height - image.height) // 2))
     return canvas
+
+
+def load_source_frame(project_path: Path, asset_id: str | None, timestamp: float, width: int, height: int) -> Image.Image | None:
+    if not asset_id:
+        return None
+    sidecar_path = find_asset_sidecar_path(project_path, asset_id)
+    if sidecar_path is None:
+        return None
+    payload = read_json(sidecar_path)
+    media_path = project_path / payload.get("file", {}).get("path", "")
+    if not media_path.exists():
+        return None
+
+    image = load_seekable_image_frame(media_path, timestamp, payload.get("file", {}).get("duration"))
+    if image is None:
+        image = load_ffmpeg_frame(media_path, timestamp)
+    if image is None:
+        return None
+
+    image.thumbnail((width, height), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (width, height), (18, 17, 15))
+    canvas.paste(image, ((width - image.width) // 2, (height - image.height) // 2))
+    return canvas
+
+
+def load_seekable_image_frame(media_path: Path, timestamp: float, duration: Any = None) -> Image.Image | None:
+    try:
+        image = Image.open(media_path)
+    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return None
+
+    try:
+        frame_count = getattr(image, "n_frames", 1)
+        if frame_count > 1:
+            total_duration = safe_float(duration, 0, 0, 3600)
+            if total_duration > 0:
+                frame_index = min(frame_count - 1, max(0, int(round((timestamp / total_duration) * (frame_count - 1)))))
+                image.seek(frame_index)
+        return image.convert("RGB")
+    except (EOFError, OSError):
+        return None
+
+
+def load_ffmpeg_frame(media_path: Path, timestamp: float) -> Image.Image | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg is not available for frame extraction.")
+    with tempfile.TemporaryDirectory(prefix="sceneworks-frame-") as temp_dir:
+        frame_path = Path(temp_dir) / "frame.png"
+        command = [
+            ffmpeg,
+            "-y",
+            "-ss",
+            f"{max(0, timestamp):.3f}",
+            "-i",
+            str(media_path),
+            "-frames:v",
+            "1",
+            "-f",
+            "image2",
+            str(frame_path),
+        ]
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
+        if result.returncode != 0 or not frame_path.exists():
+            tail = "\n".join((result.stderr or "").splitlines()[-6:]).strip()
+            if tail:
+                raise RuntimeError(f"ffmpeg could not extract a frame at {timestamp:.3f}s: {tail}")
+            return None
+        try:
+            return Image.open(frame_path).convert("RGB")
+        except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+            return None
 
 
 def render_preview_frames(
@@ -422,7 +508,17 @@ def build_video_asset_sidecar(
     target: dict[str, Any],
     raw_settings: dict[str, Any],
 ) -> dict[str, Any]:
-    parents = [asset_id for asset_id in [request.source_asset_id, request.last_frame_asset_id, request.source_clip_asset_id] if asset_id]
+    parents = [
+        asset_id
+        for asset_id in [
+            request.source_asset_id,
+            request.last_frame_asset_id,
+            request.source_clip_asset_id,
+            request.bridge_right_clip_asset_id,
+        ]
+        if asset_id
+    ]
+    timeline_context = request.advanced.get("timelineContext", {})
     return {
         "schemaVersion": 1,
         "id": asset_id,
@@ -463,6 +559,8 @@ def build_video_asset_sidecar(
                 "sourceAssetId": request.source_asset_id,
                 "lastFrameAssetId": request.last_frame_asset_id,
                 "sourceClipAssetId": request.source_clip_asset_id,
+                "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
+                "timelineContextRef": "lineage.timeline",
             },
             "rawAdapterSettings": raw_settings,
         },
@@ -471,7 +569,121 @@ def build_video_asset_sidecar(
             "sourceAssetId": request.source_asset_id,
             "lastFrameAssetId": request.last_frame_asset_id,
             "sourceClipAssetId": request.source_clip_asset_id,
+            "bridgeRightClipAssetId": request.bridge_right_clip_asset_id,
             "sourceTimestamp": None,
+            "timeline": timeline_context,
             "jobId": job_id,
         },
+    }
+
+
+def run_frame_extract(
+    *,
+    settings: WorkerSettings,
+    job: dict[str, Any],
+    progress: ProgressCallback,
+    cancel_requested: CancelCallback,
+) -> dict[str, Any]:
+    payload = job["payload"]
+    project_id = payload["projectId"]
+    project_path = find_project_path(settings, project_id)
+    frames_dir = project_path / "assets" / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    (project_path / "recipes").mkdir(parents=True, exist_ok=True)
+
+    source_asset_id = payload.get("sourceAssetId")
+    timestamp = safe_float(payload.get("sourceTimestamp"), 0, 0, 3600)
+    source_sidecar_path = find_asset_sidecar_path(project_path, source_asset_id)
+    if source_sidecar_path is None:
+        raise FileNotFoundError(f"Source asset not found: {source_asset_id}")
+    source_asset = read_json(source_sidecar_path)
+    source_media_path = project_path / source_asset.get("file", {}).get("path", "")
+    if not source_media_path.exists():
+        raise FileNotFoundError(f"Source media not found: {source_media_path}")
+
+    progress("running", "extracting", 0.25, "Extracting timeline frame.")
+    if cancel_requested():
+        raise InterruptedError("Frame extraction canceled before reading media.")
+
+    image = load_source_frame(project_path, source_asset_id, timestamp, 1920, 1080)
+    if image is None:
+        raise RuntimeError("Could not decode a frame from the selected clip.")
+
+    asset_id = f"asset_{uuid4().hex}"
+    created_at = utc_now()
+    filename = f"{created_at[:10]}_frame_{asset_id[-8:]}.png"
+    media_rel = f"assets/frames/{filename}"
+    media_path = project_path / media_rel
+    temp_path = media_path.with_suffix(".tmp.png")
+    image.save(temp_path, "PNG")
+    temp_path.replace(media_path)
+
+    timeline_id = payload.get("timelineId")
+    timeline_item_id = payload.get("timelineItemId")
+    intended_use = payload.get("intendedUse", "reuse")
+    asset = {
+        "schemaVersion": 1,
+        "id": asset_id,
+        "projectId": project_id,
+        "generationSetId": None,
+        "type": "frame",
+        "displayName": f"Frame {timestamp:.2f}s from {source_asset.get('displayName', 'clip')}",
+        "createdAt": created_at,
+        "file": {
+            "path": media_rel,
+            "mimeType": "image/png",
+            "width": image.width,
+            "height": image.height,
+            "duration": None,
+            "fps": None,
+        },
+        "status": {
+            "favorite": False,
+            "rating": 0,
+            "rejected": False,
+            "trashed": False,
+        },
+        "recipe": {
+            "mode": "frame_extract",
+            "model": "timeline-frame-extract",
+            "adapter": "ffmpeg-frame-extract",
+            "prompt": f"Extract frame at {timestamp:.2f}s",
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {
+                "timelineId": timeline_id,
+                "timelineItemId": timeline_item_id,
+                "playheadSeconds": payload.get("playheadSeconds"),
+                "sourceTimestamp": timestamp,
+                "intendedUse": intended_use,
+            },
+            "rawAdapterSettings": {"sourcePath": str(source_media_path.relative_to(project_path)).replace("\\", "/")},
+        },
+        "lineage": {
+            "parents": [source_asset_id],
+            "sourceAssetId": source_asset_id,
+            "sourceTimestamp": timestamp,
+            "timelineId": timeline_id,
+            "timelineItemId": timeline_item_id,
+            "intendedUse": intended_use,
+            "jobId": job["id"],
+        },
+    }
+    sidecar_path = media_path.with_suffix(".sceneworks.json")
+    progress("saving", "saving", 0.85, "Saving extracted frame asset.")
+    if cancel_requested():
+        media_path.unlink(missing_ok=True)
+        raise InterruptedError("Frame extraction canceled before asset promotion.")
+    write_json(sidecar_path, asset)
+    write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
+    index_asset(project_path, asset)
+    return {
+        "assetIds": [asset_id],
+        "assets": [asset],
+        "sourceAssetId": source_asset_id,
+        "sourceTimestamp": timestamp,
+        "timelineId": timeline_id,
+        "timelineItemId": timeline_item_id,
     }

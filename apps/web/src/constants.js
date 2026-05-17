@@ -20,7 +20,7 @@ export const fallbackModels = [
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",
-    capabilities: ["image_to_video", "text_to_video", "first_last_frame"],
+    capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
     defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],
@@ -37,7 +37,7 @@ export const fallbackModels = [
     id: "wan_2_2",
     name: "Wan2.2",
     type: "video",
-    capabilities: ["image_to_video", "text_to_video", "first_last_frame", "replace_person"],
+    capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
     defaults: { duration: 5, fps: 24, resolution: "1280x720", quality: "balanced" },
     limits: {
       durations: [4, 5, 6, 7, 8],

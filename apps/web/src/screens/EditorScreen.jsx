@@ -1,15 +1,28 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetMedia, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { formatSeconds } from "../formatting.js";
-import { aspectOptions, itemDuration, speedPresets, timelineDuration, trackItems, transitionOptions } from "../timeline.js";
+import {
+  aspectOptions,
+  ensureItemVersionFields,
+  itemDuration,
+  sourceTimestampAtPlayhead,
+  speedPresets,
+  timelineDuration,
+  trackItems,
+  transitionOptions,
+} from "../timeline.js";
 
 export function EditorScreen({
   activeProject,
   activeTimeline,
   assets,
   createTimeline,
+  extractTimelineFrame,
   exportTimeline,
   onPreview,
+  onSendImage,
+  onSendVideo,
+  queueTimelineVideoJob,
   saveTimeline,
   selectedTimelineId,
   setActiveTimeline,
@@ -24,6 +37,10 @@ export function EditorScreen({
   const [history, setHistory] = useState([]);
   const [future, setFuture] = useState([]);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [playheadSeconds, setPlayheadSeconds] = useState(0);
+  const [generationPrompt, setGenerationPrompt] = useState("Continue the action with matching motion and lighting");
+  const [extensionDuration, setExtensionDuration] = useState(4);
+  const [timelineNotice, setTimelineNotice] = useState("");
 
   const selectedItem = useMemo(() => {
     if (!activeTimeline) {
@@ -42,6 +59,13 @@ export function EditorScreen({
     setFuture([]);
     setSelectedItemId(null);
   }, [activeTimeline?.id]);
+
+  useEffect(() => {
+    if (selectedItem) {
+      setPlayheadSeconds(Number(selectedItem.timelineStart) || 0);
+    }
+    setTimelineNotice("");
+  }, [selectedItem?.id]);
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -147,6 +171,8 @@ export function EditorScreen({
       fit: "fit",
       volume: 1,
       versionAssetIds: [asset.id],
+      currentVersionAssetId: asset.id,
+      versionHistory: [{ assetId: asset.id, createdAt: null, source: "original", jobId: null, note: null }],
       transitionIn: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
       transitionOut: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
     });
@@ -197,13 +223,154 @@ export function EditorScreen({
     const sourceIn = Number(item.sourceIn) || 0;
     const sourceOut = Math.max(sourceIn + 0.1, Number(item.sourceOut) || sourceIn + itemDuration(item));
     return {
-      ...item,
+      ...ensureItemVersionFields(item),
       sourceIn,
       sourceOut,
       timelineStart: Math.max(0, start),
       timelineEnd: end,
       speed: Math.max(0.1, Number(item.speed) || 1),
     };
+  }
+
+  function selectedTrackItems() {
+    if (!activeTimeline || !selectedItem) {
+      return [];
+    }
+    const track = activeTimeline.tracks.find((item) => item.id === selectedItem.trackId);
+    return track ? trackItems(track) : [];
+  }
+
+  function nextItemAfterSelection() {
+    return selectedTrackItems().find((item) => item.timelineStart >= selectedItem.timelineEnd && item.id !== selectedItem.id) ?? null;
+  }
+
+  function generationBaseContext(action, extra = {}) {
+    return {
+      action,
+      timelineId: activeTimeline.id,
+      timelineName: activeTimeline.name,
+      itemId: selectedItem.id,
+      trackId: selectedItem.trackId,
+      sourceAssetId: selectedItem.assetId,
+      sourceTimestamp: sourceTimestampAtPlayhead(selectedItem, playheadSeconds),
+      ...extra,
+    };
+  }
+
+  async function extractFrame(intendedUse = "reuse") {
+    if (!selectedItem || selectedItem.type !== "video") {
+      setTimelineNotice("Select a video clip before extracting a frame.");
+      return;
+    }
+    const job = await extractTimelineFrame({ timeline: activeTimeline, item: selectedItem, playheadSeconds, intendedUse });
+    if (job) {
+      setTimelineNotice("Frame extraction queued.");
+    }
+  }
+
+  async function extendSelectedClip() {
+    if (!selectedItem || selectedItem.type !== "video") {
+      setTimelineNotice("Select a video clip before extending.");
+      return;
+    }
+    const duration = Math.min(15, Math.max(1, Number(extensionDuration) || itemDuration(selectedItem)));
+    const job = await queueTimelineVideoJob({
+      mode: "extend_clip",
+      prompt: generationPrompt,
+      model: "ltx_2_3",
+      duration,
+      fps: activeTimeline.fps,
+      width: activeTimeline.width,
+      height: activeTimeline.height,
+      quality: "balanced",
+      sourceClipAssetId: selectedItem.assetId,
+      loras: [],
+      advanced: {
+        resolution: `${activeTimeline.width}x${activeTimeline.height}`,
+        timelineAction: "extend",
+        timelineContext: generationBaseContext("extend", {
+          endpointTimestamp: Number(selectedItem.sourceOut) || sourceTimestampAtPlayhead(selectedItem, selectedItem.timelineEnd),
+          timelineStart: Number(selectedItem.timelineEnd),
+        }),
+      },
+    });
+    if (job) {
+      setTimelineNotice("Extension job queued. The new clip will land after the selection when it completes.");
+    }
+  }
+
+  async function replaceSelectedItem() {
+    if (!selectedItem) {
+      return;
+    }
+    const isStill = selectedItem.type === "image";
+    const duration = itemDuration(selectedItem);
+    const job = await queueTimelineVideoJob({
+      mode: isStill ? "image_to_video" : "extend_clip",
+      prompt: generationPrompt,
+      model: "ltx_2_3",
+      duration,
+      fps: activeTimeline.fps,
+      width: activeTimeline.width,
+      height: activeTimeline.height,
+      quality: "balanced",
+      sourceAssetId: isStill ? selectedItem.assetId : null,
+      sourceClipAssetId: isStill ? null : selectedItem.assetId,
+      loras: [],
+      advanced: {
+        resolution: `${activeTimeline.width}x${activeTimeline.height}`,
+        timelineAction: "replace",
+        timelineContext: generationBaseContext("replace"),
+      },
+    });
+    if (job) {
+      setTimelineNotice("Replacement job queued. The prior asset will stay in this item's version history.");
+    }
+  }
+
+  async function bridgeAfterSelectedClip() {
+    if (!selectedItem || selectedItem.type !== "video") {
+      setTimelineNotice("Select the left video clip before generating a bridge.");
+      return;
+    }
+    const rightItem = nextItemAfterSelection();
+    if (!rightItem || rightItem.type !== "video") {
+      setTimelineNotice("Place another video clip after this one on the same track first.");
+      return;
+    }
+    const gap = Number(rightItem.timelineStart) - Number(selectedItem.timelineEnd);
+    if (gap <= 0.05) {
+      setTimelineNotice("Create space between the clips before generating a bridge.");
+      return;
+    }
+    const job = await queueTimelineVideoJob({
+      mode: "video_bridge",
+      prompt: generationPrompt,
+      model: "ltx_2_3",
+      duration: Number(gap.toFixed(2)),
+      fps: activeTimeline.fps,
+      width: activeTimeline.width,
+      height: activeTimeline.height,
+      quality: "balanced",
+      sourceClipAssetId: selectedItem.assetId,
+      bridgeRightClipAssetId: rightItem.assetId,
+      loras: [],
+      advanced: {
+        resolution: `${activeTimeline.width}x${activeTimeline.height}`,
+        timelineAction: "bridge",
+        timelineContext: generationBaseContext("bridge", {
+          rightItemId: rightItem.id,
+          rightAssetId: rightItem.assetId,
+          leftTimestamp: Number(selectedItem.sourceOut) || sourceTimestampAtPlayhead(selectedItem, selectedItem.timelineEnd),
+          rightTimestamp: Number(rightItem.sourceIn) || 0,
+          timelineStart: Number(selectedItem.timelineEnd),
+          timelineEnd: Number(rightItem.timelineStart),
+        }),
+      },
+    });
+    if (job) {
+      setTimelineNotice("Bridge job queued. The generated clip will land in the gap.");
+    }
   }
 
   if (!activeProject) {
@@ -360,6 +527,70 @@ export function EditorScreen({
                     value={selectedItem.speed}
                   />
                 </label>
+                <div className="generation-hook-panel">
+                  <label>
+                    Playhead
+                    <input
+                      max={selectedItem.timelineEnd}
+                      min={selectedItem.timelineStart}
+                      onChange={(event) => setPlayheadSeconds(Number(event.target.value))}
+                      step="0.1"
+                      type="number"
+                      value={playheadSeconds}
+                    />
+                  </label>
+                  <label className="prompt-field">
+                    Generation prompt
+                    <textarea onChange={(event) => setGenerationPrompt(event.target.value)} value={generationPrompt} />
+                  </label>
+                  <label>
+                    Extension duration
+                    <input
+                      max="15"
+                      min="1"
+                      onChange={(event) => setExtensionDuration(Number(event.target.value))}
+                      step="0.5"
+                      type="number"
+                      value={extensionDuration}
+                    />
+                  </label>
+                  <div className="hook-actions">
+                    <button disabled={selectedItem.type !== "video"} onClick={() => extractFrame("reuse")} type="button">
+                      Extract Frame
+                    </button>
+                    <button disabled={selectedItem.type === "video"} onClick={() => onSendImage(selectedAsset)} type="button">
+                      Send Image
+                    </button>
+                    <button onClick={() => onSendVideo(selectedAsset)} type="button">
+                      Send Video
+                    </button>
+                    <button disabled={selectedItem.type !== "video"} onClick={extendSelectedClip} type="button">
+                      Extend
+                    </button>
+                    <button onClick={replaceSelectedItem} type="button">
+                      Replace
+                    </button>
+                    <button disabled={selectedItem.type !== "video"} onClick={bridgeAfterSelectedClip} type="button">
+                      Bridge Gap
+                    </button>
+                  </div>
+                  <div className="version-list">
+                    <strong>{ensureItemVersionFields(selectedItem).versionAssetIds.length} versions</strong>
+                    {ensureItemVersionFields(selectedItem)
+                      .versionAssetIds.slice(-4)
+                      .map((assetId) => (
+                        <button
+                          className={assetId === selectedItem.assetId ? "active" : ""}
+                          key={assetId}
+                          onClick={() => updateTimelineItem(selectedItem.id, { assetId, currentVersionAssetId: assetId })}
+                          type="button"
+                        >
+                          {assetId === selectedItem.assetId ? "Current" : "Restore"} {assetId.slice(-6)}
+                        </button>
+                      ))}
+                  </div>
+                  {timelineNotice ? <p className="inline-warning">{timelineNotice}</p> : null}
+                </div>
                 <label>
                   Transition in
                   <select

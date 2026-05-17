@@ -10,6 +10,7 @@ export function VideoStudio({
   purgeAsset,
   gpuOptions,
   latestAssets,
+  launchRequest,
   onPreview,
   requestedGpu,
   selectedAsset,
@@ -30,7 +31,7 @@ export function VideoStudio({
   const [fps, setFps] = useState(selectedModel?.defaults?.fps ?? 25);
   const [seed, setSeed] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
-  const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.type === "image" ? selectedAsset.id : "");
+  const [sourceAssetId, setSourceAssetId] = useState(["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "");
   const [lastFrameAssetId, setLastFrameAssetId] = useState("");
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
 
@@ -41,13 +42,26 @@ export function VideoStudio({
   }, [videoModels, model]);
 
   useEffect(() => {
-    if (selectedAsset?.type === "image") {
+    if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
       setSourceAssetId(selectedAsset.id);
     }
     if (selectedAsset?.type === "video") {
       setSourceClipAssetId(selectedAsset.id);
     }
   }, [selectedAsset?.id, selectedAsset?.type]);
+
+  useEffect(() => {
+    if (launchRequest?.view !== "Video" || launchRequest.assetId !== selectedAsset?.id) {
+      return;
+    }
+    setMode(launchRequest.mode);
+    if (selectedAsset?.type === "video") {
+      setSourceClipAssetId(selectedAsset.id);
+    }
+    if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
+      setSourceAssetId(selectedAsset.id);
+    }
+  }, [launchRequest?.id, selectedAsset?.id, selectedAsset?.type]);
 
   useEffect(() => {
     if (!selectedModel) {
@@ -76,7 +90,7 @@ export function VideoStudio({
   ];
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
-  const implementedMode = ["image_to_video", "text_to_video", "first_last_frame"].includes(mode);
+  const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip"].includes(mode);
   const hasInputs =
     mode === "text_to_video" ||
     (mode === "image_to_video" && sourceAssetId) ||

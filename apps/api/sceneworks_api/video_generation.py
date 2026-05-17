@@ -10,7 +10,7 @@ from .jobs import queue_summary
 
 router = APIRouter(prefix="/video", tags=["video"])
 
-VideoMode = Literal["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"]
+VideoMode = Literal["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"]
 VideoQuality = Literal["fast", "balanced", "best"]
 
 
@@ -31,6 +31,7 @@ class VideoJobRequest(BaseModel):
     sourceAssetId: str | None = None
     lastFrameAssetId: str | None = None
     sourceClipAssetId: str | None = None
+    bridgeRightClipAssetId: str | None = None
     requestedGpu: str = "auto"
     advanced: dict[str, Any] = Field(default_factory=dict)
 
@@ -42,13 +43,20 @@ class VideoJobRequest(BaseModel):
             raise ValueError("First/Last Frame requires first and last image assets.")
         if self.mode == "extend_clip" and not self.sourceClipAssetId:
             raise ValueError("Extend Clip requires a source clip.")
+        if self.mode == "video_bridge" and (not self.sourceClipAssetId or not self.bridgeRightClipAssetId):
+            raise ValueError("Bridge generation requires left and right source clips.")
         return self
 
 
 @router.post("/jobs", status_code=201)
 def create_video_job(payload: VideoJobRequest, request: Request) -> dict:
+    job_type = "video_generate"
+    if payload.mode == "extend_clip":
+        job_type = "video_extend"
+    elif payload.mode == "video_bridge":
+        job_type = "video_bridge"
     job = request.app.state.jobs_store.create_job(
-        job_type="video_generate",
+        job_type=job_type,
         project_id=payload.projectId,
         project_name=payload.projectName,
         payload=payload.model_dump(exclude={"requestedGpu"}),
