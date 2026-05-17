@@ -3,9 +3,58 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+/// Unknown JSON object keys captured during deserialization.
+///
+/// These fields are reserved for forward-compatible contract data. Do not add
+/// keys here that duplicate declared struct fields; write the typed field
+/// instead so serialized JSON stays unambiguous.
 pub type ExtraFields = BTreeMap<String, Value>;
 pub type JsonObject = serde_json::Map<String, Value>;
+/// JSON number token preserved exactly for fixture parity.
+///
+/// Using `serde_json::Number` keeps integer JSON values as integers on
+/// round-trip, but it means owning structs derive `PartialEq` rather than `Eq`.
 pub type ContractNumber = serde_json::Number;
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum MaybePresent<T> {
+    #[default]
+    Missing,
+    Present(Option<T>),
+}
+
+impl<T> MaybePresent<T> {
+    pub const fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+}
+
+impl<T> Serialize for MaybePresent<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Missing => serializer.serialize_none(),
+            Self::Present(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for MaybePresent<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Self::Present)
+    }
+}
 
 macro_rules! string_enum {
     (
@@ -15,6 +64,7 @@ macro_rules! string_enum {
         }
     ) => {
         $(#[$meta])*
+        #[non_exhaustive]
         #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
         pub enum $name {
             $($variant,)+
@@ -52,6 +102,65 @@ macro_rules! string_enum {
             }
         }
     };
+}
+
+string_enum! {
+    pub enum ContractMode {
+        TextToImage => "text_to_image",
+        EditImage => "edit_image",
+        CharacterImage => "character_image",
+        StyleVariations => "style_variations",
+        ImageToVideo => "image_to_video",
+        TextToVideo => "text_to_video",
+        FirstLastFrame => "first_last_frame",
+        ExtendClip => "extend_clip",
+        VideoBridge => "video_bridge",
+        ReplacePerson => "replace_person",
+        PersonDetect => "person_detect",
+        PersonTrack => "person_track",
+        FrameExtract => "frame_extract",
+        TimelineExport => "timeline_export",
+        ModelDownload => "model_download",
+        LoraImport => "lora_import",
+    }
+}
+
+string_enum! {
+    pub enum RecipeAdapter {
+        ProceduralPreview => "procedural_preview",
+        ZImageDiffusers => "z_image_diffusers",
+        QwenImage => "qwen_image",
+        ProceduralVideo => "procedural_video",
+        ProceduralPersonTracking => "procedural_person_tracking",
+        FfmpegFrameExtract => "ffmpeg-frame-extract",
+        TimelineExporter => "timeline-exporter",
+    }
+}
+
+string_enum! {
+    pub enum PersonTrackMaskState {
+        Deferred => "deferred",
+    }
+}
+
+string_enum! {
+    pub enum PersonTrackCorrectionState {
+        ReadyForBoxCorrections => "ready_for_box_corrections",
+    }
+}
+
+string_enum! {
+    pub enum CharacterReferenceRole {
+        Reference => "reference",
+        Hero => "hero",
+        TestOutput => "test-output",
+    }
+}
+
+string_enum! {
+    pub enum CharacterLoraCategory {
+        Character => "character",
+    }
 }
 
 string_enum! {
@@ -148,6 +257,10 @@ string_enum! {
 }
 
 string_enum! {
+    /// Asset resource types allowed by the JSON schema.
+    ///
+    /// Current writers emit `image`, `video`, and frame extraction sidecars;
+    /// `upload` and `render` are reserved by the schema and project folders.
     pub enum AssetType {
         Image => "image",
         Video => "video",
@@ -530,7 +643,7 @@ pub struct GenerationSet {
     pub id: String,
     pub project_id: String,
     pub job_id: Option<String>,
-    pub mode: String,
+    pub mode: ContractMode,
     pub model: String,
     pub prompt: String,
     pub negative_prompt: String,
@@ -543,9 +656,9 @@ pub struct GenerationSet {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Recipe {
-    pub mode: String,
+    pub mode: ContractMode,
     pub model: String,
-    pub adapter: String,
+    pub adapter: RecipeAdapter,
     pub prompt: String,
     pub negative_prompt: String,
     pub seed: i64,
@@ -592,7 +705,7 @@ pub struct CharacterStatus {
 pub struct CharacterReference {
     pub asset_id: String,
     pub approved: bool,
-    pub role: String,
+    pub role: CharacterReferenceRole,
     pub notes: String,
     pub added_at: String,
     pub approved_at: Option<String>,
@@ -623,7 +736,7 @@ pub struct CharacterLora {
     pub source_path: Option<String>,
     pub project_path: Option<String>,
     pub copied_into_project: bool,
-    pub category: String,
+    pub category: CharacterLoraCategory,
     pub scope: CharacterLoraScope,
     pub trigger_words: Vec<String>,
     pub default_weight: ContractNumber,
@@ -752,13 +865,12 @@ pub struct PersonDetection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonTrackFrame {
-    #[serde(rename = "time", alias = "timestamp")]
-    pub time: ContractNumber,
+    pub timestamp: ContractNumber,
     #[serde(rename = "box")]
     pub box_: NormalizedBox,
     pub confidence: ContractNumber,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mask: Option<String>,
+    #[serde(default, skip_serializing_if = "MaybePresent::is_missing")]
+    pub mask: MaybePresent<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -778,9 +890,9 @@ pub struct NormalizedBox {
 #[serde(rename_all = "camelCase")]
 pub struct PersonTrackStatus {
     pub sample_rate_fps: ContractNumber,
-    pub mask_state: String,
+    pub mask_state: PersonTrackMaskState,
     pub average_confidence: ContractNumber,
-    pub correction_state: String,
+    pub correction_state: PersonTrackCorrectionState,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

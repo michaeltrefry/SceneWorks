@@ -378,6 +378,13 @@ def test_resource_sidecar_fixtures_match_live_writer_shapes(tmp_path):
         assert set(sidecar["requiredTopLevelKeys"]).issubset(fixture_payload.keys()), sidecar["name"]
         if sidecar["name"] in live_payloads:
             assert set(sidecar["requiredTopLevelKeys"]).issubset(live_payloads[sidecar["name"]].keys()), sidecar["name"]
+        if sidecar["name"] == "personTrack":
+            assert "timestamp" in fixture_payload["frames"][0]
+            assert "time" not in fixture_payload["frames"][0]
+            assert "mask" in fixture_payload["frames"][0]
+            assert "timestamp" in live_payloads["personTrack"]["frames"][0]
+            assert "time" not in live_payloads["personTrack"]["frames"][0]
+            assert "mask" in live_payloads["personTrack"]["frames"][0]
 
 
 def test_security_behavior_fixture_matches_python_files_endpoint(tmp_path):

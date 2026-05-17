@@ -14,9 +14,10 @@
   },
   "frames": [
     {
-      "time": 0,
+      "timestamp": 0,
       "box": { "x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6 },
-      "confidence": 0.92
+      "confidence": 0.92,
+      "mask": null
     }
   ],
   "corrections": [],
@@ -54,4 +55,3 @@
     "parents": ["asset_source_clip", "asset_frame_fixture"]
   }
 }
-

@@ -12,6 +12,7 @@
     "rust:fmt": "cargo fmt --all -- --check",
     "rust:lint": "cargo clippy --workspace --all-targets -- -D warnings",
     "rust:test": "cargo test --workspace",
+    "rust:test:python-live": "cargo test -p sceneworks-core --features python-live --test python_live_contracts",
     "rust:build": "cargo build --workspace",
     "rust:check": "npm run rust:fmt && npm run rust:lint && npm run rust:test && npm run rust:build"
   },
