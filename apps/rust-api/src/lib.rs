@@ -15,8 +15,9 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
-    ClaimRequest, ClaimResponse, DuplicateJobRequest, JobCreateRequest, JobSnapshot,
-    ProgressRequest, QueueSummary, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot,
+    ClaimRequest, ClaimResponse, DuplicateJobRequest, JobCreateRequest, JobSnapshot, JobType,
+    JsonObject, ProgressRequest, QueueSummary, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    WorkerSnapshot,
 };
 use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
@@ -26,7 +27,7 @@ use sceneworks_core::project_store::{
     AssetStatusPatch, ProjectStore, ProjectStoreError, UploadAsset,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -256,6 +257,24 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/projects/:project_id/files/*relative_path",
             get(get_project_file),
         )
+        .route(
+            "/api/v1/projects/:project_id/timelines",
+            get(list_timelines).post(create_timeline),
+        )
+        .route(
+            "/api/v1/projects/:project_id/timelines/:timeline_id",
+            get(get_timeline).put(update_timeline),
+        )
+        .route(
+            "/api/v1/projects/:project_id/timelines/:timeline_id/exports",
+            post(create_timeline_export),
+        )
+        .route(
+            "/api/v1/projects/:project_id/timelines/:timeline_id/items/:item_id/frames",
+            post(extract_timeline_frame),
+        )
+        .route("/api/v1/image/jobs", post(create_image_job))
+        .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
         .route("/api/v1/jobs/events", get(job_events))
@@ -334,6 +353,130 @@ struct VerifyResponse {
 #[derive(Debug, Deserialize)]
 struct ProjectCreateRequest {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineCreateRequest {
+    #[serde(default = "default_timeline_name")]
+    name: String,
+    #[serde(default = "default_aspect_ratio")]
+    aspect_ratio: String,
+    #[serde(default = "default_timeline_fps")]
+    fps: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineSaveRequest {
+    timeline: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineExportRequest {
+    #[serde(default = "default_export_resolution")]
+    resolution: u32,
+    #[serde(default = "default_timeline_fps")]
+    fps: u32,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameExtractRequest {
+    playhead_seconds: f64,
+    #[serde(default = "default_frame_intended_use")]
+    intended_use: String,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageJobRequest {
+    project_id: String,
+    #[serde(default)]
+    project_name: Option<String>,
+    #[serde(default = "default_image_mode")]
+    mode: String,
+    prompt: String,
+    #[serde(default)]
+    negative_prompt: String,
+    #[serde(default = "default_image_model")]
+    model: String,
+    #[serde(default = "default_image_count")]
+    count: u32,
+    #[serde(default)]
+    seed: Option<u32>,
+    #[serde(default = "default_image_size")]
+    width: u32,
+    #[serde(default = "default_image_size")]
+    height: u32,
+    #[serde(default = "default_style_preset")]
+    style_preset: String,
+    #[serde(default)]
+    loras: Vec<Value>,
+    #[serde(default)]
+    character_id: Option<String>,
+    #[serde(default)]
+    character_look_id: Option<String>,
+    #[serde(default)]
+    source_asset_id: Option<String>,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+    #[serde(default)]
+    advanced: JsonObject,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoJobRequest {
+    project_id: String,
+    #[serde(default)]
+    project_name: Option<String>,
+    #[serde(default = "default_video_mode")]
+    mode: String,
+    prompt: String,
+    #[serde(default)]
+    negative_prompt: String,
+    #[serde(default = "default_video_model")]
+    model: String,
+    #[serde(default = "default_video_duration")]
+    duration: f64,
+    #[serde(default = "default_video_fps")]
+    fps: u32,
+    #[serde(default = "default_video_width")]
+    width: u32,
+    #[serde(default = "default_video_height")]
+    height: u32,
+    #[serde(default = "default_video_quality")]
+    quality: String,
+    #[serde(default)]
+    seed: Option<u32>,
+    #[serde(default)]
+    loras: Vec<Value>,
+    #[serde(default)]
+    character_id: Option<String>,
+    #[serde(default)]
+    character_look_id: Option<String>,
+    #[serde(default)]
+    person_track_id: Option<String>,
+    #[serde(default = "default_replacement_mode")]
+    replacement_mode: String,
+    #[serde(default)]
+    source_asset_id: Option<String>,
+    #[serde(default)]
+    last_frame_asset_id: Option<String>,
+    #[serde(default)]
+    source_clip_asset_id: Option<String>,
+    #[serde(default)]
+    bridge_right_clip_asset_id: Option<String>,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+    #[serde(default)]
+    advanced: JsonObject,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -554,6 +697,217 @@ async fn get_project_file(
         Body::from_stream(stream),
     )
         .into_response())
+}
+
+async fn list_timelines(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<Vec<sceneworks_core::project_store::TimelineSummary>>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| store.list_timelines(&project_id)).await?,
+    ))
+}
+
+async fn create_timeline(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Json(payload): Json<TimelineCreateRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let timeline = project_call(state, move |store| {
+        store.create_timeline(
+            &project_id,
+            &payload.name,
+            &payload.aspect_ratio,
+            payload.fps,
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(timeline)))
+}
+
+async fn get_timeline(
+    State(state): State<AppState>,
+    Path((project_id, timeline_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.get_timeline(&project_id, &timeline_id)
+        })
+        .await?,
+    ))
+}
+
+async fn update_timeline(
+    State(state): State<AppState>,
+    Path((project_id, timeline_id)): Path<(String, String)>,
+    Json(payload): Json<TimelineSaveRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.save_existing_timeline(&project_id, &timeline_id, payload.timeline)
+        })
+        .await?,
+    ))
+}
+
+async fn create_timeline_export(
+    State(state): State<AppState>,
+    Path((project_id, timeline_id)): Path<(String, String)>,
+    Json(payload): Json<TimelineExportRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_timeline_export(&payload)?;
+    let timeline_file = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let timeline_id = timeline_id.clone();
+        move |store| store.timeline_file(&project_id, &timeline_id)
+    })
+    .await?;
+    let timeline = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let timeline_id = timeline_id.clone();
+        move |store| store.get_timeline(&project_id, &timeline_id)
+    })
+    .await?;
+    let timeline_name = timeline
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Timeline")
+        .to_owned();
+    let mut job_payload = JsonObject::new();
+    job_payload.insert("projectId".to_owned(), Value::String(project_id.clone()));
+    job_payload.insert("timelineId".to_owned(), Value::String(timeline_id));
+    job_payload.insert("timelineName".to_owned(), Value::String(timeline_name));
+    job_payload.insert(
+        "timelinePath".to_owned(),
+        Value::String(timeline_file.relative_path),
+    );
+    job_payload.insert("resolution".to_owned(), json!(payload.resolution));
+    job_payload.insert("fps".to_owned(), json!(payload.fps));
+    let job = create_generation_job(
+        state,
+        JobType::TimelineExport,
+        Some(project_id),
+        None,
+        job_payload,
+        payload.requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn extract_timeline_frame(
+    State(state): State<AppState>,
+    Path((project_id, timeline_id, item_id)): Path<(String, String, String)>,
+    Json(payload): Json<FrameExtractRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_frame_extract(&payload)?;
+    let timeline_file = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let timeline_id = timeline_id.clone();
+        move |store| store.timeline_file(&project_id, &timeline_id)
+    })
+    .await?;
+    let timeline = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let timeline_id = timeline_id.clone();
+        move |store| store.get_timeline(&project_id, &timeline_id)
+    })
+    .await?;
+    let item = find_timeline_item(&timeline, &item_id)?;
+    let source_asset_id = required_string_field(item, "assetId")?.to_owned();
+    let timestamp = source_timestamp_for_item(item, payload.playhead_seconds)?;
+    let timeline_name = timeline
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Timeline")
+        .to_owned();
+    let mut job_payload = JsonObject::new();
+    job_payload.insert("projectId".to_owned(), Value::String(project_id.clone()));
+    job_payload.insert("timelineId".to_owned(), Value::String(timeline_id));
+    job_payload.insert("timelineName".to_owned(), Value::String(timeline_name));
+    job_payload.insert(
+        "timelinePath".to_owned(),
+        Value::String(timeline_file.relative_path),
+    );
+    job_payload.insert("timelineItemId".to_owned(), Value::String(item_id));
+    job_payload.insert("sourceAssetId".to_owned(), Value::String(source_asset_id));
+    job_payload.insert("sourceTimestamp".to_owned(), json!(timestamp));
+    job_payload.insert(
+        "playheadSeconds".to_owned(),
+        json!(payload.playhead_seconds),
+    );
+    job_payload.insert(
+        "intendedUse".to_owned(),
+        Value::String(payload.intended_use),
+    );
+    let job = create_generation_job(
+        state,
+        JobType::FrameExtract,
+        Some(project_id),
+        None,
+        job_payload,
+        payload.requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn create_image_job(
+    State(state): State<AppState>,
+    Json(payload): Json<ImageJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_image_job(&payload)?;
+    let job_type = if payload.mode == "edit_image" {
+        JobType::ImageEdit
+    } else {
+        JobType::ImageGenerate
+    };
+    let requested_gpu = payload.requested_gpu.clone();
+    let project_id = Some(payload.project_id.clone());
+    let project_name = payload.project_name.clone();
+    let mut job_payload = to_json_object(&payload)?;
+    job_payload.remove("requestedGpu");
+    if payload.seed.is_none() {
+        job_payload.insert("seeds".to_owned(), random_image_seeds(payload.count));
+    }
+    let job = create_generation_job(
+        state,
+        job_type,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn create_video_job(
+    State(state): State<AppState>,
+    Json(payload): Json<VideoJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_video_job(&payload)?;
+    let job_type = match payload.mode.as_str() {
+        "extend_clip" => JobType::VideoExtend,
+        "video_bridge" => JobType::VideoBridge,
+        "replace_person" => JobType::PersonReplace,
+        _ => JobType::VideoGenerate,
+    };
+    let requested_gpu = payload.requested_gpu.clone();
+    let project_id = Some(payload.project_id.clone());
+    let project_name = payload.project_name.clone();
+    let mut job_payload = to_json_object(&payload)?;
+    job_payload.remove("requestedGpu");
+    let job = create_generation_job(
+        state,
+        job_type,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
 }
 
 async fn route_not_found(request: Request<axum::body::Body>) -> Response {
@@ -921,6 +1275,32 @@ async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiErro
     .await
 }
 
+async fn create_generation_job(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    payload: JsonObject,
+    requested_gpu: String,
+) -> Result<JobSnapshot, ApiError> {
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type,
+            project_id,
+            project_name,
+            payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok(job)
+}
+
 async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
     let queue = queue_summary_snapshot(state.clone()).await?;
     publish(state, "queue.updated", &queue);
@@ -948,6 +1328,275 @@ fn optional_number_to_f64(
     field: &'static str,
 ) -> Result<Option<f64>, ApiError> {
     number.map(|value| number_to_f64(value, field)).transpose()
+}
+
+fn validate_timeline_export(payload: &TimelineExportRequest) -> Result<(), ApiError> {
+    if ![640, 720, 1024, 1280].contains(&payload.resolution) {
+        return Err(ApiError::bad_request(
+            "Resolution must be one of 640, 720, 1024, or 1280.",
+        ));
+    }
+    if !(1..=60).contains(&payload.fps) {
+        return Err(ApiError::bad_request("FPS must be between 1 and 60"));
+    }
+    Ok(())
+}
+
+fn validate_frame_extract(payload: &FrameExtractRequest) -> Result<(), ApiError> {
+    if payload.playhead_seconds < 0.0 {
+        return Err(ApiError::bad_request(
+            "playheadSeconds must be greater than or equal to 0",
+        ));
+    }
+    if ![
+        "reuse",
+        "first_frame",
+        "last_frame",
+        "video_studio",
+        "image_studio",
+        "bridge",
+        "extension",
+    ]
+    .contains(&payload.intended_use.as_str())
+    {
+        return Err(ApiError::bad_request("Unsupported intendedUse"));
+    }
+    Ok(())
+}
+
+fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
+    if payload.project_id.trim().is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > 4000 {
+        return Err(ApiError::bad_request(
+            "prompt must be between 1 and 4000 characters",
+        ));
+    }
+    if ![
+        "text_to_image",
+        "edit_image",
+        "character_image",
+        "style_variations",
+    ]
+    .contains(&payload.mode.as_str())
+    {
+        return Err(ApiError::bad_request("Unsupported image mode"));
+    }
+    if !(1..=8).contains(&payload.count) {
+        return Err(ApiError::bad_request("count must be between 1 and 8"));
+    }
+    validate_dimension(payload.width, "width", 2048)?;
+    validate_dimension(payload.height, "height", 2048)?;
+    Ok(())
+}
+
+fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
+    if payload.project_id.trim().is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > 4000 {
+        return Err(ApiError::bad_request(
+            "prompt must be between 1 and 4000 characters",
+        ));
+    }
+    if ![
+        "image_to_video",
+        "text_to_video",
+        "first_last_frame",
+        "extend_clip",
+        "video_bridge",
+        "replace_person",
+    ]
+    .contains(&payload.mode.as_str())
+    {
+        return Err(ApiError::bad_request("Unsupported video mode"));
+    }
+    if !(1.0..=30.0).contains(&payload.duration) {
+        return Err(ApiError::bad_request("duration must be between 1 and 30"));
+    }
+    if !(1..=60).contains(&payload.fps) {
+        return Err(ApiError::bad_request("fps must be between 1 and 60"));
+    }
+    validate_dimension(payload.width, "width", 1920)?;
+    validate_dimension(payload.height, "height", 1920)?;
+    match payload.mode.as_str() {
+        "image_to_video" if payload.source_asset_id.is_none() => Err(ApiError::bad_request(
+            "Image to Video requires a source image.",
+        )),
+        "first_last_frame"
+            if payload.source_asset_id.is_none() || payload.last_frame_asset_id.is_none() =>
+        {
+            Err(ApiError::bad_request(
+                "First/Last Frame requires first and last image assets.",
+            ))
+        }
+        "extend_clip" if payload.source_clip_asset_id.is_none() => {
+            Err(ApiError::bad_request("Extend Clip requires a source clip."))
+        }
+        "video_bridge"
+            if payload.source_clip_asset_id.is_none()
+                || payload.bridge_right_clip_asset_id.is_none() =>
+        {
+            Err(ApiError::bad_request(
+                "Bridge generation requires left and right source clips.",
+            ))
+        }
+        "replace_person" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
+            "Replace Person requires a source clip.",
+        )),
+        "replace_person" if payload.person_track_id.is_none() => Err(ApiError::bad_request(
+            "Replace Person requires a selected person track.",
+        )),
+        "replace_person" if payload.character_id.is_none() => Err(ApiError::bad_request(
+            "Replace Person requires a Character.",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
+    if !(256..=max).contains(&value) {
+        return Err(ApiError::bad_request(format!(
+            "{field} must be between 256 and {max}"
+        )));
+    }
+    Ok(())
+}
+
+fn to_json_object<T: Serialize>(payload: &T) -> Result<JsonObject, ApiError> {
+    serde_json::to_value(payload)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| ApiError::internal("Serialized payload was not an object"))
+}
+
+fn random_image_seeds(count: u32) -> Value {
+    Value::Array(
+        (0..count)
+            .map(|_| {
+                let bytes = *Uuid::new_v4().as_bytes();
+                Value::Number(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]).into())
+            })
+            .collect(),
+    )
+}
+
+fn find_timeline_item<'a>(timeline: &'a Value, item_id: &str) -> Result<&'a Value, ApiError> {
+    timeline
+        .get("tracks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|track| track.get("items").and_then(Value::as_array))
+        .flatten()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(item_id))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "Timeline item not found".to_owned(),
+        })
+}
+
+fn source_timestamp_for_item(item: &Value, playhead_seconds: f64) -> Result<f64, ApiError> {
+    let timeline_start = optional_f64_field(item, "timelineStart").unwrap_or(0.0);
+    let timeline_end = optional_f64_field(item, "timelineEnd").unwrap_or(4.0);
+    let source_in = optional_f64_field(item, "sourceIn").unwrap_or(0.0);
+    let speed = optional_f64_field(item, "speed").unwrap_or(1.0);
+    if timeline_end <= timeline_start {
+        return Err(ApiError::bad_request(
+            "timelineEnd must be greater than timelineStart.",
+        ));
+    }
+    let clamped = playhead_seconds.clamp(timeline_start, timeline_end);
+    Ok(source_in + ((clamped - timeline_start) * speed))
+}
+
+fn required_string_field<'a>(payload: &'a Value, field: &str) -> Result<&'a str, ApiError> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request(format!("Missing required field: {field}")))
+}
+
+fn optional_f64_field(payload: &Value, field: &str) -> Option<f64> {
+    payload.get(field).and_then(Value::as_f64)
+}
+
+fn default_timeline_name() -> String {
+    "Main timeline".to_owned()
+}
+
+fn default_aspect_ratio() -> String {
+    "16:9".to_owned()
+}
+
+fn default_timeline_fps() -> u32 {
+    30
+}
+
+fn default_export_resolution() -> u32 {
+    720
+}
+
+fn default_frame_intended_use() -> String {
+    "reuse".to_owned()
+}
+
+fn default_requested_gpu() -> String {
+    "auto".to_owned()
+}
+
+fn default_image_mode() -> String {
+    "text_to_image".to_owned()
+}
+
+fn default_image_model() -> String {
+    "z_image_turbo".to_owned()
+}
+
+fn default_image_count() -> u32 {
+    4
+}
+
+fn default_image_size() -> u32 {
+    1024
+}
+
+fn default_style_preset() -> String {
+    "cinematic".to_owned()
+}
+
+fn default_video_mode() -> String {
+    "image_to_video".to_owned()
+}
+
+fn default_video_model() -> String {
+    "ltx_2_3".to_owned()
+}
+
+fn default_video_duration() -> f64 {
+    6.0
+}
+
+fn default_video_fps() -> u32 {
+    25
+}
+
+fn default_video_width() -> u32 {
+    768
+}
+
+fn default_video_height() -> u32 {
+    512
+}
+
+fn default_video_quality() -> String {
+    "balanced".to_owned()
+}
+
+fn default_replacement_mode() -> String {
+    "face_only".to_owned()
 }
 
 fn env_string(name: &str, default: &str) -> String {
@@ -1355,6 +2004,178 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(purged, json!({ "id": asset_id, "status": "purged" }));
+    }
+
+    #[tokio::test]
+    async fn timeline_routes_persist_and_create_worker_jobs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, created_project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Timeline Project" }),
+        )
+        .await;
+        let project_id = created_project["id"]
+            .as_str()
+            .expect("project id")
+            .to_owned();
+
+        let (status, mut timeline) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/timelines"),
+            json!({ "name": "Main timeline", "aspectRatio": "16:9", "fps": 30 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(timeline["projectId"], project_id);
+        assert_eq!(timeline["tracks"].as_array().unwrap().len(), 3);
+
+        let timeline_id = timeline["id"].as_str().expect("timeline id").to_owned();
+        timeline["tracks"][0]["items"] = json!([
+            {
+                "id": "item-1",
+                "trackId": "track_main",
+                "assetId": "asset-1",
+                "type": "video",
+                "displayName": "Clip",
+                "sourceIn": 2,
+                "sourceOut": 6,
+                "timelineStart": 10,
+                "timelineEnd": 14,
+                "speed": 1,
+                "fit": "fit",
+                "volume": 1
+            }
+        ]);
+        let (status, saved) = request(
+            app.clone(),
+            "PUT",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+            json!({ "timeline": timeline }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["duration"].as_f64(), Some(14.0));
+        assert_eq!(
+            saved["tracks"][0]["items"][0]["currentVersionAssetId"],
+            "asset-1"
+        );
+        assert_eq!(
+            saved["tracks"][0]["items"][0]["versionHistory"][0]["source"],
+            "original"
+        );
+
+        let (status, timelines) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/timelines"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(timelines[0]["id"], timeline_id);
+        assert_eq!(
+            timelines[0]["filePath"],
+            format!(
+                "timelines/main-timeline-{}.sceneworks.timeline.json",
+                &timeline_id[timeline_id.len() - 8..]
+            )
+        );
+
+        let (status, export_job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}/exports"),
+            json!({ "resolution": 720, "fps": 30, "requestedGpu": "auto" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(export_job["type"], "timeline_export");
+        assert_eq!(export_job["payload"]["timelineId"], timeline_id);
+
+        let (status, frame_job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}/items/item-1/frames"),
+            json!({ "playheadSeconds": 12.5, "intendedUse": "first_frame" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(frame_job["type"], "frame_extract");
+        assert_eq!(frame_job["payload"]["sourceAssetId"], "asset-1");
+        assert_eq!(frame_job["payload"]["sourceTimestamp"], 4.5);
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 2);
+    }
+
+    #[tokio::test]
+    async fn image_and_video_job_routes_normalize_payloads() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, image_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "projectName": "Project 1",
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "count": 2
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(image_job["type"], "image_generate");
+        assert_eq!(image_job["projectId"], "project-1");
+        assert!(image_job["payload"].get("requestedGpu").is_none());
+        assert_eq!(image_job["payload"]["seed"], Value::Null);
+        assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 2);
+
+        let (status, edit_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "mode": "edit_image",
+                "prompt": "make it dusk",
+                "sourceAssetId": "asset-1",
+                "seed": 42
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(edit_job["type"], "image_edit");
+        assert!(edit_job["payload"].get("seeds").is_none());
+
+        let (status, video_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "mode": "replace_person",
+                "prompt": "hero walks through rain",
+                "sourceClipAssetId": "asset-video",
+                "personTrackId": "track-1",
+                "characterId": "character-1"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(video_job["type"], "person_replace");
+        assert!(video_job["payload"].get("requestedGpu").is_none());
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 3);
     }
 
     #[tokio::test]

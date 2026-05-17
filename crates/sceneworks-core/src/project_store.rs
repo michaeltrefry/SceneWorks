@@ -93,6 +93,27 @@ pub struct ReindexResult {
     pub timelines: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSummary {
+    pub id: String,
+    pub name: String,
+    pub file_path: String,
+    pub aspect_ratio: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub duration: f64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineFile {
+    pub path: PathBuf,
+    pub relative_path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetMutationResult {
     pub id: String,
@@ -237,6 +258,155 @@ impl ProjectStore {
             generation_sets: counts.generation_sets,
             timelines: counts.timelines,
         })
+    }
+
+    pub fn list_timelines(&self, project_id: &str) -> ProjectStoreResult<Vec<TimelineSummary>> {
+        let project_path = self.find_project_path(project_id)?;
+        ensure_project_db_ready(&project_path)?;
+        let connection = connect_project_db(&project_path)?;
+        let mut statement = connection.prepare(
+            "
+            select id, name, file_path, aspect_ratio, width, height, fps, duration, created_at, updated_at
+              from timelines
+             order by updated_at desc
+            ",
+        )?;
+        let timelines = statement
+            .query_map([], |row| {
+                Ok(TimelineSummary {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    file_path: row.get(2)?,
+                    aspect_ratio: row.get(3)?,
+                    width: row.get(4)?,
+                    height: row.get(5)?,
+                    fps: row.get(6)?,
+                    duration: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProjectStoreError::from)?;
+        Ok(timelines)
+    }
+
+    pub fn create_timeline(
+        &self,
+        project_id: &str,
+        name: &str,
+        aspect_ratio: &str,
+        fps: u32,
+    ) -> ProjectStoreResult<Value> {
+        if name.trim().is_empty() {
+            return Err(ProjectStoreError::BadRequest(
+                "Timeline name is required".to_owned(),
+            ));
+        }
+        if name.chars().count() > 120 {
+            return Err(ProjectStoreError::BadRequest(
+                "Timeline name must be at most 120 characters".to_owned(),
+            ));
+        }
+        if !(1..=60).contains(&fps) {
+            return Err(ProjectStoreError::BadRequest(
+                "FPS must be between 1 and 60".to_owned(),
+            ));
+        }
+        let (width, height) = timeline_dimensions(aspect_ratio)?;
+        let timeline = json!({
+            "schemaVersion": 1,
+            "id": format!("timeline_{}", random_hex(16)?),
+            "projectId": project_id,
+            "name": name,
+            "aspectRatio": aspect_ratio,
+            "width": width,
+            "height": height,
+            "fps": fps,
+            "duration": 0.0,
+            "tracks": default_timeline_tracks(),
+            "transitions": [],
+            "createdAt": Value::Null,
+            "updatedAt": Value::Null,
+        });
+        self.save_timeline(project_id, timeline)
+    }
+
+    pub fn get_timeline(&self, project_id: &str, timeline_id: &str) -> ProjectStoreResult<Value> {
+        let project_path = self.find_project_path(project_id)?;
+        let timeline_file = find_timeline_file(&project_path, timeline_id)?;
+        read_json(&timeline_file.path)
+    }
+
+    pub fn save_timeline(
+        &self,
+        project_id: &str,
+        mut timeline: Value,
+    ) -> ProjectStoreResult<Value> {
+        let project_path = self.find_project_path(project_id)?;
+        let timeline_id = required_str(&timeline, "id")?.to_owned();
+        let timeline_project_id = required_str(&timeline, "projectId")?;
+        if timeline_project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Project ID mismatch".to_owned(),
+            ));
+        }
+        let name = required_str(&timeline, "name")?.to_owned();
+        if name.trim().is_empty() {
+            return Err(ProjectStoreError::BadRequest(
+                "Timeline name is required".to_owned(),
+            ));
+        }
+        let now = utc_now();
+        let duration = compute_timeline_duration(&timeline);
+        let object = timeline.as_object_mut().ok_or_else(|| {
+            ProjectStoreError::BadRequest("Timeline must be an object".to_owned())
+        })?;
+        if !object.contains_key("createdAt") || object.get("createdAt") == Some(&Value::Null) {
+            object.insert("createdAt".to_owned(), Value::String(now.clone()));
+        }
+        object.insert("updatedAt".to_owned(), Value::String(now));
+        object.insert("duration".to_owned(), json!(duration));
+        if !object
+            .get("tracks")
+            .and_then(Value::as_array)
+            .is_some_and(|tracks| !tracks.is_empty())
+        {
+            object.insert("tracks".to_owned(), default_timeline_tracks());
+        }
+        object
+            .entry("transitions".to_owned())
+            .or_insert_with(|| json!([]));
+        normalize_timeline_items(&mut timeline);
+
+        let path = timeline_file_path(&project_path, &timeline_id, &name);
+        let rel_path = relative_string(&project_path, &path)?;
+        write_json(&path, &timeline)?;
+        index_timeline(&project_path, &timeline, &rel_path)?;
+        Ok(timeline)
+    }
+
+    pub fn save_existing_timeline(
+        &self,
+        project_id: &str,
+        timeline_id: &str,
+        timeline: Value,
+    ) -> ProjectStoreResult<Value> {
+        if required_str(&timeline, "id")? != timeline_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Timeline ID mismatch".to_owned(),
+            ));
+        }
+        self.save_timeline(project_id, timeline)
+    }
+
+    pub fn timeline_file(
+        &self,
+        project_id: &str,
+        timeline_id: &str,
+    ) -> ProjectStoreResult<TimelineFile> {
+        let project_path = self.find_project_path(project_id)?;
+        find_timeline_file(&project_path, timeline_id)
     }
 
     pub fn list_assets(
@@ -782,6 +952,187 @@ fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts
 
     transaction.commit()?;
     Ok(counts)
+}
+
+fn timeline_dimensions(aspect_ratio: &str) -> ProjectStoreResult<(u32, u32)> {
+    match aspect_ratio {
+        "16:9" => Ok((1280, 720)),
+        "9:16" => Ok((720, 1280)),
+        "1:1" => Ok((1024, 1024)),
+        _ => Err(ProjectStoreError::BadRequest(
+            "Aspect ratio must be one of 16:9, 9:16, or 1:1".to_owned(),
+        )),
+    }
+}
+
+fn default_timeline_tracks() -> Value {
+    json!([
+        {"id": "track_main", "name": "Main", "kind": "video", "locked": false, "muted": false, "items": []},
+        {"id": "track_overlay", "name": "Overlay", "kind": "overlay", "locked": false, "muted": false, "items": []},
+        {"id": "track_audio", "name": "Audio", "kind": "audio", "locked": false, "muted": false, "items": []}
+    ])
+}
+
+fn compute_timeline_duration(timeline: &Value) -> f64 {
+    timeline
+        .get("tracks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|track| track.get("items").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|item| item.get("timelineEnd").and_then(Value::as_f64))
+        .fold(0.0, f64::max)
+}
+
+fn normalize_timeline_items(timeline: &mut Value) {
+    let Some(tracks) = timeline.get_mut("tracks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for track in tracks {
+        let Some(items) = track.get_mut("items").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            let Some(object) = item.as_object_mut() else {
+                continue;
+            };
+            let Some(asset_id) = object
+                .get("assetId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            object
+                .entry("currentVersionAssetId".to_owned())
+                .or_insert_with(|| Value::String(asset_id.clone()));
+            let version_ids = object
+                .entry("versionAssetIds".to_owned())
+                .or_insert_with(|| json!([]));
+            if let Some(version_ids) = version_ids.as_array_mut() {
+                let has_asset = version_ids
+                    .iter()
+                    .any(|value| value.as_str() == Some(&asset_id));
+                if !has_asset {
+                    version_ids.push(Value::String(asset_id.clone()));
+                }
+            }
+            let needs_history = object
+                .get("versionHistory")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty);
+            if needs_history {
+                object.insert(
+                    "versionHistory".to_owned(),
+                    json!([{
+                        "assetId": asset_id,
+                        "createdAt": Value::Null,
+                        "source": "original",
+                        "jobId": Value::Null,
+                        "note": Value::Null
+                    }]),
+                );
+            }
+        }
+    }
+}
+
+fn timeline_file_path(project_path: &Path, timeline_id: &str, name: &str) -> PathBuf {
+    let suffix = timeline_id
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    project_path.join("timelines").join(format!(
+        "{}-{suffix}.sceneworks.timeline.json",
+        slugify(name, "timeline", Some(48))
+    ))
+}
+
+fn index_timeline(project_path: &Path, timeline: &Value, rel_path: &str) -> ProjectStoreResult<()> {
+    let mut connection = connect_project_db(project_path)?;
+    let transaction = connection.transaction()?;
+    apply_project_migrations(&transaction)?;
+    transaction.execute(
+        "
+        insert or replace into timelines (
+          id, name, file_path, aspect_ratio, width, height, fps, duration, created_at, updated_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ",
+        params![
+            required_str(timeline, "id")?,
+            optional_str(timeline, "name").unwrap_or("Timeline"),
+            rel_path,
+            optional_str(timeline, "aspectRatio").unwrap_or("16:9"),
+            optional_u64(timeline, "width").unwrap_or(1280),
+            optional_u64(timeline, "height").unwrap_or(720),
+            optional_u64(timeline, "fps").unwrap_or(30),
+            optional_f64(timeline, "duration").unwrap_or(0.0),
+            optional_str(timeline, "createdAt").unwrap_or(""),
+            optional_str(timeline, "updatedAt")
+                .or_else(|| optional_str(timeline, "createdAt"))
+                .unwrap_or(""),
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn find_timeline_file(project_path: &Path, timeline_id: &str) -> ProjectStoreResult<TimelineFile> {
+    ensure_project_db_ready(project_path)?;
+    let connection = connect_project_db(project_path)?;
+    let indexed_path = connection
+        .query_row(
+            "select file_path from timelines where id = ?1",
+            params![timeline_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(indexed_path) = indexed_path.as_deref() {
+        let path = project_path.join(indexed_path);
+        if path.exists() {
+            return Ok(TimelineFile {
+                path,
+                relative_path: indexed_path.to_owned(),
+            });
+        }
+    }
+
+    let timeline_dir = project_path.join("timelines");
+    for candidate in read_dir_paths(&timeline_dir)? {
+        if !candidate
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(".sceneworks.timeline.json"))
+        {
+            continue;
+        }
+        let Ok(timeline) = read_json(&candidate) else {
+            continue;
+        };
+        if timeline.get("id").and_then(Value::as_str) == Some(timeline_id) {
+            let rel_path = relative_string(project_path, &candidate)?;
+            connection.execute(
+                "update timelines set file_path = ?1 where id = ?2",
+                params![rel_path, timeline_id],
+            )?;
+            return Ok(TimelineFile {
+                path: candidate,
+                relative_path: rel_path,
+            });
+        }
+    }
+
+    if let Some(indexed_path) = indexed_path {
+        return Err(ProjectStoreError::NotFound(format!(
+            "Timeline file not found at indexed path {indexed_path}; reindex required"
+        )));
+    }
+    Err(ProjectStoreError::NotFound("Timeline not found".to_owned()))
 }
 
 fn read_project_summary(project_path: &Path) -> ProjectStoreResult<ProjectSummary> {
