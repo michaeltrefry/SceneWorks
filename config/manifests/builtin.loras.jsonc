@@ -1,5 +1,34 @@
 {
   "$schema": "../../packages/schemas/lora-manifest.schema.json",
   "schemaVersion": 1,
-  "loras": []
+  "loras": [
+    {
+      "id": "cinematic_detail_global",
+      "name": "Cinematic Detail",
+      "scope": "global",
+      "category": "enhance",
+      "compatibleFamilies": ["ltx", "qwen"],
+      "path": "loras/global/cinematic_detail.safetensors",
+      "triggerWords": [],
+      "defaultWeight": 0.6,
+      "builtIn": true,
+      "ui": {
+        "description": "A trusted built-in enhancement slot for sharper cinematic detail."
+      }
+    },
+    {
+      "id": "portrait_consistency_global",
+      "name": "Portrait Consistency",
+      "scope": "global",
+      "category": "character",
+      "compatibleFamilies": ["qwen"],
+      "path": "loras/global/portrait_consistency.safetensors",
+      "triggerWords": ["portrait consistency"],
+      "defaultWeight": 0.75,
+      "builtIn": true,
+      "ui": {
+        "description": "A trusted built-in character-style LoRA slot for image workflows."
+      }
+    }
+  ]
 }

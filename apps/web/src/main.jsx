@@ -4,7 +4,7 @@ import "./styles.css";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
-const navItems = ["Library", "Image", "Video", "Characters", "Editor", "Queue"];
+const navItems = ["Library", "Image", "Video", "Models", "Characters", "Editor", "Queue"];
 const terminalStatuses = new Set(["completed", "failed", "canceled", "interrupted"]);
 const actionStatuses = new Set(["failed", "canceled", "interrupted", "completed"]);
 
@@ -12,6 +12,7 @@ const placeholders = {
   Library: ["Project assets", "Imported and generated media"],
   Image: ["Image Studio", "Text, edit, character, variations"],
   Video: ["Video Studio", "Short generated shots"],
+  Models: ["Model Manager", "Models and LoRAs"],
   Characters: ["Character Studio", "Reusable identities"],
   Editor: ["Editor", "Timeline assembly"],
 };
@@ -56,6 +57,10 @@ function percent(value) {
   return `${Math.round((value ?? 0) * 100)}%`;
 }
 
+function modelStatusLabel(status) {
+  return status === "downloadable" ? "Downloadable" : status;
+}
+
 function App() {
   const [health, setHealth] = useState(null);
   const [access, setAccess] = useState({ authRequired: false });
@@ -66,6 +71,14 @@ function App() {
   const [projectName, setProjectName] = useState("");
   const [jobs, setJobs] = useState([]);
   const [workers, setWorkers] = useState([]);
+  const [modelManager, setModelManager] = useState({ models: [], storage: null });
+  const [loras, setLoras] = useState([]);
+  const [selectedModelId, setSelectedModelId] = useState("");
+  const [showAdvancedLoras, setShowAdvancedLoras] = useState(false);
+  const [importPath, setImportPath] = useState("");
+  const [importCategory, setImportCategory] = useState("style");
+  const [importFamilies, setImportFamilies] = useState("");
+  const [importScope, setImportScope] = useState("global");
   const [projectFilter, setProjectFilter] = useState("all");
   const [requestedGpu, setRequestedGpu] = useState("auto");
   const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
@@ -96,6 +109,9 @@ function App() {
     const ids = workers.map((worker) => worker.gpuId).filter(Boolean);
     return ["auto", ...Array.from(new Set(ids))];
   }, [workers]);
+  const selectedModel = useMemo(() => {
+    return modelManager.models.find((model) => model.id === selectedModelId) ?? modelManager.models[0] ?? null;
+  }, [modelManager.models, selectedModelId]);
 
   useEffect(() => {
     apiFetch("/api/v1/health", "")
@@ -138,20 +154,54 @@ function App() {
 
   async function refreshData() {
     try {
-      const [projectItems, jobItems, workerItems] = await Promise.all([
+      const [projectItems, jobItems, workerItems, modelItems] = await Promise.all([
         apiFetch("/api/v1/projects", token),
         apiFetch("/api/v1/jobs", token),
         apiFetch("/api/v1/workers", token),
+        apiFetch(`/api/v1/models${activeProject?.id ? `?projectId=${activeProject.id}` : ""}`, token),
       ]);
       setProjects(projectItems);
       setActiveProject((current) => current ?? projectItems[0] ?? null);
       setJobs(jobItems.sort(sortNewest));
       setWorkers(workerItems.sort(sortWorkers));
+      setModelManager(modelItems);
+      setSelectedModelId((current) => current || modelItems.models[0]?.id || "");
       setError("");
     } catch (err) {
       setError(err.message);
     }
   }
+
+  useEffect(() => {
+    if (!authenticated || !selectedModel) {
+      return;
+    }
+    const query = new URLSearchParams();
+    if (activeProject?.id) {
+      query.set("projectId", activeProject.id);
+    }
+    query.set("modelId", selectedModel.id);
+    if (showAdvancedLoras) {
+      query.set("includeUnknown", "true");
+      query.set("includeIncompatible", "true");
+    }
+    apiFetch(`/api/v1/loras?${query.toString()}`, token)
+      .then((payload) => setLoras(payload.loras))
+      .catch((err) => setError(err.message));
+  }, [activeProject?.id, authenticated, selectedModel?.id, showAdvancedLoras, token]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+    const query = activeProject?.id ? `?projectId=${activeProject.id}` : "";
+    apiFetch(`/api/v1/models${query}`, token)
+      .then((payload) => {
+        setModelManager(payload);
+        setSelectedModelId((current) => current || payload.models[0]?.id || "");
+      })
+      .catch((err) => setError(err.message));
+  }, [activeProject?.id, authenticated, token]);
 
   function saveToken(event) {
     event.preventDefault();
@@ -194,10 +244,56 @@ function App() {
           payload: {
             prompt: jobPrompt,
             createdFrom: activeView,
+            modelId: selectedModel?.id,
+            loras: loras
+              .filter((lora) => lora.compatibility === "compatible")
+              .slice(0, 2)
+              .map((lora) => ({ id: lora.id, weight: lora.defaultWeight })),
           },
         }),
       });
       setActiveView("Queue");
+      setError("");
+      refreshData();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function downloadModel(model) {
+    try {
+      await apiFetch(`/api/v1/models/${model.id}/download`, token, {
+        method: "POST",
+        body: JSON.stringify({ projectId: activeProject?.id ?? null }),
+      });
+      setActiveView("Queue");
+      setError("");
+      refreshData();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function importLora(event) {
+    event.preventDefault();
+    if (!importPath.trim()) {
+      return;
+    }
+    try {
+      await apiFetch("/api/v1/loras/import", token, {
+        method: "POST",
+        body: JSON.stringify({
+          path: importPath,
+          projectId: activeProject?.id ?? null,
+          scope: importScope,
+          category: importCategory,
+          compatibleFamilies: importFamilies
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        }),
+      });
+      setImportPath("");
       setError("");
       refreshData();
     } catch (err) {
@@ -339,6 +435,27 @@ function App() {
             setRequestedGpu={setRequestedGpu}
             workers={workers}
           />
+        ) : activeView === "Models" ? (
+          <ModelManager
+            activeProject={activeProject}
+            downloadModel={downloadModel}
+            importCategory={importCategory}
+            importFamilies={importFamilies}
+            importLora={importLora}
+            importPath={importPath}
+            importScope={importScope}
+            loras={loras}
+            modelManager={modelManager}
+            selectedModel={selectedModel}
+            selectedModelId={selectedModelId}
+            setImportCategory={setImportCategory}
+            setImportFamilies={setImportFamilies}
+            setImportPath={setImportPath}
+            setImportScope={setImportScope}
+            setSelectedModelId={setSelectedModelId}
+            setShowAdvancedLoras={setShowAdvancedLoras}
+            showAdvancedLoras={showAdvancedLoras}
+          />
         ) : (
           <section className="main-surface">
             <div className="section-heading">
@@ -358,6 +475,17 @@ function App() {
                 {gpuOptions.map((gpu) => (
                   <option key={gpu} value={gpu}>
                     {gpu === "auto" ? "Auto" : gpu}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Model"
+                onChange={(event) => setSelectedModelId(event.target.value)}
+                value={selectedModel?.id ?? ""}
+              >
+                {modelManager.models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
                   </option>
                 ))}
               </select>
@@ -381,6 +509,142 @@ function App() {
         )}
       </section>
     </main>
+  );
+}
+
+function ModelManager({
+  activeProject,
+  downloadModel,
+  importCategory,
+  importFamilies,
+  importLora,
+  importPath,
+  importScope,
+  loras,
+  modelManager,
+  selectedModel,
+  selectedModelId,
+  setImportCategory,
+  setImportFamilies,
+  setImportPath,
+  setImportScope,
+  setSelectedModelId,
+  setShowAdvancedLoras,
+  showAdvancedLoras,
+}) {
+  return (
+    <section className="main-surface model-surface">
+      <div className="model-header">
+        <div className="section-heading">
+          <p className="eyebrow">Manifest driven</p>
+          <h2>Model Manager</h2>
+        </div>
+        <div className="storage-strip">
+          <span>Models {modelManager.storage?.appManagedModels}</span>
+          <span>HF cache {modelManager.storage?.hfCache}</span>
+          <span>{modelManager.storage?.hfTokenConfigured ? "HF token configured" : "HF token optional"}</span>
+        </div>
+      </div>
+
+      <div className="model-grid">
+        {modelManager.models.map((model) => (
+          <article className={selectedModelId === model.id ? "model-card active" : "model-card"} key={model.id}>
+            <div className="model-card-main">
+              <div>
+                <p className="eyebrow">{model.family} / {model.type}</p>
+                <h3>{model.name}</h3>
+              </div>
+              <span className={`status-badge ${model.status}`}>{modelStatusLabel(model.status)}</span>
+            </div>
+            <p>{model.ui?.description ?? model.adapter}</p>
+            <div className="job-meta">
+              <span>{model.downloadSizeLabel ?? "Size unknown"}</span>
+              <span>{model.source}</span>
+              <span>{model.capabilities.join(", ") || "No capabilities"}</span>
+            </div>
+            <div className="model-paths">
+              {Object.entries(model.resolvedPaths).map(([key, value]) => (
+                <small key={key}>{key}: {value}</small>
+              ))}
+            </div>
+            <div className="job-actions">
+              <button onClick={() => setSelectedModelId(model.id)} type="button">
+                Select
+              </button>
+              <button
+                disabled={model.status === "installed" || !model.downloads.length}
+                onClick={() => downloadModel(model)}
+                type="button"
+              >
+                Predownload
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <div className="lora-panel">
+        <div className="section-heading">
+          <p className="eyebrow">{selectedModel?.name ?? "No model selected"}</p>
+          <h2>LoRAs</h2>
+        </div>
+        <label className="toggle-row" htmlFor="advanced-loras">
+          <input
+            checked={showAdvancedLoras}
+            id="advanced-loras"
+            onChange={(event) => setShowAdvancedLoras(event.target.checked)}
+            type="checkbox"
+          />
+          Show unknown and incompatible
+        </label>
+        <div className="lora-list">
+          {loras.length === 0 ? (
+            <div className="empty-panel">No compatible LoRAs for this model</div>
+          ) : (
+            loras.map((lora) => (
+              <article className="lora-row" key={lora.id}>
+                <div>
+                  <strong>{lora.name}</strong>
+                  <span>{lora.category} / {lora.scope}</span>
+                </div>
+                <span className={`status-badge ${lora.compatibility}`}>{lora.compatibility}</span>
+                <small>{lora.compatibleFamilies.length ? lora.compatibleFamilies.join(", ") : "Manual compatibility needed"}</small>
+              </article>
+            ))
+          )}
+        </div>
+      </div>
+
+      <form className="import-panel" onSubmit={importLora}>
+        <div className="section-heading">
+          <p className="eyebrow">{activeProject ? activeProject.name : "Global"}</p>
+          <h2>Import LoRA</h2>
+        </div>
+        <input
+          aria-label="LoRA path"
+          onChange={(event) => setImportPath(event.target.value)}
+          placeholder="C:\\models\\character.safetensors or loras/project/character.safetensors"
+          value={importPath}
+        />
+        <select aria-label="Category" onChange={(event) => setImportCategory(event.target.value)} value={importCategory}>
+          <option value="style">Style</option>
+          <option value="enhance">Enhance</option>
+          <option value="character">Character</option>
+          <option value="motion">Motion</option>
+        </select>
+        <input
+          aria-label="Compatible families"
+          onChange={(event) => setImportFamilies(event.target.value)}
+          placeholder="ltx, qwen"
+          value={importFamilies}
+        />
+        <select aria-label="Scope" onChange={(event) => setImportScope(event.target.value)} value={importScope}>
+          <option value="global">Global</option>
+          <option value="project">Project</option>
+        </select>
+        <button type="submit">Import</button>
+      </form>
+    </section>
   );
 }
 
@@ -479,7 +743,8 @@ function JobRow({ job, jobAction }) {
         <span>{job.projectName ?? "Global"}</span>
         <span>Stage {job.stage}</span>
         <span>Elapsed {formatSeconds(job.elapsedSeconds)}</span>
-        <span>GPU {job.assignedGpu ?? job.requestedGpu}</span>
+        <span>{job.requiresGpu ? `GPU ${job.assignedGpu ?? job.requestedGpu}` : "CPU/network"}</span>
+        {job.dependsOnJobId ? <span>Depends {job.dependsOnJobId}</span> : null}
       </div>
       <div className="progress-track" aria-label={`${percent(job.progress)} complete`}>
         <span style={{ width: percent(job.progress) }} />

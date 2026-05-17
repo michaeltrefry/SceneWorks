@@ -56,6 +56,8 @@ def ensure_data_dirs(settings: Settings) -> None:
     settings.projects_dir.mkdir(parents=True, exist_ok=True)
     for folder in ("models", "loras", "cache"):
         (settings.data_dir / folder).mkdir(parents=True, exist_ok=True)
+    settings.manifests_dir.mkdir(parents=True, exist_ok=True)
+    settings.hf_home.mkdir(parents=True, exist_ok=True)
 
 
 def load_registry(settings: Settings) -> list[dict]:

@@ -1,5 +1,84 @@
 {
   "$schema": "../../packages/schemas/model-manifest.schema.json",
   "schemaVersion": 1,
-  "models": []
+  "models": [
+    {
+      "id": "ltx_2_3_i2v",
+      "name": "LTX 2.3",
+      "family": "ltx",
+      "type": "video",
+      "adapter": "ltx_video",
+      "capabilities": ["text_to_video", "image_to_video"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Lightricks/LTX-Video",
+          "files": ["ltx-video-2b-v0.9.5.safetensors"],
+          "sizeBytes": 9797894144,
+          "sizeLabel": "9.1 GB"
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/models--Lightricks--LTX-Video/snapshots/current/ltx-video-2b-v0.9.5.safetensors"
+      },
+      "defaults": {
+        "resolution": 720,
+        "fps": 24,
+        "durationSeconds": 5,
+        "quality": "balanced"
+      },
+      "limits": {
+        "resolutions": [640, 720, 1024],
+        "durationSeconds": [3, 5, 8],
+        "nativeFps": [24]
+      },
+      "loraCompatibility": {
+        "families": ["ltx"],
+        "types": ["style", "enhance", "character", "motion"]
+      },
+      "ui": {
+        "label": "LTX 2.3",
+        "description": "First-class video target for local SceneWorks generation.",
+        "recommendedFor": ["image_to_video", "text_to_video"]
+      },
+      "builtIn": true
+    },
+    {
+      "id": "qwen_image",
+      "name": "Qwen Image",
+      "family": "qwen",
+      "type": "image",
+      "adapter": "qwen_image",
+      "capabilities": ["text_to_image", "image_edit"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image",
+          "files": ["model_index.json"],
+          "sizeBytes": 21474836480,
+          "sizeLabel": "20.0 GB"
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/models--Qwen--Qwen-Image/snapshots/current/model_index.json"
+      },
+      "defaults": {
+        "resolution": 1024,
+        "quality": "balanced"
+      },
+      "limits": {
+        "resolutions": [768, 1024, 1280]
+      },
+      "loraCompatibility": {
+        "families": ["qwen"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Qwen Image",
+        "description": "Image generation and editing family placeholder for the first image adapter.",
+        "recommendedFor": ["text_to_image", "image_edit"]
+      },
+      "builtIn": true
+    }
+  ]
 }

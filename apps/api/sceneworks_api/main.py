@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .events import EventHub
 from .jobs import router as jobs_router
 from .jobs_store import JobsStore
+from .manifests import ManifestService, router as manifests_router
 from .projects import ensure_data_dirs, router as projects_router
 from .security import access_control_middleware
 from .settings import Settings, get_settings
@@ -24,6 +25,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.jobs_store = jobs_store
     app.state.event_hub = EventHub()
+    app.state.manifest_service = ManifestService(settings)
 
     app.add_middleware(
         CORSMiddleware,
@@ -67,6 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": is_authorized(request, settings)}
 
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(manifests_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
     return app
 

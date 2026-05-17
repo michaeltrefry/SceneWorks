@@ -41,6 +41,12 @@ X-SceneWorks-Token: choose-a-private-token
 
 This is for privacy and control over local media, model downloads, and long-running GPU work. It is not a content moderation system.
 
+## Model Storage
+
+SceneWorks reads built-in and user model/LoRA manifests from `config/manifests`. User manifests are separate from built-in manifests so local edits survive app upgrades.
+
+Set `SCENEWORKS_HF_HOME` to reuse an existing Hugging Face cache. When it is unset, SceneWorks uses `data/cache/huggingface`. For gated or private repositories, set `SCENEWORKS_HF_TOKEN`, `HF_TOKEN`, or `HUGGING_FACE_HUB_TOKEN`.
+
 ## Structure
 
 ```text

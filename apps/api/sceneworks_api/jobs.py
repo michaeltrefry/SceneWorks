@@ -12,6 +12,7 @@ from .jobs_store import JOB_STATUSES, JobsStore
 
 
 router = APIRouter(tags=["jobs"])
+NON_GPU_JOB_TYPES = {"model_download", "lora_import"}
 
 
 class JobCreateRequest(BaseModel):
@@ -77,12 +78,51 @@ def list_jobs(
 
 @router.post("/jobs", status_code=201)
 def create_job(payload: JobCreateRequest, request: Request) -> dict:
+    depends_on_job_id = None
+    message = "Waiting for an available worker."
+    if payload.type not in NON_GPU_JOB_TYPES:
+        model_id = payload.payload.get("modelId")
+        if model_id and hasattr(request.app.state, "manifest_service"):
+            model = request.app.state.manifest_service.find_model(model_id, payload.projectId)
+            if model and model["status"] != "installed" and model["downloads"]:
+                download_job = get_store(request).create_job(
+                    job_type="model_download",
+                    project_id=payload.projectId,
+                    project_name=payload.projectName,
+                    payload={
+                        "modelId": model["id"],
+                        "modelName": model["name"],
+                        "family": model["family"],
+                        "downloads": model["downloads"],
+                        "resolvedPaths": model["resolvedPaths"],
+                        "downloadSizeBytes": model["downloadSizeBytes"],
+                        "downloadSizeLabel": model["downloadSizeLabel"],
+                    },
+                    requested_gpu="none",
+                    requires_gpu=False,
+                    message="Queued model download. This job does not reserve a GPU worker.",
+                )
+                download_job = get_store(request).update_job_progress(
+                    download_job["id"],
+                    status="completed",
+                    stage="completed",
+                    progress=1,
+                    message="Model download job placeholder completed. File transfer adapter is not installed yet.",
+                    result={"modelId": model["id"], "placeholder": True},
+                )
+                publish(request, "job.updated", download_job)
+                depends_on_job_id = download_job["id"]
+                message = f"Waiting for required model download {download_job['id']}."
+
     job = get_store(request).create_job(
         job_type=payload.type,
         project_id=payload.projectId,
         project_name=payload.projectName,
         payload=payload.payload,
         requested_gpu=payload.requestedGpu,
+        depends_on_job_id=depends_on_job_id,
+        requires_gpu=payload.type not in NON_GPU_JOB_TYPES,
+        message=message,
     )
     publish(request, "job.updated", job)
     publish(request, "queue.updated", queue_summary(request))

@@ -10,7 +10,13 @@ class Settings:
         self.port = int(os.getenv("SCENEWORKS_API_PORT", "8000"))
         self.data_dir = Path(os.getenv("SCENEWORKS_DATA_DIR", "data")).resolve()
         self.config_dir = Path(os.getenv("SCENEWORKS_CONFIG_DIR", "config")).resolve()
+        self.hf_home = Path(os.getenv("SCENEWORKS_HF_HOME") or os.getenv("HF_HOME") or self.data_dir / "cache" / "huggingface").resolve()
         self.access_token = os.getenv("SCENEWORKS_ACCESS_TOKEN", "").strip()
+        self.huggingface_token = (
+            os.getenv("SCENEWORKS_HF_TOKEN", "").strip()
+            or os.getenv("HF_TOKEN", "").strip()
+            or os.getenv("HUGGING_FACE_HUB_TOKEN", "").strip()
+        )
         cors = os.getenv(
             "SCENEWORKS_CORS_ORIGINS",
             ",".join(
@@ -37,6 +43,22 @@ class Settings:
     @property
     def jobs_db_path(self) -> Path:
         return self.data_dir / "jobs.db"
+
+    @property
+    def manifests_dir(self) -> Path:
+        return self.config_dir / "manifests"
+
+    @property
+    def models_dir(self) -> Path:
+        return self.data_dir / "models"
+
+    @property
+    def loras_dir(self) -> Path:
+        return self.data_dir / "loras"
+
+    @property
+    def hf_cache_dir(self) -> Path:
+        return Path(os.getenv("HF_HUB_CACHE") or self.hf_home / "hub").resolve()
 
 
 @lru_cache(maxsize=1)

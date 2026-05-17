@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
 import json
 import sqlite3
@@ -41,8 +42,17 @@ class JobsStore:
         connection.execute("pragma foreign_keys = on")
         return connection
 
+    @contextmanager
+    def connection(self):
+        connection = self.connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def initialize(self) -> None:
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             connection.executescript(
                 """
                 create table if not exists jobs (
@@ -64,6 +74,8 @@ class JobsStore:
                   attempts integer not null default 1,
                   source_job_id text,
                   duplicate_of_job_id text,
+                  depends_on_job_id text,
+                  requires_gpu integer not null default 1,
                   cancel_requested integer not null default 0,
                   created_at text not null,
                   updated_at text not null,
@@ -93,10 +105,17 @@ class JobsStore:
                 );
                 """
             )
+            self._ensure_column(connection, "jobs", "depends_on_job_id", "text")
+            self._ensure_column(connection, "jobs", "requires_gpu", "integer not null default 1")
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in connection.execute(f"pragma table_info({table})").fetchall()}
+        if column not in columns:
+            connection.execute(f"alter table {table} add column {column} {definition}")
 
     def mark_interrupted_on_startup(self) -> list[dict]:
         now = utc_now()
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             rows = connection.execute(
                 f"select * from jobs where status in ({','.join('?' for _ in ACTIVE_STATUSES)})",
                 ACTIVE_STATUSES,
@@ -130,18 +149,21 @@ class JobsStore:
         requested_gpu: str,
         source_job_id: str | None = None,
         duplicate_of_job_id: str | None = None,
+        depends_on_job_id: str | None = None,
+        requires_gpu: bool = True,
         attempts: int = 1,
+        message: str = "Waiting for an available worker.",
     ) -> dict:
         now = utc_now()
         job_id = f"job_{uuid4().hex}"
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             connection.execute(
                 """
                 insert into jobs (
                   id, type, status, project_id, project_name, payload_json, result_json,
                   requested_gpu, progress, stage, message, attempts, source_job_id,
-                  duplicate_of_job_id, created_at, updated_at
-                ) values (?, ?, 'queued', ?, ?, ?, '{}', ?, 0, 'queued', ?, ?, ?, ?, ?, ?)
+                  duplicate_of_job_id, depends_on_job_id, requires_gpu, created_at, updated_at
+                ) values (?, ?, 'queued', ?, ?, ?, '{}', ?, 0, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -150,10 +172,12 @@ class JobsStore:
                     project_name,
                     dumps(payload),
                     requested_gpu or "auto",
-                    "Waiting for an available worker.",
+                    message,
                     attempts,
                     source_job_id,
                     duplicate_of_job_id,
+                    depends_on_job_id,
+                    int(requires_gpu),
                     now,
                     now,
                 ),
@@ -177,7 +201,7 @@ class JobsStore:
             params.append(status)
 
         where_clause = f"where {' and '.join(filters)}" if filters else ""
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             rows = connection.execute(
                 f"select * from jobs {where_clause} order by created_at desc limit ?",
                 (*params, max(1, min(limit, 500))),
@@ -198,7 +222,7 @@ class JobsStore:
 
     def cancel_job(self, job_id: str) -> dict:
         now = utc_now()
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             job = self.get_job(job_id, connection=connection)
             if job["status"] in TERMINAL_STATUSES:
                 return job
@@ -233,7 +257,7 @@ class JobsStore:
             return self.get_job(job_id, connection=connection)
 
     def retry_job(self, job_id: str) -> dict:
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             job = self.get_job(job_id, connection=connection)
         return self.create_job(
             job_type=job["type"],
@@ -242,11 +266,13 @@ class JobsStore:
             payload=job["payload"],
             requested_gpu=job["requestedGpu"],
             source_job_id=job["id"],
+            depends_on_job_id=job["dependsOnJobId"],
+            requires_gpu=job["requiresGpu"],
             attempts=job["attempts"] + 1,
         )
 
     def duplicate_job(self, job_id: str, *, payload_changes: dict, requested_gpu: str | None) -> dict:
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             job = self.get_job(job_id, connection=connection)
         payload = {**job["payload"], **payload_changes}
         return self.create_job(
@@ -256,6 +282,8 @@ class JobsStore:
             payload=payload,
             requested_gpu=requested_gpu or job["requestedGpu"],
             duplicate_of_job_id=job["id"],
+            depends_on_job_id=job["dependsOnJobId"],
+            requires_gpu=job["requiresGpu"],
         )
 
     def register_worker(
@@ -268,7 +296,7 @@ class JobsStore:
         loaded_models: list[str],
     ) -> dict:
         now = utc_now()
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             connection.execute(
                 """
                 insert into workers (
@@ -304,7 +332,7 @@ class JobsStore:
         loaded_models: list[str],
     ) -> dict:
         now = utc_now()
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             connection.execute(
                 """
                 update workers
@@ -325,13 +353,14 @@ class JobsStore:
 
     def claim_next_job(self, worker_id: str) -> dict | None:
         now = utc_now()
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             worker = self.get_worker(worker_id, connection=connection)
             gpu_id = worker["gpuId"]
             active_gpu_job = connection.execute(
                 f"""
                 select id from jobs
                  where assigned_gpu = ?
+                   and requires_gpu = 1
                    and status in ({','.join('?' for _ in ACTIVE_STATUSES)})
                  limit 1
                 """,
@@ -344,7 +373,16 @@ class JobsStore:
                 """
                 select * from jobs
                  where status = 'queued'
+                   and requires_gpu = 1
                    and (requested_gpu = 'auto' or requested_gpu = ?)
+                   and (
+                     depends_on_job_id is null
+                     or exists (
+                       select 1 from jobs dependency
+                        where dependency.id = jobs.depends_on_job_id
+                          and dependency.status = 'completed'
+                     )
+                   )
                  order by created_at asc
                  limit 1
                 """,
@@ -391,7 +429,7 @@ class JobsStore:
         now = utc_now()
         completed_at = now if status in TERMINAL_STATUSES else None
         canceled_at = now if status == "canceled" else None
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             connection.execute(
                 """
                 update jobs
@@ -430,7 +468,7 @@ class JobsStore:
             return job
 
     def list_workers(self) -> list[dict]:
-        with self._lock, self.connect() as connection:
+        with self._lock, self.connection() as connection:
             rows = connection.execute("select * from workers order by gpu_id, id").fetchall()
         return [self.row_to_worker(row) for row in rows]
 
@@ -483,6 +521,8 @@ class JobsStore:
             "attempts": row["attempts"],
             "sourceJobId": row["source_job_id"],
             "duplicateOfJobId": row["duplicate_of_job_id"],
+            "dependsOnJobId": row["depends_on_job_id"],
+            "requiresGpu": bool(row["requires_gpu"]),
             "cancelRequested": bool(row["cancel_requested"]),
             "createdAt": created_at,
             "updatedAt": row["updated_at"],

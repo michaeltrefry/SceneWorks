@@ -8,7 +8,51 @@
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "models": {
       "type": "array",
-      "items": { "type": "object" }
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "family", "type", "adapter"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "family": { "type": "string", "minLength": 1 },
+          "type": { "type": "string", "enum": ["image", "video", "multimodal"] },
+          "adapter": { "type": "string", "minLength": 1 },
+          "capabilities": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "downloads": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["provider"],
+              "properties": {
+                "provider": { "type": "string", "minLength": 1 },
+                "repo": { "type": "string" },
+                "files": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "sizeBytes": { "type": "integer", "minimum": 0 },
+                "sizeLabel": { "type": "string" },
+                "url": { "type": "string" }
+              },
+              "additionalProperties": true
+            }
+          },
+          "paths": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "defaults": { "type": "object" },
+          "limits": { "type": "object" },
+          "loraCompatibility": { "type": "object" },
+          "ui": { "type": "object" },
+          "builtIn": { "type": "boolean" },
+          "scope": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
     }
   }
 }

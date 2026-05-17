@@ -107,6 +107,7 @@ button {
   display: grid;
   grid-template-rows: auto auto auto 1fr;
   gap: 18px;
+  min-width: 0;
   padding: 22px;
 }
 
@@ -123,6 +124,7 @@ button {
   justify-content: space-between;
   gap: 16px;
   align-items: center;
+  min-width: 0;
   padding: 14px 18px;
 }
 
@@ -130,6 +132,7 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  min-width: 0;
   color: #c7bfb2;
   font-size: 14px;
 }
@@ -260,8 +263,14 @@ button:disabled {
   display: grid;
   align-content: start;
   gap: 18px;
+  min-width: 0;
   padding: 24px;
   min-height: 420px;
+}
+
+.main-surface > * {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .queue-chip {
@@ -285,8 +294,146 @@ button:disabled {
 }
 
 .job-composer.compact {
-  grid-template-columns: minmax(0, 1fr) minmax(104px, 140px) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(104px, 140px) minmax(160px, 220px) auto;
   max-width: 760px;
+}
+
+.model-surface {
+  gap: 20px;
+}
+
+.model-header {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.5fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.storage-strip {
+  display: grid;
+  gap: 6px;
+  color: #aaa397;
+  font-size: 13px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.model-card,
+.lora-panel,
+.import-panel,
+.lora-row {
+  border: 1px solid #3c3a34;
+  background: #23221f;
+}
+
+.model-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.model-card.active {
+  border-color: #6ec6b8;
+}
+
+.model-card-main {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+
+.model-card h3,
+.model-card p {
+  margin: 0;
+}
+
+.model-card p {
+  color: #c7bfb2;
+}
+
+.model-paths {
+  display: grid;
+  gap: 4px;
+  color: #8f887c;
+  overflow-wrap: anywhere;
+}
+
+.model-paths small {
+  min-width: 0;
+}
+
+.status-badge.installed,
+.status-badge.compatible {
+  color: #6ec6b8;
+}
+
+.status-badge.downloadable,
+.status-badge.unknown {
+  color: #f8d78c;
+}
+
+.status-badge.missing,
+.status-badge.incompatible {
+  color: #e28e78;
+}
+
+.lora-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.toggle-row {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.toggle-row input {
+  width: 16px;
+  height: 16px;
+}
+
+.lora-list {
+  display: grid;
+  gap: 8px;
+}
+
+.lora-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(140px, 0.6fr);
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+}
+
+.lora-row div {
+  display: grid;
+  gap: 2px;
+}
+
+.lora-row span,
+.lora-row small {
+  color: #aaa397;
+}
+
+.import-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(240px, 1.6fr) minmax(120px, 0.7fr) minmax(160px, 1fr) minmax(120px, 0.7fr) auto;
+  gap: 8px;
+  align-items: end;
+  padding: 16px;
 }
 
 .queue-surface {
@@ -367,6 +514,11 @@ button:disabled {
 .job-meta {
   color: #aaa397;
   font-size: 13px;
+  min-width: 0;
+}
+
+.job-meta span {
+  overflow-wrap: anywhere;
 }
 
 .status-badge {
@@ -375,6 +527,7 @@ button:disabled {
   color: #f8d78c;
   padding: 4px 8px;
   text-transform: capitalize;
+  white-space: nowrap;
 }
 
 .job-row.completed .status-badge {
@@ -470,6 +623,9 @@ button:disabled {
   .project-band,
   .media-grid,
   .queue-header,
+  .model-header,
+  .lora-row,
+  .import-panel,
   .job-composer,
   .job-composer.compact {
     grid-template-columns: 1fr;
