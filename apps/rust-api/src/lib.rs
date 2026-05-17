@@ -1468,23 +1468,42 @@ async fn model_catalog(settings: &Settings) -> Result<Vec<Value>, ApiError> {
     let mut models = merge_entries_by_id(builtin, user);
     for model in &mut models {
         let download = model_download(model);
-        let (downloadable, installed_path, installed) = if let Some(download) = download {
-            let repo = required_string_field(&download, "repo")?;
-            let installed_path = settings
-                .data_dir
-                .join("models")
-                .join(safe_download_dir(repo));
-            let installed = model_is_installed(&installed_path);
-            (true, Some(installed_path.display().to_string()), installed)
-        } else {
-            (false, None, false)
-        };
+        let (downloadable, installed_path, installed, download_size_bytes) =
+            if let Some(download) = download {
+                let repo = required_string_field(&download, "repo")?;
+                let files = string_array_field(&download, "files");
+                let download_size_bytes = estimate_huggingface_download_size(repo, &files).await;
+                let installed_path = settings
+                    .data_dir
+                    .join("models")
+                    .join(safe_download_dir(repo));
+                let installed = model_is_installed(&installed_path);
+                (
+                    true,
+                    Some(installed_path.display().to_string()),
+                    installed,
+                    download_size_bytes,
+                )
+            } else {
+                (false, None, false, None)
+            };
         let object = model
             .as_object_mut()
             .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
         object.insert("downloadable".to_owned(), Value::Bool(downloadable));
-        object.insert("downloadSizeBytes".to_owned(), Value::Null);
-        object.insert("downloadSizeLabel".to_owned(), Value::Null);
+        object.insert(
+            "downloadSizeBytes".to_owned(),
+            download_size_bytes
+                .map(|value| json!(value))
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "downloadSizeLabel".to_owned(),
+            download_size_bytes
+                .map(format_bytes)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
         object.insert(
             "installState".to_owned(),
             Value::String(if installed { "installed" } else { "missing" }.to_owned()),
@@ -1653,6 +1672,132 @@ fn model_download(model: &Value) -> Option<Value> {
                     .is_some_and(|repo| !repo.is_empty())
         })
         .cloned()
+}
+
+async fn estimate_huggingface_download_size(repo: &str, files: &[String]) -> Option<u64> {
+    if matches!(
+        std::env::var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    ) {
+        return None;
+    }
+    let url = format!(
+        "https://huggingface.co/api/models/{}?blobs=true",
+        quote_huggingface_repo(repo)
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .ok()?;
+    let payload: Value = client
+        .get(url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let siblings = payload.get("siblings")?.as_array()?;
+    download_size_from_siblings(siblings, files)
+}
+
+fn download_size_from_siblings(siblings: &[Value], files: &[String]) -> Option<u64> {
+    let mut total = 0_u64;
+    let mut found_size = false;
+    for sibling in siblings {
+        let filename = sibling
+            .get("rfilename")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !allow_pattern_matches(filename, files) {
+            continue;
+        }
+        let Some(size) = sibling.get("size").and_then(Value::as_u64) else {
+            continue;
+        };
+        found_size = true;
+        total = total.saturating_add(size);
+    }
+    found_size.then_some(total)
+}
+
+fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return true;
+    }
+    patterns.iter().any(|pattern| wildcard_match(pattern, path))
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut pattern_index, mut value_index) = (0_usize, 0_usize);
+    let mut star_index = None;
+    let mut star_value_index = 0_usize;
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            star_value_index = value_index;
+        } else if let Some(index) = star_index {
+            pattern_index = index + 1;
+            star_value_index += 1;
+            value_index = star_value_index;
+        } else {
+            return false;
+        }
+    }
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
+}
+
+fn quote_huggingface_repo(repo: &str) -> String {
+    let mut output = String::new();
+    for byte in repo.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            output.push(char::from(byte));
+        } else {
+            output.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    output
+}
+
+fn format_bytes(value: u64) -> String {
+    let mut size = value as f64;
+    for unit in ["B", "KB", "MB", "GB", "TB"] {
+        if size < 1024.0 || unit == "TB" {
+            if unit == "B" {
+                return format!("{} {unit}", size as u64);
+            }
+            return format!("{size:.1} {unit}");
+        }
+        size /= 1024.0;
+    }
+    format!("{size:.1} TB")
+}
+
+fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
+    payload
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn safe_download_dir(repo: &str) -> String {
@@ -2601,6 +2746,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_and_lora_routes_match_python_manifest_behavior() {
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let config_dir = temp_dir.path().join("config/manifests");
         std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -2715,6 +2861,31 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(job["type"], "lora_import");
         assert_eq!(job["payload"]["repo"], "owner/lora");
+    }
+
+    #[test]
+    fn model_download_size_helpers_match_python_shapes() {
+        let siblings = json!([
+            { "rfilename": "model-00001.safetensors", "size": 100 },
+            { "rfilename": "model-00002.safetensors", "size": 200 },
+            { "rfilename": "README.md", "size": 50 },
+            { "rfilename": "unknown.bin" }
+        ]);
+        let siblings = siblings.as_array().expect("siblings array");
+        assert_eq!(
+            super::download_size_from_siblings(siblings, &["*.safetensors".to_owned()]),
+            Some(300)
+        );
+        assert_eq!(
+            super::download_size_from_siblings(siblings, &["*.ckpt".to_owned()]),
+            None
+        );
+        assert_eq!(super::format_bytes(0), "0 B");
+        assert_eq!(super::format_bytes(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(
+            super::quote_huggingface_repo("owner/model name"),
+            "owner/model%20name"
+        );
     }
 
     #[tokio::test]
