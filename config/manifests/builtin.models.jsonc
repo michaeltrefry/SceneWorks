@@ -111,6 +111,90 @@
         "description": "Higher-control image edit target kept behind the same adapter contract.",
         "recommendedFor": ["edit_image"]
       }
+    },
+    {
+      "id": "ltx_2_3",
+      "name": "LTX-2.3",
+      "family": "ltx-video",
+      "type": "video",
+      "adapter": "ltx_video",
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Lightricks/LTX-2.3",
+          "files": []
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Lightricks/LTX-2.3"
+      },
+      "defaults": {
+        "duration": 6,
+        "fps": 25,
+        "resolution": "768x512",
+        "quality": "balanced",
+        "steps": 8
+      },
+      "limits": {
+        "durations": [4, 6, 8, 10, 12, 15],
+        "recommendedMaxDuration": 10,
+        "hardMaxDuration": 15,
+        "fps": [24, 25, 30],
+        "resolutions": ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
+        "requiresDimensionsMultipleOf": 32
+      },
+      "loraCompatibility": {
+        "families": ["ltx-video"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "ui": {
+        "label": "LTX-2.3",
+        "description": "First-class short-shot video target for image-to-video and text-to-video.",
+        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame"],
+        "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow."
+      }
+    },
+    {
+      "id": "wan_2_2",
+      "name": "Wan2.2",
+      "family": "wan-video",
+      "type": "video",
+      "adapter": "wan_video",
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "replace_person"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.2-TI2V-5B",
+          "files": []
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Wan-AI/Wan2.2-TI2V-5B"
+      },
+      "defaults": {
+        "duration": 5,
+        "fps": 24,
+        "resolution": "1280x720",
+        "quality": "balanced"
+      },
+      "limits": {
+        "durations": [4, 5, 6, 7, 8],
+        "recommendedMaxDuration": 7,
+        "hardMaxDuration": 8,
+        "fps": [16, 24],
+        "resolutions": ["832x480", "1280x720", "720x1280"]
+      },
+      "loraCompatibility": {
+        "families": ["wan-video"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "ui": {
+        "label": "Wan2.2",
+        "description": "Fallback video family kept behind the adapter contract for future runtime support.",
+        "recommendedFor": ["image_to_video", "text_to_video"],
+        "durationHint": "Use shorter clips until local looping behavior is validated."
+      }
     }
   ]
 }

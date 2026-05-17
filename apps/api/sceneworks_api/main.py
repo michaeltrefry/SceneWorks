@@ -9,6 +9,7 @@ from .models import router as models_router
 from .projects import ensure_data_dirs, router as projects_router
 from .security import access_control_middleware
 from .settings import Settings, get_settings
+from .video_generation import router as video_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -73,6 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(assets_router, prefix="/api/v1")
     app.include_router(models_router, prefix="/api/v1")
     app.include_router(image_router, prefix="/api/v1")
+    app.include_router(video_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
     return app
 

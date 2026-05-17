@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from fastapi import APIRouter, Request
+from pydantic import BaseModel, Field, model_validator
+
+from .jobs import queue_summary
+
+
+router = APIRouter(prefix="/video", tags=["video"])
+
+VideoMode = Literal["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"]
+VideoQuality = Literal["fast", "balanced", "best"]
+
+
+class VideoJobRequest(BaseModel):
+    projectId: str = Field(min_length=1)
+    projectName: str | None = None
+    mode: VideoMode = "image_to_video"
+    prompt: str = Field(min_length=1, max_length=4000)
+    negativePrompt: str = ""
+    model: str = "ltx_2_3"
+    duration: float = Field(default=6, ge=1, le=30)
+    fps: int = Field(default=25, ge=1, le=60)
+    width: int = Field(default=768, ge=256, le=1920)
+    height: int = Field(default=512, ge=256, le=1920)
+    quality: VideoQuality = "balanced"
+    seed: int | None = None
+    loras: list[dict[str, Any]] = Field(default_factory=list)
+    sourceAssetId: str | None = None
+    lastFrameAssetId: str | None = None
+    sourceClipAssetId: str | None = None
+    requestedGpu: str = "auto"
+    advanced: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_mode_inputs(self) -> "VideoJobRequest":
+        if self.mode == "image_to_video" and not self.sourceAssetId:
+            raise ValueError("Image to Video requires a source image.")
+        if self.mode == "first_last_frame" and (not self.sourceAssetId or not self.lastFrameAssetId):
+            raise ValueError("First/Last Frame requires first and last image assets.")
+        if self.mode == "extend_clip" and not self.sourceClipAssetId:
+            raise ValueError("Extend Clip requires a source clip.")
+        return self
+
+
+@router.post("/jobs", status_code=201)
+def create_video_job(payload: VideoJobRequest, request: Request) -> dict:
+    job = request.app.state.jobs_store.create_job(
+        job_type="video_generate",
+        project_id=payload.projectId,
+        project_name=payload.projectName,
+        payload=payload.model_dump(exclude={"requestedGpu"}),
+        requested_gpu=payload.requestedGpu,
+    )
+    request.app.state.event_hub.publish("job.updated", job)
+    request.app.state.event_hub.publish("queue.updated", queue_summary(request))
+    return job

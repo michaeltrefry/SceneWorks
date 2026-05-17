@@ -366,15 +366,22 @@ button:disabled {
 }
 
 .asset-tile img,
+.asset-tile video,
 .preview-button img,
+.preview-button video,
 .review-card img,
-.preview-modal img {
+.review-card video,
+.preview-modal img,
+.preview-modal video,
+.tray-item img,
+.tray-item video {
   display: block;
   width: 100%;
   object-fit: cover;
 }
 
-.asset-tile img {
+.asset-tile img,
+.asset-tile video {
   aspect-ratio: 1;
   background: #191815;
 }
@@ -432,7 +439,8 @@ button:disabled {
   color: #f3f0e8;
 }
 
-.preview-button img {
+.preview-button img,
+.preview-button video {
   aspect-ratio: 16 / 11;
 }
 
@@ -490,6 +498,88 @@ button:disabled {
   opacity: 0.58;
 }
 
+.mode-control {
+  max-width: min(720px, 100%);
+}
+
+.video-layout {
+  grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
+}
+
+.guidance-strip,
+.inline-warning {
+  border: 1px solid #4b463d;
+  background: #191815;
+}
+
+.guidance-strip {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+}
+
+.guidance-strip span,
+.inline-warning {
+  color: #c7bfb2;
+  line-height: 1.45;
+}
+
+.inline-warning {
+  margin: 0;
+  padding: 10px;
+}
+
+.compact-panel {
+  min-height: auto;
+  padding: 12px;
+}
+
+.video-review {
+  align-content: start;
+}
+
+.video-review-grid {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.asset-tray {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.tray-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.tray-item {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-height: 154px;
+  border: 1px solid #3c3a34;
+  background: #23221f;
+  color: #f3f0e8;
+  padding: 8px;
+  text-align: left;
+}
+
+.tray-item img,
+.tray-item video {
+  aspect-ratio: 16 / 10;
+  background: #191815;
+}
+
+.tray-item span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: 13px;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -510,7 +600,8 @@ button:disabled {
   background: #191815;
 }
 
-.preview-modal img {
+.preview-modal img,
+.preview-modal video {
   max-height: 78vh;
   object-fit: contain;
   background: #0f0f0e;

@@ -9,7 +9,7 @@ services:
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
-      SCENEWORKS_CORS_ORIGINS: ${SCENEWORKS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      SCENEWORKS_CORS_ORIGINS: ${SCENEWORKS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:5176,http://127.0.0.1:5176}
     ports:
       - "8000:8000"
     volumes:

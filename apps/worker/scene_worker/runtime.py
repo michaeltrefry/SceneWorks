@@ -10,6 +10,7 @@ import httpx
 from .gpu import discover_gpu
 from .image_adapters import create_image_adapter
 from .settings import WorkerSettings
+from .video_adapters import ProceduralVideoAdapter
 
 
 def now() -> str:
@@ -43,7 +44,9 @@ def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict) -> None
         "workerId": settings.worker_id,
         "gpuId": gpu["id"],
         "gpuName": gpu["name"],
-        "capabilities": sorted(set([*gpu["capabilities"], "image_generate", "image_edit"])),
+        "capabilities": sorted(
+            set([*gpu["capabilities"], "image_generate", "image_edit", "video_generate", "video_extend", "video_bridge"])
+        ),
         "loadedModels": [],
     }
     worker = api.post("/api/v1/workers/register", payload)
@@ -187,6 +190,82 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         heartbeat(api, settings, "idle")
 
 
+def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+    adapter = ProceduralVideoAdapter()
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": status,
+                "stage": stage,
+                "progress": value,
+                "message": message,
+            },
+        )
+
+    try:
+        progress("preparing", "preparing", 0.06, "Preparing Video Studio request.")
+        request = adapter.prepare(settings=settings, job=job)
+        progress("loading_model", "loading_model", 0.14, "Resolving video adapter target.")
+        adapter.ensure_models(request)
+        requirements = adapter.estimate_requirements(request)
+        progress(
+            "running",
+            "estimating",
+            0.18,
+            f"Estimated {requirements['previewFrames']} preview frames for this clip.",
+        )
+        result = adapter.run(
+            settings=settings,
+            job=job,
+            request=request,
+            progress=progress,
+            cancel_requested=lambda: job_cancel_requested(api, job_id),
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Video generation asset saved.",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        adapter.cancel(job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "canceled",
+                "stage": "canceled",
+                "progress": 1,
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        adapter.cleanup(job_id)
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "progress": 1,
+                "message": "Video generation failed.",
+                "error": str(exc),
+            },
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def main() -> None:
     settings = WorkerSettings()
     gpu = discover_gpu(settings.gpu_id)
@@ -214,6 +293,8 @@ def main() -> None:
                 run_placeholder_job(api, settings, job)
             elif job["type"] in ("image_generate", "image_edit"):
                 run_image_job(api, settings, job)
+            elif job["type"] in ("video_generate", "video_extend", "video_bridge"):
+                run_video_job(api, settings, job)
             else:
                 update_job(
                     api,
