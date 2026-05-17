@@ -7,17 +7,17 @@
       "name": "Z-Image-Turbo",
       "family": "z-image",
       "type": "image",
-      "adapter": "z_image",
+      "adapter": "z_image_diffusers",
       "capabilities": ["text_to_image", "character_image", "style_variations"],
       "downloads": [
         {
           "provider": "huggingface",
-          "repo": "foyoux/Z-Image-Turbo",
+          "repo": "Tongyi-MAI/Z-Image-Turbo",
           "files": []
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/foyoux/Z-Image-Turbo"
+        "model": "${HF_CACHE}/Tongyi-MAI/Z-Image-Turbo"
       },
       "defaults": {
         "resolution": "1024x1024",
@@ -44,17 +44,17 @@
       "name": "Z-Image-Edit",
       "family": "z-image",
       "type": "image",
-      "adapter": "z_image",
-      "capabilities": ["edit_image"],
+      "adapter": "z_image_diffusers",
+      "capabilities": ["edit_image", "image_to_image"],
       "downloads": [
         {
           "provider": "huggingface",
-          "repo": "foyoux/Z-Image-Edit",
+          "repo": "Tongyi-MAI/Z-Image-Turbo",
           "files": []
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/foyoux/Z-Image-Edit"
+        "model": "${HF_CACHE}/Tongyi-MAI/Z-Image-Turbo"
       },
       "defaults": {
         "resolution": "1024x1024",
@@ -72,7 +72,7 @@
       },
       "ui": {
         "label": "Z-Image-Edit",
-        "description": "Edit-capable Z-Image target for source-image workflows.",
+        "description": "Z-Image edit target using Diffusers ZImageImg2ImgPipeline while the dedicated Edit checkpoint is pending release.",
         "recommendedFor": ["edit_image"]
       }
     },

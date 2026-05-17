@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
+import importlib
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -26,18 +28,24 @@ MODEL_TARGETS = {
         "family": "z-image",
         "supportsEdit": False,
         "steps": 8,
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "adapter": "z_image_diffusers",
     },
     "z_image_edit": {
         "label": "Z-Image-Edit",
         "family": "z-image",
         "supportsEdit": True,
         "steps": 8,
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "adapter": "z_image_diffusers",
     },
     "qwen_image_edit": {
         "label": "Qwen Image Edit",
         "family": "qwen-image",
         "supportsEdit": True,
         "steps": 20,
+        "repo": "Qwen/Qwen-Image-Edit",
+        "adapter": "qwen_image",
     },
 }
 
@@ -110,24 +118,22 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
     )
 
 
-class ProceduralImageAdapter:
-    id = "procedural_preview"
-
-    def generate(
+class ImageAssetWriter:
+    def write_outputs(
         self,
         *,
         settings: WorkerSettings,
         job: dict[str, Any],
+        images: list[Image.Image],
+        adapter_id: str,
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
+        raw_settings: dict[str, Any],
     ) -> dict[str, Any]:
         request = image_request_from_job(job)
         project_path = find_project_path(settings, request.project_id)
         for folder in ("assets/images", "generation-sets", "recipes"):
             (project_path / folder).mkdir(parents=True, exist_ok=True)
-
-        if request.mode == "edit_image" and not model_supports_edit(request.model):
-            raise RuntimeError(f"{request.model} does not support image editing.")
 
         created_at = utc_now()
         generation_set_id = f"genset_{uuid4().hex}"
@@ -145,12 +151,12 @@ class ProceduralImageAdapter:
             "model": request.model,
             "prompt": request.prompt,
             "negativePrompt": request.negative_prompt,
-            "count": request.count,
+            "count": len(images),
             "createdAt": created_at,
         }
         write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
 
-        for index in range(request.count):
+        for index, image in enumerate(images):
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
 
@@ -160,8 +166,7 @@ class ProceduralImageAdapter:
             media_rel = f"assets/images/{filename}"
             media_path = project_path / media_rel
             sidecar_path = media_path.with_suffix(".sceneworks.json")
-            preview = render_preview_image(request, model_target, seed, index)
-            preview.save(media_path, "PNG")
+            image.save(media_path, "PNG")
 
             asset = build_asset_sidecar(
                 asset_id=asset_id,
@@ -174,11 +179,172 @@ class ProceduralImageAdapter:
                 seed=seed,
                 index=index,
                 model_target=model_target,
+                adapter_id=adapter_id,
+                raw_settings=raw_settings,
             )
             write_json(sidecar_path, asset)
             write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
             index_project_db(project_path, asset)
             assets.append(asset)
+            progress(
+                "saving",
+                "saving",
+                0.78 + ((index + 1) / len(images)) * 0.17,
+                f"Saved image asset {index + 1} of {len(images)}.",
+            )
+
+        return {
+            "generationSetId": generation_set_id,
+            "assetIds": [asset["id"] for asset in assets],
+            "assets": assets,
+            "adapter": adapter_id,
+            "model": request.model,
+        }
+
+
+class ZImageDiffusersAdapter:
+    id = "z_image_diffusers"
+
+    def __init__(self) -> None:
+        self._text_pipe: Any | None = None
+        self._img2img_pipe: Any | None = None
+        self._loaded_repo: str | None = None
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        request = image_request_from_job(job)
+        if request.mode == "edit_image" and not model_supports_edit(request.model):
+            raise RuntimeError(f"{request.model} does not support image editing.")
+
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{request.model} is not a Z-Image Diffusers target.")
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
+        pipe = self._load_pipeline(request, model_target)
+        images = []
+        total = request.count
+        for index in range(total):
+            if cancel_requested():
+                raise InterruptedError("Image generation canceled by user.")
+            seed = resolve_seed(request.seed, request.prompt, index)
+            progress("running", "generating", 0.24 + (index / total) * 0.48, f"Running Z-Image {index + 1} of {total}.")
+            images.append(self._run_pipeline(settings, pipe, request, seed))
+
+        return ImageAssetWriter().write_outputs(
+            settings=settings,
+            job=job,
+            images=images,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={
+                **request.advanced,
+                "repo": model_target["repo"],
+                "numInferenceSteps": self._num_inference_steps(request, model_target),
+                "guidanceScale": self._guidance_scale(request),
+                "realModelInference": True,
+            },
+        )
+
+    def _load_pipeline(self, request: ImageRequest, model_target: dict[str, Any]) -> Any:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+        repo = request.advanced.get("modelRepo") or model_target["repo"]
+        device = select_torch_device(torch)
+        dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        use_img2img = request.mode == "edit_image"
+        cached_pipe = self._img2img_pipe if use_img2img else self._text_pipe
+        if cached_pipe is not None and self._loaded_repo == repo:
+            return cached_pipe
+
+        pipeline_name = "ZImageImg2ImgPipeline" if use_img2img else "ZImagePipeline"
+        pipeline_class = getattr(diffusers, pipeline_name, None)
+        if pipeline_class is None and use_img2img:
+            raise RuntimeError(
+                "The installed diffusers package does not expose ZImageImg2ImgPipeline. "
+                "Install the latest diffusers build for Z-Image edit support."
+            )
+        if pipeline_class is None:
+            pipeline_class = getattr(diffusers, "DiffusionPipeline")
+
+        pipe = pipeline_class.from_pretrained(
+            repo,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=bool(request.advanced.get("lowCpuMemUsage", False)),
+        )
+        if bool(request.advanced.get("cpuOffload", False)) and hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
+
+        if use_img2img:
+            self._img2img_pipe = pipe
+        else:
+            self._text_pipe = pipe
+        self._loaded_repo = repo
+        return pipe
+
+    def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch)
+        generator_device = "cuda" if device == "cuda" else "cpu"
+        generator = torch.Generator(generator_device).manual_seed(seed)
+        kwargs = {
+            "prompt": request.prompt,
+            "height": request.height,
+            "width": request.width,
+            "num_inference_steps": self._num_inference_steps(request, MODEL_TARGETS[request.model]),
+            "guidance_scale": self._guidance_scale(request),
+            "generator": generator,
+        }
+        if request.negative_prompt:
+            kwargs["negative_prompt"] = request.negative_prompt
+        if request.mode == "edit_image":
+            kwargs["image"] = load_source_image(settings, request)
+            kwargs["strength"] = float(request.advanced.get("strength", 0.6))
+        output = pipe(**kwargs)
+        image = output.images[0]
+        return image.convert("RGB")
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"] + 1, 1, 80)
+
+    def _guidance_scale(self, request: ImageRequest) -> float:
+        try:
+            return float(request.advanced.get("guidanceScale", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+
+class ProceduralImageAdapter:
+    id = "procedural_preview"
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        request = image_request_from_job(job)
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
+        if request.mode == "edit_image" and not model_supports_edit(request.model):
+            raise RuntimeError(f"{request.model} does not support image editing.")
+
+        images = []
+        for index in range(request.count):
+            if cancel_requested():
+                raise InterruptedError("Image generation canceled by user.")
+            seed = resolve_seed(request.seed, request.prompt, index)
+            images.append(render_preview_image(request, model_target, seed, index))
             progress(
                 "running",
                 "generating",
@@ -186,13 +352,30 @@ class ProceduralImageAdapter:
                 f"Generated preview image {index + 1} of {request.count}.",
             )
 
-        return {
-            "generationSetId": generation_set_id,
-            "assetIds": [asset["id"] for asset in assets],
-            "assets": assets,
-            "adapter": self.id,
-            "model": request.model,
-        }
+        return ImageAssetWriter().write_outputs(
+            settings=settings,
+            job=job,
+            images=images,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={
+                **request.advanced,
+                "targetSteps": model_target["steps"],
+                "previewRenderer": True,
+            },
+        )
+
+
+def create_image_adapter(job: dict[str, Any]) -> ProceduralImageAdapter | ZImageDiffusersAdapter:
+    payload = job.get("payload", {})
+    requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
+    if requested == "procedural_preview":
+        return ProceduralImageAdapter()
+    model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
+    if model_target.get("adapter") == ZImageDiffusersAdapter.id:
+        return ZImageDiffusersAdapter()
+    return ProceduralImageAdapter()
 
 
 def model_supports_edit(model_id: str) -> bool:
@@ -204,6 +387,47 @@ def resolve_seed(seed: int | None, prompt: str, index: int) -> int:
         return int(seed) + index
     digest = hashlib.sha256(f"{prompt}:{index}".encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
+
+
+def select_torch_device(torch: Any) -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:
+    if requested == "float16":
+        return torch.float16
+    if requested == "float32" or device == "cpu":
+        return torch.float32
+    return torch.bfloat16
+
+
+def load_source_image(settings: WorkerSettings, request: ImageRequest) -> Image.Image:
+    source_path = request.advanced.get("sourceImagePath")
+    if not source_path and request.source_asset_id:
+        source_path = find_asset_media_path(find_project_path(settings, request.project_id), request.source_asset_id)
+    if not source_path:
+        raise RuntimeError("Image edit jobs require a source image asset.")
+    image = Image.open(source_path).convert("RGB")
+    return image.resize((request.width, request.height))
+
+
+def find_asset_media_path(project_path: Path, asset_id: str) -> Path:
+    for sidecar_path in (project_path / "assets" / "images").glob("*.sceneworks.json"):
+        try:
+            with sidecar_path.open("r", encoding="utf-8") as handle:
+                asset = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if asset.get("id") == asset_id:
+            media_path = project_path / asset.get("file", {}).get("path", "")
+            if media_path.exists():
+                return media_path
+            raise RuntimeError(f"Source image file is missing for asset {asset_id}.")
+    raise RuntimeError(f"Source image asset not found: {asset_id}.")
 
 
 def render_preview_image(request: ImageRequest, model_target: dict[str, Any], seed: int, index: int) -> Image.Image:
@@ -251,6 +475,8 @@ def build_asset_sidecar(
     seed: int,
     index: int,
     model_target: dict[str, Any],
+    adapter_id: str,
+    raw_settings: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
@@ -277,7 +503,7 @@ def build_asset_sidecar(
         "recipe": {
             "mode": request.mode,
             "model": request.model,
-            "adapter": "procedural_preview",
+            "adapter": adapter_id,
             "prompt": request.prompt,
             "negativePrompt": request.negative_prompt,
             "seed": seed,
@@ -289,11 +515,7 @@ def build_asset_sidecar(
                 "count": request.count,
                 "family": model_target["family"],
             },
-            "rawAdapterSettings": {
-                **request.advanced,
-                "targetSteps": model_target["steps"],
-                "previewRenderer": True,
-            },
+            "rawAdapterSettings": raw_settings,
         },
         "lineage": {
             "parents": [request.source_asset_id] if request.source_asset_id else [],

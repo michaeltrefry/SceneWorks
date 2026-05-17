@@ -1,2 +1,7 @@
 httpx==0.28.1
 pillow>=12.0.0,<13
+torch>=2.7
+transformers>=4.57
+accelerate>=1.11
+safetensors>=0.6
+diffusers @ git+https://github.com/huggingface/diffusers.git

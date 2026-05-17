@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from .gpu import discover_gpu
-from .image_adapters import ProceduralImageAdapter
+from .image_adapters import create_image_adapter
 from .settings import WorkerSettings
 
 
@@ -125,7 +125,7 @@ def run_placeholder_job(api: ApiClient, settings: WorkerSettings, job: dict) -> 
 
 def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
-    adapter = ProceduralImageAdapter()
+    adapter = create_image_adapter(job)
 
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
