@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 from scene_worker.image_adapters import (
@@ -12,18 +11,15 @@ from scene_worker.image_adapters import (
     resolve_seed,
 )
 from scene_worker.runtime import (
-    download_progress_payload,
-    format_bytes,
     child_environment,
     friendly_failure,
     heartbeat,
     keep_job_alive,
-    lora_manifest_target,
     loaded_models_from_adapters,
+    main,
     resolve_loaded_models,
-    resolve_lora_import_target,
+    run_check,
     run_video_job,
-    upsert_lora_manifest_entry,
     worker_capabilities,
 )
 from scene_worker.video_adapters import VIDEO_MODEL_TARGETS, build_video_asset_sidecar, video_request_from_job
@@ -32,11 +28,8 @@ from scene_worker.video_adapters import VIDEO_MODEL_TARGETS, build_video_asset_s
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
-    assert "image_generate" not in capabilities
-    assert "video_generate" not in capabilities
+    assert capabilities == ["cpu"]
     assert "placeholder" not in capabilities
-    assert "model_download" not in capabilities
-    assert "timeline_export" not in capabilities
 
 
 def test_gpu_worker_advertises_generation_capabilities():
@@ -48,93 +41,36 @@ def test_gpu_worker_advertises_generation_capabilities():
     assert "placeholder" not in capabilities
 
 
-def test_python_worker_does_not_advertise_rust_utility_capabilities(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "1")
-    monkeypatch.setenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "1")
-    monkeypatch.setenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "1")
-
+def test_python_worker_only_advertises_inference_job_capabilities():
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
+    job_capabilities = [capability for capability in capabilities if capability != "gpu"]
 
-    assert "image_generate" in capabilities
-    assert "placeholder" not in capabilities
-    assert "model_download" not in capabilities
-    assert "lora_import" not in capabilities
-    assert "person_track" not in capabilities
+    assert job_capabilities == [
+        "image_edit",
+        "image_generate",
+        "person_replace",
+        "video_bridge",
+        "video_extend",
+        "video_generate",
+    ]
 
 
 def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
-    assert "person_detect" not in capabilities
-    assert "person_track" not in capabilities
+    assert capabilities == ["cpu"]
 
 
-def test_lora_import_target_must_stay_under_allowed_roots(tmp_path):
-    settings = SimpleNamespace(data_dir=tmp_path / "data", config_dir=tmp_path / "config")
-    target = resolve_lora_import_target(settings, {"targetDir": str(tmp_path / "data" / "loras" / "style")}, tmp_path / "fallback")
-
-    assert target == (tmp_path / "data" / "loras" / "style").resolve()
-
-    try:
-        resolve_lora_import_target(settings, {"targetDir": str(tmp_path / "outside")}, tmp_path / "fallback")
-    except ValueError as exc:
-        assert "targetDir" in str(exc)
-    else:
-        raise AssertionError("outside targetDir should reject")
-
-
-def test_project_lora_import_target_and_manifest_are_allowed(tmp_path):
-    settings = SimpleNamespace(data_dir=tmp_path / "data", config_dir=tmp_path / "config")
-    project_path = tmp_path / "projects" / "demo"
-    project_path.mkdir(parents=True)
-    settings.data_dir.mkdir()
-    (settings.data_dir / "recent-projects.json").write_text(
-        json.dumps([{"id": "project-1", "path": str(project_path)}]),
-        encoding="utf-8",
-    )
-
-    target_dir = project_path / "loras" / "imports" / "style"
-    target = resolve_lora_import_target(
-        settings,
-        {"projectId": "project-1", "targetDir": str(target_dir)},
-        tmp_path / "fallback",
-    )
-    manifest = lora_manifest_target(
-        settings,
-        {
-            "projectId": "project-1",
-            "manifestPath": str(project_path / "loras" / "manifest.jsonc"),
-            "manifestEntry": {"id": "style"},
-        },
-    )
-
-    assert target == target_dir.resolve()
-    assert manifest == (project_path / "loras" / "manifest.jsonc").resolve()
-
-
-def test_lora_manifest_upsert_is_atomic_and_preserves_created_at(tmp_path):
-    manifest = tmp_path / "user.loras.jsonc"
-    upsert_lora_manifest_entry(manifest, {"id": "style", "name": "Style", "createdAt": "first"})
-    upsert_lora_manifest_entry(manifest, {"id": "style", "name": "Style Updated", "createdAt": "second"})
-
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
-    assert payload["loras"] == [{"id": "style", "name": "Style Updated", "createdAt": "first"}]
-
-
-def test_python_cpu_child_disables_utility_jobs(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "1")
-
+def test_python_cpu_child_disables_cuda():
     env = child_environment(SimpleNamespace(), worker_id="python-inference-worker-cpu", gpu_id="cpu")
 
     assert env["CUDA_VISIBLE_DEVICES"] == ""
-    assert env["SCENEWORKS_UTILITY_JOBS"] == "0"
 
 
-def test_python_gpu_child_disables_utility_jobs():
+def test_python_gpu_child_selects_cuda_device():
     env = child_environment(SimpleNamespace(), worker_id="worker-gpu-0", gpu_id="0")
 
     assert env["CUDA_VISIBLE_DEVICES"] == "0"
-    assert env["SCENEWORKS_UTILITY_JOBS"] == "0"
 
 
 def test_loaded_models_are_collected_from_adapter_cache():
@@ -176,8 +112,39 @@ def test_friendly_failure_identifies_missing_model_files():
 
     assert message == "Image generation failed because required model files were not available."
     assert "Model Manager" in error
-    assert "model_download" in error
+    assert "Rust utility worker" in error
     assert "HF_TOKEN" in error
+
+
+def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
+    events = []
+    monkeypatch.setattr("scene_worker.runtime.emit", events.append)
+    monkeypatch.setattr(
+        "scene_worker.runtime.discover_gpu",
+        lambda _gpu_id: {"id": "0", "name": "GPU 0", "capabilities": ["gpu"]},
+    )
+
+    run_check(SimpleNamespace(worker_id="worker-1", gpu_id="0"))
+
+    assert events[0]["event"] == "worker_check"
+    assert events[0]["jobTypes"] == [
+        "image_generate",
+        "image_edit",
+        "video_generate",
+        "video_extend",
+        "video_bridge",
+        "person_replace",
+    ]
+    assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
+
+
+def test_main_check_exits_without_api_loop(monkeypatch):
+    calls = []
+    monkeypatch.setattr("scene_worker.runtime.run_check", lambda settings: calls.append(settings.worker_id))
+
+    main(["--check"])
+
+    assert calls == ["worker-local-0"]
 
 
 def test_heartbeat_loaded_models_are_not_sent_as_current_job():
@@ -448,42 +415,3 @@ def test_replace_person_video_sidecar_preserves_lineage():
     assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
     assert asset["lineage"]["sourceClipAssetId"] == "asset-video"
     assert asset["lineage"]["characterId"] == "character-1"
-
-
-def test_download_progress_payload_reports_remaining_bytes(monkeypatch):
-    monkeypatch.setattr("scene_worker.runtime.time.monotonic", lambda: 20.0)
-
-    payload = download_progress_payload(
-        "owner/model",
-        downloaded_bytes=512 * 1024 * 1024,
-        total_bytes=1024 * 1024 * 1024,
-        started_bytes=0,
-        started_at=10.0,
-    )
-
-    assert payload["status"] == "downloading"
-    assert payload["stage"] == "downloading"
-    assert payload["progress"] == 0.525
-    assert payload["message"] == "Downloading owner/model: 512.0 MB of 1.0 GB (512.0 MB left)."
-    assert payload["etaSeconds"] == 10.0
-
-
-def test_download_progress_payload_handles_unknown_total(monkeypatch):
-    monkeypatch.setattr("scene_worker.runtime.time.monotonic", lambda: 20.0)
-
-    payload = download_progress_payload(
-        "owner/model",
-        downloaded_bytes=128 * 1024 * 1024,
-        total_bytes=None,
-        started_bytes=0,
-        started_at=10.0,
-    )
-
-    assert payload["progress"] == 0.1
-    assert payload["message"] == "Downloading owner/model: 128.0 MB written."
-    assert payload["etaSeconds"] is None
-
-
-def test_format_bytes_uses_readable_units():
-    assert format_bytes(0) == "0 B"
-    assert format_bytes(1024 * 1024) == "1.0 MB"

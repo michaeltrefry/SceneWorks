@@ -3,9 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import hashlib
-import shutil
-import subprocess
-import tempfile
 import warnings
 from pathlib import Path
 from textwrap import wrap
@@ -58,9 +55,6 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "durationHint": "Keep clips shorter until local looping behavior is validated.",
     },
 }
-
-
-ASSET_FOLDERS = ("assets/images", "assets/videos", "assets/uploads", "assets/frames", "assets/renders")
 
 
 @dataclass(frozen=True)
@@ -346,8 +340,6 @@ def load_source_frame(project_path: Path, asset_id: str | None, timestamp: float
 
     image = load_seekable_image_frame(media_path, timestamp, payload.get("file", {}).get("duration"))
     if image is None:
-        image = load_ffmpeg_frame(media_path, timestamp)
-    if image is None:
         return None
 
     image.thumbnail((width, height), Image.Resampling.LANCZOS)
@@ -372,37 +364,6 @@ def load_seekable_image_frame(media_path: Path, timestamp: float, duration: Any 
         return image.convert("RGB")
     except (EOFError, OSError):
         return None
-
-
-def load_ffmpeg_frame(media_path: Path, timestamp: float) -> Image.Image | None:
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        raise RuntimeError("ffmpeg is not available for frame extraction.")
-    with tempfile.TemporaryDirectory(prefix="sceneworks-frame-") as temp_dir:
-        frame_path = Path(temp_dir) / "frame.png"
-        command = [
-            ffmpeg,
-            "-y",
-            "-ss",
-            f"{max(0, timestamp):.3f}",
-            "-i",
-            str(media_path),
-            "-frames:v",
-            "1",
-            "-f",
-            "image2",
-            str(frame_path),
-        ]
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
-        if result.returncode != 0 or not frame_path.exists():
-            tail = "\n".join((result.stderr or "").splitlines()[-6:]).strip()
-            if tail:
-                raise RuntimeError(f"ffmpeg could not extract a frame at {timestamp:.3f}s: {tail}")
-            return None
-        try:
-            return Image.open(frame_path).convert("RGB")
-        except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-            return None
 
 
 def render_preview_frames(
@@ -641,116 +602,4 @@ def build_video_asset_sidecar(
             "timeline": timeline_context,
             "jobId": job_id,
         },
-    }
-
-
-def run_frame_extract(
-    *,
-    settings: WorkerSettings,
-    job: dict[str, Any],
-    progress: ProgressCallback,
-    cancel_requested: CancelCallback,
-) -> dict[str, Any]:
-    payload = job["payload"]
-    project_id = payload["projectId"]
-    project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
-    frames_dir = project_path / "assets" / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    (project_path / "recipes").mkdir(parents=True, exist_ok=True)
-
-    source_asset_id = payload.get("sourceAssetId")
-    timestamp = safe_float(payload.get("sourceTimestamp"), 0, 0, 3600)
-    source_sidecar_path = find_asset_sidecar_path(project_path, source_asset_id)
-    if source_sidecar_path is None:
-        raise FileNotFoundError(f"Source asset not found: {source_asset_id}")
-    source_asset = read_json(source_sidecar_path)
-    source_media_path = project_path / source_asset.get("file", {}).get("path", "")
-    if not source_media_path.exists():
-        raise FileNotFoundError(f"Source media not found: {source_media_path}")
-
-    progress("running", "extracting", 0.25, "Extracting timeline frame.")
-    if cancel_requested():
-        raise InterruptedError("Frame extraction canceled before reading media.")
-
-    image = load_source_frame(project_path, source_asset_id, timestamp, 1920, 1080)
-    if image is None:
-        raise RuntimeError("Could not decode a frame from the selected clip.")
-
-    asset_id = f"asset_{uuid4().hex}"
-    created_at = utc_now()
-    filename = f"{created_at[:10]}_frame_{asset_id[-8:]}.png"
-    media_rel = f"assets/frames/{filename}"
-    media_path = project_path / media_rel
-    temp_path = media_path.with_suffix(".tmp.png")
-    image.save(temp_path, "PNG")
-    temp_path.replace(media_path)
-
-    timeline_id = payload.get("timelineId")
-    timeline_item_id = payload.get("timelineItemId")
-    intended_use = payload.get("intendedUse", "reuse")
-    asset = {
-        "schemaVersion": 1,
-        "id": asset_id,
-        "projectId": project_id,
-        "generationSetId": None,
-        "type": "frame",
-        "displayName": f"Frame {timestamp:.2f}s from {source_asset.get('displayName', 'clip')}",
-        "createdAt": created_at,
-        "file": {
-            "path": media_rel,
-            "mimeType": "image/png",
-            "width": image.width,
-            "height": image.height,
-            "duration": None,
-            "fps": None,
-        },
-        "status": {
-            "favorite": False,
-            "rating": 0,
-            "rejected": False,
-            "trashed": False,
-        },
-        "recipe": {
-            "mode": "frame_extract",
-            "model": "timeline-frame-extract",
-            "adapter": "ffmpeg-frame-extract",
-            "prompt": f"Extract frame at {timestamp:.2f}s",
-            "negativePrompt": "",
-            "seed": 0,
-            "loras": [],
-            "stylePreset": "none",
-            "normalizedSettings": {
-                "timelineId": timeline_id,
-                "timelineItemId": timeline_item_id,
-                "playheadSeconds": payload.get("playheadSeconds"),
-                "sourceTimestamp": timestamp,
-                "intendedUse": intended_use,
-            },
-            "rawAdapterSettings": {"sourcePath": str(source_media_path.relative_to(project_path)).replace("\\", "/")},
-        },
-        "lineage": {
-            "parents": [source_asset_id],
-            "sourceAssetId": source_asset_id,
-            "sourceTimestamp": timestamp,
-            "timelineId": timeline_id,
-            "timelineItemId": timeline_item_id,
-            "intendedUse": intended_use,
-            "jobId": job["id"],
-        },
-    }
-    sidecar_path = media_path.with_suffix(".sceneworks.json")
-    progress("saving", "saving", 0.85, "Saving extracted frame asset.")
-    if cancel_requested():
-        media_path.unlink(missing_ok=True)
-        raise InterruptedError("Frame extraction canceled before asset promotion.")
-    write_json(sidecar_path, asset)
-    write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
-    index_asset(project_path, asset)
-    return {
-        "assetIds": [asset_id],
-        "assets": [asset],
-        "sourceAssetId": source_asset_id,
-        "sourceTimestamp": timestamp,
-        "timelineId": timeline_id,
-        "timelineItemId": timeline_item_id,
     }

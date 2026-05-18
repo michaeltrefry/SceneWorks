@@ -129,7 +129,7 @@ When multiple GPU children are registered, auto GPU jobs may be claimed by a
 worker that already reports the requested model as warm before falling back to
 FIFO order. Explicit GPU selections and utility jobs keep their normal FIFO
 claim order.
-Both Docker worker images install Debian Bookworm `ffmpeg`; host-mode workers
+The Rust worker image installs Debian Bookworm `ffmpeg`; host-mode Rust workers
 use the `ffmpeg` found on `PATH`. Set `HF_TOKEN` when downloading from gated
 Hugging Face repositories.
 
@@ -172,7 +172,7 @@ apps/
   api/       FastAPI API rollback runtime
   rust-api/  Default Rust backend API
   rust-worker/ Rust CPU utility worker for model downloads, LoRA imports, frame extraction, and timeline exports
-  worker/    Python Diffusers/PyTorch inference worker and documented utility fallback
+  worker/    Python Diffusers/PyTorch image and video inference sidecar
 crates/
   sceneworks-core/ Shared Rust contract/domain helpers
 packages/
