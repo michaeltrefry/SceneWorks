@@ -6,6 +6,7 @@
       "id": "cinematic",
       "name": "Cinematic",
       "scope": "builtin",
+      "order": 10,
       "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -27,6 +28,7 @@
       "id": "photoreal",
       "name": "Photoreal",
       "scope": "builtin",
+      "order": 20,
       "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -48,6 +50,7 @@
       "id": "anime",
       "name": "Anime",
       "scope": "builtin",
+      "order": 30,
       "modes": ["text_to_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -69,6 +72,7 @@
       "id": "fantasy",
       "name": "Fantasy",
       "scope": "builtin",
+      "order": 40,
       "modes": ["text_to_image", "character_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {
@@ -90,6 +94,7 @@
       "id": "product",
       "name": "Product Shot",
       "scope": "builtin",
+      "order": 50,
       "modes": ["text_to_image", "edit_image", "style_variations"],
       "model": "z_image_turbo",
       "defaults": {

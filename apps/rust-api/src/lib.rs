@@ -608,6 +608,8 @@ struct ImageJobRequest {
     #[serde(default = "default_style_preset")]
     style_preset: String,
     #[serde(default)]
+    recipe_preset_id: Option<String>,
+    #[serde(default)]
     loras: Vec<Value>,
     #[serde(default)]
     character_id: Option<String>,
@@ -1166,8 +1168,17 @@ async fn create_image_job(
     let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
     job_payload.remove("requestedGpu");
+    if payload.recipe_preset_id.is_none() {
+        job_payload.remove("recipePresetId");
+    }
+    apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload).await?;
     if payload.seed.is_none() {
-        job_payload.insert("seeds".to_owned(), random_image_seeds(payload.count));
+        let count = job_payload
+            .get("count")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(payload.count);
+        job_payload.insert("seeds".to_owned(), random_image_seeds(count));
     }
     let job = create_generation_job(
         state,
@@ -1179,6 +1190,167 @@ async fn create_image_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn apply_recipe_preset_to_image_payload(
+    state: &AppState,
+    payload: &ImageJobRequest,
+    job_payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let Some(preset_id) = payload.recipe_preset_id.as_deref() else {
+        return Ok(());
+    };
+    if payload.project_id.is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    let presets = recipe_preset_catalog(state, Some(&payload.project_id)).await?;
+    let preset = presets
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(preset_id))
+        .ok_or_else(|| ApiError::bad_request("Recipe preset not found"))?;
+
+    let expanded_prompt = preset_prompt(&payload.prompt, preset);
+    job_payload.insert("prompt".to_owned(), Value::String(expanded_prompt));
+    if let Some(model) = preset
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    }
+    apply_recipe_preset_defaults(preset, job_payload)?;
+    job_payload.insert(
+        "stylePreset".to_owned(),
+        Value::String(preset_id.to_owned()),
+    );
+    let loras = lora_catalog(state, Some(&payload.project_id)).await?;
+    let existing_lora_ids = job_payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut seen_lora_ids = existing_lora_ids;
+    let mut preset_loras = Vec::new();
+    let mut missing_lora_ids = Vec::new();
+    for preset_lora in preset
+        .get("builtInLoras")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        let Some(lora_id) = preset_lora_id(&preset_lora) else {
+            continue;
+        };
+        let Some(lora) = loras
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(lora_id))
+        else {
+            missing_lora_ids.push(Value::String(lora_id.to_owned()));
+            continue;
+        };
+        if seen_lora_ids.iter().any(|seen_id| seen_id == lora_id) {
+            continue;
+        }
+        preset_loras.push(serialize_preset_lora(lora, &preset_lora, lora_id));
+        seen_lora_ids.push(lora_id.to_owned());
+    }
+    let advanced = job_payload
+        .entry("advanced".to_owned())
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    if !advanced.is_object() {
+        *advanced = Value::Object(JsonObject::new());
+    }
+    let advanced = advanced
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("advanced payload must be an object"))?;
+    advanced.insert(
+        "recipePresetId".to_owned(),
+        Value::String(preset_id.to_owned()),
+    );
+    advanced.remove("recipePresetName");
+    if missing_lora_ids.is_empty() {
+        advanced.remove("presetMissingLoras");
+    } else {
+        advanced.insert(
+            "presetMissingLoras".to_owned(),
+            Value::Array(missing_lora_ids),
+        );
+    }
+
+    let user_loras = job_payload
+        .remove("loras")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    preset_loras.extend(user_loras);
+    job_payload.insert("loras".to_owned(), Value::Array(preset_loras));
+    Ok(())
+}
+
+fn apply_recipe_preset_defaults(
+    preset: &Value,
+    job_payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let Some(defaults) = preset.get("defaults").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if let Some(count) = defaults.get("count").and_then(Value::as_u64) {
+        let count = u32::try_from(count)
+            .map_err(|_| ApiError::bad_request("Recipe preset count is out of range"))?;
+        if !(1..=8).contains(&count) {
+            return Err(ApiError::bad_request(
+                "Recipe preset count must be between 1 and 8",
+            ));
+        }
+        job_payload.insert("count".to_owned(), json!(count));
+    }
+    if let Some(resolution) = defaults.get("resolution").and_then(Value::as_str) {
+        let (width, height) = parse_recipe_preset_resolution(resolution)?;
+        validate_dimension(width, "width", 2048)?;
+        validate_dimension(height, "height", 2048)?;
+        job_payload.insert("width".to_owned(), json!(width));
+        job_payload.insert("height".to_owned(), json!(height));
+        let advanced = job_payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| Value::Object(JsonObject::new()));
+        if !advanced.is_object() {
+            *advanced = Value::Object(JsonObject::new());
+        }
+        advanced
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("advanced payload must be an object"))?
+            .insert(
+                "resolution".to_owned(),
+                Value::String(resolution.to_owned()),
+            );
+    }
+    if let Some(negative_prompt) = defaults.get("negativePrompt").and_then(Value::as_str) {
+        job_payload.insert(
+            "negativePrompt".to_owned(),
+            Value::String(negative_prompt.to_owned()),
+        );
+    }
+    Ok(())
+}
+
+fn parse_recipe_preset_resolution(value: &str) -> Result<(u32, u32), ApiError> {
+    let Some((width, height)) = value.split_once('x') else {
+        return Err(ApiError::bad_request(
+            "Recipe preset resolution must use WIDTHxHEIGHT",
+        ));
+    };
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| ApiError::bad_request("Recipe preset width must be a number"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| ApiError::bad_request("Recipe preset height must be a number"))?;
+    Ok((width, height))
 }
 
 async fn create_video_job(
@@ -2054,6 +2226,7 @@ async fn recipe_preset_catalog(
             left.get("scope")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
+            left.get("order").and_then(Value::as_i64).unwrap_or(10_000),
             left.get("name").and_then(Value::as_str).unwrap_or_default(),
         );
         let right_key = (
@@ -2061,6 +2234,7 @@ async fn recipe_preset_catalog(
                 .get("scope")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
+            right.get("order").and_then(Value::as_i64).unwrap_or(10_000),
             right
                 .get("name")
                 .and_then(Value::as_str)
@@ -2157,6 +2331,52 @@ fn finalize_recipe_preset_entry(preset: &mut Value) -> Result<(), ApiError> {
         .entry("prompt".to_owned())
         .or_insert_with(|| Value::Object(JsonObject::new()));
     Ok(())
+}
+
+fn preset_prompt(prompt: &str, preset: &Value) -> String {
+    let fragments = preset.get("prompt").and_then(Value::as_object);
+    [
+        fragments
+            .and_then(|value| value.get("prefix"))
+            .and_then(Value::as_str),
+        Some(prompt),
+        fragments
+            .and_then(|value| value.get("suffix"))
+            .and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+fn preset_lora_id(preset_lora: &Value) -> Option<&str> {
+    preset_lora
+        .as_str()
+        .or_else(|| preset_lora.get("id").and_then(Value::as_str))
+}
+
+fn preset_lora_weight(lora: &Value, preset_lora: &Value) -> f64 {
+    preset_lora
+        .get("weight")
+        .and_then(Value::as_f64)
+        .or_else(|| lora.get("defaultWeight").and_then(Value::as_f64))
+        .or_else(|| lora.get("weight").and_then(Value::as_f64))
+        .unwrap_or(0.8)
+}
+
+fn serialize_preset_lora(lora: &Value, preset_lora: &Value, lora_id: &str) -> Value {
+    json!({
+        "id": lora_id,
+        "name": lora.get("name").and_then(Value::as_str).unwrap_or(lora_id),
+        "scope": lora.get("scope").and_then(Value::as_str).unwrap_or("builtin"),
+        "weight": preset_lora_weight(lora, preset_lora),
+        "triggerWords": lora.get("triggerWords").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "compatibility": lora.get("compatibility").cloned().unwrap_or_else(|| Value::Object(JsonObject::new())),
+        "presetManaged": true
+    })
 }
 
 async fn load_manifest_entries(
@@ -3668,7 +3888,9 @@ mod tests {
                 {
                   "id": "cinematic",
                   "name": "Cinematic",
-                  "defaults": { "count": 4 },
+                  "model": "preset-model",
+                  "defaults": { "count": 4, "resolution": "1280x720", "negativePrompt": "flat lighting" },
+                  "prompt": { "suffix": "cinematic lighting" },
                   "builtInLoras": [{ "id": "style-lora", "weight": 0.5 }]
                 }
               ]
@@ -3682,7 +3904,7 @@ mod tests {
             {
               "schemaVersion": 1,
               "presets": [
-                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2 } }
+                { "id": "cinematic", "name": "My Cinematic", "defaults": { "count": 2, "resolution": "1280x720", "negativePrompt": "flat lighting" } }
               ]
             }
             "#,
@@ -3724,6 +3946,48 @@ mod tests {
         assert_eq!(presets[0]["scope"], "global");
         assert_eq!(presets[0]["defaults"]["count"], 2);
         assert_eq!(presets[0]["builtInLoras"][0]["id"], "style-lora");
+
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Preset Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id");
+        let (status, image_job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "city at night",
+                "model": "client-model",
+                "count": 1,
+                "width": 512,
+                "height": 512,
+                "negativePrompt": "client negative prompt",
+                "recipePresetId": "cinematic"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            image_job["payload"]["prompt"],
+            "city at night, cinematic lighting"
+        );
+        assert_eq!(image_job["payload"]["loras"][0]["id"], "style-lora");
+        assert_eq!(image_job["payload"]["model"], "preset-model");
+        assert_eq!(image_job["payload"]["count"], 2);
+        assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 2);
+        assert_eq!(image_job["payload"]["width"], 1280);
+        assert_eq!(image_job["payload"]["height"], 720);
+        assert_eq!(image_job["payload"]["negativePrompt"], "flat lighting");
+        assert_eq!(image_job["payload"]["advanced"]["resolution"], "1280x720");
+        assert_eq!(
+            image_job["payload"]["advanced"]["recipePresetId"],
+            "cinematic"
+        );
 
         let (status, job) = request(
             app.clone(),

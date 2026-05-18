@@ -20,7 +20,6 @@ from sceneworks_shared import ProjectNotFound, find_project_path, slugify, utc_n
 
 router = APIRouter(prefix="/models", tags=["models"])
 loras_router = APIRouter(prefix="/loras", tags=["loras"])
-recipe_presets_router = APIRouter(prefix="/recipe-presets", tags=["recipe-presets"])
 LORA_MANIFEST_LOCK = threading.Lock()
 
 
@@ -107,10 +106,6 @@ def load_lora_manifest(path: Path) -> list[dict[str, Any]]:
     return [dict(item) for item in load_manifest_cached(str(path), manifest_signature(path), "loras")]
 
 
-def load_recipe_preset_manifest(path: Path) -> list[dict[str, Any]]:
-    return [dict(item) for item in load_manifest_cached(str(path), manifest_signature(path), "presets")]
-
-
 def lora_manifest_payload(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"schemaVersion": 1, "loras": []}
@@ -136,10 +131,6 @@ def project_lora_manifest_path(project_path: Path) -> Path:
     return project_path / "loras" / "manifest.jsonc"
 
 
-def project_recipe_preset_manifest_path(project_path: Path) -> Path:
-    return project_path / "recipes" / "presets.jsonc"
-
-
 def normalize_lora_entry(
     lora: dict[str, Any],
     *,
@@ -159,26 +150,6 @@ def normalize_lora_entry(
     entry["manifestPath"] = str(manifest_path)
     entry["installedPath"] = str(installed_path) if installed_path else None
     entry["installState"] = "missing" if installed_path and not installed_path.exists() else "installed"
-    return entry
-
-
-def normalize_recipe_preset_entry(
-    preset: dict[str, Any],
-    *,
-    scope: str,
-    manifest_path: Path,
-) -> dict[str, Any]:
-    entry = dict(preset)
-    entry.setdefault("scope", scope)
-    entry["manifestPath"] = str(manifest_path)
-    return entry
-
-
-def finalize_recipe_preset_entry(preset: dict[str, Any]) -> dict[str, Any]:
-    entry = dict(preset)
-    entry.setdefault("builtInLoras", [])
-    entry.setdefault("defaults", {})
-    entry.setdefault("prompt", {})
     return entry
 
 
@@ -356,49 +327,6 @@ def lora_catalog(request: Request, project_id: str | None = None) -> list[dict[s
     return sorted(by_id.values(), key=lambda lora: (lora.get("scope", ""), lora.get("family", ""), lora.get("name", "")))
 
 
-def recipe_preset_catalog(request: Request, project_id: str | None = None) -> list[dict[str, Any]]:
-    settings = request.app.state.settings
-    manifest_dir = settings.config_dir / "manifests"
-    by_id = {
-        preset["id"]: normalize_recipe_preset_entry(
-            preset,
-            scope=preset.get("scope", "builtin"),
-            manifest_path=manifest_dir / "builtin.recipe-presets.jsonc",
-        )
-        for preset in load_recipe_preset_manifest(manifest_dir / "builtin.recipe-presets.jsonc")
-        if "id" in preset
-    }
-    for preset in load_recipe_preset_manifest(manifest_dir / "user.recipe-presets.jsonc"):
-        preset_id = preset.get("id")
-        if preset_id:
-            by_id[preset_id] = {
-                **by_id.get(preset_id, {}),
-                **normalize_recipe_preset_entry(
-                    preset,
-                    scope=preset.get("scope", "global"),
-                    manifest_path=manifest_dir / "user.recipe-presets.jsonc",
-                ),
-            }
-    if project_id:
-        project_path = project_path_for_request(request, project_id)
-        project_manifest = project_recipe_preset_manifest_path(project_path)
-        for preset in load_recipe_preset_manifest(project_manifest):
-            preset_id = preset.get("id")
-            if preset_id:
-                by_id[preset_id] = {
-                    **by_id.get(preset_id, {}),
-                    **normalize_recipe_preset_entry(
-                        preset,
-                        scope=preset.get("scope", "project"),
-                        manifest_path=project_manifest,
-                    ),
-                }
-    return sorted(
-        (finalize_recipe_preset_entry(preset) for preset in by_id.values()),
-        key=lambda preset: (preset.get("scope", ""), preset.get("name", "")),
-    )
-
-
 def lora_families(lora: dict[str, Any]) -> set[str]:
     compatibility = lora.get("compatibility", {})
     values = (
@@ -457,14 +385,6 @@ def list_loras(
     if modelFamily:
         items = [item for item in items if modelFamily in lora_families(item)]
     return items
-
-
-@recipe_presets_router.get("")
-def list_recipe_presets(
-    request: Request,
-    projectId: str | None = Query(default=None),
-) -> list[dict[str, Any]]:
-    return recipe_preset_catalog(request, projectId)
 
 
 @loras_router.post("/import", status_code=201)

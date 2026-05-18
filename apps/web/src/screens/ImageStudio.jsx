@@ -1,14 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
 
-const fallbackRecipePresets = [
-  { id: "cinematic", name: "Cinematic", defaults: { count: 4, resolution: "1024x1024" }, builtInLoras: [] },
-  { id: "photoreal", name: "Photoreal", defaults: { count: 4, resolution: "1024x1024" }, builtInLoras: [] },
-  { id: "anime", name: "Anime", defaults: { count: 4, resolution: "1024x1024" }, builtInLoras: [] },
-  { id: "fantasy", name: "Fantasy", defaults: { count: 4, resolution: "1024x1024" }, builtInLoras: [] },
-  { id: "product", name: "Product Shot", defaults: { count: 2, resolution: "1024x1024" }, builtInLoras: [] },
-];
-
 export function ImageStudio({
   activeProject,
   assets,
@@ -71,11 +63,6 @@ export function ImageStudio({
     };
   }
 
-  function applyPresetPrompt(basePrompt, preset) {
-    const fragments = preset?.prompt ?? {};
-    return [fragments.prefix, basePrompt, fragments.suffix].filter((part) => String(part ?? "").trim()).join(", ");
-  }
-
   useEffect(() => {
     if (!imageModels.some((item) => item.id === model)) {
       setModel(imageModels[0]?.id ?? "z_image_turbo");
@@ -124,9 +111,7 @@ export function ImageStudio({
   const selectedModel = imageModels.find((item) => item.id === model);
   const selectedModelFamily = selectedModel?.family ?? null;
   const availableRecipePresets = useMemo(() => {
-    const items = recipePresets.length ? recipePresets : fallbackRecipePresets;
-    const matchingMode = items.filter((preset) => !preset.modes?.length || preset.modes.includes(mode));
-    return matchingMode.length ? matchingMode : items;
+    return recipePresets.filter((preset) => !preset.modes?.length || preset.modes.includes(mode));
   }, [mode, recipePresets]);
   const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === stylePreset) ?? availableRecipePresets[0] ?? null;
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
@@ -145,18 +130,20 @@ export function ImageStudio({
   const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
   const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
   const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
-  const presetLoras = (selectedRecipePreset?.builtInLoras ?? [])
+  const presetLoraDetails = (selectedRecipePreset?.builtInLoras ?? [])
     .map((presetLora) => {
       const loraId = typeof presetLora === "string" ? presetLora : presetLora.id;
       const lora = loras.find((item) => item.id === loraId);
-      return lora ? serializeLora(lora, presetLora) : { id: loraId, name: loraId, scope: "builtin", weight: presetLora.weight ?? 0.8 };
+      return lora ? { ...serializeLora(lora, presetLora), missing: false } : { id: loraId, name: loraId, missing: true };
     })
     .filter((lora) => lora.id);
+  const presetPromptParts = [selectedRecipePreset?.prompt?.prefix, selectedRecipePreset?.prompt?.suffix]
+    .filter((part) => String(part ?? "").trim());
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
   useEffect(() => {
     if (!availableRecipePresets.some((preset) => preset.id === stylePreset)) {
-      setStylePreset(availableRecipePresets[0]?.id ?? "cinematic");
+      setStylePreset(availableRecipePresets[0]?.id ?? "");
     }
   }, [availableRecipePresets, stylePreset]);
 
@@ -164,7 +151,7 @@ export function ImageStudio({
     if (!selectedRecipePreset) {
       return;
     }
-    if (selectedRecipePreset.model && imageModels.some((item) => item.id === selectedRecipePreset.model)) {
+    if (selectedRecipePreset.model) {
       setModel(selectedRecipePreset.model);
     }
     const defaults = selectedRecipePreset.defaults ?? {};
@@ -174,8 +161,10 @@ export function ImageStudio({
     if (defaults.resolution) {
       setResolution(defaults.resolution);
     }
-    setNegativePrompt(defaults.negativePrompt ?? "");
-  }, [selectedRecipePreset, imageModels]);
+    if (Object.prototype.hasOwnProperty.call(defaults, "negativePrompt")) {
+      setNegativePrompt(defaults.negativePrompt ?? "");
+    }
+  }, [selectedRecipePreset?.id]);
 
   useEffect(() => {
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
@@ -199,7 +188,7 @@ export function ImageStudio({
     event.preventDefault();
     createImageJob({
       mode,
-      prompt: applyPresetPrompt(prompt, selectedRecipePreset),
+      prompt,
       negativePrompt,
       model,
       count,
@@ -207,19 +196,13 @@ export function ImageStudio({
       width,
       height,
       stylePreset,
+      recipePresetId: selectedRecipePreset?.id ?? null,
       characterId: mode === "character_image" ? characterId || null : null,
       characterLookId: mode === "character_image" ? characterLookId || null : null,
       sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
-      loras: [
-        ...presetLoras,
-        ...selectedLoras
-          .filter((lora) => !presetLoras.some((presetLora) => presetLora.id === lora.id))
-          .map((lora) => serializeLora(lora)),
-      ],
+      loras: selectedLoras.map((lora) => serializeLora(lora)),
       advanced: {
         resolution,
-        recipePresetId: selectedRecipePreset?.id ?? stylePreset,
-        recipePresetName: selectedRecipePreset?.name ?? stylePreset,
       },
     });
   }
@@ -304,12 +287,16 @@ export function ImageStudio({
           <div className="control-grid">
             <label>
               Style
-              <select onChange={(event) => setStylePreset(event.target.value)} value={stylePreset}>
-                {availableRecipePresets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.name ?? preset.id}
-                  </option>
-                ))}
+              <select disabled={!availableRecipePresets.length} onChange={(event) => setStylePreset(event.target.value)} value={stylePreset}>
+                {availableRecipePresets.length ? (
+                  availableRecipePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name ?? preset.id}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">Presets unavailable</option>
+                )}
               </select>
             </label>
             <label>
@@ -327,6 +314,23 @@ export function ImageStudio({
               </select>
             </label>
           </div>
+          {selectedRecipePreset ? (
+            <div className="guidance-strip">
+              <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
+              <span>
+                {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
+                {presetLoraDetails.length
+                  ? ` | Uses LoRA: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
+                  : " | No preset LoRAs"}
+                {presetLoraDetails.some((lora) => lora.missing) ? " | Preset incomplete" : ""}
+              </span>
+            </div>
+          ) : (
+            <div className="guidance-strip">
+              <strong>Presets unavailable</strong>
+              <span>Generation can continue, but no preset defaults or managed LoRAs will be applied.</span>
+            </div>
+          )}
 
           <section className="lora-picker" aria-label="LoRA selection">
             <div>

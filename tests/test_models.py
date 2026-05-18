@@ -12,7 +12,6 @@ from sceneworks_api.models import (
     load_manifest,
     model_is_installed,
     model_install_marker,
-    recipe_preset_catalog,
     strip_jsonc_comments,
 )
 
@@ -188,46 +187,3 @@ def test_project_lora_import_targets_project_manifest_and_folder(tmp_path):
     assert payload["manifestEntry"]["scope"] == "project"
     assert payload["manifestEntry"]["source"]["path"] == "loras/imports/mira_style"
     assert not (project_path / "loras" / "manifest.jsonc").exists()
-
-
-def test_recipe_preset_catalog_merges_builtin_global_and_project_scopes(tmp_path):
-    config_dir = tmp_path / "config"
-    manifest_dir = config_dir / "manifests"
-    manifest_dir.mkdir(parents=True)
-    data_dir = tmp_path / "data"
-    project_path = data_dir / "projects" / "noir.sceneworks"
-    (project_path / "recipes").mkdir(parents=True)
-    (manifest_dir / "builtin.recipe-presets.jsonc").write_text(
-        '{"schemaVersion":1,"presets":[{"id":"cinematic","name":"Cinematic","defaults":{"count":4}}]}',
-        encoding="utf-8",
-    )
-    (manifest_dir / "user.recipe-presets.jsonc").write_text(
-        '{"schemaVersion":1,"presets":[{"id":"cinematic","name":"My Cinematic","defaults":{"count":2}},{"id":"macro","name":"Macro"}]}',
-        encoding="utf-8",
-    )
-    (project_path / "recipes" / "presets.jsonc").write_text(
-        '{"schemaVersion":1,"presets":[{"id":"project_style","name":"Project Style","builtInLoras":[{"id":"builtin_cinematic_detail","weight":0.4}]}]}',
-        encoding="utf-8",
-    )
-    registry_path = data_dir / "recent-projects.json"
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text(
-        json.dumps([{"id": "project-1", "name": "Noir", "path": str(project_path)}]),
-        encoding="utf-8",
-    )
-    request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                settings=SimpleNamespace(config_dir=config_dir, data_dir=data_dir, registry_path=registry_path),
-            ),
-        ),
-    )
-
-    presets = recipe_preset_catalog(request, "project-1")
-
-    by_id = {preset["id"]: preset for preset in presets}
-    assert by_id["cinematic"]["name"] == "My Cinematic"
-    assert by_id["cinematic"]["scope"] == "global"
-    assert by_id["cinematic"]["defaults"]["count"] == 2
-    assert by_id["project_style"]["scope"] == "project"
-    assert by_id["project_style"]["builtInLoras"][0]["id"] == "builtin_cinematic_detail"

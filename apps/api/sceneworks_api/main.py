@@ -6,7 +6,7 @@ from .events import EventHub, EventTicketStore
 from .image_generation import router as image_router
 from .jobs import router as jobs_router
 from .jobs_store import JobsStore
-from .models import loras_router, recipe_presets_router, router as models_router
+from .models import loras_router, router as models_router
 from .person_tracking import router as person_tracking_router
 from .projects import ensure_data_dirs, router as projects_router
 from .security import access_control_middleware
@@ -80,7 +80,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(characters_router, prefix="/api/v1")
     app.include_router(models_router, prefix="/api/v1")
     app.include_router(loras_router, prefix="/api/v1")
-    app.include_router(recipe_presets_router, prefix="/api/v1")
     app.include_router(timelines_router, prefix="/api/v1")
     app.include_router(person_tracking_router, prefix="/api/v1")
     app.include_router(image_router, prefix="/api/v1")

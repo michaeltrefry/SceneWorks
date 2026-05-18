@@ -528,7 +528,6 @@ def test_system_manifest_and_http_contracts(parity_runtimes):
         ("event ticket response", "/api/v1/jobs/events/ticket", "POST", 200),
         ("model manifest response", "/api/v1/models", "GET", 200),
         ("lora manifest response", "/api/v1/loras?modelFamily=wan-video", "GET", 200),
-        ("recipe preset manifest response", "/api/v1/recipe-presets", "GET", 200),
     ]:
         responses = [runtime.request(method, path) for runtime in parity_runtimes]
         assert_response_parity(label, python_runtime, rust_runtime, responses[0], responses[1], expected_status=expected, snapshot=True)

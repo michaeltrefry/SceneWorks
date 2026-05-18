@@ -578,7 +578,6 @@
       }
     }
   ],
-  "recipe preset manifest response": [],
   "persisted upload sidecar": {
     "createdAt": "<timestamp>",
     "displayName": "fixture image.png",

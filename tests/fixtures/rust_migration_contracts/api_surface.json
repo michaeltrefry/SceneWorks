@@ -37,7 +37,6 @@
     { "family": "loras", "path": "/api/v1/loras/import", "methods": ["POST"], "usedBy": ["web"] },
     { "family": "models", "path": "/api/v1/models", "methods": ["GET"], "usedBy": ["web"] },
     { "family": "models", "path": "/api/v1/models/{model_id}/download", "methods": ["POST"], "usedBy": ["web"] },
-    { "family": "recipePresets", "path": "/api/v1/recipe-presets", "methods": ["GET"], "usedBy": ["web"] },
     { "family": "projects", "path": "/api/v1/projects", "methods": ["GET", "POST"], "usedBy": ["web"] },
     { "family": "projects", "path": "/api/v1/projects/{project_id}", "methods": ["GET"], "usedBy": ["web"] },
     { "family": "assets", "path": "/api/v1/projects/{project_id}/assets", "methods": ["GET", "POST"], "usedBy": ["web"] },

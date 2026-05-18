@@ -262,27 +262,31 @@ export function App() {
   }, [access.authRequired, authenticated, token]);
 
   async function refreshData() {
-    try {
-      const [projectItems, jobItems, workerItems, modelItems, loraItems, recipePresetItems] = await Promise.all([
-        apiFetch("/api/v1/projects", token),
-        apiFetch("/api/v1/jobs", token),
-        apiFetch("/api/v1/workers", token),
-        apiFetch("/api/v1/models", token),
-        apiFetch("/api/v1/loras", token),
-        apiFetch("/api/v1/recipe-presets", token),
-      ]);
-      setProjects(projectItems);
-      setActiveProject((current) => current ?? projectItems[0] ?? null);
-      setJobs(jobItems.sort(sortNewest));
-      setWorkers(workerItems.sort(sortWorkers));
-      setQueueSummary(null);
-      setModels(modelItems);
-      setLoras(loraItems);
-      setRecipePresets(recipePresetItems);
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
+    const fetchInitial = async (label, path, fallback, optional = false) => {
+      try {
+        return { label, value: await apiFetch(path, token), error: "" };
+      } catch (err) {
+        return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
+      }
+    };
+    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, recipePresetsResult] = await Promise.all([
+      fetchInitial("Projects", "/api/v1/projects", []),
+      fetchInitial("Jobs", "/api/v1/jobs", []),
+      fetchInitial("Workers", "/api/v1/workers", []),
+      fetchInitial("Models", "/api/v1/models", []),
+      fetchInitial("LoRAs", "/api/v1/loras", []),
+      fetchInitial("Recipe presets", "/api/v1/recipe-presets", [], true),
+    ]);
+    const projectItems = projectsResult.value;
+    setProjects(projectItems);
+    setActiveProject((current) => current ?? projectItems[0] ?? null);
+    setJobs(jobsResult.value.sort(sortNewest));
+    setWorkers(workersResult.value.sort(sortWorkers));
+    setQueueSummary(null);
+    setModels(modelsResult.value);
+    setLoras(lorasResult.value);
+    setRecipePresets(recipePresetsResult.value);
+    setError([projectsResult, jobsResult, workersResult, modelsResult, lorasResult, recipePresetsResult].map((result) => result.error).filter(Boolean).join("; "));
   }
 
   async function refreshAssets(projectId = activeProject?.id) {
