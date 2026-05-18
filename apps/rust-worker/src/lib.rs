@@ -2257,9 +2257,9 @@ fn quote_path(value: &str) -> String {
 fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .replace_nanosecond(0)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .expect("setting nanoseconds to zero must be valid")
         .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+        .expect("formatting a UTC timestamp as RFC3339 must succeed")
 }
 
 fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<TimelineExportRequest> {

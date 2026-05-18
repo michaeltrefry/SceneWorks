@@ -2391,9 +2391,9 @@ fn slugify_lora_id(value: &str) -> String {
 fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .replace_nanosecond(0)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .expect("setting nanoseconds to zero must be valid")
         .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+        .expect("formatting a UTC timestamp as RFC3339 must succeed")
 }
 
 fn model_is_installed(path: &FsPath) -> bool {

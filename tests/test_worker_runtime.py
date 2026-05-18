@@ -18,6 +18,7 @@ from scene_worker.runtime import (
     friendly_failure,
     heartbeat,
     keep_job_alive,
+    lora_manifest_target,
     loaded_models_from_adapters,
     resolve_loaded_models,
     resolve_lora_import_target,
@@ -83,7 +84,7 @@ def test_python_worker_can_advertise_legacy_ffmpeg_jobs(monkeypatch):
 
 
 def test_lora_import_target_must_stay_under_allowed_roots(tmp_path):
-    settings = SimpleNamespace(data_dir=tmp_path / "data", registry_path=tmp_path / "data" / "recent-projects.json")
+    settings = SimpleNamespace(data_dir=tmp_path / "data", config_dir=tmp_path / "config")
     target = resolve_lora_import_target(settings, {"targetDir": str(tmp_path / "data" / "loras" / "style")}, tmp_path / "fallback")
 
     assert target == (tmp_path / "data" / "loras" / "style").resolve()
@@ -94,6 +95,35 @@ def test_lora_import_target_must_stay_under_allowed_roots(tmp_path):
         assert "targetDir" in str(exc)
     else:
         raise AssertionError("outside targetDir should reject")
+
+
+def test_project_lora_import_target_and_manifest_are_allowed(tmp_path):
+    settings = SimpleNamespace(data_dir=tmp_path / "data", config_dir=tmp_path / "config")
+    project_path = tmp_path / "projects" / "demo"
+    project_path.mkdir(parents=True)
+    settings.data_dir.mkdir()
+    (settings.data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+
+    target_dir = project_path / "loras" / "imports" / "style"
+    target = resolve_lora_import_target(
+        settings,
+        {"projectId": "project-1", "targetDir": str(target_dir)},
+        tmp_path / "fallback",
+    )
+    manifest = lora_manifest_target(
+        settings,
+        {
+            "projectId": "project-1",
+            "manifestPath": str(project_path / "loras" / "manifest.jsonc"),
+            "manifestEntry": {"id": "style"},
+        },
+    )
+
+    assert target == target_dir.resolve()
+    assert manifest == (project_path / "loras" / "manifest.jsonc").resolve()
 
 
 def test_lora_manifest_upsert_is_atomic_and_preserves_created_at(tmp_path):

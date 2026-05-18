@@ -15,6 +15,7 @@ import time
 from typing import Any, Callable
 
 import httpx
+from sceneworks_shared import find_project_path
 
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, create_image_adapter
@@ -231,7 +232,7 @@ def resolve_lora_import_target(settings: WorkerSettings, payload: dict[str, Any]
     allowed_roots = [(settings.data_dir / "loras").resolve()]
     project_id = payload.get("projectId")
     if project_id:
-        project_path = find_project_path(settings, project_id)
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
         allowed_roots.append((project_path / "loras" / "imports").resolve())
     for root in allowed_roots:
         try:
@@ -251,7 +252,8 @@ def lora_manifest_target(settings: WorkerSettings, payload: dict[str, Any]) -> P
     allowed = [(settings.config_dir / "manifests" / "user.loras.jsonc").resolve()]
     project_id = payload.get("projectId")
     if project_id:
-        allowed.append((find_project_path(settings, project_id) / "loras" / "manifest.jsonc").resolve())
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        allowed.append((project_path / "loras" / "manifest.jsonc").resolve())
     if manifest_path not in allowed:
         raise ValueError("LoRA manifestPath must target the global user manifest or the selected project's LoRA manifest")
     return manifest_path

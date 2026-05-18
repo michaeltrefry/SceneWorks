@@ -14,7 +14,6 @@ from uuid import uuid4
 from PIL import Image, ImageDraw, ImageFont
 
 from sceneworks_shared import (
-    ProjectNotFound,
     find_asset_sidecar_path,
     find_project_path as shared_find_project_path,
     index_asset,
@@ -115,13 +114,6 @@ def load_registry(data_dir: Path) -> list[dict[str, Any]]:
         return json.load(handle)
 
 
-def find_project_path(settings: WorkerSettings, project_id: str) -> Path:
-    try:
-        return shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
-    except ProjectNotFound as exc:
-        raise RuntimeError(str(exc)) from exc
-
-
 def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
     payload = job["payload"]
     return ImageRequest(
@@ -157,7 +149,7 @@ class ImageAssetWriter:
         raw_settings: dict[str, Any],
     ) -> dict[str, Any]:
         request = image_request_from_job(job)
-        project_path = find_project_path(settings, request.project_id)
+        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
         for folder in ("assets/images", "generation-sets", "recipes"):
             (project_path / folder).mkdir(parents=True, exist_ok=True)
 
@@ -472,7 +464,8 @@ def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:
 def load_source_image(settings: WorkerSettings, request: ImageRequest) -> Image.Image:
     source_path = request.advanced.get("sourceImagePath")
     if not source_path and request.source_asset_id:
-        source_path = find_asset_media_path(find_project_path(settings, request.project_id), request.source_asset_id)
+        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+        source_path = find_asset_media_path(project_path, request.source_asset_id)
     if not source_path:
         raise RuntimeError("Image edit jobs require a source image asset.")
     try:

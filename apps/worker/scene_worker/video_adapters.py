@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from sceneworks_shared import (
     find_asset_sidecar_path,
+    find_project_path,
     index_asset,
     load_asset_with_media,
     read_json,
@@ -25,7 +26,7 @@ from sceneworks_shared import (
     utc_now,
 )
 
-from .image_adapters import find_project_path, write_json
+from .image_adapters import write_json
 from .settings import WorkerSettings
 
 
@@ -163,7 +164,7 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
-        project_path = find_project_path(settings, request.project_id)
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
         for folder in ("assets/videos", "generation-sets", "recipes"):
             (project_path / folder).mkdir(parents=True, exist_ok=True)
 
@@ -692,7 +693,7 @@ def run_person_detect(
     payload = job["payload"]
     project_id = payload["projectId"]
     source_asset_id = payload["sourceAssetId"]
-    project_path = find_project_path(settings, project_id)
+    project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
     frames_dir = project_path / "assets" / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     (project_path / "recipes").mkdir(parents=True, exist_ok=True)
@@ -815,7 +816,7 @@ def run_person_track(
     payload = job["payload"]
     project_id = payload["projectId"]
     source_asset_id = payload["sourceAssetId"]
-    project_path = find_project_path(settings, project_id)
+    project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
     track_dir = project_path / "person-tracks"
     track_dir.mkdir(parents=True, exist_ok=True)
     source_asset, _ = source_asset_payload(project_path, source_asset_id)
@@ -882,7 +883,7 @@ def run_frame_extract(
 ) -> dict[str, Any]:
     payload = job["payload"]
     project_id = payload["projectId"]
-    project_path = find_project_path(settings, project_id)
+    project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
     frames_dir = project_path / "assets" / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     (project_path / "recipes").mkdir(parents=True, exist_ok=True)

@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from sceneworks_shared import find_asset_sidecar_path, index_asset, read_json, safe_float, slugify, utc_now
+from sceneworks_shared import find_asset_sidecar_path, find_project_path, index_asset, read_json, safe_float, slugify, utc_now
 
-from .image_adapters import find_project_path, write_json
+from .image_adapters import write_json
 from .settings import WorkerSettings
 
 
@@ -53,7 +53,7 @@ def run_timeline_export(
     cancel_requested: CancelCallback,
 ) -> dict[str, Any]:
     request = export_request_from_job(job)
-    project_path = find_project_path(settings, request.project_id)
+    project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
     timeline = read_json(project_path / request.timeline_path)
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
