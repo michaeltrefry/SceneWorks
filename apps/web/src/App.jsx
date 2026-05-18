@@ -202,6 +202,9 @@ export function App() {
       if (job.status === "completed" && job.projectId && job.type === "person_detect") {
         refreshAssets(job.projectId);
       }
+      if (job.status === "completed" && job.type === "model_download") {
+        refreshData();
+      }
       if (job.status === "failed") {
         setError(failedJobNotice(job));
       }
@@ -592,10 +595,10 @@ export function App() {
   async function createImageJob(payload) {
     if (!activeProject) {
       setError("Create or open a project first.");
-      return;
+      return null;
     }
     try {
-      await apiFetch("/api/v1/image/jobs", token, {
+      const job = await apiFetch("/api/v1/image/jobs", token, {
         method: "POST",
         body: JSON.stringify({
           ...payload,
@@ -604,11 +607,13 @@ export function App() {
           requestedGpu,
         }),
       });
-      setActiveView("Queue");
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
       refreshData();
+      return job;
     } catch (err) {
       setError(err.message);
+      return null;
     }
   }
 
@@ -766,7 +771,7 @@ export function App() {
   }
 
   async function createVideoJob(payload, options = {}) {
-    const { navigateToQueue = true } = options;
+    const { navigateToQueue = false } = options;
     if (!activeProject) {
       setError("Create or open a project first.");
       return null;
@@ -784,6 +789,7 @@ export function App() {
       if (navigateToQueue) {
         setActiveView("Queue");
       }
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
       refreshData();
       return job;
@@ -1076,15 +1082,17 @@ export function App() {
 
   async function createModelDownloadJob(model) {
     try {
-      await apiFetch(`/api/v1/models/${model.id}/download`, token, {
+      const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
         method: "POST",
         body: JSON.stringify({ requestedGpu: "auto" }),
       });
-      setActiveView("Queue");
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
       refreshData();
+      return job;
     } catch (err) {
       setError(err.message);
+      return null;
     }
   }
 
@@ -1233,9 +1241,11 @@ export function App() {
             createImageJob={createImageJob}
             gpuOptions={gpuOptions}
             imageModels={imageModels}
+            jobs={jobs}
             latestAssets={latestImageAssets}
             launchRequest={studioLaunch}
             loras={loras}
+            onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             recipePresets={recipePresets}
             requestedGpu={requestedGpu}
@@ -1262,6 +1272,7 @@ export function App() {
             launchRequest={studioLaunch}
             loras={loras}
             jobs={jobs}
+            onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             personTracks={personTracks}
             recipePresets={recipePresets}
@@ -1308,7 +1319,13 @@ export function App() {
         ) : null}
 
         {activeView === "Models" ? (
-          <ModelManagerScreen jobs={jobs} loras={loras} models={models} onDownloadModel={createModelDownloadJob} />
+          <ModelManagerScreen
+            jobs={jobs}
+            loras={loras}
+            models={models}
+            onDownloadModel={createModelDownloadJob}
+            onOpenQueue={() => setActiveView("Queue")}
+          />
         ) : null}
 
         {activeView === "Editor" ? (

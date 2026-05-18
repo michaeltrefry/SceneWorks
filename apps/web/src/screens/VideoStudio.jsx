@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
@@ -23,6 +24,7 @@ export function VideoStudio({
   launchRequest,
   loras = [],
   jobs = [],
+  onOpenQueue,
   onPreview,
   personTracks = [],
   recipePresets = [],
@@ -57,6 +59,7 @@ export function VideoStudio({
   const [trackName, setTrackName] = useState("Selected person");
   const [comparisonMode, setComparisonMode] = useState("side_by_side");
   const [abSide, setAbSide] = useState("replacement");
+  const [localJobIds, setLocalJobIds] = useState([]);
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
@@ -228,9 +231,13 @@ export function VideoStudio({
     full_person_replace_outfit: "Full Person, Replace Outfit",
   };
 
-  function submit(event) {
+  const localJobs = localJobIds
+    .map((id) => jobs.find((job) => job.id === id))
+    .filter((job) => job && job.status !== "completed");
+
+  async function submit(event) {
     event.preventDefault();
-    createVideoJob({
+    const job = await createVideoJob({
       mode,
       prompt,
       negativePrompt,
@@ -259,6 +266,9 @@ export function VideoStudio({
         replacementModeLabel: replacementModeLabels[replacementMode],
       },
     });
+    if (job?.id) {
+      setLocalJobIds((ids) => [job.id, ...ids.filter((id) => id !== job.id)].slice(0, 4));
+    }
   }
 
   return (
@@ -510,6 +520,13 @@ export function VideoStudio({
             <p className="eyebrow">Fresh clip</p>
             <h2>Review</h2>
           </div>
+          {localJobs.length ? (
+            <div className="local-job-stack">
+              {localJobs.map((job) => (
+                <JobProgressCard job={job} key={job.id} label="Video generation" onOpenQueue={onOpenQueue} />
+              ))}
+            </div>
+          ) : null}
           {latestAssets.length ? (
             <div className="review-grid video-review-grid">
               {latestAssets.map((asset) => (
@@ -523,7 +540,7 @@ export function VideoStudio({
                 />
               ))}
             </div>
-          ) : (
+          ) : localJobs.length ? null : (
             <div className="empty-panel">No fresh video clip</div>
           )}
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
+import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
   loraMatchesModel,
   loraWeight,
@@ -18,9 +19,11 @@ export function ImageStudio({
   purgeAsset,
   gpuOptions,
   imageModels,
+  jobs = [],
   latestAssets,
   launchRequest,
   loras = [],
+  onOpenQueue,
   onPreview,
   recipePresets = [],
   requestedGpu,
@@ -42,6 +45,7 @@ export function ImageStudio({
   const [characterLookId, setCharacterLookId] = useState("");
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
+  const [localJobIds, setLocalJobIds] = useState([]);
 
   function serializeLora(lora, override = {}) {
     return {
@@ -173,9 +177,13 @@ export function ImageStudio({
     });
   }
 
-  function submit(event) {
+  const localJobs = localJobIds
+    .map((id) => jobs.find((job) => job.id === id))
+    .filter((job) => job && job.status !== "completed");
+
+  async function submit(event) {
     event.preventDefault();
-    createImageJob({
+    const job = await createImageJob({
       mode,
       prompt,
       negativePrompt,
@@ -194,6 +202,9 @@ export function ImageStudio({
         resolution,
       },
     });
+    if (job?.id) {
+      setLocalJobIds((ids) => [job.id, ...ids.filter((id) => id !== job.id)].slice(0, 4));
+    }
   }
 
   return (
@@ -419,6 +430,13 @@ export function ImageStudio({
             <p className="eyebrow">Fresh batch</p>
             <h2>Review</h2>
           </div>
+          {localJobs.length ? (
+            <div className="local-job-stack">
+              {localJobs.map((job) => (
+                <JobProgressCard job={job} key={job.id} label="Image generation" onOpenQueue={onOpenQueue} />
+              ))}
+            </div>
+          ) : null}
           {latestAssets.length ? (
             <div className="review-grid">
               {latestAssets.map((asset) => (
@@ -432,7 +450,7 @@ export function ImageStudio({
                 />
               ))}
             </div>
-          ) : (
+          ) : localJobs.length ? null : (
             <div className="empty-panel">No fresh image batch</div>
           )}
         </section>

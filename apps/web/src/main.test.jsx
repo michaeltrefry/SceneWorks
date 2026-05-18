@@ -158,6 +158,204 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("V1 placeholder tracking");
   });
 
+  it("keeps image generation in the studio and shows local progress", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response([{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]));
+      }
+      if (path.endsWith("/image/jobs") && options.method === "POST") {
+        const job = {
+          id: "image-job-1",
+          type: "image_generate",
+          status: "running",
+          stage: "running",
+          progress: 0.35,
+          elapsedSeconds: 4,
+          projectId: "project-1",
+          projectName: "Noir",
+          requestedGpu: "auto",
+          payload: { prompt: "A cinematic frame of a neon street at midnight" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".image-studio form").requestSubmit();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Image generation");
+    expect(container.textContent).toContain("running");
+    expect(container.textContent).not.toContain("Jobs and GPUs");
+  });
+
+  it("keeps video generation in the studio and shows local progress", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "ltx_2_3",
+              name: "LTX",
+              type: "video",
+              capabilities: ["image_to_video", "text_to_video"],
+              defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+              limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/video/jobs") && options.method === "POST") {
+        const job = {
+          id: "video-job-1",
+          type: "video_generate",
+          status: "queued",
+          stage: "queued",
+          progress: 0,
+          elapsedSeconds: 0,
+          projectId: "project-1",
+          projectName: "Noir",
+          requestedGpu: "auto",
+          payload: { prompt: "Camera slowly pushes in while the scene comes alive" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text to Video").click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector(".video-studio form").requestSubmit();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Video generation");
+    expect(container.textContent).toContain("queued");
+    expect(container.textContent).not.toContain("Jobs and GPUs");
+  });
+
+  it("keeps model downloads on the Models page and shows local progress", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "z_image_turbo",
+              name: "Z-Image Turbo",
+              type: "image",
+              family: "z-image",
+              downloadable: true,
+              installState: "missing",
+              downloadSizeLabel: "12 GB",
+              downloads: [{ provider: "huggingface", repo: "Tongyi-MAI/Z-Image-Turbo" }],
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      if (path.endsWith("/models/z_image_turbo/download") && options.method === "POST") {
+        const job = {
+          id: "download-job-1",
+          type: "model_download",
+          status: "downloading",
+          stage: "downloading",
+          progress: 0.5,
+          elapsedSeconds: 12,
+          requestedGpu: "auto",
+          assignedGpu: "cpu",
+          payload: { modelId: "z_image_turbo", modelName: "Z-Image Turbo" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Download 12 GB").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Model download");
+    expect(container.textContent).toContain("downloading");
+    expect(container.textContent).not.toContain("Jobs and GPUs");
+  });
+
   it("adds the SSE ticket as a query parameter", () => {
     expect(eventUrl("/api/v1/jobs/events", "stream-ticket")).toContain("ticket=stream-ticket");
   });

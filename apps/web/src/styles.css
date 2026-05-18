@@ -600,6 +600,49 @@ button:disabled {
   min-height: 36px;
 }
 
+.local-job-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.local-job-card {
+  display: grid;
+  gap: 9px;
+  border: 1px solid #3c3a34;
+  background: #191815;
+  padding: 12px;
+}
+
+.local-job-card.failed,
+.local-job-card.canceled,
+.local-job-card.interrupted {
+  border-color: #7a4739;
+}
+
+.local-job-main {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: start;
+}
+
+.local-job-main h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.secondary-action {
+  justify-self: start;
+  min-height: 34px;
+  border: 1px solid #4b463d;
+  background: #292722;
+  color: #f3f0e8;
+  padding: 7px 10px;
+}
+
 .status-badge.installed {
   border-color: #6ec6b8;
   background: #183f3a;
