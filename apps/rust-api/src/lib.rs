@@ -3187,11 +3187,6 @@ fn default_recipe_preset_model_for_workflow(models: &[Value], workflow: &str) ->
             model_supports_recipe_workflow(model, workflow)
                 && model.get("installState").and_then(Value::as_str) == Some("installed")
         })
-        .or_else(|| {
-            models
-                .iter()
-                .find(|model| model_supports_recipe_workflow(model, workflow))
-        })
         .and_then(|model| model.get("id").and_then(Value::as_str))
         .map(str::to_owned)
 }
@@ -3255,6 +3250,8 @@ fn recipe_preset_archived(preset: &Value) -> bool {
 }
 
 fn finalized_recipe_preset(mut preset: Value) -> Result<Value, ApiError> {
+    // Write paths require an explicit model before this point, so single-preset
+    // response finalization does not need the read-side model catalog fallback.
     finalize_recipe_preset_entry(&mut preset, &[])?;
     Ok(preset)
 }
@@ -6521,6 +6518,90 @@ mod tests {
         let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(loras.as_array().expect("loras array").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_preset_read_defaults_do_not_select_uninstalled_models() {
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "missing_image_model",
+                  "name": "Missing Image Model",
+                  "family": "z-image",
+                  "type": "image",
+                  "adapter": "z_image_diffusers",
+                  "capabilities": ["text_to_image"],
+                  "downloads": [{ "provider": "huggingface", "repo": "owner/missing-model", "files": ["*.safetensors"] }],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": {},
+                  "ui": {}
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin recipe presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                { "id": "legacy_text", "name": "Legacy Text", "modes": ["text_to_image"] }
+              ]
+            }
+            "#,
+        )
+        .expect("user recipe presets writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, presets) = request(app, "GET", "/api/v1/recipe-presets", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let preset = &presets.as_array().expect("presets array")[0];
+        assert_eq!(preset["workflow"], "text_to_image");
+        assert!(preset.get("model").is_none());
+        assert_eq!(
+            preset["appliedDefaults"]["notes"][0],
+            "workflow inferred from legacy modes as text_to_image"
+        );
+        assert!(preset["appliedDefaults"]["notes"]
+            .as_array()
+            .expect("notes array")
+            .iter()
+            .all(|note| !note
+                .as_str()
+                .unwrap_or_default()
+                .contains("model defaulted")));
     }
 
     #[test]
