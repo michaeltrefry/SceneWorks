@@ -77,12 +77,48 @@
       }
     },
     {
+      "id": "qwen_image",
+      "name": "Qwen Image",
+      "family": "qwen-image",
+      "type": "image",
+      "adapter": "qwen_image",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image",
+          "files": []
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image"
+      },
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 20,
+        "count": 4
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        "families": ["qwen-image"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Qwen Image",
+        "description": "Higher-control Qwen text-to-image target backed by Diffusers.",
+        "recommendedFor": ["text_to_image", "style_variations"]
+      }
+    },
+    {
       "id": "qwen_image_edit",
       "name": "Qwen Image Edit",
       "family": "qwen-image",
       "type": "image",
       "adapter": "qwen_image",
-      "capabilities": ["text_to_image", "edit_image", "style_variations"],
+      "capabilities": ["edit_image"],
       "downloads": [
         {
           "provider": "huggingface",
@@ -122,12 +158,18 @@
       "downloads": [
         {
           "provider": "huggingface",
-          "repo": "Lightricks/LTX-2.3",
-          "files": ["ltx-2.3-22b-dev.safetensors"]
+          "repo": "Lightricks/LTX-2",
+          "files": []
+        },
+        {
+          "provider": "huggingface",
+          "repo": "Lightricks/LTX-Video",
+          "files": []
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Lightricks/LTX-2.3"
+        "model": "${HF_CACHE}/Lightricks/LTX-2",
+        "imageToVideoModel": "${HF_CACHE}/Lightricks/LTX-Video"
       },
       "defaults": {
         "duration": 6,
@@ -165,12 +207,12 @@
       "downloads": [
         {
           "provider": "huggingface",
-          "repo": "Wan-AI/Wan2.2-TI2V-5B",
+          "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
           "files": []
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Wan-AI/Wan2.2-TI2V-5B"
+        "model": "${HF_CACHE}/Wan-AI/Wan2.2-TI2V-5B-Diffusers"
       },
       "defaults": {
         "duration": 5,

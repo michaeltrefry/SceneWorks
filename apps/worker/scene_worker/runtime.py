@@ -13,9 +13,9 @@ from typing import Any, Callable
 import httpx
 
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_worker_id
-from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, create_image_adapter
+from .image_adapters import ProceduralImageAdapter, QwenImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .settings import WorkerSettings
-from .video_adapters import ProceduralVideoAdapter
+from .video_adapters import create_video_adapter
 
 
 LoadedModelsSource = Callable[[], list[str]] | None
@@ -286,7 +286,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
 
 def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
-    adapter = ProceduralVideoAdapter()
+    adapter = create_video_adapter()
 
     def adapter_loaded_models() -> list[str]:
         return loaded_models_from_adapter(adapter, job_id=job_id)
@@ -376,6 +376,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
     api = ApiClient(settings)
     image_adapters: dict[str, object] = {
         "procedural_preview": ProceduralImageAdapter(),
+        "qwen_image": QwenImageAdapter(),
         "z_image_diffusers": ZImageDiffusersAdapter(),
     }
     max_registration_attempts = 20

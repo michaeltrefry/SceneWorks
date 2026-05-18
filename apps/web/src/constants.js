@@ -10,11 +10,25 @@ export const fallbackModels = [
     ui: { description: "Fast local text-to-image target." },
   },
   {
+    id: "qwen_image",
+    name: "Qwen Image",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: { description: "Qwen text-to-image target." },
+  },
+  {
     id: "z_image_edit",
     name: "Z-Image-Edit",
     type: "image",
     capabilities: ["edit_image"],
     ui: { description: "Image edit target." },
+  },
+  {
+    id: "qwen_image_edit",
+    name: "Qwen Image Edit",
+    type: "image",
+    capabilities: ["edit_image"],
+    ui: { description: "Qwen image edit target." },
   },
   {
     id: "ltx_2_3",

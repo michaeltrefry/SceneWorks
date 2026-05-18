@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
+from PIL import Image
+
+from scene_worker.adapter_utils import filter_call_kwargs
 from scene_worker.image_adapters import (
     MODEL_TARGETS,
+    QwenImageAdapter,
     ZImageDiffusersAdapter,
     build_asset_sidecar,
+    create_image_adapter,
     huggingface_repo_cache_path,
     image_request_from_job,
     resolve_seed,
@@ -22,7 +28,23 @@ from scene_worker.runtime import (
     run_video_job,
     worker_capabilities,
 )
-from scene_worker.video_adapters import VIDEO_MODEL_TARGETS, build_video_asset_sidecar, video_request_from_job
+from scene_worker.video_adapters import (
+    DiffusersVideoAdapter,
+    VIDEO_MODEL_TARGETS,
+    build_video_asset_sidecar,
+    character_reference_images,
+    create_video_adapter,
+    evenly_spaced_indices,
+    frames_from_output,
+    load_seekable_image_frame,
+    person_track_masks,
+    video_request_from_job,
+)
+
+
+class AcceptsNone:
+    def __call__(self, *, prompt, image=None):
+        return prompt, image
 
 
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
@@ -87,6 +109,35 @@ def test_z_image_loaded_models_include_repo_and_model_id():
     adapter._loaded_model = "z_image_turbo"
 
     assert set(adapter.loaded_models()) == {"Tongyi-MAI/Z-Image-Turbo", "z_image_turbo"}
+
+
+def test_qwen_loaded_models_track_text_and_edit_repos_independently():
+    adapter = QwenImageAdapter()
+    adapter._text_repo = "Qwen/Qwen-Image"
+    adapter._edit_repo = "Qwen/Qwen-Image-Edit"
+    adapter._loaded_model = "qwen_image_edit"
+
+    assert set(adapter.loaded_models()) == {"Qwen/Qwen-Image", "Qwen/Qwen-Image-Edit", "qwen_image_edit"}
+
+
+def test_filter_call_kwargs_preserves_none_for_accepted_parameters():
+    assert filter_call_kwargs(AcceptsNone(), {"prompt": "city", "image": None, "extra": 1}) == {
+        "prompt": "city",
+        "image": None,
+    }
+
+
+def test_image_adapter_env_aliases_and_unknown_values(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "procedural")
+    assert create_image_adapter({"payload": {"model": "z_image_turbo"}}).__class__.__name__ == "ProceduralImageAdapter"
+
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "typo")
+    try:
+        create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    except RuntimeError as exc:
+        assert "Unsupported SCENEWORKS_IMAGE_ADAPTER" in str(exc)
+    else:
+        raise AssertionError("Unknown image adapter override should fail loudly.")
 
 
 def test_huggingface_repo_cache_path_stays_under_cache_root(monkeypatch, tmp_path):
@@ -313,7 +364,7 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
         blocking_models.append(loaded_models())
         return result
 
-    monkeypatch.setattr("scene_worker.runtime.ProceduralVideoAdapter", VideoAdapter)
+    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda: VideoAdapter())
     monkeypatch.setattr("scene_worker.runtime.run_blocking_job_step", run_immediately)
 
     run_video_job(
@@ -338,6 +389,112 @@ def test_random_batch_seeds_are_used_per_image():
 
 def test_explicit_seed_uses_reproducible_ladder():
     assert resolve_seed(1234, "city at night", 2, [101, 202, 303, 404]) == 1236
+
+
+def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "procedural")
+    assert create_video_adapter().__class__.__name__ == "ProceduralVideoAdapter"
+
+    monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "typo")
+    try:
+        create_video_adapter()
+    except RuntimeError as exc:
+        assert "Unsupported SCENEWORKS_VIDEO_ADAPTER" in str(exc)
+    else:
+        raise AssertionError("Unknown video adapter override should fail loudly.")
+
+
+def test_video_pipeline_evicts_previous_pipeline_and_loaded_models():
+    adapter = DiffusersVideoAdapter()
+    adapter._pipeline = object()
+    adapter._pipeline_key_value = "old"
+    adapter._loaded_models = {"old-model"}
+
+    class Torch:
+        class cuda:
+            emptied = False
+
+            @classmethod
+            def is_available(cls):
+                return True
+
+            @classmethod
+            def empty_cache(cls):
+                cls.emptied = True
+
+    adapter._evict_pipeline(Torch)
+
+    assert adapter._pipeline is None
+    assert adapter._pipeline_key_value is None
+    assert adapter.loaded_models() == []
+    assert Torch.cuda.emptied is True
+
+
+def test_evenly_spaced_indices_are_bounded():
+    assert evenly_spaced_indices(10, 4) == [0, 3, 6, 9]
+    assert evenly_spaced_indices(1, 4) == [0, 0, 0, 0]
+
+
+def test_frames_from_output_accepts_nested_frames():
+    red = Image.new("RGB", (2, 2), "red")
+    blue = Image.new("RGB", (2, 2), "blue")
+
+    frames = frames_from_output(SimpleNamespace(frames=[[red, blue]]))
+
+    assert len(frames) == 2
+    assert frames[0].getpixel((0, 0)) == (255, 0, 0)
+
+
+def test_load_seekable_image_frame_does_not_fallback_on_decompression_bomb(monkeypatch, tmp_path):
+    path = tmp_path / "bomb.png"
+    path.write_bytes(b"not really used")
+
+    monkeypatch.setattr("scene_worker.video_adapters.Image.open", lambda _path: (_ for _ in ()).throw(Image.DecompressionBombError("too large")))
+    monkeypatch.setattr(
+        "scene_worker.video_adapters.load_seekable_video_frame",
+        lambda _path, _timestamp: (_ for _ in ()).throw(AssertionError("video fallback should not run")),
+    )
+
+    assert load_seekable_image_frame(path, 0) is None
+
+
+def test_person_track_masks_fail_without_track_boxes(tmp_path):
+    project_path = tmp_path
+    track_dir = project_path / "person-tracks"
+    track_dir.mkdir()
+    (track_dir / "track_empty.sceneworks.person-track.json").write_text(
+        json.dumps({"id": "track_empty", "frames": [], "selectedDetection": {}}),
+        encoding="utf-8",
+    )
+
+    try:
+        person_track_masks(project_path, "track_empty", 64, 64, 2)
+    except RuntimeError as exc:
+        assert "no usable boxes" in str(exc)
+    else:
+        raise AssertionError("Empty person tracks should fail loudly.")
+
+
+def test_character_reference_images_are_capped(tmp_path):
+    project_path = tmp_path
+    (project_path / "characters").mkdir()
+    (project_path / "assets" / "images").mkdir(parents=True)
+    references = []
+    for index in range(5):
+        asset_id = f"asset_ref_{index}"
+        media_rel = f"assets/images/ref_{index}.png"
+        Image.new("RGB", (4, 4), (index, 0, 0)).save(project_path / media_rel)
+        (project_path / f"assets/images/ref_{index}.sceneworks.json").write_text(
+            json.dumps({"id": asset_id, "file": {"path": media_rel}}),
+            encoding="utf-8",
+        )
+        references.append({"assetId": asset_id, "approved": True})
+    (project_path / "characters" / "character_1.sceneworks.character.json").write_text(
+        json.dumps({"id": "character_1", "references": references, "looks": []}),
+        encoding="utf-8",
+    )
+
+    assert len(character_reference_images(project_path, "character_1", None, 16, 16)) == 4
 
 
 def test_character_image_recipe_marks_conditioning_inactive():
@@ -404,10 +561,13 @@ def test_replace_person_video_sidecar_preserves_lineage():
         created_at="2026-05-17T00:00:00Z",
         seed=44,
         target=VIDEO_MODEL_TARGETS["wan_2_2"],
+        adapter_id="wan_video",
+        mime_type="video/mp4",
         raw_settings={},
     )
 
     assert asset["recipe"]["mode"] == "replace_person"
+    assert asset["file"]["mimeType"] == "video/mp4"
     assert asset["recipe"]["normalizedSettings"]["personTrackId"] == "track-1"
     assert asset["recipe"]["normalizedSettings"]["replacementMode"] == "full_person_keep_outfit"
     assert asset["recipe"]["normalizedSettings"]["personDetectionActive"] is False
