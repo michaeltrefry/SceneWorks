@@ -700,6 +700,11 @@ button:disabled {
   padding: 8px 12px;
 }
 
+.lora-import-progress {
+  display: grid;
+  gap: 8px;
+}
+
 .lora-list {
   display: grid;
   gap: 8px;

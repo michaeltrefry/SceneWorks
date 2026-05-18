@@ -4,6 +4,7 @@ import { terminalStatuses } from "../constants.js";
 
 export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownloadModel, onImportLora, onOpenQueue }) {
   const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
+  const familiesKey = families.join("|");
   const [familyFilter, setFamilyFilter] = useState(families[0] ?? "all");
   const [importingLora, setImportingLora] = useState(false);
   const [importMessage, setImportMessage] = useState({ tone: "neutral", text: "" });
@@ -35,7 +36,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
     if (familyFilter !== "all" && !families.includes(familyFilter)) {
       setFamilyFilter(families[0] ?? "all");
     }
-  }, [families.join("|"), familyFilter]);
+  }, [familiesKey, familyFilter]);
 
   useEffect(() => {
     setImportForm((current) => {
@@ -45,7 +46,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
       const family = familyFilter !== "all" && families.includes(familyFilter) ? familyFilter : families[0] ?? "";
       return { ...current, family };
     });
-  }, [families.join("|"), familyFilter]);
+  }, [familiesKey, familyFilter]);
 
   function downloadJobsFor(model) {
     return jobs.filter((job) => job.type === "model_download" && job.payload?.modelId === model.id);
@@ -71,6 +72,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
       });
       const loraId = job?.payload?.loraId;
       setImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
+      // Force a re-mount so choosing the same file again still emits a change event.
       setFileInputKey((current) => current + 1);
       setImportMessage({
         tone: "success",
@@ -260,16 +262,19 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
               />
             </label>
             <button disabled={importDisabled} type="submit">
-              {importingLora && isFileImport ? "Uploading" : "Queue Import"}
+              {importingLora ? (isFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
             </button>
           </div>
           {importForm.scope === "project" && !activeProject ? <p className="helper-copy">Open a project before importing a project LoRA.</p> : null}
           {importMessage.text ? <p className={importMessage.tone === "success" ? "inline-success" : "inline-warning"}>{importMessage.text}</p> : null}
           {activeLoraImportJobs.length ? (
-            <div className="local-job-stack">
-              {activeLoraImportJobs.map((job) => (
-                <JobProgressCard job={job} key={job.id} label="LoRA import" onOpenQueue={onOpenQueue} />
-              ))}
+            <div className="lora-import-progress">
+              <strong>LoRA imports in progress</strong>
+              <div className="local-job-stack">
+                {activeLoraImportJobs.map((job) => (
+                  <JobProgressCard job={job} key={job.id} label="LoRA import" onOpenQueue={onOpenQueue} />
+                ))}
+              </div>
             </div>
           ) : null}
         </form>

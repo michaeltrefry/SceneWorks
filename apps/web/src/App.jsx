@@ -41,6 +41,7 @@ function failedJobNotice(job) {
 }
 
 const localJobStackLimit = 4;
+const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 
 export function App() {
   const [health, setHealth] = useState(null);
@@ -228,6 +229,7 @@ export function App() {
       }
       if (job.status === "completed" && job.type === "lora_import") {
         refreshData();
+        // refreshData loads the global catalog; project imports need the project overlay too.
         if (job.projectId) {
           refreshLoras(job.projectId);
         }
@@ -436,6 +438,9 @@ export function App() {
       throw new Error("Create or open a project first.");
     }
     const { file, ...metadata } = payload;
+    if (file?.size > maxLoraUploadBytes) {
+      throw new Error("Uploaded LoRA file exceeds the 2GB limit");
+    }
     let body;
     if (file) {
       body = new FormData();
@@ -460,7 +465,8 @@ export function App() {
       method: "POST",
       body,
     });
-    if (options.navigateToQueue ?? true) {
+    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    if (options.navigateToQueue ?? false) {
       setActiveView("Queue");
     }
     setError("");
@@ -1380,7 +1386,7 @@ export function App() {
             loras={loras}
             models={models}
             onDownloadModel={createModelDownloadJob}
-            onImportLora={(payload) => createLoraImportJob(payload, { navigateToQueue: false })}
+            onImportLora={createLoraImportJob}
             onOpenQueue={() => setActiveView("Queue")}
           />
         ) : null}

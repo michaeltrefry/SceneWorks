@@ -608,7 +608,7 @@ export function PresetManagerScreen({
                 onClick={importLora}
                 type="button"
               >
-                {importingLora && importForm.mode === "file" ? "Uploading" : "Queue Import"}
+                {importingLora ? (importForm.mode === "file" ? "Uploading" : "Queueing...") : "Queue Import"}
               </button>
             </div>
             {!selectedModel ? <p className="helper-copy">Choose a model before importing so compatibility can be recorded.</p> : null}

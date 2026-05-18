@@ -523,6 +523,166 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Jobs and GPUs");
   });
 
+  it("keeps LoRA imports on the Models page and shows local progress", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response([{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]));
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      if (path.endsWith("/loras/import") && options.method === "POST") {
+        const job = {
+          id: "lora-import-job-1",
+          type: "lora_import",
+          status: "running",
+          stage: "downloading",
+          progress: 0.25,
+          payload: { loraId: "detail_lora" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+    });
+    await settle();
+    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("LoRA imports in progress");
+    expect(container.textContent).toContain("running");
+    expect(container.textContent).not.toContain("Jobs and GPUs");
+  });
+
+  it("rejects oversized LoRA uploads before posting from the Models page", async () => {
+    let importCalls = 0;
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response([{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]));
+      }
+      if (path.endsWith("/loras/import") && options.method === "POST") {
+        importCalls += 1;
+        return Promise.resolve(response({ id: "should-not-create" }));
+      }
+      return Promise.resolve(response([]));
+    });
+    const loraFile = new File(["lora"], "too-large.safetensors", { type: "application/octet-stream" });
+    Object.defineProperty(loraFile, "size", { configurable: true, value: 2 * 1024 * 1024 * 1024 + 1 });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+    });
+    await settle();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Upload").click();
+    });
+    await changeFile(field(container, "LoRA File"), loraFile);
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+
+    expect(container.textContent).toContain("Uploaded LoRA file exceeds the 2GB limit");
+    expect(importCalls).toBe(0);
+  });
+
+  it("keeps Preset Manager LoRA imports in context", async () => {
+    const createdJobs = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response([{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]));
+      }
+      if (path.endsWith("/recipe-presets")) {
+        return Promise.resolve(
+          response([{ id: "moody", name: "Moody", scope: "global", workflow: "text_to_image", model: "z_image_turbo" }]),
+        );
+      }
+      if (path.endsWith("/jobs")) {
+        return Promise.resolve(response(createdJobs));
+      }
+      if (path.endsWith("/loras/import") && options.method === "POST") {
+        const job = {
+          id: "lora-import-job-1",
+          type: "lora_import",
+          status: "running",
+          payload: { loraId: "preset_detail" },
+        };
+        createdJobs.unshift(job);
+        return Promise.resolve(response(job));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Presets").click();
+    });
+    await settle();
+    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Preset Manager");
+    expect(createdJobs).toHaveLength(1);
+    expect(container.textContent).not.toContain("Jobs and GPUs");
+  });
+
   it("queues LoRA URL imports from the Models page", async () => {
     const onImportLora = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "detail_lora" } }));
     root = createRoot(container);
@@ -602,6 +762,34 @@ describe("SceneWorks app shell", () => {
     );
     expect(container.textContent).toContain("LoRA import");
     expect(container.textContent).toContain("running");
+  });
+
+  it("shows Models page LoRA import errors and resets the queueing state", async () => {
+    const onImportLora = vi.fn(async () => {
+      throw new Error("LoRA sourceUrl must use http or https");
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ModelManagerScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          jobs={[]}
+          loras={[]}
+          models={[{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }]}
+          onDownloadModel={() => {}}
+          onImportLora={onImportLora}
+          onOpenQueue={() => {}}
+        />,
+      );
+    });
+
+    await changeField(field(container, "Source URL"), "file:///tmp/detail.safetensors");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+
+    expect(container.textContent).toContain("LoRA sourceUrl must use http or https");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").disabled).toBe(false);
   });
 
   it("adds the SSE ticket as a query parameter", () => {
