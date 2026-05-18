@@ -16,6 +16,7 @@ from scene_worker.image_adapters import (
     image_request_from_job,
     resolve_seed,
 )
+from scene_worker.lora_adapters import apply_loras_to_pipeline, normalize_lora_specs
 from scene_worker.runtime import (
     child_environment,
     friendly_failure,
@@ -46,6 +47,22 @@ from scene_worker.video_adapters import (
 class AcceptsNone:
     def __call__(self, *, prompt, image=None):
         return prompt, image
+
+
+class FakeLoraPipe:
+    def __init__(self):
+        self.loaded = []
+        self.set_calls = []
+        self.unloaded = 0
+
+    def load_lora_weights(self, path, adapter_name=None):
+        self.loaded.append((path, adapter_name))
+
+    def set_adapters(self, names, adapter_weights=None):
+        self.set_calls.append((names, adapter_weights))
+
+    def unload_lora_weights(self):
+        self.unloaded += 1
 
 
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
@@ -126,6 +143,72 @@ def test_filter_call_kwargs_preserves_none_for_accepted_parameters():
         "prompt": "city",
         "image": None,
     }
+
+
+def test_lora_loader_applies_weights_and_reuses_cached_state(tmp_path):
+    first = tmp_path / "style.safetensors"
+    second = tmp_path / "detail.safetensors"
+    first.write_bytes(b"lora")
+    second.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    loras = [
+        {"id": "style", "installedPath": str(first), "weight": 0.5},
+        {"id": "detail", "installedPath": str(second), "weight": 0.8},
+    ]
+
+    key, names = apply_loras_to_pipeline(pipe, loras, adapter_id="diffusers_test")
+    same_key, same_names = apply_loras_to_pipeline(
+        pipe,
+        loras,
+        adapter_id="diffusers_test",
+        previous_key=key,
+        previous_adapter_names=names,
+    )
+
+    assert same_key == key
+    assert same_names == names
+    assert [path for path, _name in pipe.loaded] == [str(first), str(second)]
+    assert pipe.set_calls == [(names, [0.5, 0.8])]
+    assert pipe.unloaded == 0
+
+
+def test_lora_loader_clears_previous_adapters_between_jobs(tmp_path):
+    first = tmp_path / "style.safetensors"
+    second = tmp_path / "detail.safetensors"
+    first.write_bytes(b"lora")
+    second.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+
+    key, names = apply_loras_to_pipeline(pipe, [{"id": "style", "installedPath": str(first)}], adapter_id="diffusers_test")
+    apply_loras_to_pipeline(
+        pipe,
+        [{"id": "detail", "installedPath": str(second)}],
+        adapter_id="diffusers_test",
+        previous_key=key,
+        previous_adapter_names=names,
+    )
+
+    assert pipe.unloaded == 1
+    assert pipe.loaded[-1][0] == str(second)
+
+
+def test_lora_specs_fail_before_inference_for_missing_or_excess_loras(tmp_path):
+    missing = tmp_path / "missing.safetensors"
+
+    try:
+        normalize_lora_specs([{"id": "missing", "installedPath": str(missing)}])
+    except RuntimeError as exc:
+        assert "file is missing" in str(exc)
+    else:
+        raise AssertionError("Missing LoRA files should fail before inference.")
+
+    many = [{"id": f"lora_{index}", "installedPath": str(missing)} for index in range(4)]
+    try:
+        normalize_lora_specs(many)
+    except RuntimeError as exc:
+        assert "at most 3 LoRAs" in str(exc)
+    else:
+        raise AssertionError("More than three LoRAs should fail before inference.")
 
 
 def test_image_adapter_env_aliases_and_unknown_values(monkeypatch):

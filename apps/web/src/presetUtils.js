@@ -72,6 +72,8 @@ export function serializePresetLora(lora, presetLora = {}) {
     weight: loraWeight(lora, presetLora),
     triggerWords: lora?.triggerWords ?? [],
     compatibility: lora?.compatibility ?? presetLora?.compatibility ?? {},
+    installedPath: lora?.installedPath ?? presetLora?.installedPath ?? null,
+    source: lora?.source ?? presetLora?.source ?? null,
     presetManaged: true,
   };
 }

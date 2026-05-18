@@ -3874,6 +3874,8 @@ fn serialize_preset_lora(lora: &Value, preset_lora: &Value, lora_id: &str) -> Va
         "weight": preset_lora_weight(lora, preset_lora),
         "triggerWords": lora.get("triggerWords").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         "compatibility": lora.get("compatibility").cloned().unwrap_or_else(|| Value::Object(JsonObject::new())),
+        "installedPath": lora.get("installedPath").cloned().unwrap_or(Value::Null),
+        "source": lora.get("source").cloned().unwrap_or(Value::Null),
         "presetManaged": true
     })
 }
@@ -5619,6 +5621,12 @@ mod tests {
             "city at night, cinematic lighting"
         );
         assert_eq!(image_job["payload"]["loras"][0]["id"], "style-lora");
+        assert!(image_job["payload"]["loras"][0]["installedPath"]
+            .as_str()
+            .is_some_and(|value| value.ends_with("data/loras/style.safetensors")
+                || value.ends_with("data\\loras\\style.safetensors")
+                || value.ends_with("loras/style.safetensors")
+                || value.ends_with("loras\\style.safetensors")));
         assert_eq!(image_job["payload"]["model"], "client-model");
         assert_eq!(image_job["payload"]["count"], 2);
         assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 2);
