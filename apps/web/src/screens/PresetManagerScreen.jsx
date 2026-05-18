@@ -1,4 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
+import {
+  loraMatchesModel,
+  presetLoraId,
+  presetLoras,
+  presetValidation,
+  workflowModelType,
+  workflowModes,
+} from "../presetUtils.js";
 
 const workflowOptions = [
   ["text_to_image", "Text to Image"],
@@ -8,14 +16,6 @@ const workflowOptions = [
   ["first_last_frame", "First/Last Frame"],
 ];
 
-const defaultModesByWorkflow = {
-  text_to_image: "text_to_image, character_image, style_variations",
-  edit_image: "edit_image",
-  image_to_video: "image_to_video",
-  text_to_video: "text_to_video",
-  first_last_frame: "first_last_frame",
-};
-
 function slugify(value) {
   return String(value ?? "")
     .trim()
@@ -24,20 +24,18 @@ function slugify(value) {
     .replace(/^_+|_+$/g, "");
 }
 
-function loraId(lora) {
-  return typeof lora === "string" ? lora : lora?.id;
-}
-
-function parseList(value) {
-  return String(value ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function modelOptions(models, workflow) {
-  const type = workflow.includes("video") || workflow === "first_last_frame" ? "video" : "image";
+  const type = workflowModelType(workflow);
   return models.filter((model) => model.type === type);
+}
+
+function formLorasFromPreset(preset) {
+  return presetLoras(preset)
+    .map((lora) => {
+      const id = presetLoraId(lora);
+      return id ? { id, weight: typeof lora === "object" && lora.weight != null ? String(lora.weight) : "" } : null;
+    })
+    .filter(Boolean);
 }
 
 function formFromPreset(preset, fallbackModel) {
@@ -46,21 +44,32 @@ function formFromPreset(preset, fallbackModel) {
     name: preset?.name ?? "",
     scope: preset?.scope === "project" ? "project" : "global",
     workflow: preset?.workflow ?? "text_to_image",
-    modes: (preset?.modes ?? []).join(", "),
     model: preset?.model ?? fallbackModel ?? "",
     order: preset?.order ?? "",
     count: preset?.defaults?.count ?? "",
+    duration: preset?.defaults?.duration ?? "",
+    fps: preset?.defaults?.fps ?? "",
+    quality: preset?.defaults?.quality ?? "",
     resolution: preset?.defaults?.resolution ?? "",
     negativePrompt: preset?.defaults?.negativePrompt ?? "",
     promptPrefix: preset?.prompt?.prefix ?? "",
     promptSuffix: preset?.prompt?.suffix ?? "",
     description: preset?.ui?.description ?? "",
-    loraIds: (preset?.builtInLoras ?? preset?.loras ?? []).map(loraId).filter(Boolean),
+    loras: formLorasFromPreset(preset),
   };
+}
+
+function selectedLoraIds(form) {
+  return form.loras.map((lora) => lora.id);
+}
+
+function loraLabel(lora) {
+  return [lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ");
 }
 
 export function PresetManagerScreen({
   activeProject,
+  createLoraImportJob,
   createRecipePreset,
   deleteRecipePreset,
   duplicateRecipePreset,
@@ -75,10 +84,31 @@ export function PresetManagerScreen({
   const selectedPreset = recipePresets.find((preset) => preset.id === selectedPresetId) ?? null;
   const [form, setForm] = useState(() => formFromPreset(selectedPreset, models[0]?.id));
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState({ tone: "neutral", text: "" });
+  const [importForm, setImportForm] = useState({ sourceUrl: "", name: "" });
   const editable = !selectedPreset || selectedPreset.scope !== "builtin";
   const availableModels = modelOptions(models, form.workflow);
-  const compatibleLoras = loras.filter((lora) => lora.presetManaged || lora.scope === "builtin");
+  const selectedModel = models.find((model) => model.id === form.model) ?? availableModels[0] ?? null;
+  const availableLoras = loras.filter((lora) => lora.installState !== "missing" && loraMatchesModel(lora, selectedModel));
+  const validation = presetValidation({ ...selectedPreset, loras: form.loras }, loras, selectedModel);
+  const unknownSelectedLoras = form.loras.filter((selection) => !loras.some((lora) => lora.id === selection.id)).map((lora) => lora.id);
+  const incompatibleSelectedLoras = form.loras
+    .filter((selection) => {
+      const lora = loras.find((item) => item.id === selection.id);
+      return lora && !loraMatchesModel(lora, selectedModel);
+    })
+    .map((lora) => lora.id);
+  const saveDisabledReason = !editable
+    ? "Built-in presets are read-only."
+    : !form.name.trim()
+      ? "Name is required."
+      : !form.model
+        ? "Model is required."
+        : unknownSelectedLoras.length
+          ? `Wait for imported LoRA ${unknownSelectedLoras.join(", ")} to finish before saving.`
+          : incompatibleSelectedLoras.length
+            ? `Remove incompatible LoRA ${incompatibleSelectedLoras.join(", ")} before saving.`
+            : "";
 
   useEffect(() => {
     if (selectedPreset && !recipePresets.some((preset) => preset.id === selectedPreset.id)) {
@@ -88,29 +118,32 @@ export function PresetManagerScreen({
 
   useEffect(() => {
     setForm(formFromPreset(selectedPreset, modelOptions(models, selectedPreset?.workflow ?? "text_to_image")[0]?.id ?? models[0]?.id));
-    setMessage("");
-  }, [selectedPreset?.id, models.length]);
+    setMessage({ tone: "neutral", text: "" });
+  }, [selectedPreset?.id, models]);
 
   useEffect(() => {
     if (!availableModels.length) {
       return;
     }
     if (!availableModels.some((model) => model.id === form.model)) {
-      setForm((current) => ({ ...current, model: availableModels[0].id }));
+      setForm((current) => ({ ...current, model: availableModels[0].id, loras: [] }));
     }
   }, [availableModels, form.model]);
 
   function updateField(field, value) {
     setForm((current) => {
       if (field === "workflow") {
-        return {
-          ...current,
-          workflow: value,
-          modes: current.modes || defaultModesByWorkflow[value] || value,
-        };
+        return { ...current, workflow: value, loras: [] };
       }
       if (field === "name" && !selectedPreset) {
         return { ...current, name: value, id: slugify(value) };
+      }
+      if (field === "model") {
+        return { ...current, model: value, loras: current.loras.filter((selection) => {
+          const lora = loras.find((item) => item.id === selection.id);
+          const model = models.find((item) => item.id === value);
+          return !lora || loraMatchesModel(lora, model);
+        }) };
       }
       return { ...current, [field]: value };
     });
@@ -118,16 +151,39 @@ export function PresetManagerScreen({
 
   function toggleLora(id) {
     setForm((current) => {
-      const hasLora = current.loraIds.includes(id);
-      const loraIds = hasLora ? current.loraIds.filter((item) => item !== id) : [...current.loraIds, id].slice(0, 3);
-      return { ...current, loraIds };
+      const hasLora = current.loras.some((lora) => lora.id === id);
+      if (hasLora) {
+        return { ...current, loras: current.loras.filter((lora) => lora.id !== id) };
+      }
+      if (current.loras.length >= 3) {
+        return current;
+      }
+      const source = loras.find((lora) => lora.id === id);
+      const weight = source?.defaultWeight ?? source?.weight ?? 0.8;
+      return { ...current, loras: [...current.loras, { id, weight: String(weight) }] };
     });
+  }
+
+  function updateLoraWeight(id, weight) {
+    setForm((current) => ({
+      ...current,
+      loras: current.loras.map((lora) => (lora.id === id ? { ...lora, weight } : lora)),
+    }));
   }
 
   function buildPayload() {
     const defaults = {};
     if (form.count !== "") {
       defaults.count = Number(form.count);
+    }
+    if (form.duration !== "") {
+      defaults.duration = Number(form.duration);
+    }
+    if (form.fps !== "") {
+      defaults.fps = Number(form.fps);
+    }
+    if (form.quality.trim()) {
+      defaults.quality = form.quality.trim();
     }
     if (form.resolution.trim()) {
       defaults.resolution = form.resolution.trim();
@@ -147,9 +203,12 @@ export function PresetManagerScreen({
       name: form.name.trim(),
       scope: form.scope,
       workflow: form.workflow,
-      modes: parseList(form.modes),
+      modes: workflowModes(form.workflow),
       model: form.model,
-      builtInLoras: form.loraIds.map((id) => ({ id })),
+      loras: form.loras.map((lora) => ({
+        id: lora.id,
+        weight: Number.isFinite(Number(lora.weight)) ? Number(lora.weight) : 0.8,
+      })),
       ui: { description: form.description.trim() },
     };
     if (form.order !== "") {
@@ -166,20 +225,24 @@ export function PresetManagerScreen({
 
   async function savePreset(event) {
     event.preventDefault();
+    if (saveDisabledReason) {
+      setMessage({ tone: "error", text: saveDisabledReason });
+      return;
+    }
     setSaving(true);
-    setMessage("");
+    setMessage({ tone: "neutral", text: "" });
     try {
       const payload = buildPayload();
       if (selectedPreset) {
-        await updateRecipePreset(selectedPreset.id, payload);
-        setMessage("Preset saved.");
+        await updateRecipePreset(selectedPreset.id, payload, selectedPreset.scope);
+        setMessage({ tone: "success", text: "Preset saved." });
       } else {
         const created = await createRecipePreset(payload);
         setSelectedPresetId(created?.id ?? payload.id);
-        setMessage("Preset created.");
+        setMessage({ tone: "success", text: "Preset created." });
       }
     } catch (err) {
-      setMessage(err.message);
+      setMessage({ tone: "error", text: err.message });
     } finally {
       setSaving(false);
     }
@@ -190,7 +253,7 @@ export function PresetManagerScreen({
       return;
     }
     setSaving(true);
-    setMessage("");
+    setMessage({ tone: "neutral", text: "" });
     try {
       if (selectedPreset.scope === "builtin") {
         const payload = buildPayload();
@@ -198,14 +261,14 @@ export function PresetManagerScreen({
         payload.name = `${selectedPreset.name ?? selectedPreset.id} Copy`;
         const created = await createRecipePreset(payload);
         setSelectedPresetId(created.id);
-        setMessage("Preset duplicated.");
+        setMessage({ tone: "success", text: "Preset duplicated." });
         return;
       }
       const duplicated = await duplicateRecipePreset(selectedPreset.id, form.scope);
       setSelectedPresetId(duplicated.id);
-      setMessage("Preset duplicated.");
+      setMessage({ tone: "success", text: "Preset duplicated." });
     } catch (err) {
-      setMessage(err.message);
+      setMessage({ tone: "error", text: err.message });
     } finally {
       setSaving(false);
     }
@@ -216,13 +279,45 @@ export function PresetManagerScreen({
       return;
     }
     setSaving(true);
-    setMessage("");
+    setMessage({ tone: "neutral", text: "" });
     try {
-      await deleteRecipePreset(selectedPreset.id);
+      await deleteRecipePreset(selectedPreset.id, selectedPreset.scope);
       setSelectedPresetId("");
-      setMessage("Preset archived.");
+      setMessage({ tone: "success", text: "Preset archived." });
     } catch (err) {
-      setMessage(err.message);
+      setMessage({ tone: "error", text: err.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function importLora(event) {
+    event.preventDefault();
+    if (!importForm.sourceUrl.trim()) {
+      return;
+    }
+    setSaving(true);
+    setMessage({ tone: "neutral", text: "" });
+    try {
+      const job = await createLoraImportJob({
+        sourceUrl: importForm.sourceUrl.trim(),
+        name: importForm.name.trim() || undefined,
+        scope: form.scope,
+        family: selectedModel?.family ?? undefined,
+      });
+      const importedId = job?.payload?.loraId;
+      if (importedId) {
+        setForm((current) => ({
+          ...current,
+          loras: current.loras.some((lora) => lora.id === importedId)
+            ? current.loras
+            : [...current.loras, { id: importedId, weight: "0.8" }].slice(0, 3),
+        }));
+      }
+      setImportForm({ sourceUrl: "", name: "" });
+      setMessage({ tone: "success", text: "LoRA import queued. Save after the import finishes." });
+    } catch (err) {
+      setMessage({ tone: "error", text: err.message });
     } finally {
       setSaving(false);
     }
@@ -231,7 +326,7 @@ export function PresetManagerScreen({
   function startNewPreset() {
     setSelectedPresetId("");
     setForm(formFromPreset(null, modelOptions(models, "text_to_image")[0]?.id ?? models[0]?.id));
-    setMessage("");
+    setMessage({ tone: "neutral", text: "" });
   }
 
   return (
@@ -257,22 +352,27 @@ export function PresetManagerScreen({
       <div className="preset-layout">
         <section className="preset-list" aria-label="Recipe presets">
           {recipePresets.length ? (
-            recipePresets.map((preset) => (
-              <button
-                className={selectedPresetId === preset.id ? "preset-row active" : "preset-row"}
-                key={`${preset.scope}-${preset.id}`}
-                onClick={() => setSelectedPresetId(preset.id)}
-                type="button"
-              >
-                <span>
-                  <strong>{preset.name ?? preset.id}</strong>
-                  <small>
-                    {preset.scope ?? "global"} | {preset.workflow}
-                  </small>
-                </span>
-                <span>{preset.model}</span>
-              </button>
-            ))
+            recipePresets.map((preset) => {
+              const presetModel = models.find((model) => model.id === preset.model);
+              const status = presetValidation(preset, loras, presetModel);
+              const label = status.ok ? "Valid" : status.missing.length ? `Missing ${status.missing.join(", ")}` : `Incompatible ${status.incompatible.join(", ")}`;
+              return (
+                <button
+                  className={selectedPresetId === preset.id ? "preset-row active" : "preset-row"}
+                  key={`${preset.scope}-${preset.id}`}
+                  onClick={() => setSelectedPresetId(preset.id)}
+                  type="button"
+                >
+                  <span>
+                    <strong>{preset.name ?? preset.id}</strong>
+                    <small>
+                      {preset.scope ?? "global"} | {preset.workflow}
+                    </small>
+                  </span>
+                  <span className={status.ok ? "preset-status ok" : "preset-status error"}>{label}</span>
+                </button>
+              );
+            })
           ) : (
             <div className="empty-panel compact-panel">No presets</div>
           )}
@@ -328,8 +428,8 @@ export function PresetManagerScreen({
               </select>
             </label>
             <label>
-              Modes
-              <input disabled={!editable} onChange={(event) => updateField("modes", event.target.value)} value={form.modes} />
+              Derived modes
+              <input disabled readOnly value={workflowModes(form.workflow).join(", ")} />
             </label>
           </div>
 
@@ -339,14 +439,30 @@ export function PresetManagerScreen({
               <input disabled={!editable} min="1" max="8" onChange={(event) => updateField("count", event.target.value)} type="number" value={form.count} />
             </label>
             <label>
+              Duration
+              <input disabled={!editable} min="1" max="30" onChange={(event) => updateField("duration", event.target.value)} type="number" value={form.duration} />
+            </label>
+            <label>
               Resolution
               <input disabled={!editable} onChange={(event) => updateField("resolution", event.target.value)} placeholder="1024x1024" value={form.resolution} />
             </label>
+          </div>
+
+          <div className="control-grid compact-controls">
             <label>
-              Negative
-              <input disabled={!editable} onChange={(event) => updateField("negativePrompt", event.target.value)} value={form.negativePrompt} />
+              FPS
+              <input disabled={!editable} min="1" max="60" onChange={(event) => updateField("fps", event.target.value)} type="number" value={form.fps} />
+            </label>
+            <label>
+              Quality
+              <input disabled={!editable} onChange={(event) => updateField("quality", event.target.value)} value={form.quality} />
             </label>
           </div>
+
+          <label>
+            Negative
+            <input disabled={!editable} onChange={(event) => updateField("negativePrompt", event.target.value)} value={form.negativePrompt} />
+          </label>
 
           <label>
             Description
@@ -367,31 +483,83 @@ export function PresetManagerScreen({
           <section className="lora-picker" aria-label="Preset LoRAs">
             <div>
               <strong>Managed LoRAs</strong>
-              <span>{form.loraIds.length}/3 selected</span>
+              <span>{form.loras.length}/3 selected</span>
             </div>
-            {compatibleLoras.length ? (
+            {availableLoras.length ? (
               <div className="lora-choice-list">
-                {compatibleLoras.map((lora) => {
-                  const checked = form.loraIds.includes(lora.id);
+                {availableLoras.map((lora) => {
+                  const checked = selectedLoraIds(form).includes(lora.id);
+                  const selected = form.loras.find((item) => item.id === lora.id);
                   return (
-                    <label className={checked ? "lora-choice active" : "lora-choice"} key={lora.id}>
-                      <input checked={checked} disabled={!editable || (!checked && form.loraIds.length >= 3)} onChange={() => toggleLora(lora.id)} type="checkbox" />
-                      <span>
-                        <strong>{lora.name ?? lora.id}</strong>
-                        <small>{lora.family ?? lora.scope ?? "global"}</small>
-                      </span>
-                    </label>
+                    <div className={checked ? "lora-choice active editable-lora-choice" : "lora-choice editable-lora-choice"} key={lora.id}>
+                      <label>
+                        <input checked={checked} disabled={!editable || (!checked && form.loras.length >= 3)} onChange={() => toggleLora(lora.id)} type="checkbox" />
+                        <span>
+                          <strong>{lora.name ?? lora.id}</strong>
+                          <small>{loraLabel(lora)}</small>
+                        </span>
+                      </label>
+                      {checked ? (
+                        <label>
+                          Weight
+                          <input
+                            disabled={!editable}
+                            max="2"
+                            min="-2"
+                            onChange={(event) => updateLoraWeight(lora.id, event.target.value)}
+                            step="0.05"
+                            type="number"
+                            value={selected?.weight ?? ""}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
                   );
                 })}
               </div>
             ) : (
-              <div className="empty-panel compact-panel">No managed LoRAs</div>
+              <div className="empty-panel compact-panel">No compatible LoRAs</div>
             )}
           </section>
 
-          {selectedPreset?.scope === "builtin" ? <p className="inline-warning">Built-in presets are read-only.</p> : null}
-          {message ? <p className="inline-warning">{message}</p> : null}
-          <button className="primary-action" disabled={!editable || saving || !form.name.trim() || !form.model} type="submit">
+          <section className="lora-import-panel" aria-label="Import LoRA by URL">
+            <div>
+              <strong>Add by URL</strong>
+              <span>{selectedModel?.family ?? "selected model family"}</span>
+            </div>
+            <div className="inline-create">
+              <label>
+                Source URL
+                <input
+                  disabled={!editable}
+                  onChange={(event) => setImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
+                  placeholder="https://..."
+                  value={importForm.sourceUrl}
+                />
+              </label>
+              <label>
+                Name
+                <input
+                  disabled={!editable}
+                  onChange={(event) => setImportForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder="Optional"
+                  value={importForm.name}
+                />
+              </label>
+              <button disabled={!editable || saving || !importForm.sourceUrl.trim()} onClick={importLora} type="button">
+                Queue Import
+              </button>
+            </div>
+          </section>
+
+          {!validation.ok ? (
+            <p className="inline-warning">
+              {validation.missing.length ? `Missing LoRA: ${validation.missing.join(", ")}` : `Incompatible LoRA: ${validation.incompatible.join(", ")}`}
+            </p>
+          ) : null}
+          {saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}
+          {message.text ? <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p> : null}
+          <button className="primary-action" disabled={Boolean(saveDisabledReason) || saving} type="submit">
             {selectedPreset ? "Save Preset" : "Create Preset"}
           </button>
         </form>

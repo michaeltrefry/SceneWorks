@@ -441,6 +441,7 @@ describe("SceneWorks app shell", () => {
               id: "cinematic",
               name: "Cinematic",
               model: "z_image_turbo",
+              workflow: "text_to_image",
               defaults: { count: 2, resolution: "1280x720", negativePrompt: "flat lighting" },
               prompt: { suffix: "cinematic lighting" },
               builtInLoras: [{ id: "builtin_cinematic_detail", weight: 0.4 }],
@@ -476,6 +477,49 @@ describe("SceneWorks app shell", () => {
         advanced: { resolution: "1280x720" },
       }),
     );
+  });
+
+  it("keeps Qwen selected when applying a Qwen image preset", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={createImageJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[
+            { id: "qwen_image", name: "Qwen Image", type: "image", family: "qwen-image" },
+            { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" },
+          ]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          recipePresets={[
+            { id: "qwen_detail", name: "Qwen Detail", model: "qwen_image", workflow: "text_to_image", defaults: { count: 1 } },
+            { id: "cinematic", name: "Cinematic", model: "z_image_turbo", workflow: "text_to_image", defaults: { count: 4 } },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Qwen Detail");
+    expect(container.textContent).not.toContain("Cinematic");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen_image", recipePresetId: "qwen_detail" }));
   });
 
   it("applies recipe preset defaults to video jobs", async () => {
@@ -546,6 +590,7 @@ describe("SceneWorks app shell", () => {
         quality: "best",
         negativePrompt: "jitter",
         recipePresetId: "dream_motion",
+        loras: [expect.objectContaining({ id: "video_motion", weight: 0.8, presetManaged: true })],
         advanced: expect.objectContaining({
           recipePresetName: "Dream Motion",
           recipePresetPrompt: { suffix: "smooth camera motion" },
@@ -555,21 +600,98 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("filters video presets by mode and selected model", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <VideoStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[{ id: "image-1", type: "image", displayName: "Frame One" }]}
+          characters={[]}
+          createPersonDetectionJob={() => {}}
+          createPersonTrackJob={() => {}}
+          createVideoJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          latestAssets={[]}
+          loras={[]}
+          onPreview={() => {}}
+          personTracks={[]}
+          purgeAsset={() => {}}
+          recipePresets={[
+            { id: "ltx_motion", name: "LTX Motion", workflow: "image_to_video", model: "ltx_2_3" },
+            { id: "ltx_story", name: "LTX Story", workflow: "text_to_video", model: "ltx_2_3" },
+            { id: "wan_motion", name: "Wan Motion", workflow: "image_to_video", model: "wan_2_2" },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={{ id: "image-1", type: "image", displayName: "Frame One" }}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+          videoModels={[
+            {
+              id: "ltx_2_3",
+              name: "LTX",
+              type: "video",
+              capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip"],
+              defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+              limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+            },
+            {
+              id: "wan_2_2",
+              name: "Wan2.2",
+              type: "video",
+              capabilities: ["image_to_video", "text_to_video"],
+              defaults: { duration: 5, fps: 24, resolution: "1280x720", quality: "balanced" },
+              limits: { durations: [4, 5], fps: [24], resolutions: ["1280x720"] },
+            },
+          ]}
+        />,
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("LTX Motion");
+    expect(container.textContent).not.toContain("Wan Motion");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text to Video").click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("LTX Story");
+    expect(container.textContent).not.toContain("LTX Motion");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+    await changeField(field(container, "Model"), "wan_2_2");
+    await settle();
+
+    expect(container.textContent).toContain("Presets unavailable");
+    expect(container.textContent).not.toContain("LTX Story");
+  });
+
   it("creates, edits, duplicates, and archives recipe presets from the manager", async () => {
     const createRecipePreset = vi.fn(async (payload) => payload);
     const updateRecipePreset = vi.fn(async (id, payload) => ({ ...payload, id }));
     const duplicateRecipePreset = vi.fn(async (id) => ({ id: `${id}_copy` }));
     const deleteRecipePreset = vi.fn(async (id) => ({ id, archived: true }));
+    const createLoraImportJob = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "imported_detail" } }));
     root = createRoot(container);
     await act(async () => {
       root.render(
         <PresetManagerScreen
           activeProject={{ id: "project-1", name: "Noir" }}
+          createLoraImportJob={createLoraImportJob}
           createRecipePreset={createRecipePreset}
           deleteRecipePreset={deleteRecipePreset}
           duplicateRecipePreset={duplicateRecipePreset}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image" }]}
-          loras={[{ id: "builtin_cinematic_detail", name: "Cinematic Detail", family: "z-image", presetManaged: true }]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          loras={[
+            { id: "builtin_cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", defaultWeight: 0.55 },
+            { id: "global_detail", name: "Global Detail", family: "z-image", scope: "global", defaultWeight: 0.7 },
+            { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
+          ]}
           recipePresets={[
             {
               id: "cinematic",
@@ -577,6 +699,7 @@ describe("SceneWorks app shell", () => {
               scope: "builtin",
               workflow: "text_to_image",
               model: "z_image_turbo",
+              loras: [{ id: "builtin_cinematic_detail", weight: 0.5 }],
               ui: { description: "Built in cinematic finish." },
             },
             {
@@ -598,12 +721,40 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await changeField(field(container, "Name"), "Soft Morning");
+    await act(async () => {
+      [...container.querySelectorAll('.lora-choice input[type="checkbox"]')].find((input) => input.closest(".lora-choice").textContent.includes("Global Detail")).click();
+    });
+    await changeField(field(container, "Weight"), "0.35");
     expect(field(container, "ID").value).toBe("soft_morning");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Preset").click();
     });
-    expect(createRecipePreset).toHaveBeenCalledWith(expect.objectContaining({ id: "soft_morning", name: "Soft Morning", scope: "global" }));
+    expect(createRecipePreset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "soft_morning",
+        name: "Soft Morning",
+        scope: "global",
+        loras: [{ id: "global_detail", weight: 0.35 }],
+        modes: ["text_to_image", "character_image", "style_variations"],
+      }),
+    );
+    expect(container.textContent).toContain("Valid");
+    expect(container.textContent).not.toContain("Qwen Only");
 
+    await act(async () => {
+      [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
+    });
+    await changeField(field(container, "Description"), "Richer low key color.");
+    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+    expect(createLoraImportJob).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceUrl: "https://example.com/loras/detail.safetensors", scope: "global", family: "z-image" }),
+    );
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
+    });
     await act(async () => {
       [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
     });
@@ -611,7 +762,7 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").click();
     });
-    expect(updateRecipePreset).toHaveBeenCalledWith("moody", expect.objectContaining({ ui: { description: "Richer low key color." } }));
+    expect(updateRecipePreset).toHaveBeenCalledWith("moody", expect.objectContaining({ ui: { description: "Richer low key color." } }), "global");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Duplicate").click();
@@ -624,6 +775,6 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Archive").click();
     });
-    expect(deleteRecipePreset).toHaveBeenCalledWith("moody");
+    expect(deleteRecipePreset).toHaveBeenCalledWith("moody", "global");
   });
 });

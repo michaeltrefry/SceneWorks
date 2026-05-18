@@ -1,0 +1,109 @@
+export const defaultModesByWorkflow = {
+  text_to_image: ["text_to_image", "character_image", "style_variations"],
+  edit_image: ["edit_image"],
+  image_to_video: ["image_to_video"],
+  text_to_video: ["text_to_video"],
+  first_last_frame: ["first_last_frame"],
+};
+
+export function workflowModelType(workflow) {
+  return workflow?.includes("video") || workflow === "first_last_frame" ? "video" : "image";
+}
+
+export function workflowModes(workflow) {
+  return defaultModesByWorkflow[workflow] ?? [workflow].filter(Boolean);
+}
+
+export function loraFamilies(lora) {
+  const compatibility = lora?.compatibility ?? {};
+  const values =
+    lora?.families ??
+    lora?.compatibleFamilies ??
+    lora?.modelFamilies ??
+    compatibility.families ??
+    (lora?.family ? [lora.family] : []);
+  return Array.isArray(values) ? values : [values].filter(Boolean);
+}
+
+export function modelLoraFamilies(model) {
+  const compatibility = model?.loraCompatibility ?? {};
+  const values = model?.loraFamilies ?? compatibility.families ?? (model?.family ? [model.family] : []);
+  return Array.isArray(values) ? values : [values].filter(Boolean);
+}
+
+export function loraMatchesModel(lora, model) {
+  const modelFamilies = modelLoraFamilies(model);
+  const families = loraFamilies(lora);
+  return !modelFamilies.length || !families.length || families.some((family) => modelFamilies.includes(family));
+}
+
+export function presetMatchesWorkflow(preset, mode) {
+  if (preset?.modes?.length) {
+    return preset.modes.includes(mode);
+  }
+  return preset?.workflow === mode;
+}
+
+export function presetMatchesModel(preset, model) {
+  return !preset?.model || !model?.id || preset.model === model.id;
+}
+
+export function presetLoras(preset) {
+  return preset?.loras ?? preset?.builtInLoras ?? [];
+}
+
+export function presetLoraId(presetLora) {
+  return typeof presetLora === "string" ? presetLora : presetLora?.id ?? presetLora?.loraId;
+}
+
+export function loraWeight(lora, presetLora = {}) {
+  const value = Number(presetLora.weight ?? lora?.defaultWeight ?? lora?.weight ?? 0.8);
+  return Number.isFinite(value) ? value : 0.8;
+}
+
+export function serializePresetLora(lora, presetLora = {}) {
+  const id = presetLoraId(presetLora) ?? lora?.id;
+  return {
+    id,
+    name: lora?.name ?? presetLora?.name ?? presetLora?.displayName ?? id,
+    scope: lora?.scope ?? presetLora?.scope ?? "global",
+    weight: loraWeight(lora, presetLora),
+    triggerWords: lora?.triggerWords ?? [],
+    compatibility: lora?.compatibility ?? presetLora?.compatibility ?? {},
+    presetManaged: true,
+  };
+}
+
+export function presetLoraDetails(preset, loras) {
+  return presetLoras(preset)
+    .map((presetLora) => {
+      const id = presetLoraId(presetLora);
+      const lora = loras.find((item) => item.id === id);
+      return lora
+        ? { ...serializePresetLora(lora, presetLora), missing: false }
+        : { id, name: id, weight: loraWeight(null, presetLora), missing: true };
+    })
+    .filter((lora) => lora.id);
+}
+
+export function presetPromptParts(preset) {
+  return [preset?.prompt?.prefix, preset?.prompt?.suffix]
+    .map((part) => String(part ?? "").trim())
+    .filter(Boolean);
+}
+
+export function presetValidation(preset, loras, model) {
+  const details = presetLoraDetails(preset, loras);
+  const missing = details.filter((lora) => lora.missing).map((lora) => lora.id);
+  const incompatible = details
+    .filter((detail) => {
+      const lora = loras.find((item) => item.id === detail.id);
+      return lora && !loraMatchesModel(lora, model);
+    })
+    .map((lora) => lora.id);
+  return {
+    missing,
+    incompatible,
+    ok: missing.length === 0 && incompatible.length === 0,
+  };
+}

@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
+import {
+  loraMatchesModel,
+  loraWeight,
+  presetLoraDetails as buildPresetLoraDetails,
+  presetMatchesModel,
+  presetMatchesWorkflow,
+  presetPromptParts as buildPresetPromptParts,
+} from "../presetUtils.js";
 
 export function ImageStudio({
   activeProject,
@@ -34,22 +42,6 @@ export function ImageStudio({
   const [characterLookId, setCharacterLookId] = useState("");
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
-
-  function loraFamilies(lora) {
-    const compatibility = lora.compatibility ?? {};
-    const values =
-      lora.families ??
-      lora.compatibleFamilies ??
-      lora.modelFamilies ??
-      compatibility.families ??
-      (lora.family ? [lora.family] : []);
-    return Array.isArray(values) ? values : [values].filter(Boolean);
-  }
-
-  function loraWeight(lora) {
-    const value = Number(lora.defaultWeight ?? lora.weight ?? 0.8);
-    return Number.isFinite(value) ? value : 0.8;
-  }
 
   function serializeLora(lora, override = {}) {
     return {
@@ -109,10 +101,9 @@ export function ImageStudio({
     return item.type === "image";
   });
   const selectedModel = imageModels.find((item) => item.id === model);
-  const selectedModelFamily = selectedModel?.family ?? null;
   const availableRecipePresets = useMemo(() => {
-    return recipePresets.filter((preset) => !preset.modes?.length || preset.modes.includes(mode));
-  }, [mode, recipePresets]);
+    return recipePresets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
+  }, [mode, recipePresets, selectedModel?.id]);
   const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === stylePreset) ?? availableRecipePresets[0] ?? null;
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
@@ -124,21 +115,14 @@ export function ImageStudio({
     if (showIncompatibleLoras) {
       return true;
     }
-    const families = loraFamilies(lora);
-    return !selectedModelFamily || families.length === 0 || families.includes(selectedModelFamily);
-  }), [loras, selectedModelFamily, showIncompatibleLoras]);
+    return loraMatchesModel(lora, selectedModel);
+  }), [loras, selectedModel, showIncompatibleLoras]);
   const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
   const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
   const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
-  const presetLoraDetails = (selectedRecipePreset?.builtInLoras ?? [])
-    .map((presetLora) => {
-      const loraId = typeof presetLora === "string" ? presetLora : presetLora.id;
-      const lora = loras.find((item) => item.id === loraId);
-      return lora ? { ...serializeLora(lora, presetLora), missing: false } : { id: loraId, name: loraId, missing: true };
-    })
-    .filter((lora) => lora.id);
-  const presetPromptParts = [selectedRecipePreset?.prompt?.prefix, selectedRecipePreset?.prompt?.suffix]
-    .filter((part) => String(part ?? "").trim());
+  const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
+  const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
+  const presetMissingLoras = presetLoraDetails.filter((lora) => lora.missing);
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
   useEffect(() => {
@@ -150,9 +134,6 @@ export function ImageStudio({
   useEffect(() => {
     if (!selectedRecipePreset) {
       return;
-    }
-    if (selectedRecipePreset.model) {
-      setModel(selectedRecipePreset.model);
     }
     const defaults = selectedRecipePreset.defaults ?? {};
     if (defaults.count) {
@@ -411,7 +392,12 @@ export function ImageStudio({
             </div>
           ) : null}
 
-          <button className="primary-action" disabled={!activeProject || !prompt.trim() || (mode === "character_image" && !characterId)} type="submit">
+          {presetMissingLoras.length ? <p className="inline-warning">Preset is missing LoRA: {presetMissingLoras.map((lora) => lora.id).join(", ")}</p> : null}
+          <button
+            className="primary-action"
+            disabled={!activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || Boolean(presetMissingLoras.length)}
+            type="submit"
+          >
             Generate
           </button>
         </section>

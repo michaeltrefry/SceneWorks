@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import {
+  presetLoraDetails as buildPresetLoraDetails,
+  presetMatchesModel,
+  presetMatchesWorkflow,
+  presetPromptParts as buildPresetPromptParts,
+} from "../presetUtils.js";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 
 export function VideoStudio({
@@ -55,23 +61,12 @@ export function VideoStudio({
   const supportsMode = capabilities.includes(mode);
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
   const availableRecipePresets = useMemo(() => {
-    return recipePresets.filter((preset) => {
-      if (preset.modes?.length) {
-        return preset.modes.includes(mode);
-      }
-      return preset.workflow === mode;
-    });
-  }, [mode, recipePresets]);
+    return recipePresets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
+  }, [mode, recipePresets, selectedModel?.id]);
   const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? availableRecipePresets[0] ?? null;
-  const presetPromptParts = [selectedRecipePreset?.prompt?.prefix, selectedRecipePreset?.prompt?.suffix]
-    .filter((part) => String(part ?? "").trim());
-  const presetLoraDetails = (selectedRecipePreset?.builtInLoras ?? selectedRecipePreset?.loras ?? [])
-    .map((presetLora) => {
-      const loraId = typeof presetLora === "string" ? presetLora : presetLora.id;
-      const lora = loras.find((item) => item.id === loraId);
-      return lora ? { id: loraId, name: lora.name ?? loraId } : { id: loraId, name: loraId, missing: true };
-    })
-    .filter((lora) => lora.id);
+  const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
+  const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
+  const presetMissingLoras = presetLoraDetails.filter((lora) => lora.missing);
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
@@ -155,9 +150,6 @@ export function VideoStudio({
     if (!selectedRecipePreset) {
       return;
     }
-    if (selectedRecipePreset.model) {
-      setModel(selectedRecipePreset.model);
-    }
     const defaults = selectedRecipePreset.defaults ?? {};
     if (defaults.duration) {
       setDuration(Number(defaults.duration));
@@ -215,7 +207,7 @@ export function VideoStudio({
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId);
-  const canSubmit = Boolean(activeProject && prompt.trim() && supportsMode && implementedMode && hasInputs);
+  const canSubmit = Boolean(activeProject && prompt.trim() && supportsMode && implementedMode && hasInputs && !presetMissingLoras.length);
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
   const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
@@ -257,7 +249,7 @@ export function VideoStudio({
       sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
       personTrackId: mode === "replace_person" ? personTrackId || null : null,
       replacementMode: mode === "replace_person" ? replacementMode : "face_only",
-      loras: [],
+      loras: presetLoraDetails.filter((lora) => !lora.missing),
       advanced: {
         resolution,
         durationHint,
@@ -503,6 +495,7 @@ export function VideoStudio({
           ) : null}
 
           {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
+          {presetMissingLoras.length ? <p className="inline-warning">Preset is missing LoRA: {presetMissingLoras.map((lora) => lora.id).join(", ")}</p> : null}
           <button className="primary-action" disabled={!canSubmit} type="submit">
             {mode === "replace_person" ? "Replace Person" : "Generate Clip"}
           </button>

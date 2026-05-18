@@ -356,7 +356,7 @@ export function App() {
     if (scope) {
       params.set("scope", scope);
     }
-    if (activeProject?.id) {
+    if (scope === "project" && activeProject?.id) {
       params.set("projectId", activeProject.id);
     }
     const value = params.toString();
@@ -375,8 +375,8 @@ export function App() {
     return created;
   }
 
-  async function updateRecipePreset(presetId, payload) {
-    const updated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${recipePresetQuery()}`, token, {
+  async function updateRecipePreset(presetId, payload, scope = payload.scope) {
+    const updated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${recipePresetQuery(scope)}`, token, {
       method: "PATCH",
       body: JSON.stringify(payload),
     });
@@ -393,12 +393,30 @@ export function App() {
     return duplicated;
   }
 
-  async function deleteRecipePreset(presetId) {
-    const archived = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${recipePresetQuery()}`, token, {
+  async function deleteRecipePreset(presetId, scope = null) {
+    const archived = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${recipePresetQuery(scope)}`, token, {
       method: "DELETE",
     });
     await refreshRecipePresets(activeProject?.id);
     return archived;
+  }
+
+  async function createLoraImportJob(payload) {
+    if (payload.scope === "project" && !activeProject) {
+      throw new Error("Create or open a project first.");
+    }
+    const job = await apiFetch("/api/v1/loras/import", token, {
+      method: "POST",
+      body: JSON.stringify({
+        ...payload,
+        projectId: payload.scope === "project" ? activeProject.id : null,
+        projectName: payload.scope === "project" ? activeProject.name : null,
+      }),
+    });
+    setActiveView("Queue");
+    setError("");
+    refreshData();
+    return job;
   }
 
   async function refreshPersonTracks(projectId = activeProject?.id) {
@@ -1241,6 +1259,7 @@ export function App() {
         {activeView === "Presets" ? (
           <PresetManagerScreen
             activeProject={activeProject}
+            createLoraImportJob={createLoraImportJob}
             createRecipePreset={createRecipePreset}
             deleteRecipePreset={deleteRecipePreset}
             duplicateRecipePreset={duplicateRecipePreset}
