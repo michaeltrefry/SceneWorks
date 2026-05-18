@@ -49,6 +49,13 @@ def choose_claimable_job(rows: list[sqlite3.Row], capabilities: set[str], loaded
     if first["type"] in NON_GPU_JOB_TYPES or first["requested_gpu"] != "auto":
         return first
 
+    explicit_gpu_job = next(
+        (row for row in compatible if row["type"] not in NON_GPU_JOB_TYPES and row["requested_gpu"] != "auto"),
+        None,
+    )
+    if explicit_gpu_job is not None:
+        return explicit_gpu_job
+
     return next((row for row in compatible if job_matches_loaded_model(row, loaded_models)), first)
 
 

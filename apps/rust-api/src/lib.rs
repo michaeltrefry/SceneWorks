@@ -12,7 +12,7 @@ use axum::extract::{
 };
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
+use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
@@ -54,7 +55,9 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
     "http://localhost:5176,http://127.0.0.1:5176"
 );
 const EVENT_BUFFER_SIZE: usize = 100;
-const HEARTBEAT_SSE_TEXT: &str = "{}";
+const HEARTBEAT_SSE_DATA: &str = "{}";
+#[cfg(test)]
+const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MANIFEST_CACHE_LIMIT: usize = 16;
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
@@ -1550,18 +1553,47 @@ async fn job_events(
             .event_tickets
             .consume(query.ticket.as_deref().unwrap_or_default())?;
     }
-    let ready = tokio_stream::iter([Ok(Event::default()
+    Ok(Sse::new(sse_event_stream(state.events.subscribe())))
+}
+
+fn sse_event_stream(
+    messages: ReceiverStream<EventMessage>,
+) -> impl futures_util::Stream<Item = Result<Event, Infallible>> {
+    let mut heartbeat = tokio::time::interval_at(
+        TokioInstant::now() + Duration::from_secs(15),
+        Duration::from_secs(15),
+    );
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    futures_util::stream::unfold(
+        (messages, heartbeat, true),
+        |(mut messages, mut heartbeat, send_ready)| async move {
+            if send_ready {
+                return Some((Ok(ready_event()), (messages, heartbeat, false)));
+            }
+            tokio::select! {
+                message = messages.next() => {
+                    message.map(|message| (Ok(sse_message_event(message)), (messages, heartbeat, false)))
+                }
+                _ = heartbeat.tick() => {
+                    Some((Ok(heartbeat_event()), (messages, heartbeat, false)))
+                }
+            }
+        },
+    )
+}
+
+fn ready_event() -> Event {
+    Event::default()
         .event("ready")
-        .data(json!({ "status": "connected" }).to_string()))]);
-    let messages = state
-        .events
-        .subscribe()
-        .map(|message| Ok(Event::default().event(message.event).data(message.data)));
-    Ok(Sse::new(ready.chain(messages)).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text(HEARTBEAT_SSE_TEXT),
-    ))
+        .data(json!({ "status": "connected" }).to_string())
+}
+
+fn sse_message_event(message: EventMessage) -> Event {
+    Event::default().event(message.event).data(message.data)
+}
+
+fn heartbeat_event() -> Event {
+    Event::default().event("heartbeat").data(HEARTBEAT_SSE_DATA)
 }
 
 async fn access_control(
@@ -2622,7 +2654,8 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, EventHub, EventMessage, Settings, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_TEXT,
+        create_app, EventHub, EventMessage, Settings, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
+        HEARTBEAT_SSE_WIRE,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -3769,9 +3802,9 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_keepalive_text_is_axum_safe() {
-        assert_eq!(HEARTBEAT_SSE_TEXT, "{}");
-        assert!(!HEARTBEAT_SSE_TEXT.contains(['\r', '\n']));
+    fn heartbeat_event_matches_python_wire_shape() {
+        assert_eq!(HEARTBEAT_SSE_DATA, "{}");
+        assert_eq!(HEARTBEAT_SSE_WIRE, "event: heartbeat\ndata: {}\n\n");
     }
 
     #[tokio::test]

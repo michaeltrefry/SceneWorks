@@ -248,6 +248,53 @@ fn loaded_model_preference_does_not_skip_explicit_gpu_job() {
 }
 
 #[test]
+fn explicit_gpu_job_beats_younger_warm_auto_match() {
+    let store = store("explicit-gpu-before-warm-auto");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: vec!["model-x".to_owned()],
+        })
+        .expect("worker registers");
+    let auto_other = store
+        .create_job(image_job(object(json!({ "model": "model-y" }))))
+        .expect("auto other job creates");
+    let explicit_job = store
+        .create_job(CreateJob {
+            requested_gpu: "gpu-0".to_owned(),
+            ..image_job(object(json!({ "model": "model-y" })))
+        })
+        .expect("explicit job creates");
+    let warm_auto = store
+        .create_job(image_job(object(json!({ "model": "model-x" }))))
+        .expect("warm auto job creates");
+
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+
+    assert_eq!(claimed.id, explicit_job.id);
+    assert_eq!(
+        store
+            .get_job(&auto_other.id)
+            .expect("auto other job loads")
+            .status,
+        JobStatus::Queued
+    );
+    assert_eq!(
+        store
+            .get_job(&warm_auto.id)
+            .expect("warm auto job loads")
+            .status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
 fn cpu_utility_worker_does_not_claim_gpu_generation_job() {
     let store = store("cpu-utility-no-gpu-jobs");
     store

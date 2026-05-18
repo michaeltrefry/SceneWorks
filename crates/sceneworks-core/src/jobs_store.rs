@@ -1130,6 +1130,13 @@ fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Opti
     if is_non_gpu_job_type(first.job_type.as_str()) || first.requested_gpu != "auto" {
         return compatible.into_iter().next();
     }
+    if let Some(explicit_gpu_job) = compatible
+        .iter()
+        .find(|job| !is_non_gpu_job_type(job.job_type.as_str()) && job.requested_gpu != "auto")
+        .cloned()
+    {
+        return Some(explicit_gpu_job);
+    }
     compatible
         .iter()
         .find(|job| job_matches_loaded_model(job, worker))

@@ -159,15 +159,18 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
         "repository not found",
         "is not a local folder",
         "couldn't connect to 'https://huggingface.co'",
-        "model not found",
-        "model files",
+        "no file named model_index.json",
+        "error no file named",
+        "cannot load model",
+        "missing model file",
     )
     if any(marker in lowered for marker in missing_model_markers):
         return (
             f"{job_kind} failed because required model files were not available.",
             (
                 "The worker could not find or download the model files. Check that the model is installed, "
-                f"the Hugging Face repo is reachable, and HF_TOKEN is set for gated repos. Technical detail: {detail}"
+                "open Model Manager or queue a model_download job to install it, and verify HF_TOKEN for gated repos. "
+                f"Technical detail: {detail}"
             ),
         )
     return (f"{job_kind} failed.", detail)

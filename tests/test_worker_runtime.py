@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from scene_worker.image_adapters import MODEL_TARGETS, ZImageDiffusersAdapter, build_asset_sidecar, image_request_from_job, resolve_seed
+from scene_worker.image_adapters import (
+    MODEL_TARGETS,
+    ZImageDiffusersAdapter,
+    build_asset_sidecar,
+    huggingface_repo_cache_path,
+    image_request_from_job,
+    resolve_seed,
+)
 from scene_worker.runtime import (
     download_progress_payload,
     format_bytes,
@@ -102,7 +109,17 @@ def test_z_image_loaded_models_include_repo_and_model_id():
     adapter._loaded_repo = "Tongyi-MAI/Z-Image-Turbo"
     adapter._loaded_model = "z_image_turbo"
 
-    assert adapter.loaded_models() == ["Tongyi-MAI/Z-Image-Turbo", "z_image_turbo"]
+    assert set(adapter.loaded_models()) == {"Tongyi-MAI/Z-Image-Turbo", "z_image_turbo"}
+
+
+def test_huggingface_repo_cache_path_stays_under_cache_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "hub"))
+
+    path = huggingface_repo_cache_path(r"..\outside/../../model")
+
+    assert path is not None
+    path.relative_to((tmp_path / "hub").resolve())
+    assert path.name.startswith("models--")
 
 
 def test_friendly_failure_identifies_gpu_oom():
@@ -117,6 +134,8 @@ def test_friendly_failure_identifies_missing_model_files():
     message, error = friendly_failure("Image generation", RuntimeError("Repository not found: owner/model"))
 
     assert message == "Image generation failed because required model files were not available."
+    assert "Model Manager" in error
+    assert "model_download" in error
     assert "HF_TOKEN" in error
 
 

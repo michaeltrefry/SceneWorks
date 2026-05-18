@@ -36,11 +36,26 @@ CancelCallback = Callable[[], bool]
 
 
 def huggingface_repo_cache_exists(repo: str) -> bool:
+    repo_cache = huggingface_repo_cache_path(repo)
+    if repo_cache is None:
+        return False
+    return (repo_cache / "snapshots").is_dir() or (repo_cache / "blobs").is_dir()
+
+
+def huggingface_repo_cache_path(repo: str) -> Path | None:
     default_home = Path.home() / ".cache" / "huggingface"
     hf_home = Path(os.getenv("HF_HOME") or default_home)
     cache_root = Path(os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
-    repo_cache = cache_root / f"models--{repo.replace('/', '--')}"
-    return (repo_cache / "snapshots").exists() or (repo_cache / "blobs").exists()
+    safe_repo = "".join(char if char.isalnum() or char in "._-" else "--" for char in repo).strip("-")
+    if not safe_repo:
+        return None
+    try:
+        root = cache_root.resolve()
+        repo_cache = (root / f"models--{safe_repo}").resolve()
+        repo_cache.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return repo_cache
 
 
 MODEL_TARGETS = {

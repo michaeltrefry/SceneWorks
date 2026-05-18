@@ -3,6 +3,7 @@ import { actionStatuses, terminalStatuses } from "../constants.js";
 import { formatSeconds, percent } from "../formatting.js";
 
 const nonGpuJobTypes = new Set(["model_download", "lora_import"]);
+const terminalStatusesForBlocking = new Set(["completed", "failed", "canceled", "interrupted"]);
 
 function formatJobType(type) {
   return String(type ?? "job").replaceAll("_", " ");
@@ -22,9 +23,60 @@ function workerCanClaim(job, worker) {
   return job.requestedGpu === "auto" || job.requestedGpu === worker.gpuId;
 }
 
-function jobWaitingMessage(job, workers) {
+function modelKeys(job) {
+  const keys = new Set();
+  if (job.payload?.model) {
+    keys.add(job.payload.model);
+  }
+  if (job.payload?.repo) {
+    keys.add(job.payload.repo);
+  }
+  if (job.payload?.advanced?.modelRepo) {
+    keys.add(job.payload.advanced.modelRepo);
+  }
+  if (job.payload?.advanced?.repo) {
+    keys.add(job.payload.advanced.repo);
+  }
+  return keys;
+}
+
+function activeModelDownloadFor(job, jobs) {
+  const keys = modelKeys(job);
+  if (!keys.size) {
+    return null;
+  }
+  return jobs.find(
+    (candidate) =>
+      candidate.type === "model_download" &&
+      !terminalStatusesForBlocking.has(candidate.status) &&
+      (keys.has(candidate.payload?.modelId) || keys.has(candidate.payload?.repo)),
+  );
+}
+
+function dependencyJobId(job) {
+  return job.payload?.dependsOnJobId ?? job.payload?.dependencyJobId ?? job.dependsOnJobId ?? job.sourceJobId ?? null;
+}
+
+function activeDependencyFor(job, jobs) {
+  const id = dependencyJobId(job);
+  if (!id) {
+    return null;
+  }
+  const dependency = jobs.find((candidate) => candidate.id === id);
+  return dependency && !terminalStatusesForBlocking.has(dependency.status) ? dependency : null;
+}
+
+function jobWaitingMessage(job, workers, jobs) {
   if (job.status !== "queued") {
     return job.error ?? job.message;
+  }
+  const dependency = activeDependencyFor(job, jobs);
+  if (dependency) {
+    return `Waiting for dependency ${dependency.id} to finish.`;
+  }
+  const download = activeModelDownloadFor(job, jobs);
+  if (download) {
+    return `Waiting for model download ${download.payload?.modelName ?? download.payload?.modelId ?? download.id} to finish.`;
   }
   const candidates = workers.filter((worker) => workerCanClaim(job, worker));
   if (!candidates.length) {
@@ -56,6 +108,7 @@ export function QueueScreen({
   filteredJobs,
   gpuOptions,
   jobAction,
+  jobs = filteredJobs,
   jobPrompt,
   projectFilter,
   projects,
@@ -129,6 +182,7 @@ export function QueueScreen({
               job={job}
               jobAction={jobAction}
               key={job.id}
+              jobs={jobs}
               workers={workers}
             />
           ))
@@ -138,12 +192,12 @@ export function QueueScreen({
   );
 }
 
-function JobRow({ assignedWorker, job, jobAction, workers }) {
+function JobRow({ assignedWorker, job, jobAction, jobs, workers }) {
   const canCancel = !terminalStatuses.has(job.status);
   const maxAttempts = 5;
   const attempts = job.attempts ?? 1;
   const canRepeat = actionStatuses.has(job.status) && attempts < maxAttempts;
-  const displayMessage = jobWaitingMessage(job, workers);
+  const displayMessage = jobWaitingMessage(job, workers, jobs);
   return (
     <article className={`job-row ${job.status}`}>
       <div className="job-main">

@@ -198,6 +198,60 @@ describe("SceneWorks app shell", () => {
               payload: { prompt: "clip" },
               attempts: 1,
             },
+            {
+              id: "job-download",
+              type: "model_download",
+              status: "downloading",
+              stage: "downloading",
+              progress: 0.4,
+              projectId: null,
+              projectName: null,
+              requestedGpu: "auto",
+              assignedGpu: "cpu",
+              payload: {
+                modelId: "qwen_image_edit",
+                modelName: "Qwen Image Edit",
+                repo: "Qwen/Qwen-Image-Edit",
+              },
+              attempts: 1,
+            },
+            {
+              id: "job-waiting-download",
+              type: "image_generate",
+              status: "queued",
+              stage: "queued",
+              progress: 0,
+              projectId: "project-1",
+              projectName: "Project 1",
+              requestedGpu: "auto",
+              payload: { prompt: "edit", model: "qwen_image_edit" },
+              attempts: 1,
+            },
+            {
+              id: "job-dependency",
+              type: "image_generate",
+              status: "running",
+              stage: "generating",
+              progress: 0.5,
+              projectId: "project-1",
+              projectName: "Project 1",
+              requestedGpu: "0",
+              assignedGpu: "0",
+              payload: { prompt: "source" },
+              attempts: 1,
+            },
+            {
+              id: "job-waiting-dependency",
+              type: "image_generate",
+              status: "queued",
+              stage: "queued",
+              progress: 0,
+              projectId: "project-1",
+              projectName: "Project 1",
+              requestedGpu: "auto",
+              payload: { prompt: "dependent", dependsOnJobId: "job-dependency" },
+              attempts: 1,
+            },
           ]}
           gpuOptions={["auto", "0"]}
           jobAction={() => {}}
@@ -225,6 +279,8 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Waiting: an eligible worker is busy.");
     expect(container.textContent).toContain("Blocked: no active worker supports video generate.");
+    expect(container.textContent).toContain("Waiting for model download Qwen Image Edit to finish.");
+    expect(container.textContent).toContain("Waiting for dependency job-dependency to finish.");
     expect(container.textContent).toContain("Warm: z_image_turbo");
   });
 });

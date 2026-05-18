@@ -1147,6 +1147,7 @@ export function App() {
             filteredJobs={filteredJobs}
             gpuOptions={gpuOptions}
             jobAction={jobAction}
+            jobs={jobs}
             jobPrompt={jobPrompt}
             projectFilter={projectFilter}
             projects={projects}
