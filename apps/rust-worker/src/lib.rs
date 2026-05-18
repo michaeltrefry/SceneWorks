@@ -14,6 +14,7 @@ use sceneworks_core::contracts::{
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
+use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,6 +26,9 @@ const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
 const DEFAULT_API_URL: &str = "http://localhost:8000";
 const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://huggingface.co";
 const DEFAULT_TRANSITION_DURATION_SECONDS: f64 = 0.5;
+const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = 2.0;
+const PERSON_TRACK_MAX_SAMPLES: usize = 24;
+const PERSON_TRACK_X_DRIFT: f64 = 0.018;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -539,6 +543,8 @@ fn worker_capabilities_with_utility(
             WorkerCapability::TimelineExport,
             WorkerCapability::ModelDownload,
             WorkerCapability::LoraImport,
+            WorkerCapability::PersonDetect,
+            WorkerCapability::PersonTrack,
         ]);
     }
     capabilities.sort();
@@ -750,6 +756,12 @@ async fn run_utility_job(
         JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
             .await
             .map_err(|error| ("Timeline export failed.", error)),
+        JobType::PersonDetect => run_person_detect_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Person detection failed.", error)),
+        JobType::PersonTrack => run_person_track_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Person tracking failed.", error)),
         _ => {
             let result = fail_job(
                 api,
@@ -1211,7 +1223,7 @@ async fn run_frame_extract(
     let frames_dir = project_path.join("assets").join("frames");
     tokio::fs::create_dir_all(&frames_dir).await?;
     tokio::fs::create_dir_all(project_path.join("recipes")).await?;
-    let asset_id = fresh_asset_id(&job.id);
+    let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
     let filename = format!(
         "{}_frame_{}.png",
@@ -1368,6 +1380,423 @@ async fn run_frame_extract(
             .cloned()
             .unwrap_or(Value::Null),
     );
+    Ok(result)
+}
+
+async fn run_person_detect_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.08,
+            "Preparing representative frame analysis.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(
+        api,
+        &job.id,
+        "Person detection canceled before frame extraction.",
+    )
+    .await?;
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Extracting,
+            0.25,
+            "Extracting representative frame.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let result = run_person_detect(api, settings, job).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Person candidates detected.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_person_detect(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<JsonObject> {
+    let project_id = required_payload_string(&job.payload, "projectId")?;
+    let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.get_project(project_id)?;
+    let project_path = PathBuf::from(project.path);
+    let source_asset = store.get_asset(project_id, source_asset_id)?;
+    let source_file = source_asset
+        .get("file")
+        .ok_or_else(|| WorkerError::InvalidPayload("Source asset file is missing.".to_owned()))?;
+    let source_media_rel = required_value_str(source_file, "path")?;
+    let source_media_path = safe_project_path(&project_path, source_media_rel)?;
+    if !source_media_path.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Source media not found: {}",
+            source_media_path.display()
+        )));
+    }
+
+    let duration = source_file
+        .get("duration")
+        .map_or(6.0, |value| value_f64(value, 6.0))
+        .clamp(0.0, 3600.0);
+    let timestamp = payload_f64(
+        &job.payload,
+        "sourceTimestamp",
+        if duration > 0.0 { duration * 0.25 } else { 0.0 },
+    )
+    .clamp(0.0, duration.max(3600.0));
+
+    let frames_dir = project_path.join("assets").join("frames");
+    tokio::fs::create_dir_all(&frames_dir).await?;
+    tokio::fs::create_dir_all(project_path.join("recipes")).await?;
+    let asset_id = fresh_asset_id();
+    let created_at = now_rfc3339();
+    let filename = format!(
+        "{}_person-frame_{}.png",
+        &created_at[..10],
+        asset_suffix(&asset_id)
+    );
+    let media_rel = format!("assets/frames/{filename}");
+    let media_path = project_path.join(&media_rel);
+    let temp_path = media_path.with_extension("tmp.png");
+
+    let ffmpeg_context = FfmpegContext {
+        api,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person detection canceled by user.",
+    };
+    render_frame_png(
+        "ffmpeg",
+        &source_media_path,
+        &temp_path,
+        timestamp,
+        1280,
+        720,
+        Some(ffmpeg_context),
+    )
+    .await?;
+    tokio::fs::rename(&temp_path, &media_path).await?;
+
+    let detections = candidate_people(1280, 720, source_asset_id, timestamp);
+    let source_display_name = source_asset
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or("clip");
+    let source_rel = relative_path(&project_path, &source_media_path)?;
+    let asset = json!({
+        "schemaVersion": 1,
+        "id": asset_id.clone(),
+        "projectId": project_id,
+        "generationSetId": Value::Null,
+        "type": "frame",
+        "displayName": format!("Person selection frame from {source_display_name}"),
+        "createdAt": created_at,
+        "file": {
+            "path": media_rel,
+            "mimeType": "image/png",
+            "width": 1280,
+            "height": 720,
+            "duration": Value::Null,
+            "fps": Value::Null
+        },
+        "status": {
+            "favorite": false,
+            "rating": 0,
+            "rejected": false,
+            "trashed": false
+        },
+        "recipe": {
+            "mode": "person_detect",
+            "model": "procedural-person-detector",
+            "adapter": "procedural_person_tracking",
+            "prompt": "Detect selectable people in representative frame",
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {
+                "sourceTimestamp": timestamp,
+                "detectionCount": detections.len(),
+                "personDetectionActive": false
+            },
+            "rawAdapterSettings": { "sourcePath": source_rel }
+        },
+        "lineage": {
+            "parents": [source_asset_id],
+            "sourceAssetId": source_asset_id,
+            "sourceTimestamp": timestamp,
+            "jobId": job.id
+        }
+    });
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Saving,
+            ProgressStage::Saving,
+            0.78,
+            "Saving representative frame and candidate boxes.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    if let Err(error) = check_cancel(
+        api,
+        &job.id,
+        "Person detection canceled before asset promotion.",
+    )
+    .await
+    {
+        let _ = tokio::fs::remove_file(&media_path).await;
+        return Err(error);
+    }
+    let sidecar_path = media_path.with_extension("sceneworks.json");
+    write_json_value(&sidecar_path, &asset).await?;
+    write_json_value(
+        &project_path
+            .join("recipes")
+            .join(format!("{asset_id}.recipe.json")),
+        &asset["recipe"],
+    )
+    .await?;
+    store.index_asset_sidecar(project_id, &sidecar_path)?;
+
+    let mut result = JsonObject::new();
+    result.insert("frameAssetId".to_owned(), Value::String(asset_id));
+    result.insert("frameAsset".to_owned(), asset);
+    result.insert(
+        "sourceAssetId".to_owned(),
+        Value::String(source_asset_id.to_owned()),
+    );
+    result.insert("sourceTimestamp".to_owned(), json!(timestamp));
+    result.insert("detections".to_owned(), Value::Array(detections));
+    result.insert(
+        "limits".to_owned(),
+        json!({
+            "maskStorage": "deferred",
+            "correction": "single selected box corrections can be added to the track sidecar later"
+        }),
+    );
+    Ok(result)
+}
+
+async fn run_person_track_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.08,
+            "Preparing selected-person tracking.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(api, &job.id, "Person tracking canceled before saving.").await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Tracking,
+            0.35,
+            "Tracking selected person through sampled frames.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let result = run_person_track(api, settings, job).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Reusable person track saved.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_person_track(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<JsonObject> {
+    let project_id = required_payload_string(&job.payload, "projectId")?;
+    let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
+    let detection = job
+        .payload
+        .get("detection")
+        .cloned()
+        .filter(Value::is_object)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Selected detection metadata is required".to_owned())
+        })?;
+    if detection
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+    {
+        return Err(WorkerError::InvalidPayload(
+            "Selected detection metadata is required".to_owned(),
+        ));
+    }
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.get_project(project_id)?;
+    let project_path = PathBuf::from(project.path);
+    let source_asset = store.get_asset(project_id, source_asset_id)?;
+    let source_file = source_asset
+        .get("file")
+        .ok_or_else(|| WorkerError::InvalidPayload("Source asset file is missing.".to_owned()))?;
+    let duration = source_file
+        .get("duration")
+        .map_or(6.0, |value| value_f64(value, 6.0))
+        .clamp(1.0, 3600.0);
+    let frames = track_frames_from_detection(&detection, duration);
+    let average_confidence = frames
+        .iter()
+        .map(|frame| {
+            frame
+                .get("confidence")
+                .map_or(0.0, |value| value_f64(value, 0.0))
+        })
+        .sum::<f64>()
+        / (frames.len().max(1) as f64);
+    let track_id = format!("track_{}", Uuid::new_v4().simple());
+    let track_name =
+        optional_payload_string(&job.payload, "trackName").unwrap_or("Selected person");
+    let representative_frame_asset_id = job
+        .payload
+        .get("representativeFrameAssetId")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let raw_selected_detection = detection.clone();
+    let created_at = now_rfc3339();
+    let source_display_name = source_asset
+        .get("displayName")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let track = json!({
+        "schemaVersion": 1,
+        "id": track_id.clone(),
+        "projectId": project_id,
+        "name": track_name,
+        "createdAt": created_at,
+        "sourceAssetId": source_asset_id,
+        "sourceDisplayName": source_display_name,
+        "representativeFrameAssetId": representative_frame_asset_id,
+        "selectedDetection": detection,
+        "frames": frames,
+        "corrections": [],
+        "status": {
+            "sampleRateFps": PERSON_TRACK_SAMPLE_RATE_FPS,
+            "maskState": "deferred",
+            "averageConfidence": round_to(average_confidence, 3),
+            "correctionState": "ready_for_box_corrections",
+            "personTrackingActive": false
+        },
+        "recipe": {
+            "mode": "person_track",
+            "model": "procedural-person-tracker",
+            "adapter": "procedural_person_tracking",
+            "prompt": format!("Track {track_name}"),
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {
+                "sampleRateFps": PERSON_TRACK_SAMPLE_RATE_FPS,
+                "personDetectionActive": false,
+                "personTrackingActive": false
+            },
+            "rawAdapterSettings": { "selectedDetection": raw_selected_detection }
+        },
+        "lineage": {
+            "jobId": job.id,
+            "parents": [source_asset_id, job.payload.get("representativeFrameAssetId").cloned().unwrap_or(Value::Null)]
+        }
+    });
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Saving,
+            ProgressStage::Saving,
+            0.82,
+            "Saving reusable person track metadata.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(
+        api,
+        &job.id,
+        "Person tracking canceled before sidecar write.",
+    )
+    .await?;
+    let track_path = project_path
+        .join("person-tracks")
+        .join(format!("{track_id}.sceneworks.person-track.json"));
+    write_json_value(&track_path, &track).await?;
+    let relative = relative_path(&project_path, &track_path)?;
+    let mut result = JsonObject::new();
+    result.insert("trackId".to_owned(), Value::String(track_id));
+    result.insert("track".to_owned(), track);
+    result.insert("path".to_owned(), Value::String(relative));
     Ok(result)
 }
 
@@ -2262,6 +2691,79 @@ fn now_rfc3339() -> String {
         .expect("formatting a UTC timestamp as RFC3339 must succeed")
 }
 
+fn candidate_people(width: u32, height: u32, source_asset_id: &str, timestamp: f64) -> Vec<Value> {
+    let seed = format!("{source_asset_id}:{timestamp:.3}:{width}x{height}");
+    let digest = Sha256::digest(seed.as_bytes());
+    let templates = [
+        (0.34, 0.16, 0.24, 0.68, 0.91),
+        (0.58, 0.20, 0.20, 0.58, 0.78),
+        (0.14, 0.26, 0.17, 0.50, 0.66),
+    ];
+    templates
+        .iter()
+        .enumerate()
+        .map(|(index, (x, y, box_width, box_height, confidence))| {
+            let jitter = ((digest[index] % 13) as f64 - 6.0) / 1000.0;
+            json!({
+                "id": format!("person_{}", index + 1),
+                "label": format!("Person {}", index + 1),
+                "confidence": round_to(*confidence - index as f64 * 0.04, 2),
+                "box": {
+                    "x": (*x + jitter).clamp(0.02, 0.92),
+                    "y": *y,
+                    "width": *box_width,
+                    "height": *box_height
+                },
+                "maskState": "deferred",
+                "frameWidth": width,
+                "frameHeight": height
+            })
+        })
+        .collect()
+}
+
+fn track_frames_from_detection(detection: &Value, duration: f64) -> Vec<Value> {
+    let sample_count = ((duration.max(1.0) * PERSON_TRACK_SAMPLE_RATE_FPS).round() as usize)
+        .clamp(3, PERSON_TRACK_MAX_SAMPLES);
+    let base_confidence =
+        value_f64(detection.get("confidence").unwrap_or(&Value::Null), 0.82).clamp(0.0, 1.0);
+    (0..sample_count)
+        .map(|index| {
+            let t = index as f64 / (sample_count.saturating_sub(1).max(1) as f64);
+            json!({
+                "timestamp": round_to(t * duration.max(0.0), 3),
+                "box": {
+                    "x": round_to(detection_box_f64(detection, "x", 0.35, 0.0, 1.0) + (t - 0.5) * PERSON_TRACK_X_DRIFT, 4),
+                    "y": round_to(detection_box_f64(detection, "y", 0.16, 0.0, 1.0), 4),
+                    "width": round_to(detection_box_f64(detection, "width", 0.24, 0.01, 1.0), 4),
+                    "height": round_to(detection_box_f64(detection, "height", 0.68, 0.01, 1.0), 4)
+                },
+                "confidence": 0.5_f64.max(round_to(base_confidence - index as f64 * 0.006, 3)),
+                "mask": Value::Null
+            })
+        })
+        .collect()
+}
+
+fn detection_box_f64(
+    detection: &Value,
+    field: &str,
+    default: f64,
+    min_value: f64,
+    max_value: f64,
+) -> f64 {
+    detection
+        .get("box")
+        .and_then(|value| value.get(field))
+        .map_or(default, |value| value_f64(value, default))
+        .clamp(min_value, max_value)
+}
+
+fn round_to(value: f64, places: u32) -> f64 {
+    let factor = 10_f64.powi(i32::try_from(places).unwrap_or(0));
+    (value * factor).round() / factor
+}
+
 fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<TimelineExportRequest> {
     Ok(TimelineExportRequest {
         project_id: required_payload_string(&job.payload, "projectId")?.to_owned(),
@@ -2651,7 +3153,7 @@ fn build_render_asset(
     height: u32,
     duration: f64,
 ) -> Value {
-    let asset_id = fresh_asset_id(job_id);
+    let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
     let source_asset_ids = timeline
         .get("tracks")
@@ -2977,8 +3479,7 @@ fn value_f64(value: &Value, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn fresh_asset_id(job_id: &str) -> String {
-    let _ = job_id;
+fn fresh_asset_id() -> String {
     format!("asset_{}", Uuid::new_v4().simple())
 }
 
@@ -3073,14 +3574,14 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        allow_pattern_matches, auto_worker_specs, bounded_tail, child_environment,
-        concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id, crossfade_duration,
-        download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id, now_rfc3339,
-        output_dimensions, parse_nvidia_smi_gpus, restart_exited_children_with_spawner, run_ffmpeg,
-        safe_download_dir, safe_project_path, value_f64, visible_gpu_ids,
-        worker_capabilities_with_utility, write_model_install_marker, HuggingFaceSnapshot,
-        Settings, SupervisedChild, WorkerError, WorkerSpec, DEFAULT_TRANSITION_DURATION_SECONDS,
-        INSTALL_MARKER,
+        allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
+        child_environment, concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id,
+        crossfade_duration, download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id,
+        now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
+        restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
+        value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
+        HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError, WorkerSpec,
+        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[test]
@@ -3202,6 +3703,12 @@ mod tests {
         assert!(cpu_capabilities
             .iter()
             .any(|capability| capability.as_str() == "timeline_export"));
+        assert!(cpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "person_detect"));
+        assert!(cpu_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "person_track"));
         assert!(!cpu_capabilities
             .iter()
             .any(|capability| capability.as_str() == "image_generate"));
@@ -3350,12 +3857,21 @@ mod tests {
         assert!(concat.contains("C:/renders/clip one'\\''s.mp4"));
         assert!(concat.contains("file 'nested/two.mp4'"));
 
-        let asset_id = fresh_asset_id("job-ignored");
+        let asset_id = fresh_asset_id();
         assert!(asset_id.starts_with("asset_"));
         assert_eq!(asset_id.len(), "asset_".len() + 32);
         assert!(asset_id["asset_".len()..]
             .chars()
             .all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn person_detection_jitter_uses_python_sha256_bytes() {
+        let detections = candidate_people(1280, 720, "asset_source_clip", 1.25);
+
+        assert_eq!(detections[0]["box"]["x"].as_f64(), Some(0.338));
+        assert_eq!(detections[1]["box"]["x"].as_f64(), Some(0.579));
+        assert_eq!(detections[2]["box"]["x"].as_f64(), Some(0.134));
     }
 
     #[test]

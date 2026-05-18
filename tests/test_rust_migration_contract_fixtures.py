@@ -19,7 +19,6 @@ from scene_worker.runtime import (
 from scene_worker.video_adapters import (
     VIDEO_MODEL_TARGETS,
     build_video_asset_sidecar,
-    run_person_track,
     video_request_from_job,
 )
 from sceneworks_api.assets import ASSET_SIDECAR_PATTERN, get_project_file
@@ -322,25 +321,48 @@ def create_live_sidecars(tmp_path: Path) -> dict[str, dict]:
     source_sidecar = source_media.with_suffix(".sceneworks.json")
     write_json(source_sidecar, source_asset)
     index_asset(project_path, source_asset, source_sidecar)
-    person_track = run_person_track(
-        settings=worker_settings,
-        job={
-            "id": "job_fixture",
-            "payload": {
-                "projectId": "project_fixture",
-                "sourceAssetId": "asset_source_clip",
-                "representativeFrameAssetId": "asset_frame_fixture",
-                "detection": {
-                    "id": "person_1",
-                    "box": {"x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6},
-                    "confidence": 0.92,
-                },
-                "trackName": "Hero",
-            },
+    detection = {
+        "id": "person_1",
+        "box": {"x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6},
+        "confidence": 0.92,
+    }
+    person_track = {
+        "schemaVersion": 1,
+        "id": "track_fixture",
+        "projectId": "project_fixture",
+        "name": "Hero",
+        "createdAt": "2026-05-17T13:00:00Z",
+        "sourceAssetId": "asset_source_clip",
+        "sourceDisplayName": "Source clip",
+        "representativeFrameAssetId": "asset_frame_fixture",
+        "selectedDetection": detection,
+        "frames": [{"timestamp": 0, "box": detection["box"], "confidence": 0.92, "mask": None}],
+        "corrections": [],
+        "status": {
+            "sampleRateFps": 2,
+            "maskState": "deferred",
+            "averageConfidence": 0.92,
+            "correctionState": "ready_for_box_corrections",
+            "personTrackingActive": False,
         },
-        progress=lambda *_args: None,
-        cancel_requested=lambda: False,
-    )["track"]
+        "recipe": {
+            "mode": "person_track",
+            "model": "procedural-person-tracker",
+            "adapter": "procedural_person_tracking",
+            "prompt": "Track Hero",
+            "negativePrompt": "",
+            "seed": 0,
+            "loras": [],
+            "stylePreset": "none",
+            "normalizedSettings": {
+                "sampleRateFps": 2,
+                "personDetectionActive": False,
+                "personTrackingActive": False,
+            },
+            "rawAdapterSettings": {"selectedDetection": detection},
+        },
+        "lineage": {"jobId": "job_fixture", "parents": ["asset_source_clip", "asset_frame_fixture"]},
+    }
 
     marker_dir = tmp_path / "model"
     marker_dir.mkdir()

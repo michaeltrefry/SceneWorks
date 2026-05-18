@@ -243,6 +243,15 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         uploaded.raise_for_status()
         asset = uploaded.json()
         asset_id = asset["id"]
+        detection_jobs = []
+        for index in range(5):
+            detection_job = httpx.post(
+                f"{rust_api}/api/v1/projects/{project_id}/person-tracks/detections",
+                json={"sourceAssetId": asset_id, "sourceTimestamp": index * 0.1},
+                timeout=5,
+            )
+            detection_job.raise_for_status()
+            detection_jobs.append(detection_job.json())
 
         created_timeline = httpx.post(
             f"{rust_api}/api/v1/projects/{project_id}/timelines",
@@ -290,6 +299,22 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
 
         frame_completed = wait_for_job_status(rust_api, frame_job.json()["id"], "completed", worker)
         export_completed = wait_for_job_status(rust_api, export_job.json()["id"], "completed", worker)
+        detection_completed = [
+            wait_for_job_status(rust_api, job["id"], "completed", worker) for job in detection_jobs
+        ]
+        first_detection = detection_completed[0]["result"]["detections"][0]
+        track_job = httpx.post(
+            f"{rust_api}/api/v1/projects/{project_id}/person-tracks/jobs",
+            json={
+                "sourceAssetId": asset_id,
+                "representativeFrameAssetId": detection_completed[0]["result"]["frameAssetId"],
+                "detection": first_detection,
+                "trackName": "Hero",
+            },
+            timeout=5,
+        )
+        track_job.raise_for_status()
+        track_completed = wait_for_job_status(rust_api, track_job.json()["id"], "completed", worker)
 
         assert frame_completed["workerId"] == "rust-ffmpeg-smoke"
         assert frame_completed["result"]["assets"][0]["type"] == "frame"
@@ -297,6 +322,10 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         assert export_completed["workerId"] == "rust-ffmpeg-smoke"
         assert export_completed["result"]["assets"][0]["type"] == "render"
         assert export_completed["result"]["assets"][0]["file"]["mimeType"] == "video/mp4"
+        assert {job["workerId"] for job in detection_completed} == {"rust-ffmpeg-smoke"}
+        assert all(job["result"]["detections"] for job in detection_completed)
+        assert track_completed["workerId"] == "rust-ffmpeg-smoke"
+        assert track_completed["result"]["track"]["recipe"]["mode"] == "person_track"
     finally:
         worker.terminate()
         try:

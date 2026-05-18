@@ -58,11 +58,11 @@ def test_auto_gpu_worker_can_disable_utility_capabilities(monkeypatch):
     assert "person_track" not in capabilities
 
 
-def test_cpu_worker_advertises_person_tracking_utility_capabilities():
+def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
-    assert "person_detect" in capabilities
-    assert "person_track" in capabilities
+    assert "person_detect" not in capabilities
+    assert "person_track" not in capabilities
 
 
 def test_python_worker_can_advertise_legacy_model_lora_jobs(monkeypatch):

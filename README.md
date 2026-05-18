@@ -21,7 +21,7 @@ Default Compose values are:
 ```text
 SCENEWORKS_API_RUNTIME=rust
 SCENEWORKS_API_DOCKERFILE=docker/rust-api.Dockerfile
-SCENEWORKS_PYTHON_UTILITY_JOBS=1
+SCENEWORKS_RUST_WORKER_GPU_ID=cpu
 ```
 
 Rollback to the Python API remains available by setting these values in `.env`
@@ -119,9 +119,9 @@ When running the stack outside Docker Compose, start `sceneworks-rust-worker`
 alongside the API so Rust-owned utility jobs are claimed. GPU generation adapters
 remain Python-owned: the Python worker advertises image/video generation and
 person replacement capabilities on GPU children, backed by Diffusers/PyTorch.
-Compose sets `SCENEWORKS_PYTHON_UTILITY_JOBS=1` so procedural person detection
-and person tracking jobs continue to be claimed by the Python worker while Rust
-owns the model, LoRA, and FFmpeg utility families. Set
+Rust owns procedural person detection, person tracking, model, LoRA, and FFmpeg
+utility families. The Python worker remains focused on Diffusers/PyTorch image
+and video inference; set
 `SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` only when temporarily rolling
 `model_download` or `lora_import` back to Python, and set
 `SCENEWORKS_LEGACY_FFMPEG_JOBS=1` only when rolling `frame_extract` or
