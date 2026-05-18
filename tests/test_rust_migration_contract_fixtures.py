@@ -173,20 +173,10 @@ def test_job_protocol_fixture_matches_python_contracts(tmp_path, monkeypatch):
     assert set(fixture["sseEvents"]) == sse_events_from_sources()
     assert set(fixture["workerStatuses"]) == worker_statuses_from_store(tmp_path)
 
-    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "1")
     assert fixture["workerCapabilityProfiles"]["cpu"] == worker_capabilities(
         {"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]}
     )
 
-    monkeypatch.setenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "1")
-    monkeypatch.setenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "1")
-    assert fixture["workerCapabilityProfiles"]["cpuLegacy"] == worker_capabilities(
-        {"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]}
-    )
-
-    monkeypatch.delenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS")
-    monkeypatch.delenv("SCENEWORKS_LEGACY_FFMPEG_JOBS")
-    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "0")
     assert fixture["workerCapabilityProfiles"]["gpuChild"] == worker_capabilities(
         {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]}
     )

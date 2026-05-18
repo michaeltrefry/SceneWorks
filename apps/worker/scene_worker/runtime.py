@@ -5,7 +5,6 @@ from fnmatch import fnmatch
 import json
 import os
 from pathlib import Path
-import shutil
 import signal
 import subprocess
 import sys
@@ -20,8 +19,7 @@ from sceneworks_shared import find_project_path
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .settings import WorkerSettings
-from .timeline_exporter import run_timeline_export
-from .video_adapters import ProceduralVideoAdapter, run_frame_extract
+from .video_adapters import ProceduralVideoAdapter
 
 
 LoadedModelsSource = Callable[[], list[str]] | None
@@ -56,14 +54,7 @@ class ApiClient:
 
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
-    utility_jobs_enabled = os.getenv("SCENEWORKS_UTILITY_JOBS", "1").strip() != "0"
-    legacy_model_lora_jobs_enabled = os.getenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "0").strip() != "0"
-    legacy_ffmpeg_jobs_enabled = os.getenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "0").strip() != "0"
     capabilities = set(gpu["capabilities"])
-    if utility_jobs_enabled and legacy_ffmpeg_jobs_enabled:
-        capabilities |= {"timeline_export", "frame_extract"}
-    if utility_jobs_enabled and legacy_model_lora_jobs_enabled:
-        capabilities |= {"model_download", "lora_import"}
     if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
         capabilities |= {"image_generate", "image_edit", "video_generate", "video_extend", "video_bridge", "person_replace"}
     return sorted(capabilities)
@@ -506,173 +497,6 @@ def run_blocking_job_step(
         thread.join(timeout=1)
 
 
-def run_model_download_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
-    job_id = job["id"]
-    payload = job["payload"]
-    repo = payload.get("repo")
-    if not repo:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "failed",
-                "stage": "failed",
-                "progress": 1,
-                "message": "Model download is missing a repository.",
-                "error": "Missing payload.repo",
-            },
-        )
-        heartbeat(api, settings, "idle")
-        return
-
-    target_dir = Path(payload.get("targetDir") or settings.data_dir / "models" / safe_download_dir(repo))
-    try:
-        heartbeat(api, settings, "busy", job_id)
-        total_bytes = estimate_huggingface_repo_size(repo, payload.get("files") or [])
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "downloading",
-                "stage": "downloading",
-                "progress": 0.1,
-                "message": (
-                    f"Downloading {repo}: 0 B of {format_bytes(total_bytes)}."
-                    if total_bytes
-                    else f"Downloading {repo}: estimating size."
-                ),
-            },
-        )
-        if job_cancel_requested(api, job_id):
-            raise InterruptedError("Model download canceled before transfer started.")
-        run_monitored_download(api, settings, job_id, repo, target_dir, payload.get("files") or [], total_bytes)
-        write_model_install_marker(target_dir, payload, repo, job_id)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": "Model download completed.",
-                "result": {
-                    "modelId": payload.get("modelId"),
-                    "repo": repo,
-                    "path": str(target_dir),
-                    "completedAt": now(),
-                },
-            },
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "canceled",
-                "stage": "canceled",
-                "progress": 1,
-                "message": str(exc),
-            },
-        )
-    except Exception as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "failed",
-                "stage": "failed",
-                "progress": 1,
-                "message": "Model download failed.",
-                "error": str(exc),
-            },
-        )
-    finally:
-        heartbeat(api, settings, "idle")
-
-
-def run_lora_import_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
-    job_id = job["id"]
-    payload = job["payload"]
-    repo = payload.get("repo")
-    source_path = payload.get("sourcePath")
-    target_name = safe_download_dir(payload.get("loraId") or payload.get("name") or repo or Path(source_path or "lora").stem)
-    target_dir = resolve_lora_import_target(settings, payload, settings.data_dir / "loras" / target_name)
-
-    try:
-        heartbeat(api, settings, "busy", job_id)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "downloading",
-                "stage": "importing",
-                "progress": 0.1,
-                "message": "Importing LoRA.",
-            },
-        )
-        if job_cancel_requested(api, job_id):
-            raise InterruptedError("LoRA import canceled before transfer started.")
-        if repo:
-            run_blocking_job_step(
-                api,
-                settings,
-                job_id,
-                "busy",
-                lambda: snapshot_huggingface_repo(repo, target_dir, payload.get("files") or []),
-                loaded_models=None,
-            )
-        elif source_path:
-            source = Path(source_path).expanduser().resolve()
-            if not source.exists():
-                raise FileNotFoundError(f"LoRA source not found: {source}")
-            target_dir.mkdir(parents=True, exist_ok=True)
-            if source.is_dir():
-                shutil.copytree(source, target_dir, dirs_exist_ok=True)
-            else:
-                shutil.copy2(source, target_dir / source.name)
-        else:
-            raise ValueError("Provide repo or sourcePath for LoRA import")
-        manifest_path = lora_manifest_target(settings, payload)
-        if manifest_path:
-            upsert_lora_manifest_entry(manifest_path, payload["manifestEntry"])
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": "LoRA import completed.",
-                "result": {"repo": repo, "path": str(target_dir), "completedAt": now()},
-            },
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "canceled",
-                "stage": "canceled",
-                "progress": 1,
-                "message": str(exc),
-            },
-        )
-    except Exception as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "failed",
-                "stage": "failed",
-                "progress": 1,
-                "message": "LoRA import failed.",
-                "error": str(exc),
-            },
-        )
-    finally:
-        heartbeat(api, settings, "idle")
-
-
 def run_placeholder_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     job_id = job["id"]
     stages = [
@@ -886,144 +710,6 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         heartbeat(api, settings, "idle", loaded_models=adapter_loaded_models())
 
 
-def run_timeline_export_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
-    job_id = job["id"]
-
-    def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": status,
-                "stage": stage,
-                "progress": value,
-                "message": message,
-            },
-        )
-
-    try:
-        progress("preparing", "preparing", 0.06, "Preparing timeline export.")
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda: run_timeline_export(
-                settings=settings,
-                job=job,
-                progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
-            ),
-            loaded_models=None,
-        )
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": "Timeline MP4 export saved.",
-                "result": result,
-            },
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "canceled",
-                "stage": "canceled",
-                "progress": 1,
-                "message": str(exc),
-            },
-        )
-    except Exception as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "failed",
-                "stage": "failed",
-                "progress": 1,
-                "message": "Timeline export failed.",
-                "error": str(exc),
-            },
-        )
-    finally:
-        heartbeat(api, settings, "idle")
-
-
-def run_frame_extract_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
-    job_id = job["id"]
-
-    def progress(status: str, stage: str, value: float, message: str) -> None:
-        heartbeat(api, settings, "busy", job_id)
-        update_job(
-            api,
-            job_id,
-            {
-                "status": status,
-                "stage": stage,
-                "progress": value,
-                "message": message,
-            },
-        )
-
-    try:
-        progress("preparing", "preparing", 0.08, "Preparing frame extraction.")
-        result = run_blocking_job_step(
-            api,
-            settings,
-            job_id,
-            "busy",
-            lambda: run_frame_extract(
-                settings=settings,
-                job=job,
-                progress=progress,
-                cancel_requested=lambda: job_cancel_requested(api, job_id),
-            ),
-            loaded_models=None,
-        )
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "completed",
-                "stage": "completed",
-                "progress": 1,
-                "message": "Timeline frame saved as an asset.",
-                "result": result,
-            },
-        )
-    except InterruptedError as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "canceled",
-                "stage": "canceled",
-                "progress": 1,
-                "message": str(exc),
-            },
-        )
-    except Exception as exc:
-        update_job(
-            api,
-            job_id,
-            {
-                "status": "failed",
-                "stage": "failed",
-                "progress": 1,
-                "message": "Frame extraction failed.",
-                "error": str(exc),
-            },
-        )
-    finally:
-        heartbeat(api, settings, "idle")
-
-
 def run_worker_loop(settings: WorkerSettings) -> None:
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
@@ -1069,14 +755,6 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_image_job(api, settings, job, image_adapters)
             elif job["type"] in ("video_generate", "video_extend", "video_bridge", "person_replace"):
                 run_video_job(api, settings, job)
-            elif job["type"] == "frame_extract":
-                run_frame_extract_job(api, settings, job)
-            elif job["type"] == "timeline_export":
-                run_timeline_export_job(api, settings, job)
-            elif job["type"] == "model_download":
-                run_model_download_job(api, settings, job)
-            elif job["type"] == "lora_import":
-                run_lora_import_job(api, settings, job)
             else:
                 update_job(
                     api,
@@ -1099,15 +777,11 @@ def child_environment(settings: WorkerSettings, *, worker_id: str, gpu_id: str) 
     env["SCENEWORKS_WORKER_CHILD"] = "1"
     env["SCENEWORKS_WORKER_ID"] = worker_id
     env["SCENEWORKS_GPU_ID"] = gpu_id
-    # Compose exposes this as SCENEWORKS_PYTHON_UTILITY_JOBS, then maps it to
-    # the in-worker SCENEWORKS_UTILITY_JOBS flag for parent/child consistency.
-    utility_jobs = os.getenv("SCENEWORKS_UTILITY_JOBS")
+    env["SCENEWORKS_UTILITY_JOBS"] = "0"
     if gpu_id == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
-        env["SCENEWORKS_UTILITY_JOBS"] = utility_jobs if utility_jobs is not None else "1"
     else:
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
-        env["SCENEWORKS_UTILITY_JOBS"] = "0"
     return env
 
 

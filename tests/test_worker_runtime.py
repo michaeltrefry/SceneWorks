@@ -47,8 +47,10 @@ def test_gpu_worker_advertises_generation_capabilities():
     assert "person_replace" in capabilities
 
 
-def test_auto_gpu_worker_can_disable_utility_capabilities(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "0")
+def test_python_worker_does_not_advertise_rust_utility_capabilities(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "1")
+    monkeypatch.setenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "1")
+    monkeypatch.setenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "1")
 
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
 
@@ -63,24 +65,6 @@ def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
 
     assert "person_detect" not in capabilities
     assert "person_track" not in capabilities
-
-
-def test_python_worker_can_advertise_legacy_model_lora_jobs(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_LEGACY_MODEL_LORA_JOBS", "1")
-
-    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
-
-    assert "model_download" in capabilities
-    assert "lora_import" in capabilities
-
-
-def test_python_worker_can_advertise_legacy_ffmpeg_jobs(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_LEGACY_FFMPEG_JOBS", "1")
-
-    capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
-
-    assert "frame_extract" in capabilities
-    assert "timeline_export" in capabilities
 
 
 def test_lora_import_target_must_stay_under_allowed_roots(tmp_path):
@@ -135,8 +119,8 @@ def test_lora_manifest_upsert_is_atomic_and_preserves_created_at(tmp_path):
     assert payload["loras"] == [{"id": "style", "name": "Style Updated", "createdAt": "first"}]
 
 
-def test_python_cpu_child_honors_explicit_utility_disable(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "0")
+def test_python_cpu_child_disables_utility_jobs(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_UTILITY_JOBS", "1")
 
     env = child_environment(SimpleNamespace(), worker_id="python-inference-worker-cpu", gpu_id="cpu")
 
@@ -144,12 +128,11 @@ def test_python_cpu_child_honors_explicit_utility_disable(monkeypatch):
     assert env["SCENEWORKS_UTILITY_JOBS"] == "0"
 
 
-def test_python_cpu_child_keeps_utility_default_when_not_explicit(monkeypatch):
-    monkeypatch.delenv("SCENEWORKS_UTILITY_JOBS", raising=False)
+def test_python_gpu_child_disables_utility_jobs():
+    env = child_environment(SimpleNamespace(), worker_id="worker-gpu-0", gpu_id="0")
 
-    env = child_environment(SimpleNamespace(), worker_id="worker-cpu", gpu_id="cpu")
-
-    assert env["SCENEWORKS_UTILITY_JOBS"] == "1"
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert env["SCENEWORKS_UTILITY_JOBS"] == "0"
 
 
 def test_loaded_models_are_collected_from_adapter_cache():

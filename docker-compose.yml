@@ -36,7 +36,6 @@ services:
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
       SCENEWORKS_WORKER_ID: python-inference-worker-0
       SCENEWORKS_GPU_ID: auto
-      SCENEWORKS_UTILITY_JOBS: ${SCENEWORKS_PYTHON_UTILITY_JOBS:-1}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}

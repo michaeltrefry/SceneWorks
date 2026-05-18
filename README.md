@@ -121,11 +121,7 @@ remain Python-owned: the Python worker advertises image/video generation and
 person replacement capabilities on GPU children, backed by Diffusers/PyTorch.
 Rust owns procedural person detection, person tracking, model, LoRA, and FFmpeg
 utility families. The Python worker remains focused on Diffusers/PyTorch image
-and video inference; set
-`SCENEWORKS_LEGACY_MODEL_LORA_JOBS=1` only when temporarily rolling
-`model_download` or `lora_import` back to Python, and set
-`SCENEWORKS_LEGACY_FFMPEG_JOBS=1` only when rolling `frame_extract` or
-`timeline_export` back to Python.
+and video inference and no longer advertises or runs utility job fallbacks.
 The Python worker ID changed from `worker-gpu-auto-0` to
 `python-inference-worker-0`; existing queue databases may retain the old worker
 row until the stale-worker sweep marks it offline.
