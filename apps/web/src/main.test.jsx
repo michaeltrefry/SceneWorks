@@ -55,6 +55,13 @@ async function changeField(input, value) {
   });
 }
 
+async function changeFile(input, file) {
+  await act(async () => {
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+  });
+}
+
 describe("SceneWorks app shell", () => {
   let container;
   let root;
@@ -872,6 +879,19 @@ describe("SceneWorks app shell", () => {
     });
     expect(createLoraImportJob).toHaveBeenCalledWith(
       expect.objectContaining({ sourceUrl: "https://example.com/loras/detail.safetensors", scope: "global", family: "z-image" }),
+    );
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Local File").click();
+    });
+    const loraFile = new File(["lora"], "detail.safetensors", { type: "application/octet-stream" });
+    const importPanel = container.querySelector(".lora-import-panel");
+    await changeFile(field(importPanel, "Local File"), loraFile);
+    await changeField(field(importPanel, "Name"), "Uploaded Detail");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+    });
+    expect(createLoraImportJob).toHaveBeenLastCalledWith(
+      expect.objectContaining({ file: loraFile, name: "Uploaded Detail", scope: "global", family: "z-image" }),
     );
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();

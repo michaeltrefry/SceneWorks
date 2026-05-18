@@ -405,13 +405,30 @@ export function App() {
     if (payload.scope === "project" && !activeProject) {
       throw new Error("Create or open a project first.");
     }
+    const { file, ...metadata } = payload;
+    let body;
+    if (file) {
+      body = new FormData();
+      Object.entries({
+        ...metadata,
+        projectId: metadata.scope === "project" ? activeProject.id : null,
+        projectName: metadata.scope === "project" ? activeProject.name : null,
+      }).forEach(([key, value]) => {
+        if (value != null && value !== "") {
+          body.append(key, value);
+        }
+      });
+      body.append("file", file);
+    } else {
+      body = JSON.stringify({
+        ...metadata,
+        projectId: metadata.scope === "project" ? activeProject.id : null,
+        projectName: metadata.scope === "project" ? activeProject.name : null,
+      });
+    }
     const job = await apiFetch("/api/v1/loras/import", token, {
       method: "POST",
-      body: JSON.stringify({
-        ...payload,
-        projectId: payload.scope === "project" ? activeProject.id : null,
-        projectName: payload.scope === "project" ? activeProject.name : null,
-      }),
+      body,
     });
     setActiveView("Queue");
     setError("");
