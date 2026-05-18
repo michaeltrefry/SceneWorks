@@ -1,0 +1,116 @@
+{
+  "$schema": "../../packages/schemas/recipe-preset.schema.json",
+  "schemaVersion": 1,
+  "presets": [
+    {
+      "id": "cinematic",
+      "name": "Cinematic",
+      "scope": "builtin",
+      "order": 10,
+      "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "model": "z_image_turbo",
+      "defaults": {
+        "count": 4,
+        "resolution": "1024x1024",
+        "negativePrompt": "flat lighting, low contrast, muddy detail"
+      },
+      "prompt": {
+        "suffix": "cinematic lighting, natural contrast, detailed production still"
+      },
+      "builtInLoras": [
+        { "id": "builtin_cinematic_detail", "weight": 0.55 }
+      ],
+      "ui": {
+        "description": "Balanced cinematic color, contrast, and detail."
+      }
+    },
+    {
+      "id": "photoreal",
+      "name": "Photoreal",
+      "scope": "builtin",
+      "order": 20,
+      "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      "model": "z_image_turbo",
+      "defaults": {
+        "count": 4,
+        "resolution": "1024x1024",
+        "negativePrompt": "illustration, stylized, plastic skin, oversharpened"
+      },
+      "prompt": {
+        "suffix": "natural lens rendering, realistic materials, believable lighting"
+      },
+      "builtInLoras": [
+        { "id": "builtin_photoreal_texture", "weight": 0.45 }
+      ],
+      "ui": {
+        "description": "Natural image texture and realistic materials."
+      }
+    },
+    {
+      "id": "anime",
+      "name": "Anime",
+      "scope": "builtin",
+      "order": 30,
+      "modes": ["text_to_image", "character_image", "style_variations"],
+      "model": "z_image_turbo",
+      "defaults": {
+        "count": 4,
+        "resolution": "1024x1024",
+        "negativePrompt": "photorealistic skin, noisy texture, dull composition"
+      },
+      "prompt": {
+        "suffix": "clean anime key art, expressive shape language, crisp line detail"
+      },
+      "builtInLoras": [
+        { "id": "builtin_anime_key_art", "weight": 0.65 }
+      ],
+      "ui": {
+        "description": "Clean key-art styling for character and scene work."
+      }
+    },
+    {
+      "id": "fantasy",
+      "name": "Fantasy",
+      "scope": "builtin",
+      "order": 40,
+      "modes": ["text_to_image", "character_image", "style_variations"],
+      "model": "z_image_turbo",
+      "defaults": {
+        "count": 4,
+        "resolution": "1024x1024",
+        "negativePrompt": "modern props, washed out color, plain background"
+      },
+      "prompt": {
+        "suffix": "mythic atmosphere, painterly detail, dramatic environment design"
+      },
+      "builtInLoras": [
+        { "id": "builtin_fantasy_atmosphere", "weight": 0.6 }
+      ],
+      "ui": {
+        "description": "Stylized atmosphere for mythic sets and characters."
+      }
+    },
+    {
+      "id": "product",
+      "name": "Product Shot",
+      "scope": "builtin",
+      "order": 50,
+      "modes": ["text_to_image", "edit_image", "style_variations"],
+      "model": "z_image_turbo",
+      "defaults": {
+        "count": 2,
+        "resolution": "1024x1024",
+        "negativePrompt": "clutter, warped logo, messy reflections, busy background"
+      },
+      "prompt": {
+        "suffix": "controlled studio lighting, crisp edges, clean commercial composition"
+      },
+      "builtInLoras": [
+        { "id": "builtin_product_finish", "weight": 0.5 }
+      ],
+      "ui": {
+        "description": "Clean commercial lighting and material finish."
+      }
+    }
+  ]
+}

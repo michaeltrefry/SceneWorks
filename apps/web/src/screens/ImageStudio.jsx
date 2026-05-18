@@ -14,6 +14,7 @@ export function ImageStudio({
   launchRequest,
   loras = [],
   onPreview,
+  recipePresets = [],
   requestedGpu,
   selectedAsset,
   setRequestedGpu,
@@ -48,6 +49,18 @@ export function ImageStudio({
   function loraWeight(lora) {
     const value = Number(lora.defaultWeight ?? lora.weight ?? 0.8);
     return Number.isFinite(value) ? value : 0.8;
+  }
+
+  function serializeLora(lora, override = {}) {
+    return {
+      id: lora.id,
+      name: lora.name ?? lora.id,
+      scope: lora.scope ?? "global",
+      weight: Number.isFinite(Number(override.weight)) ? Number(override.weight) : loraWeight(lora),
+      triggerWords: lora.triggerWords ?? [],
+      compatibility: lora.compatibility ?? {},
+      presetManaged: Boolean(lora.presetManaged),
+    };
   }
 
   useEffect(() => {
@@ -97,7 +110,14 @@ export function ImageStudio({
   });
   const selectedModel = imageModels.find((item) => item.id === model);
   const selectedModelFamily = selectedModel?.family ?? null;
+  const availableRecipePresets = useMemo(() => {
+    return recipePresets.filter((preset) => !preset.modes?.length || preset.modes.includes(mode));
+  }, [mode, recipePresets]);
+  const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === stylePreset) ?? availableRecipePresets[0] ?? null;
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
+    if (lora.presetManaged) {
+      return false;
+    }
     if (lora.installState === "missing") {
       return false;
     }
@@ -110,7 +130,41 @@ export function ImageStudio({
   const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
   const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
   const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
+  const presetLoraDetails = (selectedRecipePreset?.builtInLoras ?? [])
+    .map((presetLora) => {
+      const loraId = typeof presetLora === "string" ? presetLora : presetLora.id;
+      const lora = loras.find((item) => item.id === loraId);
+      return lora ? { ...serializeLora(lora, presetLora), missing: false } : { id: loraId, name: loraId, missing: true };
+    })
+    .filter((lora) => lora.id);
+  const presetPromptParts = [selectedRecipePreset?.prompt?.prefix, selectedRecipePreset?.prompt?.suffix]
+    .filter((part) => String(part ?? "").trim());
   const [width, height] = resolution.split("x").map((value) => Number(value));
+
+  useEffect(() => {
+    if (!availableRecipePresets.some((preset) => preset.id === stylePreset)) {
+      setStylePreset(availableRecipePresets[0]?.id ?? "");
+    }
+  }, [availableRecipePresets, stylePreset]);
+
+  useEffect(() => {
+    if (!selectedRecipePreset) {
+      return;
+    }
+    if (selectedRecipePreset.model) {
+      setModel(selectedRecipePreset.model);
+    }
+    const defaults = selectedRecipePreset.defaults ?? {};
+    if (defaults.count) {
+      setCount(Number(defaults.count));
+    }
+    if (defaults.resolution) {
+      setResolution(defaults.resolution);
+    }
+    if (Object.prototype.hasOwnProperty.call(defaults, "negativePrompt")) {
+      setNegativePrompt(defaults.negativePrompt ?? "");
+    }
+  }, [selectedRecipePreset?.id]);
 
   useEffect(() => {
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
@@ -142,18 +196,14 @@ export function ImageStudio({
       width,
       height,
       stylePreset,
+      recipePresetId: selectedRecipePreset?.id ?? null,
       characterId: mode === "character_image" ? characterId || null : null,
       characterLookId: mode === "character_image" ? characterLookId || null : null,
       sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
-      loras: selectedLoras.map((lora) => ({
-        id: lora.id,
-        name: lora.name ?? lora.id,
-        scope: lora.scope ?? "global",
-        weight: loraWeight(lora),
-        triggerWords: lora.triggerWords ?? [],
-        compatibility: lora.compatibility ?? {},
-      })),
-      advanced: { resolution },
+      loras: selectedLoras.map((lora) => serializeLora(lora)),
+      advanced: {
+        resolution,
+      },
     });
   }
 
@@ -237,12 +287,16 @@ export function ImageStudio({
           <div className="control-grid">
             <label>
               Style
-              <select onChange={(event) => setStylePreset(event.target.value)} value={stylePreset}>
-                <option value="cinematic">Cinematic</option>
-                <option value="photoreal">Photoreal</option>
-                <option value="anime">Anime</option>
-                <option value="fantasy">Fantasy</option>
-                <option value="product">Product Shot</option>
+              <select disabled={!availableRecipePresets.length} onChange={(event) => setStylePreset(event.target.value)} value={stylePreset}>
+                {availableRecipePresets.length ? (
+                  availableRecipePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name ?? preset.id}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">Presets unavailable</option>
+                )}
               </select>
             </label>
             <label>
@@ -260,6 +314,23 @@ export function ImageStudio({
               </select>
             </label>
           </div>
+          {selectedRecipePreset ? (
+            <div className="guidance-strip">
+              <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
+              <span>
+                {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
+                {presetLoraDetails.length
+                  ? ` | Uses LoRA: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
+                  : " | No preset LoRAs"}
+                {presetLoraDetails.some((lora) => lora.missing) ? " | Preset incomplete" : ""}
+              </span>
+            </div>
+          ) : (
+            <div className="guidance-strip">
+              <strong>Presets unavailable</strong>
+              <span>Generation can continue, but no preset defaults or managed LoRAs will be applied.</span>
+            </div>
+          )}
 
           <section className="lora-picker" aria-label="LoRA selection">
             <div>

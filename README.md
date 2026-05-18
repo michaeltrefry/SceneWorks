@@ -43,6 +43,9 @@ host port, and mounted storage contracts. The API listens on
 `SCENEWORKS_WEB_PORT` controls the host port for the Vite web service. The web
 service receives `VITE_API_BASE_URL=http://localhost:${SCENEWORKS_API_PORT}`,
 and workers call `http://api:${SCENEWORKS_API_PORT}` on the compose network.
+Recipe presets are a Rust API feature: `/api/v1/recipe-presets` and server-side
+`recipePresetId` expansion are intentionally not added to the Python rollback
+runtime.
 
 API volume contracts are shared across Python and Rust:
 

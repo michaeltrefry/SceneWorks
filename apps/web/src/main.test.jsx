@@ -25,6 +25,14 @@ function response(payload) {
   };
 }
 
+function errorResponse(status, detail) {
+  return {
+    ok: false,
+    status,
+    json: async () => ({ detail }),
+  };
+}
+
 async function settle() {
   await act(async () => {
     await Promise.resolve();
@@ -74,6 +82,38 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Library");
     expect(container.textContent).toContain("Queue");
+  });
+
+  it("keeps the shell usable when recipe presets are unavailable", async () => {
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project One" }]));
+      }
+      if (path.endsWith("/recipe-presets")) {
+        return Promise.resolve(errorResponse(404, "Not Found"));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Library");
+    expect(container.textContent).toContain("Project One");
+    expect(container.textContent).not.toContain("Not Found");
   });
 
   it("switches Replace Person to the replacement-capable video model", async () => {
@@ -351,6 +391,74 @@ describe("SceneWorks app shell", () => {
           expect.objectContaining({ id: "global_style", scope: "global" }),
           expect.objectContaining({ id: "project_mira", scope: "project" }),
         ],
+      }),
+    );
+  });
+
+  it("applies recipe preset defaults and hidden preset LoRAs to image jobs", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={createImageJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          loras={[
+            {
+              id: "builtin_cinematic_detail",
+              name: "Cinematic Detail",
+              family: "z-image",
+              scope: "builtin",
+              defaultWeight: 0.55,
+              presetManaged: true,
+            },
+          ]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "cinematic",
+              name: "Cinematic",
+              model: "z_image_turbo",
+              defaults: { count: 2, resolution: "1280x720", negativePrompt: "flat lighting" },
+              prompt: { suffix: "cinematic lighting" },
+              builtInLoras: [{ id: "builtin_cinematic_detail", weight: 0.4 }],
+              ui: { description: "Balanced cinematic color, contrast, and detail." },
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Cinematic");
+    expect(container.textContent).toContain("Balanced cinematic color, contrast, and detail.");
+    expect(container.textContent).toContain("Adds: cinematic lighting");
+    expect(container.textContent).toContain("Uses LoRA: Cinematic Detail");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        count: 2,
+        width: 1280,
+        height: 720,
+        negativePrompt: "flat lighting",
+        prompt: "A cinematic frame of a neon street at midnight",
+        recipePresetId: "cinematic",
+        loras: [],
+        advanced: { resolution: "1280x720" },
       }),
     );
   });

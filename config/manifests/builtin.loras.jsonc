@@ -1,5 +1,66 @@
 {
   "$schema": "../../packages/schemas/lora-manifest.schema.json",
   "schemaVersion": 1,
-  "loras": []
+  "loras": [
+    {
+      "id": "builtin_cinematic_detail",
+      "name": "Cinematic Detail",
+      "scope": "builtin",
+      "family": "z-image",
+      "presetManaged": true,
+      "triggerWords": [],
+      "defaultWeight": 0.55,
+      "compatibility": { "families": ["z-image"], "types": ["enhance", "style"] },
+      "source": { "provider": "builtin" },
+      "ui": { "description": "Preset-managed cinematic contrast and detail." }
+    },
+    {
+      "id": "builtin_photoreal_texture",
+      "name": "Photoreal Texture",
+      "scope": "builtin",
+      "family": "z-image",
+      "presetManaged": true,
+      "triggerWords": [],
+      "defaultWeight": 0.45,
+      "compatibility": { "families": ["z-image"], "types": ["enhance", "style"] },
+      "source": { "provider": "builtin" },
+      "ui": { "description": "Preset-managed natural texture and lighting." }
+    },
+    {
+      "id": "builtin_anime_key_art",
+      "name": "Anime Key Art",
+      "scope": "builtin",
+      "family": "z-image",
+      "presetManaged": true,
+      "triggerWords": [],
+      "defaultWeight": 0.65,
+      "compatibility": { "families": ["z-image"], "types": ["style"] },
+      "source": { "provider": "builtin" },
+      "ui": { "description": "Preset-managed anime key-art styling." }
+    },
+    {
+      "id": "builtin_fantasy_atmosphere",
+      "name": "Fantasy Atmosphere",
+      "scope": "builtin",
+      "family": "z-image",
+      "presetManaged": true,
+      "triggerWords": [],
+      "defaultWeight": 0.6,
+      "compatibility": { "families": ["z-image"], "types": ["style"] },
+      "source": { "provider": "builtin" },
+      "ui": { "description": "Preset-managed mythic atmosphere." }
+    },
+    {
+      "id": "builtin_product_finish",
+      "name": "Product Finish",
+      "scope": "builtin",
+      "family": "z-image",
+      "presetManaged": true,
+      "triggerWords": [],
+      "defaultWeight": 0.5,
+      "compatibility": { "families": ["z-image"], "types": ["enhance", "style"] },
+      "source": { "provider": "builtin" },
+      "ui": { "description": "Preset-managed studio product finish." }
+    }
+  ]
 }

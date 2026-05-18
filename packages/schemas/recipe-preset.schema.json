@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/recipe-preset.schema.json",
+  "title": "SceneWorks Recipe Preset Manifest",
+  "type": "object",
+  "required": ["schemaVersion", "presets"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "presets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+          "name": { "type": "string", "minLength": 1 },
+          "scope": { "type": "string", "enum": ["builtin", "global", "project"] },
+          "order": { "type": "integer" },
+          "modes": { "type": "array", "items": { "type": "string" } },
+          "model": { "type": "string" },
+          "defaults": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "count": { "type": "integer", "minimum": 1 },
+              "resolution": { "type": "string", "pattern": "^[0-9]+x[0-9]+$" },
+              "negativePrompt": { "type": "string" }
+            }
+          },
+          "prompt": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "prefix": { "type": "string" },
+              "suffix": { "type": "string" }
+            }
+          },
+          "builtInLoras": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+                {
+                  "type": "object",
+                  "required": ["id"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+                    "weight": { "type": "number", "minimum": -2, "maximum": 2 }
+                  }
+                }
+              ]
+            }
+          },
+          "ui": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "description": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
