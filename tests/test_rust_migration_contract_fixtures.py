@@ -12,10 +12,7 @@ from fastapi import HTTPException
 from PIL import Image
 
 from scene_worker.image_adapters import ImageAssetWriter
-from scene_worker.runtime import (
-    worker_capabilities,
-    write_model_install_marker,
-)
+from scene_worker.runtime import worker_capabilities
 from scene_worker.video_adapters import (
     VIDEO_MODEL_TARGETS,
     build_video_asset_sidecar,
@@ -52,6 +49,17 @@ def load_fixture(name: str) -> dict:
 def load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def write_test_model_install_marker(target_dir: Path, payload: dict, repo: str, job_id: str) -> None:
+    marker = {
+        "repo": repo,
+        "modelId": payload.get("modelId"),
+        "modelName": payload.get("modelName"),
+        "jobId": job_id,
+        "completedAt": "2026-05-17T13:00:00Z",
+    }
+    model_install_marker(target_dir).write_text(json.dumps(marker, indent=2), encoding="utf-8")
 
 
 def build_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -355,7 +363,7 @@ def create_live_sidecars(tmp_path: Path) -> dict[str, dict]:
 
     marker_dir = tmp_path / "model"
     marker_dir.mkdir()
-    write_model_install_marker(
+    write_test_model_install_marker(
         marker_dir,
         {"modelId": "z_image_turbo", "modelName": "Z-Image-Turbo"},
         "Tongyi-MAI/Z-Image-Turbo",
