@@ -264,6 +264,7 @@ class ContractRuntime:
 
 @pytest.fixture()
 def contract_runtimes(tmp_path):
+    """Run two isolated Rust APIs to catch non-deterministic wire output before snapshot comparison."""
     runtimes = [
         ContractRuntime("rust-a", ServerApiHarness(tmp_path / "rust-a"), (tmp_path / "rust-a",)),
         ContractRuntime("rust-b", ServerApiHarness(tmp_path / "rust-b"), (tmp_path / "rust-b",)),

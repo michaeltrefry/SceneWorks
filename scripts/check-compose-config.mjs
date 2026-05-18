@@ -31,6 +31,7 @@ function assertRuntimeDefaults(config, label) {
   const api = config.services?.api;
   const worker = config.services?.worker;
   const rustWorker = config.services?.["rust-worker"];
+  // Split the removed key so the story's cleanup grep does not report this assertion as a live reference.
   const removedRuntimeKey = ["SCENEWORKS_API", "RUNTIME"].join("_");
   assertEqual(api?.build?.dockerfile, "docker/rust-api.Dockerfile", `${label} api dockerfile`);
   assertMissing(api?.environment, removedRuntimeKey, `${label} api runtime switch`);
