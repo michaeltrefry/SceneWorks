@@ -38,7 +38,7 @@ PNG_1X1 = (
 TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 PREFIXED_ID_RE = re.compile(
     r"\b(project|asset|job|timeline|track|transition|genset|generation_set|"
-    r"look|character|lora|worker)_[0-9a-f]{8,32}\b"
+    r"look|character_lora|character|lora|worker)_[0-9a-f]{8,32}\b"
 )
 UPLOAD_SUFFIX_RE = re.compile(r"\b([a-z0-9]+(?:-[a-z0-9]+)*)-[0-9a-f]{8}(?=\.)")
 HEX_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -455,6 +455,14 @@ def sidecar_payload(project_path: Path, asset_id: str) -> dict[str, Any]:
     raise AssertionError(f"Missing sidecar for {asset_id} under {project_path}")
 
 
+def character_sidecar_payload(project_path: Path, character_id: str) -> dict[str, Any]:
+    for sidecar in project_path.glob("characters/*.sceneworks.character.json"):
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        if payload.get("id") == character_id:
+            return payload
+    raise AssertionError(f"Missing character sidecar for {character_id} under {project_path}")
+
+
 def write_person_track_sidecar(runtime: ParityRuntime) -> None:
     assert runtime.project_id is not None
     assert runtime.project_path is not None
@@ -607,6 +615,210 @@ def test_project_asset_sidecar_delete_and_db_contracts(parity_runtimes):
         for runtime in parity_runtimes
     ]
     assert_response_parity("asset purge response", python_runtime, rust_runtime, purged[0], purged[1], expected_status=200, snapshot=True)
+
+
+def test_character_subsystem_contracts(parity_runtimes):
+    python_runtime, rust_runtime = parity_runtimes
+    create_projects(parity_runtimes, python_runtime, rust_runtime)
+    upload_assets(parity_runtimes, python_runtime, rust_runtime)
+
+    created_characters = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters",
+            json_payload={"name": "Mira", "type": "person", "description": "Lead performer"},
+        )
+        for runtime in parity_runtimes
+    ]
+    character_ids = [response.body["id"] for response in created_characters]
+    assert_response_parity(
+        "character create response",
+        python_runtime,
+        rust_runtime,
+        created_characters[0],
+        created_characters[1],
+        expected_status=201,
+        snapshot=True,
+    )
+
+    listed_characters = [
+        runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters")
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity(
+        "character list response",
+        python_runtime,
+        rust_runtime,
+        listed_characters[0],
+        listed_characters[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
+    fetched_characters = [
+        runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters/{character_id}")
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "character detail response",
+        python_runtime,
+        rust_runtime,
+        fetched_characters[0],
+        fetched_characters[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
+    referenced_characters = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/references",
+            json_payload={"assetId": runtime.asset_id, "approved": True, "role": "hero", "notes": "Primary face"},
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "character reference attach response",
+        python_runtime,
+        rust_runtime,
+        referenced_characters[0],
+        referenced_characters[1],
+        expected_status=201,
+        snapshot=True,
+    )
+
+    sidecars = [
+        character_sidecar_payload(runtime.project_path, character_id)
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    normalized_sidecar = assert_parity("persisted character sidecar", python_runtime, rust_runtime, sidecars[0], sidecars[1])
+    assert_snapshot("persisted character sidecar", normalized_sidecar)
+
+    asset_sidecars = [sidecar_payload(runtime.project_path, runtime.asset_id) for runtime in parity_runtimes]
+    normalized_asset_sidecar = assert_parity(
+        "asset sidecar after character reference",
+        python_runtime,
+        rust_runtime,
+        asset_sidecars[0],
+        asset_sidecars[1],
+    )
+    assert_snapshot("asset sidecar after character reference", normalized_asset_sidecar)
+
+    created_looks = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/looks",
+            json_payload={
+                "name": "Rain coat",
+                "description": "Night exterior look",
+                "approvedReferenceIds": [runtime.asset_id],
+                "recipeSettings": {"style": "noir"},
+            },
+        )
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    normalized_look_response = assert_response_parity(
+        "character look create response",
+        python_runtime,
+        rust_runtime,
+        created_looks[0],
+        created_looks[1],
+        expected_status=201,
+        snapshot=True,
+    )
+    look_ids = [response.body["looks"][0]["id"] for response in created_looks]
+
+    lora_sources = []
+    for runtime in parity_runtimes:
+        lora_dir = runtime.roots[0] / "data" / "loras"
+        lora_dir.mkdir(parents=True, exist_ok=True)
+        lora_source = lora_dir / "mira.safetensors"
+        lora_source.write_bytes(b"lora")
+        lora_sources.append(lora_source)
+    attached_loras = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/loras",
+            json_payload={
+                "name": "Mira LoRA",
+                "sourcePath": str(lora_source),
+                "triggerWords": ["mira"],
+                "compatibility": {"families": ["z-image"]},
+            },
+        )
+        for runtime, character_id, lora_source in zip(parity_runtimes, character_ids, lora_sources)
+    ]
+    assert_response_parity(
+        "character lora attach response",
+        python_runtime,
+        rust_runtime,
+        attached_loras[0],
+        attached_loras[1],
+        expected_status=201,
+        snapshot=True,
+    )
+
+    test_jobs = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/test-jobs",
+            json_payload={"prompt": "portrait in rain", "lookId": look_id, "count": 2},
+        )
+        for runtime, character_id, look_id in zip(parity_runtimes, character_ids, look_ids)
+    ]
+    assert_response_parity(
+        "character test job response",
+        python_runtime,
+        rust_runtime,
+        test_jobs[0],
+        test_jobs[1],
+        expected_status=201,
+        snapshot=True,
+    )
+
+    archived_characters = [
+        runtime.request("POST", f"/api/v1/projects/{runtime.project_id}/characters/{character_id}/archive")
+        for runtime, character_id in zip(parity_runtimes, character_ids)
+    ]
+    assert_response_parity(
+        "character archive response",
+        python_runtime,
+        rust_runtime,
+        archived_characters[0],
+        archived_characters[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
+    hidden_archived = [
+        runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters")
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity(
+        "character list after archive response",
+        python_runtime,
+        rust_runtime,
+        hidden_archived[0],
+        hidden_archived[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
+    visible_archived = [
+        runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/characters?includeArchived=true")
+        for runtime in parity_runtimes
+    ]
+    assert_response_parity(
+        "character list include archived response",
+        python_runtime,
+        rust_runtime,
+        visible_archived[0],
+        visible_archived[1],
+        expected_status=200,
+        snapshot=True,
+    )
+
+    assert normalized_look_response["looks"][0]["approvedReferenceIds"] == ["asset_fixture"]
 
 
 def test_timeline_and_worker_job_creation_contracts(parity_runtimes):
