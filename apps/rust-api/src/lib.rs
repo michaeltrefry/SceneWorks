@@ -6476,6 +6476,53 @@ mod tests {
         assert_eq!(bad_error["detail"], "Unsupported recipe preset workflow");
     }
 
+    #[tokio::test]
+    async fn empty_builtin_preset_and_lora_manifests_ship_empty_catalogs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin recipe presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user recipe presets writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, presets) =
+            request(app.clone(), "GET", "/api/v1/recipe-presets", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(presets.as_array().expect("presets array").len(), 0);
+
+        let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(loras.as_array().expect("loras array").len(), 0);
+    }
+
     #[test]
     fn model_download_size_helpers_match_contract_shapes() {
         let siblings = json!([
