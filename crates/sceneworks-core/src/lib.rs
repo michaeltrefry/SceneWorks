@@ -1,6 +1,7 @@
 pub mod character_store;
 pub mod contracts;
 pub mod jobs_store;
+pub mod lora_url;
 pub mod project_store;
 
 pub const API_PREFIX: &str = "/api/v1";

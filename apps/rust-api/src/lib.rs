@@ -27,6 +27,7 @@ use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
     WorkerHeartbeat, JOB_STATUSES,
 };
+use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url, LoraUrlError};
 use sceneworks_core::project_store::{
     AssetStatusPatch, CharacterCreateInput, CharacterLookInput, CharacterLookUpdateInput,
     CharacterLoraInput, CharacterLoraUpdateInput, CharacterReferenceInput,
@@ -2277,7 +2278,7 @@ async fn duplicate_recipe_preset(
 
 async fn create_lora_import_job(
     State(state): State<AppState>,
-    ApiJson(payload): ApiJson<LoraImportRequest>,
+    ApiJson(mut payload): ApiJson<LoraImportRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     if option_str_is_empty(payload.repo.as_deref())
         && option_str_is_empty(payload.source_url.as_deref())
@@ -2295,11 +2296,20 @@ async fn create_lora_import_job(
             "LoRA scope must be global or project",
         ));
     }
+    if let Some(family) = payload.family.take() {
+        let models = model_catalog(&state).await?;
+        payload.family = Some(validate_lora_family(&models, &family)?);
+    }
     let name = payload
         .name
         .clone()
         .or_else(|| payload.repo.clone())
-        .or_else(|| payload.source_url.as_deref().and_then(source_url_file_stem))
+        .or_else(|| {
+            payload
+                .source_url
+                .as_deref()
+                .and_then(|value| lora_source_url_file_stem(value).ok())
+        })
         .or_else(|| {
             payload.source_path.as_deref().and_then(|path| {
                 FsPath::new(path)
@@ -3602,6 +3612,11 @@ fn validate_recipe_preset_lora_compatibility(
         return Ok(());
     };
     let model_families = model_lora_families(model);
+    if model_families.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} has no declared LoRA families"
+        )));
+    }
     for preset_lora in recipe_preset_loras(preset) {
         let Some(lora_id) = preset_lora_id(&preset_lora) else {
             continue;
@@ -3612,9 +3627,17 @@ fn validate_recipe_preset_lora_compatibility(
             .ok_or_else(|| {
                 ApiError::bad_request(format!("Recipe preset LoRA not found: {lora_id}"))
             })?;
+        if lora.get("installState").and_then(Value::as_str) != Some("installed") {
+            return Err(ApiError::bad_request(format!(
+                "Recipe preset LoRA is not installed: {lora_id}"
+            )));
+        }
+        validate_lora_safetensors_header(lora_id, lora)?;
         let families = lora_families(lora);
-        if model_families.is_empty() || families.is_empty() {
-            continue;
+        if families.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "LoRA {lora_id} has no declared family; cannot verify compatibility with model {model_id}"
+            )));
         }
         if !families.iter().any(|family| {
             model_families
@@ -3629,20 +3652,114 @@ fn validate_recipe_preset_lora_compatibility(
     Ok(())
 }
 
+fn validate_lora_safetensors_header(lora_id: &str, lora: &Value) -> Result<(), ApiError> {
+    let Some(path) = lora.get("installedPath").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    let Some(safetensors_path) = first_safetensors_path(&path) else {
+        return Ok(());
+    };
+    let metadata = std::fs::metadata(&safetensors_path).map_err(|error| {
+        ApiError::bad_request(format!("Unable to inspect LoRA {lora_id}: {error}"))
+    })?;
+    if metadata.len() < 8 {
+        return Err(ApiError::bad_request(format!(
+            "LoRA {lora_id} has an invalid safetensors header"
+        )));
+    }
+    let mut file = std::fs::File::open(&safetensors_path).map_err(|error| {
+        ApiError::bad_request(format!("Unable to inspect LoRA {lora_id}: {error}"))
+    })?;
+    let mut length_bytes = [0_u8; 8];
+    std::io::Read::read_exact(&mut file, &mut length_bytes).map_err(|_| {
+        ApiError::bad_request(format!("LoRA {lora_id} has an invalid safetensors header"))
+    })?;
+    let header_len = u64::from_le_bytes(length_bytes);
+    if header_len == 0 || header_len > 16 * 1024 * 1024 || header_len + 8 > metadata.len() {
+        return Err(ApiError::bad_request(format!(
+            "LoRA {lora_id} has an invalid safetensors header"
+        )));
+    }
+    let mut header = vec![
+        0_u8;
+        usize::try_from(header_len).map_err(|_| ApiError::bad_request(
+            format!("LoRA {lora_id} has an invalid safetensors header")
+        ))?
+    ];
+    std::io::Read::read_exact(&mut file, &mut header).map_err(|_| {
+        ApiError::bad_request(format!("LoRA {lora_id} has an invalid safetensors header"))
+    })?;
+    serde_json::from_slice::<Value>(&header).map_err(|_| {
+        ApiError::bad_request(format!("LoRA {lora_id} has an invalid safetensors header"))
+    })?;
+    Ok(())
+}
+
+fn first_safetensors_path(path: &FsPath) -> Option<PathBuf> {
+    if path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+    {
+        return Some(path.to_path_buf());
+    }
+    if !path.is_dir() {
+        return None;
+    }
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let entries = std::fs::read_dir(path).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn model_lora_families(model: &Value) -> Vec<String> {
-    let compatibility = model.get("loraCompatibility").unwrap_or(&Value::Null);
-    let values = compatibility
-        .get("families")
-        .or_else(|| model.get("family"));
-    match values {
+    families_from_value_chain(
+        model,
+        &["families", "compatibleFamilies", "modelFamilies"],
+        Some("loraCompatibility"),
+    )
+}
+
+fn families_from_value_chain(
+    value: &Value,
+    direct_fields: &[&str],
+    compatibility_field: Option<&str>,
+) -> Vec<String> {
+    let compatibility = compatibility_field
+        .and_then(|field| value.get(field))
+        .unwrap_or(&Value::Null);
+    let values = direct_fields
+        .iter()
+        .find_map(|field| value.get(*field))
+        .or_else(|| compatibility.get("families"))
+        .or_else(|| value.get("family"));
+    let mut families = match values {
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(Value::as_str)
-            .map(str::to_owned)
+            .map(normalize_lora_family)
             .collect(),
-        Some(Value::String(value)) => vec![value.clone()],
+        Some(Value::String(value)) => vec![normalize_lora_family(value)],
         _ => Vec::new(),
-    }
+    };
+    families.sort();
+    families.dedup();
+    families
 }
 
 fn validate_recipe_preset_prompt(value: Option<&Value>) -> Result<(), ApiError> {
@@ -4073,37 +4190,9 @@ fn safe_download_dir(repo: &str) -> String {
 }
 
 fn validate_source_url(source_url: &str) -> Result<(), ApiError> {
-    let url = reqwest::Url::parse(source_url)
-        .map_err(|_| ApiError::bad_request("LoRA sourceUrl must be a valid URL"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(ApiError::bad_request(
-            "LoRA sourceUrl must use http or https",
-        ));
-    }
-    if source_url_file_name(source_url).is_none() {
-        return Err(ApiError::bad_request(
-            "LoRA sourceUrl must include a filename",
-        ));
-    }
-    Ok(())
-}
-
-fn source_url_file_name(source_url: &str) -> Option<String> {
-    let url = reqwest::Url::parse(source_url).ok()?;
-    url.path_segments()?
-        .next_back()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-fn source_url_file_stem(source_url: &str) -> Option<String> {
-    source_url_file_name(source_url).and_then(|file_name| {
-        FsPath::new(&file_name)
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .map(str::to_owned)
-    })
+    parse_lora_source_url(source_url)
+        .map(|_| ())
+        .map_err(|error| ApiError::bad_request(lora_url_error_message(error)))
 }
 
 fn lora_source_provider(payload: &LoraImportRequest) -> &'static str {
@@ -4114,6 +4203,40 @@ fn lora_source_provider(payload: &LoraImportRequest) -> &'static str {
     } else {
         "local"
     }
+}
+
+fn lora_url_error_message(error: LoraUrlError) -> &'static str {
+    error.message()
+}
+
+fn validate_lora_family(models: &[Value], family: &str) -> Result<String, ApiError> {
+    let normalized = normalize_lora_family(family);
+    if normalized.is_empty() {
+        return Err(ApiError::bad_request(
+            "LoRA family is required when provided",
+        ));
+    }
+    let known = known_lora_families(models);
+    if !known.is_empty() && !known.iter().any(|known_family| known_family == &normalized) {
+        return Err(ApiError::bad_request(format!(
+            "Unsupported LoRA family: {family}"
+        )));
+    }
+    Ok(normalized)
+}
+
+fn normalize_lora_family(family: &str) -> String {
+    family.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn known_lora_families(models: &[Value]) -> Vec<String> {
+    let mut families = Vec::new();
+    for model in models {
+        families.extend(model_lora_families(model));
+    }
+    families.sort();
+    families.dedup();
+    families
 }
 
 fn slugify_lora_id(value: &str) -> String {
@@ -4201,22 +4324,11 @@ fn model_is_installed(path: &FsPath) -> bool {
 }
 
 fn lora_families(lora: &Value) -> Vec<String> {
-    let compatibility = lora.get("compatibility").unwrap_or(&Value::Null);
-    let values = lora
-        .get("families")
-        .or_else(|| lora.get("compatibleFamilies"))
-        .or_else(|| lora.get("modelFamilies"))
-        .or_else(|| compatibility.get("families"))
-        .or_else(|| lora.get("family"));
-    match values {
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect(),
-        Some(Value::String(value)) => vec![value.clone()],
-        _ => Vec::new(),
-    }
+    families_from_value_chain(
+        lora,
+        &["families", "compatibleFamilies", "modelFamilies"],
+        Some("compatibility"),
+    )
 }
 
 fn requested_gpu_or_auto(value: String) -> String {
@@ -4724,6 +4836,15 @@ mod tests {
             worker_timeout_seconds: 90,
             jobs_db_path: temp_dir.path().join("jobs.db"),
         }
+    }
+
+    fn write_test_safetensors(path: &std::path::Path) {
+        let header = br#"{"__metadata__":{"format":"pt"}}"#;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(b"tensor-bytes");
+        std::fs::write(path, bytes).expect("test safetensors writes");
     }
 
     async fn request(
@@ -5575,6 +5696,46 @@ mod tests {
             "https://example.com/loras/detail.safetensors"
         );
         assert_eq!(url_job["payload"]["manifestEntry"]["family"], "z-image");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/loras/import",
+            json!({ "sourceUrl": "file:///tmp/detail.safetensors" }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(bad_error["detail"], "LoRA sourceUrl must use http or https");
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/loras/import",
+            json!({ "sourceUrl": "https://example.com/loras/detail.safetensors", "family": "unknown-family" }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "Unsupported LoRA family: unknown-family"
+        );
+
+        let (status, normalized_family) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourceUrl": "https://example.com/loras/z-detail.safetensors",
+                "family": "Z_Image"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            normalized_family["payload"]["manifestEntry"]["family"],
+            "z-image"
+        );
     }
 
     #[tokio::test]
@@ -5669,14 +5830,34 @@ mod tests {
                   "triggerWords": [],
                   "compatibility": { "families": ["qwen-image"] },
                   "source": { "provider": "local", "path": "loras/qwen.safetensors" }
+                },
+                {
+                  "id": "deleted_style",
+                  "name": "Deleted Style",
+                  "family": "z-image",
+                  "triggerWords": [],
+                  "compatibility": { "families": ["z-image"] },
+                  "source": { "provider": "local", "path": "loras/deleted.safetensors" }
+                },
+                {
+                  "id": "unknown_family",
+                  "name": "Unknown Family",
+                  "triggerWords": [],
+                  "compatibility": {},
+                  "source": { "provider": "builtin" }
                 }
               ]
             }
             "#,
         )
         .expect("user loras writes");
+        let lora_dir = temp_dir.path().join("data/loras");
+        std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+        write_test_safetensors(&lora_dir.join("style.safetensors"));
+        write_test_safetensors(&lora_dir.join("qwen.safetensors"));
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        // This also pins the positive compatibility path: style_lora is installed and compatible with z_image_turbo.
         let (status, created) = request(
             app.clone(),
             "POST",
@@ -6032,6 +6213,42 @@ mod tests {
         assert_eq!(
             bad_error["detail"],
             "Recipe preset LoRA not found: missing_lora"
+        );
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "Deleted LoRA",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "loras": [{ "id": "deleted_style" }]
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "Recipe preset LoRA is not installed: deleted_style"
+        );
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "Unknown Family LoRA",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "loras": [{ "id": "unknown_family" }]
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "LoRA unknown_family has no declared family; cannot verify compatibility with model z_image_turbo"
         );
 
         let (bad_status, bad_error) = request(
