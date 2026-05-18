@@ -790,6 +790,9 @@ async fn run_utility_job(
             result.map_err(|error| ("Utility job failed.", error))
         }
     };
+    if job.job_type == JobType::LoraImport {
+        let _ = cleanup_uploaded_lora_source(&job.payload).await;
+    }
     if let Err((message, error)) = result {
         match error {
             WorkerError::Canceled(_) => {}
@@ -2784,6 +2787,25 @@ fn optional_payload_string<'a>(payload: &'a JsonObject, field: &str) -> Option<&
         .filter(|value| !value.trim().is_empty())
 }
 
+fn payload_bool(payload: &JsonObject, field: &str) -> bool {
+    payload.get(field).and_then(Value::as_bool).unwrap_or(false)
+}
+
+async fn cleanup_uploaded_lora_source(payload: &JsonObject) -> WorkerResult<()> {
+    if !payload_bool(payload, "uploadedSourcePath") {
+        return Ok(());
+    }
+    let Some(source_path) = optional_payload_string(payload, "sourcePath") else {
+        return Ok(());
+    };
+    let source_path = PathBuf::from(source_path);
+    let _ = tokio::fs::remove_file(&source_path).await;
+    if let Some(parent) = source_path.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    Ok(())
+}
+
 fn normalize_absolute_path(path: &Path) -> WorkerResult<PathBuf> {
     let mut output = if path.is_absolute() {
         PathBuf::new()
@@ -3808,14 +3830,14 @@ mod tests {
 
     use super::{
         allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
-        child_environment, concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id,
-        crossfade_duration, download_lora_source_url, download_progress_payload, fallback_gpu,
-        fresh_asset_id, gpu_worker_id, now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
-        restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
-        value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
-        ApiClient, DownloadContext, HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError,
-        WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
-        INSTALL_MARKER,
+        child_environment, cleanup_uploaded_lora_source, concat_file_contents, copy_lora_source,
+        cpu_gpu, cpu_worker_id, crossfade_duration, download_lora_source_url,
+        download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id, now_rfc3339,
+        output_dimensions, parse_nvidia_smi_gpus, restart_exited_children_with_spawner, run_ffmpeg,
+        safe_download_dir, safe_project_path, value_f64, visible_gpu_ids,
+        worker_capabilities_with_utility, write_model_install_marker, ApiClient, DownloadContext,
+        HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError, WorkerSpec,
+        DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[test]
@@ -4065,6 +4087,26 @@ mod tests {
                 .unwrap(),
             b"adapter"
         );
+    }
+
+    #[tokio::test]
+    async fn uploaded_lora_source_cleanup_removes_staged_file_and_parent() {
+        let temp = tempdir().expect("tempdir creates");
+        let upload_dir = temp.path().join("upload-1");
+        tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+        let source_file = upload_dir.join("detail.safetensors");
+        tokio::fs::write(&source_file, b"lora").await.unwrap();
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "sourcePath".to_owned(),
+            json!(source_file.display().to_string()),
+        );
+        payload.insert("uploadedSourcePath".to_owned(), json!(true));
+
+        cleanup_uploaded_lora_source(&payload).await.unwrap();
+
+        assert!(!source_file.exists());
+        assert!(!upload_dir.exists());
     }
 
     #[tokio::test]

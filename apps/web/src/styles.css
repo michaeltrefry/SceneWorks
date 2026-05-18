@@ -343,6 +343,22 @@ button:disabled {
   pointer-events: none;
 }
 
+.file-picker-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.selected-file-name {
+  min-width: 0;
+  color: #aaa397;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .segmented-control button.active,
 .rating-row button.active {
   border-color: #6ec6b8;

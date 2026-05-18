@@ -96,9 +96,12 @@ export function PresetManagerScreen({
   const selectedPreset = recipePresets.find((preset) => preset.id === selectedPresetId) ?? null;
   const [form, setForm] = useState(() => formFromPreset(selectedPreset, models[0]?.id));
   const [saving, setSaving] = useState(false);
+  const [importingLora, setImportingLora] = useState(false);
   const [message, setMessage] = useState({ tone: "neutral", text: "" });
-  const [importForm, setImportForm] = useState({ sourceUrl: "", name: "" });
+  const [importForm, setImportForm] = useState({ mode: "url", sourceUrl: "", file: null, name: "" });
+  const [fileInputKey, setFileInputKey] = useState(0);
   const editable = !selectedPreset || selectedPreset.scope !== "builtin";
+  const busy = saving || importingLora;
   const availableModels = modelOptions(models, form.workflow);
   const selectedModel = models.find((model) => model.id === form.model) ?? availableModels[0] ?? null;
   const availableLoras = selectedModel ? loras.filter((lora) => lora.installState !== "missing" && loraMatchesModel(lora, selectedModel)) : [];
@@ -301,14 +304,18 @@ export function PresetManagerScreen({
 
   async function importLora(event) {
     event.preventDefault();
-    if (!importForm.sourceUrl.trim()) {
+    const isFileImport = importForm.mode === "file";
+    if ((!isFileImport && !importForm.sourceUrl.trim()) || (isFileImport && !importForm.file)) {
       return;
     }
-    setSaving(true);
-    setMessage({ tone: "neutral", text: "" });
+    setImportingLora(true);
+    setMessage({
+      tone: "neutral",
+      text: isFileImport ? "Uploading LoRA file before queueing import." : "",
+    });
     try {
       const job = await createLoraImportJob({
-        sourceUrl: importForm.sourceUrl.trim(),
+        ...(isFileImport ? { file: importForm.file } : { sourceUrl: importForm.sourceUrl.trim() }),
         name: importForm.name.trim() || undefined,
         scope: form.scope,
         family: selectedModel?.family ?? undefined,
@@ -322,12 +329,13 @@ export function PresetManagerScreen({
             : [...current.loras, { id: importedId, weight: "0.8" }].slice(0, 3),
         }));
       }
-      setImportForm({ sourceUrl: "", name: "" });
+      setImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
+      setFileInputKey((current) => current + 1);
       setMessage({ tone: "success", text: "LoRA import queued. Save after the import finishes." });
     } catch (err) {
       setMessage({ tone: "error", text: err.message });
     } finally {
-      setSaving(false);
+      setImportingLora(false);
     }
   }
 
@@ -348,10 +356,10 @@ export function PresetManagerScreen({
           <button onClick={startNewPreset} type="button">
             New Preset
           </button>
-          <button disabled={!selectedPreset || saving} onClick={duplicateSelected} type="button">
+          <button disabled={!selectedPreset || busy} onClick={duplicateSelected} type="button">
             Duplicate
           </button>
-          <button disabled={!selectedPreset || selectedPreset.scope === "builtin" || saving} onClick={archiveSelected} type="button">
+          <button disabled={!selectedPreset || selectedPreset.scope === "builtin" || busy} onClick={archiveSelected} type="button">
             Archive
           </button>
         </div>
@@ -533,32 +541,73 @@ export function PresetManagerScreen({
             )}
           </section>
 
-          <section className="lora-import-panel" aria-label="Import LoRA by URL">
+          <section className="lora-import-panel" aria-label="Import LoRA">
             <div>
-              <strong>Import LoRA by URL</strong>
-              <span>{selectedModel?.family ?? "choose a model first"}</span>
+              <strong>Import LoRA</strong>
+              <span>{selectedModel?.family ?? selectedModel?.name ?? "choose a model first"}</span>
+            </div>
+            <div className="segmented-control compact-segment" aria-label="LoRA import source">
+              <button
+                className={importForm.mode === "url" ? "active" : ""}
+                disabled={!editable || importingLora}
+                onClick={() => setImportForm((current) => ({ ...current, mode: "url" }))}
+                type="button"
+              >
+                URL
+              </button>
+              <button
+                className={importForm.mode === "file" ? "active" : ""}
+                disabled={!editable || importingLora}
+                onClick={() => setImportForm((current) => ({ ...current, mode: "file" }))}
+                type="button"
+              >
+                Local File
+              </button>
             </div>
             <div className="inline-create">
-              <label>
-                Source URL
-                <input
-                  disabled={!editable || !selectedModel}
-                  onChange={(event) => setImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
-                  placeholder="https://..."
-                  value={importForm.sourceUrl}
-                />
-              </label>
+              {importForm.mode === "url" ? (
+                <label>
+                  Source URL
+                  <input
+                    disabled={!editable || !selectedModel || importingLora}
+                    onChange={(event) => setImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
+                    placeholder="https://..."
+                    value={importForm.sourceUrl}
+                  />
+                </label>
+              ) : (
+                <label>
+                  Local File
+                  <span className="file-picker-row">
+                    <span className="file-upload-button">
+                      Choose
+                      <input
+                        accept=".safetensors,.ckpt,.pt,.bin"
+                        disabled={!editable || !selectedModel || importingLora}
+                        key={fileInputKey}
+                        onChange={(event) => setImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
+                        type="file"
+                      />
+                    </span>
+                    <span className="selected-file-name">{importForm.file?.name ?? "No file selected"}</span>
+                  </span>
+                </label>
+              )}
               <label>
                 Name
                 <input
-                  disabled={!editable || !selectedModel}
+                  disabled={!editable || !selectedModel || importingLora}
                   onChange={(event) => setImportForm((current) => ({ ...current, name: event.target.value }))}
                   placeholder="Optional"
                   value={importForm.name}
                 />
               </label>
-              <button disabled={!editable || saving || !selectedModel || !importForm.sourceUrl.trim()} onClick={importLora} type="button">
-                Queue Import
+              <button
+                disabled={!editable || busy || !selectedModel || (importForm.mode === "url" ? !importForm.sourceUrl.trim() : !importForm.file)}
+                onClick={importLora}
+                type="button"
+              >
+                {importingLora && importForm.mode === "file" ? "Uploading" : "Queue Import"}
               </button>
             </div>
             {!selectedModel ? <p className="helper-copy">Choose a model before importing so compatibility can be recorded.</p> : null}
@@ -566,7 +615,7 @@ export function PresetManagerScreen({
 
           {saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}
           {message.text ? <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p> : null}
-          <button className="primary-action" disabled={Boolean(saveDisabledReason) || saving} type="submit">
+          <button className="primary-action" disabled={Boolean(saveDisabledReason) || busy} type="submit">
             {selectedPreset ? "Save Preset" : "Create Preset"}
           </button>
         </form>
