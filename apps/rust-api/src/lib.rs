@@ -2125,9 +2125,11 @@ async fn create_recipe_preset(
         .or_insert_with(|| Value::String(timestamp.clone()));
     object.insert("updatedAt".to_owned(), Value::String(timestamp));
     let models = model_catalog(&state).await?;
+    let loras = lora_catalog(&state, project_id.as_deref()).await?;
     let preset = mutate_manifest_entries(&state, &manifest_path, "presets", |mut entries| {
         let preset = normalize_recipe_preset_for_write(preset, &scope, true)?;
         validate_recipe_preset_model_workflow(&models, &preset)?;
+        validate_recipe_preset_lora_compatibility(&models, &loras, &preset)?;
         if entries
             .iter()
             .any(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()))
@@ -2159,6 +2161,7 @@ async fn update_recipe_preset(
     )
     .await?;
     let models = model_catalog(&state).await?;
+    let loras = lora_catalog(&state, project_id.as_deref()).await?;
     let preset =
         mutate_manifest_entries(&state, &location.manifest_path, "presets", |mut entries| {
             let Some(index) = entries.iter().position(|entry| {
@@ -2174,6 +2177,7 @@ async fn update_recipe_preset(
             }
             let preset = normalize_recipe_preset_for_write(preset, &location.scope, false)?;
             validate_recipe_preset_model_workflow(&models, &preset)?;
+            validate_recipe_preset_lora_compatibility(&models, &loras, &preset)?;
             entries[index] = preset.clone();
             Ok((entries, preset))
         })
@@ -2228,6 +2232,7 @@ async fn duplicate_recipe_preset(
     )
     .await?;
     let models = model_catalog(&state).await?;
+    let loras = lora_catalog(&state, query.project_id.as_deref()).await?;
     let preset =
         mutate_manifest_entries(&state, &location.manifest_path, "presets", |mut entries| {
             let Some(source) = entries
@@ -2262,6 +2267,7 @@ async fn duplicate_recipe_preset(
             }
             let duplicate = normalize_recipe_preset_for_write(duplicate, &location.scope, true)?;
             validate_recipe_preset_model_workflow(&models, &duplicate)?;
+            validate_recipe_preset_lora_compatibility(&models, &loras, &duplicate)?;
             entries.push(duplicate.clone());
             Ok((entries, duplicate))
         })
@@ -3578,6 +3584,64 @@ fn validate_recipe_preset_model_workflow(models: &[Value], preset: &Value) -> Re
         Err(ApiError::bad_request(format!(
             "Model {model_id} does not support workflow {workflow}"
         )))
+    }
+}
+
+fn validate_recipe_preset_lora_compatibility(
+    models: &[Value],
+    loras: &[Value],
+    preset: &Value,
+) -> Result<(), ApiError> {
+    let Some(model_id) = preset.get("model").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let Some(model) = models
+        .iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
+    else {
+        return Ok(());
+    };
+    let model_families = model_lora_families(model);
+    for preset_lora in recipe_preset_loras(preset) {
+        let Some(lora_id) = preset_lora_id(&preset_lora) else {
+            continue;
+        };
+        let lora = loras
+            .iter()
+            .find(|lora| lora.get("id").and_then(Value::as_str) == Some(lora_id))
+            .ok_or_else(|| {
+                ApiError::bad_request(format!("Recipe preset LoRA not found: {lora_id}"))
+            })?;
+        let families = lora_families(lora);
+        if model_families.is_empty() || families.is_empty() {
+            continue;
+        }
+        if !families.iter().any(|family| {
+            model_families
+                .iter()
+                .any(|model_family| model_family == family)
+        }) {
+            return Err(ApiError::bad_request(format!(
+                "LoRA {lora_id} is not compatible with model {model_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn model_lora_families(model: &Value) -> Vec<String> {
+    let compatibility = model.get("loraCompatibility").unwrap_or(&Value::Null);
+    let values = compatibility
+        .get("families")
+        .or_else(|| model.get("family"));
+    match values {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::String(value)) => vec![value.clone()],
+        _ => Vec::new(),
     }
 }
 
@@ -5579,6 +5643,38 @@ mod tests {
             r#"{ "schemaVersion": 1, "models": [] }"#,
         )
         .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "loras": [
+                {
+                  "id": "style_lora",
+                  "name": "Style LoRA",
+                  "family": "z-image",
+                  "triggerWords": [],
+                  "compatibility": { "families": ["z-image"] },
+                  "source": { "provider": "local", "path": "loras/style.safetensors" }
+                },
+                {
+                  "id": "qwen_style",
+                  "name": "Qwen Style",
+                  "family": "qwen-image",
+                  "triggerWords": [],
+                  "compatibility": { "families": ["qwen-image"] },
+                  "source": { "provider": "local", "path": "loras/qwen.safetensors" }
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("user loras writes");
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (status, created) = request(
@@ -5918,6 +6014,42 @@ mod tests {
         assert_eq!(
             bad_error["detail"],
             "Recipe preset LoRA weight must be between -2 and 2"
+        );
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "Missing LoRA",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "loras": [{ "id": "missing_lora" }]
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "Recipe preset LoRA not found: missing_lora"
+        );
+
+        let (bad_status, bad_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "Wrong Family LoRA",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "loras": [{ "id": "qwen_style" }]
+            }),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            bad_error["detail"],
+            "LoRA qwen_style is not compatible with model z_image_turbo"
         );
 
         let create_one = request(
