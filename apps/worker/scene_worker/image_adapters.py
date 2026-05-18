@@ -25,7 +25,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import filter_call_kwargs
-from .lora_adapters import apply_loras_to_pipeline, assert_loras_supported
+from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline, reject_loras_if_unsupported
 from .settings import WorkerSettings
 
 
@@ -238,8 +238,7 @@ class ZImageDiffusersAdapter:
         self._img2img_pipe: Any | None = None
         self._loaded_repo: str | None = None
         self._loaded_model: str | None = None
-        self._loaded_lora_keys: dict[str, str] = {}
-        self._loaded_lora_names: dict[str, list[str]] = {}
+        self._loaded_lora_states: dict[str, LoraPipelineState] = {}
 
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
@@ -305,13 +304,11 @@ class ZImageDiffusersAdapter:
             self._evict_pipelines(torch)
         elif use_img2img and self._text_pipe is not None:
             self._text_pipe = None
-            self._loaded_lora_keys.pop("text", None)
-            self._loaded_lora_names.pop("text", None)
+            self._forget_loaded_loras("text")
             self._empty_cuda_cache(torch)
         elif not use_img2img and self._img2img_pipe is not None:
             self._img2img_pipe = None
-            self._loaded_lora_keys.pop("img2img", None)
-            self._loaded_lora_names.pop("img2img", None)
+            self._forget_loaded_loras("img2img")
             self._empty_cuda_cache(torch)
 
         pipeline_name = "ZImageImg2ImgPipeline" if use_img2img else "ZImagePipeline"
@@ -350,8 +347,7 @@ class ZImageDiffusersAdapter:
         self._img2img_pipe = None
         self._loaded_repo = None
         self._loaded_model = None
-        self._loaded_lora_keys.clear()
-        self._loaded_lora_names.clear()
+        self._loaded_lora_states.clear()
         self._empty_cuda_cache(torch)
 
     def _empty_cuda_cache(self, torch: Any) -> None:
@@ -382,15 +378,15 @@ class ZImageDiffusersAdapter:
 
     def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
         key = "img2img" if request.mode == "edit_image" else "text"
-        loaded_key, loaded_names = apply_loras_to_pipeline(
+        self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
             request.loras,
             adapter_id=self.id,
-            previous_key=self._loaded_lora_keys.get(key, ""),
-            previous_adapter_names=self._loaded_lora_names.get(key, []),
+            previous_state=self._loaded_lora_states.get(key),
         )
-        self._loaded_lora_keys[key] = loaded_key
-        self._loaded_lora_names[key] = loaded_names
+
+    def _forget_loaded_loras(self, key: str) -> None:
+        self._loaded_lora_states.pop(key, None)
 
     def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
         return safe_int(request.advanced.get("steps"), model_target["steps"] + 1, 1, 80)
@@ -411,8 +407,7 @@ class QwenImageAdapter:
         self._text_repo: str | None = None
         self._edit_repo: str | None = None
         self._loaded_model: str | None = None
-        self._loaded_lora_keys: dict[str, str] = {}
-        self._loaded_lora_names: dict[str, list[str]] = {}
+        self._loaded_lora_states: dict[str, LoraPipelineState] = {}
 
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._text_repo, self._edit_repo, self._loaded_model) if value})
@@ -480,8 +475,7 @@ class QwenImageAdapter:
                 self._text_pipe = None
                 self._text_repo = None
             self._empty_cuda_cache(torch)
-            self._loaded_lora_keys.pop("edit" if use_edit else "text", None)
-            self._loaded_lora_names.pop("edit" if use_edit else "text", None)
+            self._forget_loaded_loras("edit" if use_edit else "text")
 
         pipeline_name = "QwenImageEditPipeline" if use_edit else "QwenImagePipeline"
         pipeline_class = getattr(diffusers, pipeline_name, None)
@@ -533,15 +527,15 @@ class QwenImageAdapter:
 
     def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
         key = "edit" if request.mode == "edit_image" else "text"
-        loaded_key, loaded_names = apply_loras_to_pipeline(
+        self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
             request.loras,
             adapter_id=self.id,
-            previous_key=self._loaded_lora_keys.get(key, ""),
-            previous_adapter_names=self._loaded_lora_names.get(key, []),
+            previous_state=self._loaded_lora_states.get(key),
         )
-        self._loaded_lora_keys[key] = loaded_key
-        self._loaded_lora_names[key] = loaded_names
+
+    def _forget_loaded_loras(self, key: str) -> None:
+        self._loaded_lora_states.pop(key, None)
 
     def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
         return request.advanced.get("modelRepo") or model_target["repo"]
@@ -571,7 +565,7 @@ class ProceduralImageAdapter:
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
         request = image_request_from_job(job)
-        assert_loras_supported(request.loras, self.id)
+        reject_loras_if_unsupported(request.loras, self.id)
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
         if request.mode == "edit_image" and not model_supports_edit(request.model):
             raise RuntimeError(f"{request.model} does not support image editing.")

@@ -5627,6 +5627,10 @@ mod tests {
                 || value.ends_with("data\\loras\\style.safetensors")
                 || value.ends_with("loras/style.safetensors")
                 || value.ends_with("loras\\style.safetensors")));
+        assert_eq!(
+            image_job["payload"]["loras"][0]["source"]["path"],
+            "loras/style.safetensors"
+        );
         assert_eq!(image_job["payload"]["model"], "client-model");
         assert_eq!(image_job["payload"]["count"], 2);
         assert_eq!(image_job["payload"]["seeds"].as_array().unwrap().len(), 2);

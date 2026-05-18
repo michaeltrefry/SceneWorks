@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from PIL import Image
+import pytest
 
 from scene_worker.adapter_utils import filter_call_kwargs
 from scene_worker.image_adapters import (
@@ -16,7 +17,13 @@ from scene_worker.image_adapters import (
     image_request_from_job,
     resolve_seed,
 )
-from scene_worker.lora_adapters import apply_loras_to_pipeline, normalize_lora_specs
+from scene_worker.lora_adapters import (
+    apply_loras_to_pipeline,
+    lora_cache_key,
+    lora_weight,
+    normalize_lora_specs,
+    reject_loras_if_unsupported,
+)
 from scene_worker.runtime import (
     child_environment,
     friendly_failure,
@@ -63,6 +70,23 @@ class FakeLoraPipe:
 
     def unload_lora_weights(self):
         self.unloaded += 1
+
+
+class FakeTargetedLoraPipe(FakeLoraPipe):
+    def __init__(self):
+        super().__init__()
+        self.deleted = []
+
+    def delete_adapters(self, names):
+        self.deleted.append(names)
+
+
+class FakeSingleLoraPipe:
+    def __init__(self):
+        self.loaded = []
+
+    def load_lora_weights(self, path, adapter_name=None):
+        self.loaded.append((path, adapter_name))
 
 
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
@@ -156,19 +180,17 @@ def test_lora_loader_applies_weights_and_reuses_cached_state(tmp_path):
         {"id": "detail", "installedPath": str(second), "weight": 0.8},
     ]
 
-    key, names = apply_loras_to_pipeline(pipe, loras, adapter_id="diffusers_test")
-    same_key, same_names = apply_loras_to_pipeline(
+    state = apply_loras_to_pipeline(pipe, loras, adapter_id="diffusers_test")
+    same_state = apply_loras_to_pipeline(
         pipe,
         loras,
         adapter_id="diffusers_test",
-        previous_key=key,
-        previous_adapter_names=names,
+        previous_state=state,
     )
 
-    assert same_key == key
-    assert same_names == names
+    assert same_state == state
     assert [path for path, _name in pipe.loaded] == [str(first), str(second)]
-    assert pipe.set_calls == [(names, [0.5, 0.8])]
+    assert pipe.set_calls == [(list(state.adapter_names), [0.5, 0.8])]
     assert pipe.unloaded == 0
 
 
@@ -179,36 +201,97 @@ def test_lora_loader_clears_previous_adapters_between_jobs(tmp_path):
     second.write_bytes(b"lora")
     pipe = FakeLoraPipe()
 
-    key, names = apply_loras_to_pipeline(pipe, [{"id": "style", "installedPath": str(first)}], adapter_id="diffusers_test")
+    state = apply_loras_to_pipeline(pipe, [{"id": "style", "installedPath": str(first)}], adapter_id="diffusers_test")
     apply_loras_to_pipeline(
         pipe,
         [{"id": "detail", "installedPath": str(second)}],
         adapter_id="diffusers_test",
-        previous_key=key,
-        previous_adapter_names=names,
+        previous_state=state,
     )
 
     assert pipe.unloaded == 1
     assert pipe.loaded[-1][0] == str(second)
 
 
+def test_lora_loader_reuses_overlap_when_adapter_can_delete_targeted_loras(tmp_path):
+    first = tmp_path / "style.safetensors"
+    second = tmp_path / "detail.safetensors"
+    third = tmp_path / "motion.safetensors"
+    first.write_bytes(b"lora")
+    second.write_bytes(b"lora")
+    third.write_bytes(b"lora")
+    pipe = FakeTargetedLoraPipe()
+    state = apply_loras_to_pipeline(
+        pipe,
+        [{"id": "style", "installedPath": str(first)}, {"id": "detail", "installedPath": str(second)}],
+        adapter_id="diffusers_test",
+    )
+
+    apply_loras_to_pipeline(
+        pipe,
+        [{"id": "style", "installedPath": str(first)}, {"id": "motion", "installedPath": str(third)}],
+        adapter_id="diffusers_test",
+        previous_state=state,
+    )
+
+    assert pipe.unloaded == 0
+    assert pipe.deleted == [[state.specs[1].adapter_name]]
+    assert [path for path, _name in pipe.loaded] == [str(first), str(second), str(third)]
+
+
+def test_lora_cache_key_is_stable_for_reordered_loras(tmp_path):
+    first = tmp_path / "style.safetensors"
+    second = tmp_path / "detail.safetensors"
+    first.write_bytes(b"lora")
+    second.write_bytes(b"lora")
+    left = [{"id": "style", "installedPath": str(first), "weight": 0.5}, {"id": "detail", "installedPath": str(second)}]
+    right = list(reversed(left))
+
+    key = lora_cache_key(left)
+    assert key == lora_cache_key(right)
+    assert len(key) == 64
+
+
+def test_lora_loader_allows_single_implicit_weight_without_set_adapters(tmp_path):
+    first = tmp_path / "style.safetensors"
+    first.write_bytes(b"lora")
+    pipe = FakeSingleLoraPipe()
+
+    state = apply_loras_to_pipeline(pipe, [{"id": "style", "installedPath": str(first), "weight": 1.0}], adapter_id="diffusers_test")
+
+    assert state.adapter_names
+    assert pipe.loaded[0][0] == str(first)
+
+
+def test_lora_loader_fails_when_pipeline_cannot_load_loras(tmp_path):
+    first = tmp_path / "style.safetensors"
+    first.write_bytes(b"lora")
+
+    with pytest.raises(RuntimeError, match="does not support loading LoRA weights"):
+        apply_loras_to_pipeline(object(), [{"id": "style", "installedPath": str(first)}], adapter_id="diffusers_test")
+
+
+def test_unsupported_adapter_guard_rejects_loras(tmp_path):
+    first = tmp_path / "style.safetensors"
+    first.write_bytes(b"lora")
+
+    with pytest.raises(RuntimeError, match="does not support LoRA application"):
+        reject_loras_if_unsupported([{"id": "style", "installedPath": str(first)}], "procedural_preview")
+
+
+def test_lora_weight_defaults_on_unparseable_values():
+    assert lora_weight({"weight": "not-a-number"}) == 0.8
+
+
 def test_lora_specs_fail_before_inference_for_missing_or_excess_loras(tmp_path):
     missing = tmp_path / "missing.safetensors"
 
-    try:
+    with pytest.raises(RuntimeError, match="file is missing"):
         normalize_lora_specs([{"id": "missing", "installedPath": str(missing)}])
-    except RuntimeError as exc:
-        assert "file is missing" in str(exc)
-    else:
-        raise AssertionError("Missing LoRA files should fail before inference.")
 
     many = [{"id": f"lora_{index}", "installedPath": str(missing)} for index in range(4)]
-    try:
+    with pytest.raises(RuntimeError, match="at most 3 LoRAs"):
         normalize_lora_specs(many)
-    except RuntimeError as exc:
-        assert "at most 3 LoRAs" in str(exc)
-    else:
-        raise AssertionError("More than three LoRAs should fail before inference.")
 
 
 def test_image_adapter_env_aliases_and_unknown_values(monkeypatch):
