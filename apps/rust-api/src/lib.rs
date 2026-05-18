@@ -1368,11 +1368,6 @@ async fn create_character_test_job(
         move |store| store.get_character(&project_id, &character_id)
     })
     .await?;
-    let project_name = project_call(state.clone(), {
-        let project_id = project_id.clone();
-        move |store| store.project_stem(&project_id)
-    })
-    .await?;
     let look = payload.look_id.as_deref().and_then(|look_id| {
         character
             .get("looks")
@@ -1444,7 +1439,7 @@ async fn create_character_test_job(
         state,
         JobType::ImageGenerate,
         Some(project_id),
-        Some(project_name),
+        None,
         job_payload,
         requested_gpu_or_auto(payload.requested_gpu),
     )
