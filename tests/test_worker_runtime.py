@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from typing import NamedTuple
 from types import SimpleNamespace
 
 from PIL import Image
@@ -48,15 +50,18 @@ from scene_worker.runtime import (
 )
 from scene_worker.video_adapters import (
     DiffusersVideoAdapter,
+    LtxPipelinesVideoAdapter,
     VIDEO_MODEL_TARGETS,
     build_video_asset_sidecar,
     character_reference_images,
     create_video_adapter,
     evenly_spaced_indices,
     frames_from_output,
+    ltx_model_manifest_entry,
     ltx_frame_count,
     load_seekable_image_frame,
     person_track_masks,
+    safe_download_dir,
     video_request_from_job,
 )
 
@@ -1041,6 +1046,9 @@ def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
     monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "procedural")
     assert create_video_adapter().__class__.__name__ == "ProceduralVideoAdapter"
 
+    monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "ltx_pipelines")
+    assert create_video_adapter().__class__.__name__ == "LtxPipelinesVideoAdapter"
+
     monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "typo")
     try:
         create_video_adapter()
@@ -1104,7 +1112,640 @@ def test_ltx_video_requirements_report_normalized_frame_count():
 
     assert requirements["requestedFrames"] == 150
     assert requirements["estimatedFrames"] == 153
-    assert requirements["repo"] == "Lightricks/LTX-2"
+    assert requirements["repo"] == "Lightricks/LTX-2.3"
+
+
+def write_native_ltx_manifest(config_dir, *, checkpoint=None, spatial=None, lora=None, gemma=None):
+    manifest_dir = config_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    resources = {
+        "checkpoint": {"repo": "Lightricks/LTX-2.3", "file": "checkpoint.safetensors"},
+        "spatialUpscaler": {"repo": "Lightricks/LTX-2.3", "file": "spatial.safetensors"},
+        "distilledLora": {"repo": "Lightricks/LTX-2.3", "file": "distilled-lora.safetensors"},
+        "gemma": {"repo": "google/gemma-3-4b-it"},
+    }
+    if checkpoint is not None:
+        resources["checkpoint"] = {"path": str(checkpoint)}
+    if spatial is not None:
+        resources["spatialUpscaler"] = {"path": str(spatial)}
+    if lora is not None:
+        resources["distilledLora"] = {"path": str(lora)}
+    if gemma is not None:
+        resources["gemma"] = {"path": str(gemma)}
+    (manifest_dir / "builtin.models.jsonc").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "models": [
+                    {
+                        "id": "ltx_2_3",
+                        "name": "LTX-2.3",
+                        "family": "ltx-video",
+                        "type": "video",
+                        "adapter": "ltx_video",
+                        "capabilities": ["text_to_video", "image_to_video"],
+                        "downloads": [],
+                        "paths": {},
+                        "resources": resources,
+                        "defaults": {},
+                        "limits": {},
+                        "loraCompatibility": {},
+                        "ui": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_native_ltx_resource_files(tmp_path):
+    checkpoint = tmp_path / "checkpoint.safetensors"
+    spatial = tmp_path / "spatial.safetensors"
+    lora = tmp_path / "distilled-lora.safetensors"
+    gemma = tmp_path / "gemma"
+    checkpoint.write_bytes(b"checkpoint")
+    spatial.write_bytes(b"spatial")
+    lora.write_bytes(b"lora")
+    gemma.mkdir()
+    return checkpoint, spatial, lora, gemma
+
+
+def test_native_ltx_adapter_reports_mocked_pipeline_requirements(tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    data_dir.mkdir()
+    checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    adapter = LtxPipelinesVideoAdapter()
+    request = adapter.prepare(
+        settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+        job={
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "duration": 6,
+                "fps": 25,
+                "quality": "fast",
+                "advanced": {"mockNativeInference": True},
+            },
+        },
+    )
+
+    adapter.ensure_models(request)
+    requirements = adapter.estimate_requirements(request)
+
+    assert requirements["adapter"] == "ltx_pipelines"
+    assert requirements["pipeline"] == "ltx_pipelines.distilled"
+    assert requirements["requestedFrames"] == 150
+    assert requirements["estimatedFrames"] == 153
+    assert requirements["mockedInference"] is True
+    assert requirements["resources"]["checkpointPath"] == str(checkpoint)
+
+
+def test_native_ltx_missing_resources_reports_all_paths(tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    data_dir.mkdir()
+    write_native_ltx_manifest(config_dir)
+    adapter = LtxPipelinesVideoAdapter()
+    request = adapter.prepare(
+        settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+        job={
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "advanced": {},
+            },
+        },
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        adapter.ensure_models(request)
+
+    message = str(exc.value)
+    assert "checkpointPath" in message
+    assert "spatialUpscalerPath" in message
+    assert "distilledLoraPath" in message
+    assert "gemmaRoot" in message
+    assert str(data_dir / "models" / safe_download_dir("Lightricks/LTX-2.3") / "checkpoint.safetensors") in message
+    assert str(data_dir / "models" / safe_download_dir("google/gemma-3-4b-it")) in message
+
+
+def test_native_ltx_advanced_resource_overrides_win(tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    data_dir.mkdir()
+    checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir)
+    adapter = LtxPipelinesVideoAdapter()
+    request = adapter.prepare(
+        settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+        job={
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "advanced": {
+                    "mockNativeInference": True,
+                    "checkpointPath": str(checkpoint),
+                    "spatialUpscalerPath": str(spatial),
+                    "distilledLoraPath": str(lora),
+                    "gemmaRoot": str(gemma),
+                },
+            },
+        },
+    )
+
+    adapter.ensure_models(request)
+    resources = adapter.estimate_requirements(request)["resources"]
+
+    assert resources["checkpointPath"] == str(checkpoint)
+    assert resources["spatialUpscalerPath"] == str(spatial)
+    assert resources["distilledLoraPath"] == str(lora)
+    assert resources["gemmaRoot"] == str(gemma)
+
+
+def test_ltx_model_manifest_entry_reads_jsonc_comments(tmp_path):
+    config_dir = tmp_path / "config"
+    manifest_dir = config_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "builtin.models.jsonc").write_text(
+        """
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              // Keep comment stripping out of quoted strings like "https://example.test".
+              "id": "ltx_2_3",
+              "resources": { "checkpoint": { "path": "models/checkpoint.safetensors" } }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    entry = ltx_model_manifest_entry(SimpleNamespace(config_dir=config_dir), "ltx_2_3")
+
+    assert entry["resources"]["checkpoint"]["path"] == "models/checkpoint.safetensors"
+
+
+def test_ltx_model_manifest_entry_preserves_builtin_resources_for_user_entry(tmp_path):
+    config_dir = tmp_path / "config"
+    manifest_dir = config_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "builtin.models.jsonc").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "models": [
+                    {
+                        "id": "ltx_2_3",
+                        "paths": {"model": "data/models/builtin"},
+                        "resources": {"checkpoint": {"path": "models/checkpoint.safetensors"}},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (manifest_dir / "user.models.jsonc").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "models": [
+                    {
+                        "id": "ltx_2_3",
+                        "paths": {"model": "data/models/user"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entry = ltx_model_manifest_entry(SimpleNamespace(config_dir=config_dir), "ltx_2_3")
+
+    assert entry["paths"]["model"] == "data/models/user"
+    assert entry["resources"]["checkpoint"]["path"] == "models/checkpoint.safetensors"
+
+
+def test_native_ltx_adapter_rejects_unsupported_modes():
+    adapter = LtxPipelinesVideoAdapter()
+    request = video_request_from_job(
+        {
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "video_bridge",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "advanced": {},
+            },
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="native pipelines currently support"):
+        adapter.ensure_models(request)
+
+
+def test_native_ltx_mocked_run_writes_scene_video_asset(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    job = {
+        "id": "job-ltx",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_video",
+            "prompt": "Neon harbor",
+            "model": "ltx_2_3",
+            "duration": 1,
+            "fps": 12,
+            "width": 320,
+            "height": 256,
+            "quality": "balanced",
+            "advanced": {"mockNativeInference": True},
+        },
+    }
+    monkeypatch.setattr(
+        "scene_worker.video_adapters.gradient_frame",
+        lambda width, height, _digest: Image.new("RGB", (width, height), "navy"),
+    )
+    adapter = LtxPipelinesVideoAdapter()
+    request = adapter.prepare(settings=SimpleNamespace(data_dir=data_dir), job=job)
+
+    result = adapter.run(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        request=request,
+        progress=lambda *_args: None,
+        cancel_requested=lambda: False,
+    )
+
+    asset = result["assets"][0]
+    media_path = project_path / asset["file"]["path"]
+    assert media_path.exists()
+    assert result["adapter"] == "ltx_pipelines"
+    assert asset["recipe"]["adapter"] == "ltx_pipelines"
+    assert asset["recipe"]["rawAdapterSettings"]["pipeline"] == "ltx_pipelines.ti2vid_two_stages"
+    assert asset["recipe"]["rawAdapterSettings"]["mockedNativeInference"] is True
+    assert adapter.loaded_models() == ["ltx_2_3", "ltx_pipelines.ti2vid_two_stages"]
+
+
+def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    calls = {"init": None, "run": None, "encode": None}
+
+    class FakePipeline:
+        def __init__(self, **kwargs):
+            calls["init"] = kwargs
+
+        def __call__(self, **kwargs):
+            calls["run"] = kwargs
+            return ["video-chunk"], "audio-track"
+
+    class FakeTilingConfig:
+        @staticmethod
+        def default():
+            return "tiling-config"
+
+    class FakeOffloadMode:
+        NONE = "none"
+        CPU = "cpu"
+        DISK = "disk"
+
+    class FakeGuiderParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_encode_video(**kwargs):
+        calls["encode"] = kwargs
+        Path(kwargs["output_path"]).write_bytes(b"mp4")
+
+    def fake_import_module(name):
+        if name == "ltx_core.loader":
+            return SimpleNamespace(
+                LoraPathStrengthAndSDOps=lambda path, strength, sd_ops: (path, strength, sd_ops),
+                LTXV_LORA_COMFY_RENAMING_MAP={"rename": "map"},
+            )
+        if name == "ltx_pipelines.utils.types":
+            return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_pipelines.ti2vid_two_stages":
+            return SimpleNamespace(TI2VidTwoStagesPipeline=FakePipeline)
+        if name == "ltx_core.model.video_vae":
+            return SimpleNamespace(
+                TilingConfig=FakeTilingConfig,
+                get_video_chunks_number=lambda _frames, _tiling: 2,
+            )
+        if name == "ltx_pipelines.utils.media_io":
+            return SimpleNamespace(encode_video=fake_encode_video)
+        if name == "ltx_core.components.guiders":
+            return SimpleNamespace(MultiModalGuiderParams=FakeGuiderParams)
+        raise ImportError(name)
+
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
+    adapter = LtxPipelinesVideoAdapter()
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda: True)
+    job = {
+        "id": "job-real-ltx",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_video",
+            "prompt": "Neon harbor",
+            "negativePrompt": "rain",
+            "model": "ltx_2_3",
+            "duration": 1,
+            "fps": 12,
+            "width": 320,
+            "height": 256,
+            "quality": "balanced",
+            "advanced": {"steps": 7, "distilledLoraStrength": 0.6},
+        },
+    }
+    request = adapter.prepare(settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir), job=job)
+
+    adapter.ensure_models(request)
+    result = adapter.run(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        request=request,
+        progress=lambda *_args: None,
+        cancel_requested=lambda: False,
+    )
+
+    asset = result["assets"][0]
+    media_path = project_path / asset["file"]["path"]
+    assert media_path.read_bytes() == b"mp4"
+    assert calls["init"]["checkpoint_path"] == str(checkpoint)
+    assert calls["init"]["distilled_lora"] == [(str(lora), 0.6, {"rename": "map"})]
+    assert calls["run"]["prompt"] == "Neon harbor"
+    assert calls["run"]["negative_prompt"] == "rain"
+    assert calls["run"]["num_inference_steps"] == 7
+    assert calls["run"]["images"] == []
+    assert calls["encode"]["video"] == ["video-chunk"]
+    assert calls["encode"]["audio"] == "audio-track"
+    assert calls["encode"]["video_chunks_number"] == 2
+    assert asset["file"]["mimeType"] == "video/mp4"
+    assert asset["recipe"]["rawAdapterSettings"]["realModelInference"] is True
+    assert asset["recipe"]["rawAdapterSettings"]["mockedNativeInference"] is False
+    assert result["requirements"]["mockedInference"] is False
+
+
+def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    image_rel = "assets/images/source.png"
+    (project_path / "assets" / "images").mkdir(parents=True)
+    Image.new("RGB", (16, 16), "teal").save(project_path / image_rel)
+    (project_path / "assets" / "images" / "source.sceneworks.json").write_text(
+        json.dumps({"id": "asset-source", "file": {"path": image_rel}}),
+        encoding="utf-8",
+    )
+    checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    calls = {"run": None, "encode": None}
+
+    class FakePipeline:
+        def __init__(self, **_kwargs):
+            return None
+
+        def __call__(self, **kwargs):
+            calls["run"] = kwargs
+            return ["video-chunk"], None
+
+    class FakeConditioningInput(NamedTuple):
+        path: str
+        frame_idx: int
+        strength: float
+
+    class FakeTilingConfig:
+        @staticmethod
+        def default():
+            return "tiling-config"
+
+    class FakeOffloadMode:
+        NONE = "none"
+        CPU = "cpu"
+        DISK = "disk"
+
+    class FakeGuiderParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_encode_video(**kwargs):
+        calls["encode"] = kwargs
+        Path(kwargs["output_path"]).write_bytes(b"mp4")
+
+    def fake_import_module(name):
+        if name == "ltx_core.loader":
+            return SimpleNamespace(
+                LoraPathStrengthAndSDOps=lambda path, strength, sd_ops: (path, strength, sd_ops),
+                LTXV_LORA_COMFY_RENAMING_MAP={},
+            )
+        if name == "ltx_pipelines.utils.types":
+            return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_pipelines.ti2vid_two_stages":
+            return SimpleNamespace(TI2VidTwoStagesPipeline=FakePipeline)
+        if name == "ltx_core.model.video_vae":
+            return SimpleNamespace(
+                TilingConfig=FakeTilingConfig,
+                get_video_chunks_number=lambda _frames, _tiling: 1,
+            )
+        if name == "ltx_pipelines.utils.media_io":
+            return SimpleNamespace(encode_video=fake_encode_video)
+        if name == "ltx_core.components.guiders":
+            return SimpleNamespace(MultiModalGuiderParams=FakeGuiderParams)
+        if name == "ltx_pipelines.utils.args":
+            return SimpleNamespace(ImageConditioningInput=FakeConditioningInput)
+        raise ImportError(name)
+
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
+    adapter = LtxPipelinesVideoAdapter()
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda: True)
+    job = {
+        "id": "job-i2v",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "image_to_video",
+            "prompt": "Make the harbor move",
+            "model": "ltx_2_3",
+            "sourceAssetId": "asset-source",
+            "duration": 1,
+            "fps": 12,
+            "width": 320,
+            "height": 256,
+            "quality": "balanced",
+            "advanced": {"imageConditioningStrength": 0.7},
+        },
+    }
+    request = adapter.prepare(settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir), job=job)
+
+    adapter.ensure_models(request)
+    result = adapter.run(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        request=request,
+        progress=lambda *_args: None,
+        cancel_requested=lambda: False,
+    )
+
+    image_condition = calls["run"]["images"][0]
+    assert image_condition.path == str(project_path / image_rel)
+    assert image_condition.frame_idx == 0
+    assert image_condition.strength == 0.7
+    assert result["assets"][0]["lineage"]["sourceAssetId"] == "asset-source"
+    assert result["assets"][0]["recipe"]["rawAdapterSettings"]["realModelInference"] is True
+
+
+def test_native_ltx_cleanup_deletes_temp_output_and_evicts_pipeline(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+
+    class FakePipeline:
+        def __init__(self, **_kwargs):
+            return None
+
+        def __call__(self, **_kwargs):
+            return ["video-chunk"], None
+
+    class FakeTilingConfig:
+        @staticmethod
+        def default():
+            return "tiling-config"
+
+    class FakeOffloadMode:
+        NONE = "none"
+        CPU = "cpu"
+        DISK = "disk"
+
+    class FakeGuiderParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_encode_video(**kwargs):
+        Path(kwargs["output_path"]).write_bytes(b"partial")
+        raise RuntimeError("encoder failed")
+
+    def fake_import_module(name):
+        if name == "ltx_core.loader":
+            return SimpleNamespace(
+                LoraPathStrengthAndSDOps=lambda path, strength, sd_ops: (path, strength, sd_ops),
+                LTXV_LORA_COMFY_RENAMING_MAP={},
+            )
+        if name == "ltx_pipelines.utils.types":
+            return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_pipelines.ti2vid_two_stages":
+            return SimpleNamespace(TI2VidTwoStagesPipeline=FakePipeline)
+        if name == "ltx_core.model.video_vae":
+            return SimpleNamespace(
+                TilingConfig=FakeTilingConfig,
+                get_video_chunks_number=lambda _frames, _tiling: 1,
+            )
+        if name == "ltx_pipelines.utils.media_io":
+            return SimpleNamespace(encode_video=fake_encode_video)
+        if name == "ltx_core.components.guiders":
+            return SimpleNamespace(MultiModalGuiderParams=FakeGuiderParams)
+        raise ImportError(name)
+
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
+    adapter = LtxPipelinesVideoAdapter()
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda: True)
+    job = {
+        "id": "job-cleanup",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_video",
+            "prompt": "Neon harbor",
+            "model": "ltx_2_3",
+            "duration": 1,
+            "fps": 12,
+            "width": 320,
+            "height": 256,
+            "quality": "balanced",
+            "advanced": {},
+        },
+    }
+    request = adapter.prepare(settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir), job=job)
+
+    adapter.ensure_models(request)
+    with pytest.raises(RuntimeError, match="encoder failed"):
+        adapter.run(
+            settings=SimpleNamespace(data_dir=data_dir),
+            job=job,
+            request=request,
+            progress=lambda *_args: None,
+            cancel_requested=lambda: False,
+        )
+    assert list((project_path / "assets" / "videos").glob("*.tmp.mp4"))
+
+    adapter.cleanup(job["id"])
+
+    assert list((project_path / "assets" / "videos").glob("*.tmp.mp4")) == []
+    assert adapter.loaded_models() == []
+    assert adapter._pipeline is None
+
+
+def test_ltx_video_text_to_video_default_repo_fails_before_diffusers_404():
+    adapter = DiffusersVideoAdapter()
+    request = video_request_from_job(
+        {
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "advanced": {},
+            },
+        }
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        adapter.ensure_models(request)
+
+    assert "LTX-2.3 text-to-video is supported by the model" in str(exc.value)
+    assert "model_index.json" in str(exc.value)
 
 
 def test_ltx_video_image_modes_keep_image_to_video_diffusers_repo():
@@ -1146,6 +1787,7 @@ def test_ltx_video_model_repo_override_wins_over_mode_specific_repos():
     requirements = adapter.estimate_requirements(request)
 
     assert requirements["repo"] == "owner/custom-ltx-diffusers"
+    adapter.ensure_models(request)
 
 
 def test_evenly_spaced_indices_are_bounded():

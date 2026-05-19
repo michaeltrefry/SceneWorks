@@ -181,6 +181,23 @@
         "model": "${HF_CACHE}/Lightricks/LTX-2.3",
         "imageToVideoModel": "${HF_CACHE}/Lightricks/LTX-Video"
       },
+      "resources": {
+        "checkpoint": {
+          "repo": "Lightricks/LTX-2.3",
+          "file": "ltx-2.3-22b-distilled-1.1.safetensors"
+        },
+        "spatialUpscaler": {
+          "repo": "Lightricks/LTX-2.3",
+          "file": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+        },
+        "distilledLora": {
+          "repo": "Lightricks/LTX-2.3",
+          "file": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        },
+        "gemma": {
+          "repo": "google/gemma-3-4b-it"
+        }
+      },
       "defaults": {
         "duration": 6,
         "fps": 25,

@@ -330,6 +330,7 @@ Research first:
 - Validate FPS/resolution constraints.
 - Validate LoRA support.
 - Validate Wan2.2 path separately.
+- See `documents/EPIC_NATIVE_LTX23_VIDEO_ADAPTER.md` for the native-only LTX-2.3 implementation track.
 
 Implementation:
 

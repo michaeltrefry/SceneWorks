@@ -1,0 +1,4 @@
+# Optional native LTX-2.3 dependencies for SCENEWORKS_VIDEO_ADAPTER=ltx_pipelines.
+# Pinned to the official Lightricks/LTX-2 HEAD inspected on 2026-05-19.
+ltx-core @ git+https://github.com/Lightricks/LTX-2.git@1799988521d5e9725a4fbd4533d0cc12f07c07ed#subdirectory=packages/ltx-core
+ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@1799988521d5e9725a4fbd4533d0cc12f07c07ed#subdirectory=packages/ltx-pipelines

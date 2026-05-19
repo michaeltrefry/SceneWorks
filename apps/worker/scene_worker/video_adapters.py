@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import hashlib
 import importlib
+import importlib.util
+import json
 import os
 import warnings
 from pathlib import Path
@@ -43,7 +45,6 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "family": "ltx-video",
         "adapter": "ltx_video",
         "repo": "Lightricks/LTX-2.3",
-        "textRepo": "Lightricks/LTX-2",
         "fallbackRepo": "Lightricks/LTX-Video",
         "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
         "recommendedMaxDuration": 10,
@@ -88,6 +89,15 @@ class VideoRequest:
     source_clip_asset_id: str | None
     bridge_right_clip_asset_id: str | None
     advanced: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LtxPipelinesResources:
+    checkpoint_path: Path
+    spatial_upsampler_path: Path
+    distilled_lora_path: Path
+    gemma_root: Path
+    temporal_upsampler_path: Path | None = None
 
 
 class VideoGenerationAdapter(ABC):
@@ -266,6 +276,507 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         }
 
 
+class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
+    id = "ltx_pipelines"
+
+    _supported_modes = {"text_to_video", "image_to_video"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._loaded_models: set[str] = set()
+        self._settings: WorkerSettings | None = None
+        self._resources_by_model: dict[str, LtxPipelinesResources] = {}
+        self._pipeline: Any | None = None
+        self._pipeline_key_value: str | None = None
+
+    def loaded_models(self) -> list[str]:
+        return sorted(self._loaded_models)
+
+    def prepare(self, *, settings: WorkerSettings, job: dict[str, Any]) -> VideoRequest:
+        self._settings = settings
+        return video_request_from_job(job)
+
+    def ensure_models(self, request: VideoRequest) -> None:
+        target = model_target(request.model)
+        if target["adapter"] != "ltx_video":
+            raise RuntimeError("The native LTX pipelines adapter only supports LTX-family video models.")
+        if request.mode not in self._supported_modes:
+            supported = ", ".join(sorted(mode.replace("_", " ") for mode in self._supported_modes))
+            raise RuntimeError(f"{target['label']} native pipelines currently support {supported}.")
+        if request.duration > target["hardMaxDuration"]:
+            raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
+        reject_loras_if_unsupported(request.loras, self.id)
+        resources = self.resolve_resources(request)
+        missing = self._missing_resources(resources)
+        if missing:
+            details = "\n".join(f"- {label}: {path}" for label, path in missing)
+            raise RuntimeError(
+                "Native LTX-2.3 requires local model resources before generation. "
+                "Install the LTX-2.3 model resources in Model Manager or set advanced overrides "
+                "for checkpointPath, spatialUpscalerPath, distilledLoraPath, and gemmaRoot.\n"
+                f"Missing resources:\n{details}"
+            )
+        self._resources_by_model[request.model] = resources
+        if not self._mock_inference_enabled(request) and not self._dependencies_available():
+            raise RuntimeError(
+                "Native LTX-2.3 generation requires optional worker dependencies. "
+                "Install apps/worker/requirements-ltx.txt in this worker environment or use "
+                "advanced.mockNativeInference for local adapter smoke tests."
+            )
+
+    def estimate_requirements(self, request: VideoRequest) -> dict[str, Any]:
+        target = model_target(request.model)
+        raw_frames = max(1, int(round(request.duration * request.fps)))
+        resources = self._resources_by_model.get(request.model) or self.resolve_resources(request)
+        mocked = self._mock_inference_enabled(request)
+        return {
+            "estimatedFrames": ltx_frame_count(raw_frames),
+            "requestedFrames": raw_frames,
+            "previewFrames": preview_frame_count(request),
+            "pixelCount": request.width * request.height,
+            "recommendedMaxDuration": target["recommendedMaxDuration"],
+            "gpuPreference": request.advanced.get("gpuPreference", "auto"),
+            "adapter": self.id,
+            "pipeline": self._pipeline_module(request),
+            "resources": self._resource_summary(resources),
+            "nativeDependenciesAvailable": self._dependencies_available(),
+            "mockedInference": mocked,
+        }
+
+    def run(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: VideoRequest,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        if not self._mock_inference_enabled(request):
+            return self._run_real_ltx_video(
+                settings=settings,
+                job=job,
+                request=request,
+                progress=progress,
+                cancel_requested=cancel_requested,
+            )
+
+        self._loaded_models.update({request.model, self._pipeline_module(request)})
+        progress("running", "mocking_native_ltx", 0.2, "Rendering mocked native LTX-2.3 preview clip.")
+        return super().run(
+            settings=settings,
+            job=job,
+            request=request,
+            progress=progress,
+            cancel_requested=cancel_requested,
+        )
+
+    def cleanup(self, job_id: str) -> None:
+        super().cleanup(job_id)
+        self._loaded_models.clear()
+        self._evict_pipeline()
+
+    def map_settings(self, request: VideoRequest, target: dict[str, Any]) -> dict[str, Any]:
+        steps = target["steps"].get(request.quality, target["steps"]["balanced"])
+        resources = self._resources_by_model.get(request.model) or self.resolve_resources(request)
+        mocked = self._mock_inference_enabled(request)
+        return {
+            **request.advanced,
+            "adapterFamily": target["family"],
+            "targetAdapter": self.id,
+            "pipeline": self._pipeline_module(request),
+            "resources": self._resource_summary(resources),
+            "steps": safe_int(request.advanced.get("steps"), steps, 1, 80),
+            "frameCount": ltx_frame_count(max(1, int(round(request.duration * request.fps)))),
+            "previewFrameCount": preview_frame_count(request),
+            "recommendedMaxDuration": target["recommendedMaxDuration"],
+            "previewRenderer": mocked,
+            "mockedNativeInference": mocked,
+            "realModelInference": not mocked,
+        }
+
+    def _run_real_ltx_video(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: VideoRequest,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+        for folder in ("assets/videos", "generation-sets", "recipes"):
+            (project_path / folder).mkdir(parents=True, exist_ok=True)
+
+        target = model_target(request.model)
+        resources = self._resources_by_model.get(request.model) or self.resolve_resources(request)
+        seed = resolve_seed(request.seed, request.prompt)
+        num_frames = ltx_frame_count(max(1, int(round(request.duration * request.fps))))
+        generation_set_id = f"genset_{uuid4().hex}"
+        asset_id = f"asset_{uuid4().hex}"
+        created_at = utc_now()
+        filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
+        media_rel = f"assets/videos/{filename_base}.mp4"
+        media_path = project_path / media_rel
+        temp_path = media_path.with_suffix(".tmp.mp4")
+        self._temporary_outputs.setdefault(job["id"], []).append(temp_path)
+
+        progress("preparing", "validating_inputs", 0.2, "Validating native LTX-2.3 inputs.")
+        conditioning_images = self._ltx_conditioning_images(project_path, request)
+        if cancel_requested():
+            raise InterruptedError("Video generation canceled before native LTX pipeline load.")
+
+        progress("loading_model", "loading_model", 0.28, "Loading native LTX-2.3 pipeline.")
+        pipeline = self._load_ltx_pipeline(request, resources)
+        if cancel_requested():
+            raise InterruptedError("Video generation canceled before native LTX inference.")
+
+        progress("running", "generating", 0.4, "Running native LTX-2.3 inference.")
+        video, audio, video_chunks_number, encode_video = self._run_ltx_pipeline(
+            pipeline=pipeline,
+            request=request,
+            resources=resources,
+            seed=seed,
+            num_frames=num_frames,
+            conditioning_images=conditioning_images,
+        )
+        if cancel_requested():
+            raise InterruptedError("Video generation canceled before saving.")
+
+        progress("saving", "saving", 0.9, "Saving native LTX-2.3 MP4 asset and recipe.")
+        encode_video(
+            video=video,
+            fps=request.fps,
+            audio=audio,
+            output_path=str(temp_path),
+            video_chunks_number=video_chunks_number,
+        )
+        temp_path.replace(media_path)
+
+        generation_set = {
+            "schemaVersion": 1,
+            "id": generation_set_id,
+            "projectId": request.project_id,
+            "jobId": job["id"],
+            "mode": request.mode,
+            "model": request.model,
+            "prompt": request.prompt,
+            "negativePrompt": request.negative_prompt,
+            "count": 1,
+            "createdAt": created_at,
+        }
+        asset = build_video_asset_sidecar(
+            asset_id=asset_id,
+            project_id=request.project_id,
+            generation_set_id=generation_set_id,
+            request=request,
+            job_id=job["id"],
+            media_rel=media_rel,
+            created_at=created_at,
+            seed=seed,
+            target=target,
+            adapter_id=self.id,
+            mime_type="video/mp4",
+            raw_settings=self.map_settings(request, target),
+        )
+        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
+        write_json(media_path.with_suffix(".sceneworks.json"), asset)
+        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
+        index_asset(project_path, asset)
+        self._loaded_models.update({request.model, self._pipeline_module(request), str(resources.checkpoint_path)})
+        return {
+            "generationSetId": generation_set_id,
+            "assetIds": [asset_id],
+            "assets": [asset],
+            "adapter": self.id,
+            "model": request.model,
+            "requirements": self.estimate_requirements(request),
+        }
+
+    def _ltx_conditioning_images(self, project_path: Path, request: VideoRequest) -> list[Any]:
+        if request.mode == "text_to_video":
+            return []
+        if request.mode != "image_to_video":
+            raise RuntimeError(f"Native LTX-2.3 does not support {request.mode.replace('_', ' ')} yet.")
+
+        media_path = source_asset_media_path(project_path, request.source_asset_id)
+        if media_path is None:
+            raise RuntimeError("Image to Video requires a readable source image.")
+        try:
+            with Image.open(media_path) as image:
+                image.verify()
+        except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+            raise RuntimeError("Image to Video requires a readable source image.") from exc
+
+        args_module = importlib.import_module("ltx_pipelines.utils.args")
+        condition_class = getattr(args_module, "ImageConditioningInput")
+        return [
+            condition_class(
+                str(media_path),
+                safe_int(request.advanced.get("imageFrameIndex"), 0, 0, 1_000_000),
+                self._advanced_float(request, "imageConditioningStrength", 1.0),
+            )
+        ]
+
+    def _load_ltx_pipeline(self, request: VideoRequest, resources: LtxPipelinesResources) -> Any:
+        key = self._pipeline_key(request, resources)
+        if self._pipeline is not None and self._pipeline_key_value == key:
+            return self._pipeline
+
+        loader = importlib.import_module("ltx_core.loader")
+        offload_mode = self._offload_mode(request)
+        common_kwargs = {
+            "gemma_root": str(resources.gemma_root),
+            "spatial_upsampler_path": str(resources.spatial_upsampler_path),
+            "loras": (),
+            "torch_compile": bool(request.advanced.get("compile", False)),
+            "offload_mode": offload_mode,
+        }
+        if self._pipeline_module(request) == "ltx_pipelines.distilled":
+            pipeline_module = importlib.import_module("ltx_pipelines.distilled")
+            pipeline = pipeline_module.DistilledPipeline(
+                distilled_checkpoint_path=str(resources.checkpoint_path),
+                **common_kwargs,
+            )
+        else:
+            pipeline_module = importlib.import_module("ltx_pipelines.ti2vid_two_stages")
+            lora_spec = loader.LoraPathStrengthAndSDOps(
+                str(resources.distilled_lora_path),
+                float(request.advanced.get("distilledLoraStrength", 0.8)),
+                loader.LTXV_LORA_COMFY_RENAMING_MAP,
+            )
+            pipeline = pipeline_module.TI2VidTwoStagesPipeline(
+                checkpoint_path=str(resources.checkpoint_path),
+                distilled_lora=[lora_spec],
+                **common_kwargs,
+            )
+        self._pipeline = pipeline
+        self._pipeline_key_value = key
+        self._loaded_models.update({request.model, self._pipeline_module(request), str(resources.checkpoint_path)})
+        return pipeline
+
+    def _run_ltx_pipeline(
+        self,
+        *,
+        pipeline: Any,
+        request: VideoRequest,
+        resources: LtxPipelinesResources,
+        seed: int,
+        num_frames: int,
+        conditioning_images: list[Any],
+    ) -> tuple[Any, Any, int, Any]:
+        video_vae = importlib.import_module("ltx_core.model.video_vae")
+        media_io = importlib.import_module("ltx_pipelines.utils.media_io")
+        tiling_config = video_vae.TilingConfig.default()
+        video_chunks_number = video_vae.get_video_chunks_number(num_frames, tiling_config)
+        base_kwargs = {
+            "prompt": request.prompt,
+            "seed": seed,
+            "height": request.height,
+            "width": request.width,
+            "num_frames": num_frames,
+            "frame_rate": request.fps,
+            "images": conditioning_images,
+            "tiling_config": tiling_config,
+            "enhance_prompt": bool(request.advanced.get("enhancePrompt", False)),
+        }
+        if self._pipeline_module(request) == "ltx_pipelines.distilled":
+            video, audio = pipeline(**base_kwargs)
+        else:
+            guiders = importlib.import_module("ltx_core.components.guiders")
+            video, audio = pipeline(
+                **base_kwargs,
+                negative_prompt=request.negative_prompt or default_negative_prompt(model_target(request.model)),
+                num_inference_steps=self._num_inference_steps(request, model_target(request.model)),
+                video_guider_params=guiders.MultiModalGuiderParams(
+                    cfg_scale=self._advanced_float(request, "videoCfgGuidanceScale", 4.0),
+                    stg_scale=self._advanced_float(request, "videoStgGuidanceScale", 0.0),
+                    rescale_scale=self._advanced_float(request, "videoRescaleScale", 0.7),
+                    modality_scale=self._advanced_float(request, "a2vGuidanceScale", 1.0),
+                    skip_step=safe_int(request.advanced.get("videoSkipStep"), 0, 0, 80),
+                    stg_blocks=request.advanced.get("videoStgBlocks", []),
+                ),
+                audio_guider_params=guiders.MultiModalGuiderParams(
+                    cfg_scale=self._advanced_float(request, "audioCfgGuidanceScale", 1.0),
+                    stg_scale=self._advanced_float(request, "audioStgGuidanceScale", 0.0),
+                    rescale_scale=self._advanced_float(request, "audioRescaleScale", 0.0),
+                    modality_scale=self._advanced_float(request, "v2aGuidanceScale", 1.0),
+                    skip_step=safe_int(request.advanced.get("audioSkipStep"), 0, 0, 80),
+                    stg_blocks=request.advanced.get("audioStgBlocks", []),
+                ),
+                max_batch_size=safe_int(request.advanced.get("maxBatchSize"), 1, 1, 16),
+            )
+        return video, audio, video_chunks_number, media_io.encode_video
+
+    def _pipeline_module(self, request: VideoRequest) -> str:
+        if request.quality == "fast":
+            return "ltx_pipelines.distilled"
+        return "ltx_pipelines.ti2vid_two_stages"
+
+    def _num_inference_steps(self, request: VideoRequest, target: dict[str, Any]) -> int:
+        default_steps = target["steps"].get(request.quality, target["steps"]["balanced"])
+        return safe_int(request.advanced.get("steps"), default_steps, 1, 80)
+
+    def _mock_inference_enabled(self, request: VideoRequest) -> bool:
+        return bool(request.advanced.get("mockNativeInference", False))
+
+    def _pipeline_key(self, request: VideoRequest, resources: LtxPipelinesResources) -> str:
+        return ":".join(
+            [
+                self._pipeline_module(request),
+                str(resources.checkpoint_path),
+                str(resources.spatial_upsampler_path),
+                str(resources.distilled_lora_path),
+                str(resources.gemma_root),
+                str(request.advanced.get("offloadMode", "none")),
+            ]
+        )
+
+    def _offload_mode(self, request: VideoRequest) -> Any:
+        offload_value = str(request.advanced.get("offloadMode", "none")).strip().lower()
+        types_module = importlib.import_module("ltx_pipelines.utils.types")
+        offload_mode = getattr(types_module, "OffloadMode")
+        if offload_value == "cpu":
+            return offload_mode.CPU
+        if offload_value == "disk":
+            return offload_mode.DISK
+        return offload_mode.NONE
+
+    def _advanced_float(self, request: VideoRequest, key: str, fallback: float) -> float:
+        try:
+            return float(request.advanced.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+
+    def _evict_pipeline(self) -> None:
+        self._pipeline = None
+        self._pipeline_key_value = None
+        try:
+            torch = importlib.import_module("torch")
+            cuda = getattr(torch, "cuda", None)
+            if cuda is not None and cuda.is_available():
+                cuda.empty_cache()
+        except Exception:
+            return
+
+    def resolve_resources(self, request: VideoRequest) -> LtxPipelinesResources:
+        settings = self._settings or WorkerSettings()
+        entry = ltx_model_manifest_entry(settings, request.model)
+        resources = entry.get("resources", {}) if isinstance(entry.get("resources"), dict) else {}
+        return LtxPipelinesResources(
+            checkpoint_path=self._resource_path(
+                settings,
+                request,
+                resources,
+                "checkpoint",
+                "checkpointPath",
+            ),
+            spatial_upsampler_path=self._resource_path(
+                settings,
+                request,
+                resources,
+                "spatialUpscaler",
+                "spatialUpscalerPath",
+            ),
+            distilled_lora_path=self._resource_path(
+                settings,
+                request,
+                resources,
+                "distilledLora",
+                "distilledLoraPath",
+            ),
+            gemma_root=self._resource_path(
+                settings,
+                request,
+                resources,
+                "gemma",
+                "gemmaRoot",
+                expect_file=False,
+            ),
+            temporal_upsampler_path=self._optional_resource_path(
+                settings,
+                request,
+                resources,
+                "temporalUpscaler",
+                "temporalUpscalerPath",
+            ),
+        )
+
+    def _resource_path(
+        self,
+        settings: WorkerSettings,
+        request: VideoRequest,
+        resources: dict[str, Any],
+        resource_key: str,
+        advanced_key: str,
+        *,
+        expect_file: bool = True,
+    ) -> Path:
+        override = request.advanced.get(advanced_key)
+        if override:
+            return resolve_worker_path(settings, override)
+        resource = resources.get(resource_key) if isinstance(resources.get(resource_key), dict) else {}
+        configured_path = resource.get("path")
+        if configured_path:
+            return resolve_manifest_path(settings, configured_path)
+        repo = str(resource.get("repo") or VIDEO_MODEL_TARGETS["ltx_2_3"]["repo"])
+        root = settings.data_dir / "models" / safe_download_dir(repo)
+        file_name = resource.get("file")
+        if expect_file and file_name:
+            return root / str(file_name)
+        return root
+
+    def _optional_resource_path(
+        self,
+        settings: WorkerSettings,
+        request: VideoRequest,
+        resources: dict[str, Any],
+        resource_key: str,
+        advanced_key: str,
+    ) -> Path | None:
+        override = request.advanced.get(advanced_key)
+        if override:
+            return resolve_worker_path(settings, override)
+        resource = resources.get(resource_key) if isinstance(resources.get(resource_key), dict) else None
+        if not resource:
+            return None
+        return self._resource_path(settings, request, resources, resource_key, advanced_key)
+
+    def _missing_resources(self, resources: LtxPipelinesResources) -> list[tuple[str, Path]]:
+        required = [
+            ("checkpointPath", resources.checkpoint_path, "file"),
+            ("spatialUpscalerPath", resources.spatial_upsampler_path, "file"),
+            ("distilledLoraPath", resources.distilled_lora_path, "file"),
+            ("gemmaRoot", resources.gemma_root, "dir"),
+        ]
+        missing = [
+            (label, path)
+            for label, path, kind in required
+            if not (path.is_file() if kind == "file" else path.is_dir())
+        ]
+        if resources.temporal_upsampler_path is not None and not resources.temporal_upsampler_path.is_file():
+            missing.append(("temporalUpscalerPath", resources.temporal_upsampler_path))
+        return missing
+
+    def _resource_summary(self, resources: LtxPipelinesResources) -> dict[str, str | None]:
+        return {
+            "checkpointPath": str(resources.checkpoint_path),
+            "spatialUpscalerPath": str(resources.spatial_upsampler_path),
+            "distilledLoraPath": str(resources.distilled_lora_path),
+            "gemmaRoot": str(resources.gemma_root),
+            "temporalUpscalerPath": str(resources.temporal_upsampler_path) if resources.temporal_upsampler_path else None,
+        }
+
+    def _dependencies_available(self) -> bool:
+        try:
+            return (
+                importlib.util.find_spec("ltx_core") is not None
+                and importlib.util.find_spec("ltx_pipelines") is not None
+            )
+        except (ImportError, ValueError):
+            return False
+
+
 class DiffusersVideoAdapter(VideoGenerationAdapter):
     id = "diffusers_video"
 
@@ -287,6 +798,18 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             raise RuntimeError(f"{target['label']} does not support {request.mode.replace('_', ' ')}.")
         if request.duration > target["hardMaxDuration"]:
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
+        if (
+            target["adapter"] == "ltx_video"
+            and request.mode == "text_to_video"
+            and not request.advanced.get("modelRepo")
+            and not target.get("diffusersTextRepo")
+        ):
+            raise RuntimeError(
+                "LTX-2.3 text-to-video is supported by the model, but this worker's Diffusers adapter cannot "
+                "load the raw LTX-2.3 checkpoint repo because it does not publish a Diffusers model_index.json. "
+                "Use an advanced modelRepo override that points to a Diffusers-compatible LTX-2.3 conversion, "
+                "or use an adapter backed by the official Lightricks LTX pipeline stack."
+            )
 
     def estimate_requirements(self, request: VideoRequest) -> dict[str, Any]:
         target = model_target(request.model)
@@ -520,8 +1043,8 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
     def _repo_for_request(self, request: VideoRequest, target: dict[str, Any]) -> str:
         if request.advanced.get("modelRepo"):
             return str(request.advanced["modelRepo"])
-        if target["adapter"] == "ltx_video" and request.mode == "text_to_video":
-            return target.get("textRepo") or target["repo"]
+        if target["adapter"] == "ltx_video" and request.mode == "text_to_video" and target.get("diffusersTextRepo"):
+            return target["diffusersTextRepo"]
         if target["adapter"] == "ltx_video" and request.mode != "text_to_video":
             return target.get("fallbackRepo") or target["repo"]
         return target["repo"]
@@ -639,6 +1162,8 @@ def create_video_adapter() -> VideoGenerationAdapter:
         return DiffusersVideoAdapter()
     if requested in {"procedural", "procedural_video"}:
         return ProceduralVideoAdapter()
+    if requested in {"ltx", "ltx_pipelines", "native_ltx"}:
+        return LtxPipelinesVideoAdapter()
     raise RuntimeError(f"Unsupported SCENEWORKS_VIDEO_ADAPTER value: {requested}.")
 
 
@@ -707,14 +1232,121 @@ def ltx_frame_count(raw_frames: int) -> int:
     return lower if lower_delta <= upper_delta else upper
 
 
-def load_source_image(project_path: Path, asset_id: str | None, width: int, height: int) -> Image.Image | None:
+def ltx_model_manifest_entry(settings: WorkerSettings, model_id: str) -> dict[str, Any]:
+    config_dir = getattr(settings, "config_dir", Path("config").resolve())
+    builtin_entry: dict[str, Any] = {}
+    user_entry: dict[str, Any] = {}
+    for manifest_name in ("builtin.models.jsonc", "user.models.jsonc"):
+        manifest_path = config_dir / "manifests" / manifest_name
+        try:
+            payload = json.loads(strip_jsonc_comments(manifest_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+        models = payload.get("models", [])
+        if not isinstance(models, list):
+            continue
+        for entry in models:
+            if isinstance(entry, dict) and entry.get("id") == model_id:
+                if manifest_name.startswith("builtin"):
+                    builtin_entry = entry
+                else:
+                    user_entry = entry
+    if not user_entry:
+        return builtin_entry
+    merged = {**builtin_entry, **user_entry}
+    for nested_key in ("paths", "resources", "defaults", "limits", "loraCompatibility", "ui"):
+        builtin_nested = builtin_entry.get(nested_key) if isinstance(builtin_entry.get(nested_key), dict) else {}
+        user_nested = user_entry.get(nested_key) if isinstance(user_entry.get(nested_key), dict) else {}
+        if builtin_nested or user_nested:
+            merged[nested_key] = {**builtin_nested, **user_nested}
+    return merged
+
+
+def strip_jsonc_comments(text: str) -> str:
+    output = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and next_char == "*":
+            index += 2
+            while index + 1 < len(text) and not (text[index] == "*" and text[index + 1] == "/"):
+                index += 1
+            index += 2
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def resolve_worker_path(settings: WorkerSettings, value: Any) -> Path:
+    raw_path = str(value).strip()
+    path = Path(raw_path)
+    return path if path.is_absolute() else settings.data_dir / path
+
+
+def resolve_manifest_path(settings: WorkerSettings, value: Any) -> Path:
+    raw_path = str(value).strip()
+    if "${DATA_DIR}" in raw_path:
+        raw_path = raw_path.replace("${DATA_DIR}", str(settings.data_dir))
+    path = Path(raw_path)
+    return path if path.is_absolute() else settings.data_dir / path
+
+
+def safe_download_dir(repo: str) -> str:
+    output = []
+    in_replacement = False
+    for character in repo:
+        if character.isalnum() or character in "_.-":
+            output.append(character)
+            in_replacement = False
+        elif not in_replacement:
+            output.append("__")
+            in_replacement = True
+    safe = "".join(output).strip("_")
+    return safe or "download"
+
+
+def source_asset_media_path(project_path: Path, asset_id: str | None) -> Path | None:
     if not asset_id:
         return None
     sidecar_path = find_asset_sidecar_path(project_path, asset_id)
     if sidecar_path is None:
         return None
     payload = read_json(sidecar_path)
-    media_path = project_path / payload.get("file", {}).get("path", "")
+    media_rel = payload.get("file", {}).get("path", "")
+    media_path = project_path / media_rel
+    return media_path if media_path.exists() else None
+
+
+def load_source_image(project_path: Path, asset_id: str | None, width: int, height: int) -> Image.Image | None:
+    if not asset_id:
+        return None
+    media_path = source_asset_media_path(project_path, asset_id)
+    if media_path is None:
+        return None
     try:
         image = Image.open(media_path).convert("RGB")
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):

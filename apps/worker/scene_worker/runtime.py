@@ -241,6 +241,7 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
         "error no file named",
         "cannot load model",
         "missing model file",
+        "missing resources",
     )
     if any(marker in lowered for marker in missing_model_markers):
         return (
