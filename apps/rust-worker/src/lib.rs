@@ -3234,6 +3234,13 @@ pub fn safe_download_dir(value: &str) -> String {
 }
 
 fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var("HF_HUB_CACHE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path);
+    }
     if let Some(path) = std::env::var("HUGGINGFACE_HUB_CACHE")
         .ok()
         .map(|value| value.trim().to_owned())

@@ -14,11 +14,13 @@ services:
       SCENEWORKS_CORS_ORIGINS: ${SCENEWORKS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:5176,http://127.0.0.1:5176}
       SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE: ${SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE:-1}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
+      HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
     ports:
       - "${SCENEWORKS_API_PORT:-8000}:${SCENEWORKS_API_PORT:-8000}"
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
+      - ${SCENEWORKS_HF_CACHE_BIND:-./data/cache/huggingface}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${SCENEWORKS_API_PORT:-8000}/api/v1/health\" >/dev/null"]
@@ -43,10 +45,12 @@ services:
       SCENEWORKS_GPU_ID: auto
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
+      HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
+      - ${SCENEWORKS_HF_CACHE_BIND:-./data/cache/huggingface}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config:ro
     depends_on:
       api:
@@ -73,10 +77,12 @@ services:
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       HF_TOKEN: ${HF_TOKEN:-}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
+      HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
+      - ${SCENEWORKS_HF_CACHE_BIND:-./data/cache/huggingface}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
     depends_on:
       api:

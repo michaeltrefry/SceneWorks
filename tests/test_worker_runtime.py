@@ -1225,10 +1225,13 @@ def test_native_ltx_adapter_reports_mocked_pipeline_requirements(tmp_path):
     assert requirements["resources"]["checkpointPath"] == str(checkpoint)
 
 
-def test_native_ltx_missing_resources_reports_all_paths(tmp_path):
+def test_native_ltx_missing_resources_reports_all_paths(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"
     config_dir = tmp_path / "config"
     data_dir.mkdir()
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "empty-hf-home"))
     write_native_ltx_manifest(config_dir)
     adapter = LtxPipelinesVideoAdapter()
     request = adapter.prepare(
@@ -1290,6 +1293,42 @@ def test_native_ltx_resources_resolve_from_huggingface_cache(monkeypatch, tmp_pa
     assert str(cache_root) in resources["checkpointPath"]
     assert resources["spatialUpscalerPath"].endswith("spatial.safetensors")
     assert resources["distilledLoraPath"].endswith("distilled-lora.safetensors")
+    assert resources["gemmaRoot"] == str(gemma_snapshot)
+
+
+def test_native_ltx_resources_resolve_from_mounted_data_cache_without_hf_env(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    cache_root = data_dir / "cache" / "huggingface" / "hub"
+    data_dir.mkdir()
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HF_HOME", raising=False)
+    write_native_ltx_manifest(config_dir)
+    write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "checkpoint.safetensors")
+    write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "spatial.safetensors")
+    write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "distilled-lora.safetensors")
+    gemma_snapshot = write_huggingface_cache_resource(cache_root, "google/gemma-3-4b-it", "config.json")
+    adapter = LtxPipelinesVideoAdapter()
+    request = adapter.prepare(
+        settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+        job={
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "advanced": {"mockNativeInference": True},
+            },
+        },
+    )
+
+    adapter.ensure_models(request)
+    resources = adapter.estimate_requirements(request)["resources"]
+
+    assert resources["spatialUpscalerPath"].startswith(str(cache_root))
+    assert resources["distilledLoraPath"].startswith(str(cache_root))
     assert resources["gemmaRoot"] == str(gemma_snapshot)
 
 

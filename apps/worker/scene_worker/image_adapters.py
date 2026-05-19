@@ -57,7 +57,7 @@ def huggingface_repo_cache_exists(repo: str) -> bool:
 def huggingface_repo_cache_path(repo: str) -> Path | None:
     default_home = Path.home() / ".cache" / "huggingface"
     hf_home = Path(os.getenv("HF_HOME") or default_home)
-    cache_root = Path(os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
+    cache_root = Path(os.getenv("HF_HUB_CACHE") or os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
     safe_repo = "".join(char if char.isalnum() or char in "._-" else "--" for char in repo).strip("-")
     if not safe_repo:
         return None

@@ -27,13 +27,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import filter_call_kwargs
-from .image_adapters import (
-    huggingface_repo_cache_path,
-    require_inference_backend_for_gpu_worker,
-    select_torch_device,
-    select_torch_dtype,
-    write_json,
-)
+from .image_adapters import require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
 from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline, reject_loras_if_unsupported
 from .settings import WorkerSettings
 
@@ -316,6 +310,9 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         missing = self._missing_resources(request, resources)
         if missing:
             details = "\n".join(f"- {label}: {path}" for label, path in missing)
+            search_details = self._missing_resource_search_details(request, resources, missing)
+            if search_details:
+                details = f"{details}\nSearched Hugging Face cache paths:\n{search_details}"
             override_keys = ["checkpointPath", "spatialUpscalerPath", "gemmaRoot"]
             if self._pipeline_module(request) != "ltx_pipelines.distilled":
                 override_keys.insert(2, "distilledLoraPath")
@@ -738,13 +735,13 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             local_path = root / str(file_name)
             if local_path.is_file():
                 return local_path
-            cached_path = huggingface_cached_resource_file(repo, str(file_name))
+            cached_path = huggingface_cached_resource_file(settings, repo, str(file_name))
             if cached_path is not None:
                 return cached_path
             return local_path
         if not expect_file and root.is_dir():
             return root
-        cached_root = huggingface_cached_snapshot_dir(repo)
+        cached_root = huggingface_cached_snapshot_dir(settings, repo)
         if cached_root is not None:
             return cached_root
         return root
@@ -781,6 +778,47 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         if resources.temporal_upsampler_path is not None and not resources.temporal_upsampler_path.is_file():
             missing.append(("temporalUpscalerPath", resources.temporal_upsampler_path))
         return missing
+
+    def _missing_resource_search_details(
+        self,
+        request: VideoRequest,
+        resources: LtxPipelinesResources,
+        missing: list[tuple[str, Path]],
+    ) -> str:
+        settings = self._settings or WorkerSettings()
+        entry = ltx_model_manifest_entry(settings, request.model)
+        manifest_resources = entry.get("resources", {}) if isinstance(entry.get("resources"), dict) else {}
+        resource_names = {
+            "checkpointPath": "distilledCheckpoint" if self._pipeline_module(request) == "ltx_pipelines.distilled" else "checkpoint",
+            "spatialUpscalerPath": "spatialUpscaler",
+            "distilledLoraPath": "distilledLora",
+            "temporalUpscalerPath": "temporalUpscaler",
+        }
+        details: list[str] = []
+        for label, _path in missing:
+            if label == "gemmaRoot":
+                repo = self._resource_repo(manifest_resources, "gemma")
+                paths = huggingface_cached_snapshot_search_paths(settings, repo)
+            else:
+                resource_name = resource_names.get(label)
+                if resource_name is None:
+                    continue
+                resource = manifest_resources.get(resource_name) if isinstance(manifest_resources.get(resource_name), dict) else {}
+                if not resource and resource_name == "distilledCheckpoint":
+                    resource = manifest_resources.get("checkpoint") if isinstance(manifest_resources.get("checkpoint"), dict) else {}
+                file_name = resource.get("file")
+                if not file_name:
+                    continue
+                repo = self._resource_repo(manifest_resources, resource_name)
+                paths = huggingface_cached_resource_search_paths(settings, repo, str(file_name))
+            details.extend(f"- {label}: {path}" for path in paths)
+        return "\n".join(details)
+
+    def _resource_repo(self, resources: dict[str, Any], resource_key: str) -> str:
+        resource = resources.get(resource_key) if isinstance(resources.get(resource_key), dict) else {}
+        if not resource and resource_key == "distilledCheckpoint":
+            resource = resources.get("checkpoint") if isinstance(resources.get("checkpoint"), dict) else {}
+        return str(resource.get("repo") or VIDEO_MODEL_TARGETS["ltx_2_3"]["repo"])
 
     def _resource_summary(self, resources: LtxPipelinesResources) -> dict[str, str | None]:
         return {
@@ -1350,13 +1388,65 @@ def resolve_manifest_path(settings: WorkerSettings, value: Any) -> Path:
 def huggingface_cache_root() -> Path:
     default_home = Path.home() / ".cache" / "huggingface"
     hf_home = Path(os.getenv("HF_HOME") or default_home)
-    return Path(os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
+    return Path(os.getenv("HF_HUB_CACHE") or os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
 
 
-def huggingface_cached_snapshot_dir(repo: str) -> Path | None:
-    repo_cache = huggingface_repo_cache_path(repo)
-    if repo_cache is None:
+def huggingface_cache_roots(settings: WorkerSettings | None = None) -> list[Path]:
+    roots: list[Path] = []
+    for value in (os.getenv("HF_HUB_CACHE"), os.getenv("HUGGINGFACE_HUB_CACHE")):
+        if value:
+            roots.append(Path(value))
+    if os.getenv("HF_HOME"):
+        roots.append(Path(os.getenv("HF_HOME", "")) / "hub")
+    if settings is not None:
+        roots.append(settings.data_dir / "cache" / "huggingface" / "hub")
+    roots.append(huggingface_cache_root())
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return unique
+
+
+def huggingface_repo_cache_path_for_root(cache_root: Path, repo: str) -> Path | None:
+    safe_repo = "".join(char if char.isalnum() or char in "._-" else "--" for char in repo).strip("-")
+    if not safe_repo:
         return None
+    try:
+        root = cache_root.resolve()
+        repo_cache = (root / f"models--{safe_repo}").resolve()
+        repo_cache.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return repo_cache
+
+
+def huggingface_cached_snapshot_dir(settings: WorkerSettings, repo: str) -> Path | None:
+    for root in huggingface_cache_roots(settings):
+        repo_cache = huggingface_repo_cache_path_for_root(root, repo)
+        if repo_cache is None:
+            continue
+        snapshot = newest_huggingface_snapshot(repo_cache)
+        if snapshot is not None:
+            return snapshot
+    return None
+
+
+def huggingface_cached_snapshot_search_paths(settings: WorkerSettings, repo: str) -> list[Path]:
+    paths = []
+    for root in huggingface_cache_roots(settings):
+        repo_cache = huggingface_repo_cache_path_for_root(root, repo)
+        if repo_cache is None:
+            continue
+        snapshot = newest_huggingface_snapshot(repo_cache)
+        if snapshot is not None:
+            paths.append(snapshot)
+        else:
+            paths.append(repo_cache / "snapshots" / "<revision>")
+    return paths
+
+
+def newest_huggingface_snapshot(repo_cache: Path) -> Path | None:
     snapshots_dir = repo_cache / "snapshots"
     if not snapshots_dir.is_dir():
         return None
@@ -1368,24 +1458,38 @@ def huggingface_cached_snapshot_dir(repo: str) -> Path | None:
     return snapshots[0] if snapshots else None
 
 
-def huggingface_cached_resource_file(repo: str, file_name: str) -> Path | None:
+def huggingface_cached_resource_file(settings: WorkerSettings, repo: str, file_name: str) -> Path | None:
     relative = Path(file_name)
     if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
         return None
-    repo_cache = huggingface_repo_cache_path(repo)
-    snapshots_dir = repo_cache / "snapshots" if repo_cache is not None else None
-    if snapshots_dir is None or not snapshots_dir.is_dir():
-        return None
-    try:
-        snapshots = [path for path in snapshots_dir.iterdir() if path.is_dir()]
-    except OSError:
-        return None
-    snapshots.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-    for snapshot in snapshots:
+    for root in huggingface_cache_roots(settings):
+        repo_cache = huggingface_repo_cache_path_for_root(root, repo)
+        if repo_cache is None:
+            continue
+        snapshot = newest_huggingface_snapshot(repo_cache)
+        if snapshot is None:
+            continue
         candidate = snapshot / relative
         if candidate.is_file():
             return candidate
     return None
+
+
+def huggingface_cached_resource_search_paths(settings: WorkerSettings, repo: str, file_name: str) -> list[Path]:
+    relative = Path(file_name)
+    if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
+        return []
+    paths = []
+    for root in huggingface_cache_roots(settings):
+        repo_cache = huggingface_repo_cache_path_for_root(root, repo)
+        if repo_cache is None:
+            continue
+        snapshot = newest_huggingface_snapshot(repo_cache)
+        if snapshot is not None:
+            paths.append(snapshot / relative)
+        else:
+            paths.append(repo_cache / "snapshots" / "<revision>" / relative)
+    return paths
 
 
 def safe_download_dir(repo: str) -> str:
