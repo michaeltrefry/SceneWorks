@@ -225,6 +225,11 @@ export function ImageStudio({
     () => presetValidation(selectedRecipePreset, loras, selectedModel),
     [selectedRecipePreset, loras, selectedModel],
   );
+  useEffect(() => {
+    if (selectedLoraValidationResult.incompatible.length && !advancedOpen) {
+      setAdvancedOpen(true);
+    }
+  }, [advancedOpen, selectedLoraValidationResult.incompatible.length]);
   const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
   const loraEmptyMessage = !selectedModel
     ? "No model selected"

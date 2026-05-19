@@ -2530,6 +2530,14 @@ describe("SceneWorks app shell", () => {
     expect(generate.disabled).toBe(true);
 
     await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Hide advanced").click();
+    });
+    await settle();
+
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Hide advanced")).toBe(true);
+    expect(container.textContent).toContain("Qwen Only");
+
+    await act(async () => {
       generate.click();
     });
 
