@@ -4305,18 +4305,26 @@ fn strip_jsonc_comments(value: &str) -> String {
 }
 
 fn model_download(model: &Value) -> Option<Value> {
-    model
-        .get("downloads")?
-        .as_array()?
-        .iter()
-        .find(|download| {
-            download.get("provider").and_then(Value::as_str) == Some("huggingface")
-                && download
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .is_some_and(|repo| !repo.is_empty())
-        })
-        .cloned()
+    let downloads = model.get("downloads")?.as_array()?;
+    let mut fallback = None;
+    for download in downloads {
+        if !is_supported_model_download(download) {
+            continue;
+        }
+        fallback.get_or_insert(download);
+        if download.get("default").and_then(Value::as_bool) == Some(true) {
+            return Some(download.clone());
+        }
+    }
+    fallback.cloned()
+}
+
+fn is_supported_model_download(download: &Value) -> bool {
+    download.get("provider").and_then(Value::as_str) == Some("huggingface")
+        && download
+            .get("repo")
+            .and_then(Value::as_str)
+            .is_some_and(|repo| !repo.is_empty())
 }
 
 fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiError> {
@@ -5916,7 +5924,10 @@ mod tests {
                   "type": "image",
                   "adapter": "z_image_diffusers",
                   "capabilities": ["text_to_image", "edit_image"],
-                  "downloads": [{ "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"], "estimatedSizeBytes": 12884901888 }],
+                  "downloads": [
+                    { "provider": "huggingface", "repo": "owner/alternate-model", "files": ["*.bin"], "estimatedSizeBytes": 536870912 },
+                    { "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"], "default": true, "estimatedSizeBytes": 12884901888 }
+                  ],
                   "paths": {},
                   "defaults": {},
                   "limits": {},
@@ -6142,6 +6153,8 @@ mod tests {
         assert_eq!(job["type"], "model_download");
         assert_eq!(job["requestedGpu"], "auto");
         assert_eq!(job["payload"]["modelName"], "User Model");
+        assert_eq!(job["payload"]["repo"], "owner/model");
+        assert_eq!(job["payload"]["files"][0], "*.safetensors");
         assert_eq!(job["payload"]["targetDir"], models[0]["installedPath"]);
 
         let (status, job) = request(
@@ -7110,6 +7123,16 @@ mod tests {
             "downloads": [{ "repo": "owner/model" }]
         }))
         .is_none());
+        assert_eq!(
+            super::model_download(&json!({
+                "downloads": [
+                    { "provider": "huggingface", "repo": "owner/fallback", "estimatedSizeBytes": 1024 },
+                    { "provider": "huggingface", "repo": "owner/default", "default": true, "estimatedSizeBytes": 4096 }
+                ]
+            }))
+            .and_then(|download| download.get("repo").and_then(Value::as_str).map(str::to_owned)),
+            Some("owner/default".to_owned())
+        );
         let mut cache = super::ModelSizeCache::default();
         let key = ("owner/model".to_owned(), vec!["*.safetensors".to_owned()]);
         cache.insert(key.clone(), 300);

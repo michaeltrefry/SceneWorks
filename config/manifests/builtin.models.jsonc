@@ -167,6 +167,7 @@
           "provider": "huggingface",
           "repo": "Lightricks/LTX-2.3",
           "files": [],
+          "default": true,
           "estimatedSizeBytes": 157004895813
         },
         {

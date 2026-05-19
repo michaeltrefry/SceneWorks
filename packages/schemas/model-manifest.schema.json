@@ -13,10 +13,32 @@
         "properties": {
           "downloads": {
             "type": "array",
-            "description": "Download options are ordered by preference; the API uses the first supported entry as the canonical model download.",
-            "items": {
+            "description": "Download entries list alternate sources for the same model; at most one may be marked default: true. If none is marked, the first supported entry is used.",
+            "contains": {
               "type": "object",
               "properties": {
+                "default": { "const": true }
+              },
+              "required": ["default"]
+            },
+            "minContains": 0,
+            "maxContains": 1,
+            "items": {
+              "type": "object",
+              "required": ["provider", "repo"],
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "description": "Download provider identifier, such as huggingface."
+                },
+                "repo": {
+                  "type": "string",
+                  "description": "Provider repository or model identifier used when queueing a download."
+                },
+                "default": {
+                  "type": "boolean",
+                  "description": "Marks the canonical alternate used for displayed size, install path, and download jobs."
+                },
                 "estimatedSizeBytes": {
                   "type": ["integer", "string"],
                   "description": "Estimated bytes for the actual files downloaded after applying the files filter. Refresh from the provider when upstream files change."

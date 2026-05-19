@@ -84,8 +84,15 @@ def write_contract_manifests(config_dir: Path) -> None:
               "downloads": [
                 {
                   "provider": "huggingface",
+                  "repo": "owner/alternate-base-model",
+                  "files": ["*.bin"],
+                  "estimatedSizeBytes": 536870912
+                },
+                {
+                  "provider": "huggingface",
                   "repo": "owner/base-model",
                   "files": ["*.safetensors"],
+                  "default": true,
                   "estimatedSizeBytes": 12884901888
                 }
               ],

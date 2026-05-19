@@ -1923,6 +1923,15 @@
       "downloadable": true,
       "downloads": [
         {
+          "estimatedSizeBytes": 536870912,
+          "files": [
+            "*.bin"
+          ],
+          "provider": "huggingface",
+          "repo": "owner/alternate-base-model"
+        },
+        {
+          "default": true,
           "estimatedSizeBytes": 12884901888,
           "files": [
             "*.safetensors"
