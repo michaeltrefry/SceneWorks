@@ -2138,7 +2138,10 @@ async fn delete_model(
     let cleanup_source = removed_entry.as_ref().unwrap_or(&model);
     let mut removed_paths = Vec::new();
     let mut retained_paths = Vec::new();
-    let allowed_roots = vec![state.settings.data_dir.join("models")];
+    let allowed_roots = vec![
+        state.settings.data_dir.join("models"),
+        huggingface_hub_cache_dir(&state.settings.data_dir),
+    ];
     for path in model_artifact_paths(cleanup_source, &state.settings.data_dir) {
         remove_owned_artifact_path(
             path,
@@ -3643,13 +3646,27 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
             download_size_bytes.is_none() && fallback_size_bytes.is_some();
         let (downloadable, installed_path, installed) =
             if let Some(download_context) = download_context {
-                let installed_path = state
+                let managed_path = state
                     .settings
                     .data_dir
                     .join("models")
                     .join(safe_download_dir(&download_context.repo));
-                let installed = model_is_installed(&installed_path);
-                (true, Some(installed_path.display().to_string()), installed)
+                let cache_path =
+                    huggingface_repo_cache_path(&state.settings.data_dir, &download_context.repo);
+                let cache_installed = cache_path
+                    .as_ref()
+                    .is_some_and(|path| huggingface_repo_cache_exists(path));
+                let managed_installed = model_is_installed(&managed_path);
+                let installed_path = if cache_installed {
+                    cache_path
+                } else {
+                    Some(managed_path)
+                };
+                (
+                    true,
+                    installed_path.map(|path| path.display().to_string()),
+                    managed_installed || cache_installed,
+                )
             } else if let Some(installed_path) =
                 model_manifest_installed_path(model, &state.settings.data_dir)
             {
@@ -5624,6 +5641,47 @@ fn model_is_installed(path: &FsPath) -> bool {
     path.is_dir() && path.join(".sceneworks-download-complete.json").is_file()
 }
 
+fn huggingface_hub_cache_dir(data_dir: &FsPath) -> PathBuf {
+    if let Some(path) = std::env::var("HUGGINGFACE_HUB_CACHE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var("HF_HOME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path).join("hub");
+    }
+    data_dir.join("cache").join("huggingface").join("hub")
+}
+
+fn huggingface_repo_cache_path(data_dir: &FsPath, repo: &str) -> Option<PathBuf> {
+    let safe_repo = repo
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character.to_string()
+            } else {
+                "--".to_owned()
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if safe_repo.is_empty() {
+        return None;
+    }
+    Some(huggingface_hub_cache_dir(data_dir).join(format!("models--{safe_repo}")))
+}
+
+fn huggingface_repo_cache_exists(path: &FsPath) -> bool {
+    path.join("snapshots").is_dir() || path.join("blobs").is_dir()
+}
+
 fn lora_is_installed(path: &FsPath) -> bool {
     first_safetensors_path(path).is_some()
 }
@@ -5640,6 +5698,9 @@ fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<PathBuf> {
             .map(str::to_owned)
     }) {
         paths.push(data_dir.join("models").join(safe_download_dir(&repo)));
+        if let Some(cache_path) = huggingface_repo_cache_path(data_dir, &repo) {
+            paths.push(cache_path);
+        }
     }
     if let Some(source_path) = model
         .get("source")
@@ -8261,6 +8322,70 @@ mod tests {
         assert_eq!(models[0]["downloadable"], false);
         assert_eq!(models[0]["installState"], "installed");
         assert_eq!(models[0]["installedPath"], model_dir.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn downloadable_model_catalog_uses_huggingface_cache_install_state() {
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "base_model",
+                "name": "Base Model",
+                "type": "image",
+                "family": "z-image",
+                "downloads": [{ "provider": "huggingface", "repo": "owner/model" }]
+              }]
+            }
+            "#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user presets writes");
+        let cache_dir = temp_dir
+            .path()
+            .join("data/cache/huggingface/hub/models--owner--model/snapshots/abc123");
+        std::fs::create_dir_all(&cache_dir).expect("hf cache creates");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(models[0]["id"], "base_model");
+        assert_eq!(models[0]["downloadable"], true);
+        assert_eq!(models[0]["installState"], "installed");
+        assert!(models[0]["installedPath"]
+            .as_str()
+            .is_some_and(|value| value.contains("models--owner--model")));
     }
 
     #[tokio::test]

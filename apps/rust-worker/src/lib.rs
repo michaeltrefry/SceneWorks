@@ -995,6 +995,41 @@ async fn run_model_download_job(
     )
     .await?;
 
+    if let Some(cache_path) =
+        download_model_with_hf_cli(api, settings, job, repo, revision, &files, &target_dir).await?
+    {
+        let mut result = JsonObject::new();
+        result.insert(
+            "modelId".to_owned(),
+            job.payload.get("modelId").cloned().unwrap_or(Value::Null),
+        );
+        result.insert("repo".to_owned(), Value::String(repo.to_owned()));
+        result.insert(
+            "path".to_owned(),
+            Value::String(cache_path.display().to_string()),
+        );
+        result.insert(
+            "storage".to_owned(),
+            Value::String("huggingface_cache".to_owned()),
+        );
+        result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Completed,
+                ProgressStage::Completed,
+                1.0,
+                "Model download completed in the Hugging Face cache.",
+                None,
+                Some(result),
+                None,
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let snapshot =
         HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
     if let Some(total_bytes) = snapshot.total_bytes() {
@@ -1061,6 +1096,120 @@ async fn run_model_download_job(
     )
     .await?;
     Ok(())
+}
+
+async fn download_model_with_hf_cli(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    repo: &str,
+    revision: &str,
+    files: &[String],
+    marker_dir: &Path,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(program) = hf_cli_program().await else {
+        return Ok(None);
+    };
+    if settings.huggingface_base_url.trim_end_matches('/') != DEFAULT_HUGGINGFACE_BASE_URL {
+        return Ok(None);
+    }
+    let cache_dir = huggingface_hub_cache_dir(&settings.data_dir);
+    tokio::fs::create_dir_all(&cache_dir).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Downloading,
+            ProgressStage::Downloading,
+            0.12,
+            &format!("Downloading {repo} into the Hugging Face cache."),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+
+    let mut command = Command::new(program);
+    command
+        .arg("download")
+        .arg(repo)
+        .arg("--repo-type")
+        .arg("model")
+        .arg("--revision")
+        .arg(revision)
+        .arg("--cache-dir")
+        .arg(&cache_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(token) = &settings.huggingface_token {
+        command.env("HF_TOKEN", token);
+    }
+    for pattern in files {
+        command.arg("--include").arg(pattern);
+    }
+
+    let mut child = command.spawn().map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "Failed to start Hugging Face CLI. Falling back to direct downloads is only possible when the CLI is absent, not when it fails to launch: {error}"
+        ))
+    })?;
+    let mut stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.read_to_end(&mut bytes).await;
+        }
+        bytes
+    });
+    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status?,
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                if let Err(error) = check_cancel(api, &job.id, "Model download canceled by user.").await {
+                    let _ = child.kill().await;
+                    return Err(error);
+                }
+            }
+        }
+    };
+    let stderr = stderr_task.await.unwrap_or_default();
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        let detail = bounded_tail(&stderr, 10, 2000);
+        let message = if detail.trim().is_empty() {
+            "Hugging Face CLI download failed without stderr output.".to_owned()
+        } else {
+            format!("Hugging Face CLI download failed:\n{detail}")
+        };
+        return Err(WorkerError::InvalidPayload(message));
+    }
+
+    let cache_path = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Unable to resolve Hugging Face cache path for {repo}."
+        ))
+    })?;
+    write_model_install_marker(marker_dir, &job.payload, repo, &job.id).await?;
+    Ok(Some(cache_path))
+}
+
+async fn hf_cli_program() -> Option<&'static str> {
+    for program in ["hf", "huggingface-cli"] {
+        let status = Command::new(program)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        if status.is_ok_and(|status| status.success()) {
+            return Some(program);
+        }
+    }
+    None
 }
 
 /// Locates the first `.safetensors` under `dir`, reads its header, and
@@ -3084,6 +3233,44 @@ pub fn safe_download_dir(value: &str) -> String {
     }
 }
 
+fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var("HUGGINGFACE_HUB_CACHE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var("HF_HOME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path).join("hub");
+    }
+    data_dir.join("cache").join("huggingface").join("hub")
+}
+
+fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBuf> {
+    let cache_dir = huggingface_hub_cache_dir(data_dir);
+    let safe_repo = repo
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character.to_string()
+            } else {
+                "--".to_owned()
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if safe_repo.is_empty() {
+        return None;
+    }
+    Some(cache_dir.join(format!("models--{safe_repo}")))
+}
+
 async fn directory_size(path: &Path) -> u64 {
     let mut total = 0_u64;
     let mut stack = vec![path.to_path_buf()];
@@ -4342,6 +4529,18 @@ mod tests {
         ));
         assert_eq!(safe_download_dir("owner/model name"), "owner__model__name");
         assert_eq!(safe_download_dir("///"), "download");
+    }
+
+    #[test]
+    fn huggingface_cache_paths_follow_hub_layout() {
+        let root = tempdir().expect("temp dir creates");
+        let path = super::huggingface_repo_cache_path(root.path(), "owner/model-name")
+            .expect("cache path resolves");
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("models--owner--model-name")
+        );
     }
 
     #[test]

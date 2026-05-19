@@ -30,8 +30,10 @@ Native LTX-2.3 text-to-video and image-to-video require these local resources:
 - `distilledLoraPath`
 - `gemmaRoot`
 
-By default the worker resolves those from the model manifest `resources` block
-under `data/models`. A job can override them through matching advanced settings.
+By default the worker resolves those from the model manifest `resources` block,
+preferring SceneWorks-managed imports under `data/models` and then the shared
+Hugging Face cache (`HUGGINGFACE_HUB_CACHE` or `HF_HOME/hub`). A job can
+override them through matching advanced settings.
 Use `advanced.mockNativeInference=true` only for adapter smoke tests; otherwise
 the native adapter loads `ltx-pipelines` and writes MP4 video assets.
 

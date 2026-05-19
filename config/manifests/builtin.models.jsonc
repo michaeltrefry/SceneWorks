@@ -166,7 +166,12 @@
         {
           "provider": "huggingface",
           "repo": "Lightricks/LTX-2.3",
-          "files": [],
+          "files": [
+            "ltx-2.3-22b-dev.safetensors",
+            "ltx-2.3-22b-distilled-1.1.safetensors",
+            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+            "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+          ],
           "default": true,
           "estimatedSizeBytes": 157004895813
         },
@@ -183,6 +188,10 @@
       },
       "resources": {
         "checkpoint": {
+          "repo": "Lightricks/LTX-2.3",
+          "file": "ltx-2.3-22b-dev.safetensors"
+        },
+        "distilledCheckpoint": {
           "repo": "Lightricks/LTX-2.3",
           "file": "ltx-2.3-22b-distilled-1.1.safetensors"
         },

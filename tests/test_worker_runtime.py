@@ -1179,6 +1179,17 @@ def write_native_ltx_resource_files(tmp_path):
     return checkpoint, spatial, lora, gemma
 
 
+def write_huggingface_cache_resource(cache_root, repo, file_name=None):
+    safe_repo = "".join(char if char.isalnum() or char in "._-" else "--" for char in repo).strip("-")
+    snapshot = cache_root / f"models--{safe_repo}" / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    if file_name is not None:
+        path = snapshot / file_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(file_name.encode("utf-8"))
+    return snapshot
+
+
 def test_native_ltx_adapter_reports_mocked_pipeline_requirements(tmp_path):
     data_dir = tmp_path / "data"
     config_dir = tmp_path / "config"
@@ -1244,6 +1255,70 @@ def test_native_ltx_missing_resources_reports_all_paths(tmp_path):
     assert "gemmaRoot" in message
     assert str(data_dir / "models" / safe_download_dir("Lightricks/LTX-2.3") / "checkpoint.safetensors") in message
     assert str(data_dir / "models" / safe_download_dir("google/gemma-3-4b-it")) in message
+
+
+def test_native_ltx_resources_resolve_from_huggingface_cache(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    cache_root = tmp_path / "hf" / "hub"
+    data_dir.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(cache_root))
+    write_native_ltx_manifest(config_dir)
+    write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "checkpoint.safetensors")
+    write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "spatial.safetensors")
+    write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "distilled-lora.safetensors")
+    gemma_snapshot = write_huggingface_cache_resource(cache_root, "google/gemma-3-4b-it", "config.json")
+    adapter = LtxPipelinesVideoAdapter()
+    request = adapter.prepare(
+        settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+        job={
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "advanced": {"mockNativeInference": True},
+            },
+        },
+    )
+
+    adapter.ensure_models(request)
+    resources = adapter.estimate_requirements(request)["resources"]
+
+    assert resources["checkpointPath"].endswith("checkpoint.safetensors")
+    assert str(cache_root) in resources["checkpointPath"]
+    assert resources["spatialUpscalerPath"].endswith("spatial.safetensors")
+    assert resources["distilledLoraPath"].endswith("distilled-lora.safetensors")
+    assert resources["gemmaRoot"] == str(gemma_snapshot)
+
+
+def test_native_ltx_fast_pipeline_does_not_require_distilled_lora(tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    data_dir.mkdir()
+    checkpoint, spatial, _lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, gemma=gemma)
+    adapter = LtxPipelinesVideoAdapter()
+    request = adapter.prepare(
+        settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+        job={
+            "id": "job-1",
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_video",
+                "prompt": "city",
+                "model": "ltx_2_3",
+                "quality": "fast",
+                "advanced": {"mockNativeInference": True},
+            },
+        },
+    )
+
+    adapter.ensure_models(request)
+    requirements = adapter.estimate_requirements(request)
+
+    assert requirements["pipeline"] == "ltx_pipelines.distilled"
 
 
 def test_native_ltx_advanced_resource_overrides_win(tmp_path):

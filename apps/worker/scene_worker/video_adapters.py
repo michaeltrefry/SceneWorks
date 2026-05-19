@@ -27,7 +27,13 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import filter_call_kwargs
-from .image_adapters import require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
+from .image_adapters import (
+    huggingface_repo_cache_path,
+    require_inference_backend_for_gpu_worker,
+    select_torch_device,
+    select_torch_dtype,
+    write_json,
+)
 from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline, reject_loras_if_unsupported
 from .settings import WorkerSettings
 
@@ -307,13 +313,16 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
         reject_loras_if_unsupported(request.loras, self.id)
         resources = self.resolve_resources(request)
-        missing = self._missing_resources(resources)
+        missing = self._missing_resources(request, resources)
         if missing:
             details = "\n".join(f"- {label}: {path}" for label, path in missing)
+            override_keys = ["checkpointPath", "spatialUpscalerPath", "gemmaRoot"]
+            if self._pipeline_module(request) != "ltx_pipelines.distilled":
+                override_keys.insert(2, "distilledLoraPath")
             raise RuntimeError(
                 "Native LTX-2.3 requires local model resources before generation. "
                 "Install the LTX-2.3 model resources in Model Manager or set advanced overrides "
-                "for checkpointPath, spatialUpscalerPath, distilledLoraPath, and gemmaRoot.\n"
+                f"for {', '.join(override_keys)}.\n"
                 f"Missing resources:\n{details}"
             )
         self._resources_by_model[request.model] = resources
@@ -663,12 +672,13 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         settings = self._settings or WorkerSettings()
         entry = ltx_model_manifest_entry(settings, request.model)
         resources = entry.get("resources", {}) if isinstance(entry.get("resources"), dict) else {}
+        checkpoint_resource_key = "distilledCheckpoint" if self._pipeline_module(request) == "ltx_pipelines.distilled" else "checkpoint"
         return LtxPipelinesResources(
             checkpoint_path=self._resource_path(
                 settings,
                 request,
                 resources,
-                "checkpoint",
+                checkpoint_resource_key,
                 "checkpointPath",
             ),
             spatial_upsampler_path=self._resource_path(
@@ -716,6 +726,8 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         if override:
             return resolve_worker_path(settings, override)
         resource = resources.get(resource_key) if isinstance(resources.get(resource_key), dict) else {}
+        if not resource and resource_key == "distilledCheckpoint":
+            resource = resources.get("checkpoint") if isinstance(resources.get("checkpoint"), dict) else {}
         configured_path = resource.get("path")
         if configured_path:
             return resolve_manifest_path(settings, configured_path)
@@ -723,7 +735,18 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         root = settings.data_dir / "models" / safe_download_dir(repo)
         file_name = resource.get("file")
         if expect_file and file_name:
-            return root / str(file_name)
+            local_path = root / str(file_name)
+            if local_path.is_file():
+                return local_path
+            cached_path = huggingface_cached_resource_file(repo, str(file_name))
+            if cached_path is not None:
+                return cached_path
+            return local_path
+        if not expect_file and root.is_dir():
+            return root
+        cached_root = huggingface_cached_snapshot_dir(repo)
+        if cached_root is not None:
+            return cached_root
         return root
 
     def _optional_resource_path(
@@ -742,13 +765,14 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             return None
         return self._resource_path(settings, request, resources, resource_key, advanced_key)
 
-    def _missing_resources(self, resources: LtxPipelinesResources) -> list[tuple[str, Path]]:
+    def _missing_resources(self, request: VideoRequest, resources: LtxPipelinesResources) -> list[tuple[str, Path]]:
         required = [
             ("checkpointPath", resources.checkpoint_path, "file"),
             ("spatialUpscalerPath", resources.spatial_upsampler_path, "file"),
-            ("distilledLoraPath", resources.distilled_lora_path, "file"),
             ("gemmaRoot", resources.gemma_root, "dir"),
         ]
+        if self._pipeline_module(request) != "ltx_pipelines.distilled":
+            required.insert(2, ("distilledLoraPath", resources.distilled_lora_path, "file"))
         missing = [
             (label, path)
             for label, path, kind in required
@@ -1317,8 +1341,51 @@ def resolve_manifest_path(settings: WorkerSettings, value: Any) -> Path:
     raw_path = str(value).strip()
     if "${DATA_DIR}" in raw_path:
         raw_path = raw_path.replace("${DATA_DIR}", str(settings.data_dir))
+    if "${HF_CACHE}" in raw_path:
+        raw_path = raw_path.replace("${HF_CACHE}", str(huggingface_cache_root()))
     path = Path(raw_path)
     return path if path.is_absolute() else settings.data_dir / path
+
+
+def huggingface_cache_root() -> Path:
+    default_home = Path.home() / ".cache" / "huggingface"
+    hf_home = Path(os.getenv("HF_HOME") or default_home)
+    return Path(os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
+
+
+def huggingface_cached_snapshot_dir(repo: str) -> Path | None:
+    repo_cache = huggingface_repo_cache_path(repo)
+    if repo_cache is None:
+        return None
+    snapshots_dir = repo_cache / "snapshots"
+    if not snapshots_dir.is_dir():
+        return None
+    try:
+        snapshots = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+    except OSError:
+        return None
+    snapshots.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+    return snapshots[0] if snapshots else None
+
+
+def huggingface_cached_resource_file(repo: str, file_name: str) -> Path | None:
+    relative = Path(file_name)
+    if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
+        return None
+    repo_cache = huggingface_repo_cache_path(repo)
+    snapshots_dir = repo_cache / "snapshots" if repo_cache is not None else None
+    if snapshots_dir is None or not snapshots_dir.is_dir():
+        return None
+    try:
+        snapshots = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+    except OSError:
+        return None
+    snapshots.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+    for snapshot in snapshots:
+        candidate = snapshot / relative
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def safe_download_dir(repo: str) -> str:

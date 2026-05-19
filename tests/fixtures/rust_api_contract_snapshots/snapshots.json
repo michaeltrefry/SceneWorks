@@ -1832,6 +1832,7 @@
       "installedPath": "<runtime-root>/data/loras/style.safetensors",
       "manifestPath": "<runtime-root>/config/manifests/builtin.loras.jsonc",
       "name": "Style LoRA",
+      "removable": false,
       "scope": "builtin",
       "source": {
         "path": "loras/style.safetensors",
@@ -1913,6 +1914,7 @@
       "capabilities": [
         "text_to_image"
       ],
+      "catalogScope": "user",
       "defaults": {
         "height": 1024,
         "width": 1024
@@ -1952,6 +1954,7 @@
       },
       "name": "User Model",
       "paths": {},
+      "removable": true,
       "type": "image",
       "ui": {
         "label": "User"
@@ -1964,6 +1967,7 @@
         "edit_image",
         "character_image"
       ],
+      "catalogScope": "builtin",
       "defaults": {
         "height": 1024,
         "width": 1024
@@ -1985,6 +1989,7 @@
       },
       "name": "Z-Image Turbo",
       "paths": {},
+      "removable": false,
       "type": "image",
       "ui": {
         "label": "Z-Image"
