@@ -68,6 +68,16 @@ function mergeFreshJobs(currentJobs, serverJobs) {
   return [...merged.values()].sort(sortNewest);
 }
 
+function generatedResultAssetCount(job) {
+  if (Array.isArray(job.result?.assetIds)) {
+    return job.result.assetIds.length;
+  }
+  if (Array.isArray(job.result?.assets)) {
+    return job.result.assets.length;
+  }
+  return 0;
+}
+
 const localJobStackLimit = 4;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 
@@ -105,6 +115,7 @@ export function App() {
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const selectedTimelineIdRef = useRef(null);
   const timelineApplyQueueRef = useRef(Promise.resolve());
+  const generatedAssetRefreshesRef = useRef(new Map());
 
   const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
   const imageModels = useMemo(() => {
@@ -256,13 +267,26 @@ export function App() {
 
     function handleJobUpdated(event) {
       const job = JSON.parse(event.data);
-      const hasGeneratedAssets = Boolean(job.result?.generationSetId || job.result?.assetIds?.length);
+      const hasGeneratedAssets = Boolean(job.result?.generationSetId || job.result?.assetIds?.length || job.result?.assets?.length);
+      const resultAssetCount = generatedResultAssetCount(job);
+      const generationSetId = job.result?.generationSetId ?? "";
+      const refreshKey = job.id ?? generationSetId;
+      const previousRefresh = generatedAssetRefreshesRef.current.get(refreshKey) ?? { assetCount: 0, generationSetId: "" };
+      const shouldRefreshGeneratedAssets =
+        Boolean(job.projectId) &&
+        hasGeneratedAssets &&
+        (resultAssetCount > previousRefresh.assetCount ||
+          (resultAssetCount === 0 && generationSetId && generationSetId !== previousRefresh.generationSetId));
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       if (hasGeneratedAssets) {
         if (job.result?.generationSetId) {
           setLatestGenerationSetId(job.result.generationSetId);
         }
-        if (job.projectId) {
+        generatedAssetRefreshesRef.current.set(refreshKey, {
+          assetCount: Math.max(resultAssetCount, previousRefresh.assetCount),
+          generationSetId: generationSetId || previousRefresh.generationSetId,
+        });
+        if (shouldRefreshGeneratedAssets) {
           refreshAssets(job.projectId);
         }
       }

@@ -26,6 +26,7 @@ function jobResultAssets(job, assets) {
   const resultById = new Map(resultAssets.map((asset) => [asset.id, catalogById.get(asset.id) ?? asset]));
   const assetIds = job.result?.assetIds ?? [];
   if (assetIds.length) {
+    // The worker emits assetIds in batch-slot order, so preserve this array order when filling review slots.
     return assetIds
       .map((id) => resultById.get(id) ?? catalogById.get(id))
       .filter((asset) => asset?.type === "image");
@@ -59,7 +60,8 @@ function assetBatchIndex(asset) {
       return value;
     }
   }
-  const fileMatch = String(asset?.file?.path ?? "").match(/_(\d{4})\.[^./\\]+$/);
+  const basename = String(asset?.file?.path ?? "").split(/[\\/]/).pop() ?? "";
+  const fileMatch = basename.match(/_(\d{4})\.[^.]+$/);
   if (fileMatch) {
     return Number(fileMatch[1]) - 1;
   }

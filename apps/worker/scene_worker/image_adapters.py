@@ -254,7 +254,7 @@ class ImageAssetWriter:
             progress(
                 "saving",
                 "saving",
-                0.78 + ((index + 1) / image_count) * 0.17,
+                image_batch_progress(index + 1, image_count),
                 f"Saved image asset {index + 1} of {image_count}.",
                 {
                     "generationSetId": generation_set_id,
@@ -311,10 +311,8 @@ class ZImageDiffusersAdapter:
         total = request.count
 
         def image_at_index(index: int) -> Image.Image:
-            if cancel_requested():
-                raise InterruptedError("Image generation canceled by user.")
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress("running", "generating", 0.24 + (index / total) * 0.48, f"Running Z-Image {index + 1} of {total}.")
+            progress("running", "generating", image_batch_progress(index, total), f"Running Z-Image {index + 1} of {total}.")
             return self._run_pipeline(settings, pipe, request, seed)
 
         return ImageAssetWriter().write_incremental_outputs(
@@ -482,10 +480,8 @@ class QwenImageAdapter:
         self._apply_loras(pipe, request)
 
         def image_at_index(index: int) -> Image.Image:
-            if cancel_requested():
-                raise InterruptedError("Image generation canceled by user.")
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            progress("running", "generating", 0.24 + (index / request.count) * 0.48, f"Running Qwen Image {index + 1} of {request.count}.")
+            progress("running", "generating", image_batch_progress(index, request.count), f"Running Qwen Image {index + 1} of {request.count}.")
             return self._run_pipeline(settings, pipe, request, seed)
 
         return ImageAssetWriter().write_incremental_outputs(
@@ -625,13 +621,11 @@ class ProceduralImageAdapter:
             raise RuntimeError(f"{request.model} does not support image editing.")
 
         def image_at_index(index: int) -> Image.Image:
-            if cancel_requested():
-                raise InterruptedError("Image generation canceled by user.")
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
             progress(
                 "running",
                 "generating",
-                0.2 + ((index + 1) / request.count) * 0.55,
+                image_batch_progress(index, request.count),
                 f"Generated preview image {index + 1} of {request.count}.",
             )
             return render_preview_image(request, model_target, seed, index)
@@ -687,6 +681,12 @@ def resolve_seed(seed: int | None, prompt: str, index: int, seeds: list[int] | N
         return int(seeds[index])
     digest = hashlib.sha256(f"{prompt}:{index}".encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
+
+
+def image_batch_progress(completed_count: int, total: int) -> float:
+    safe_total = max(1, total)
+    bounded_count = min(max(0, completed_count), safe_total)
+    return 0.78 + (bounded_count / safe_total) * 0.17
 
 
 def select_torch_device(torch: Any, gpu_id: str | None = None) -> str:

@@ -15,6 +15,7 @@ from scene_worker.image_adapters import (
     build_asset_sidecar,
     create_image_adapter,
     huggingface_repo_cache_path,
+    image_batch_progress,
     image_request_from_job,
     require_inference_backend_for_gpu_worker,
     resolve_seed,
@@ -558,6 +559,50 @@ def test_image_asset_writer_persists_each_image_before_requesting_next(tmp_path)
 
     assert len(result["assetIds"]) == 2
     assert len(list((project_path / "assets" / "images").glob("*.png"))) == 2
+
+
+def test_image_asset_writer_batch_progress_is_monotonic(tmp_path):
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    job = {
+        "id": "job-1",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "Neon alley",
+            "model": "z_image_turbo",
+            "count": 4,
+            "width": 16,
+            "height": 16,
+        },
+    }
+    progress_values = []
+
+    def progress(_status, _stage, value, _message, result=None):
+        progress_values.append(value)
+
+    def image_at_index(index):
+        progress("running", "generating", image_batch_progress(index, 4), f"Running image {index + 1} of 4.")
+        return Image.new("RGB", (16, 16), (255, 0, 0))
+
+    ImageAssetWriter().write_incremental_outputs(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        image_count=4,
+        image_at_index=image_at_index,
+        adapter_id="z_image_diffusers",
+        progress=progress,
+        cancel_requested=lambda: False,
+        raw_settings={"realModelInference": True},
+    )
+
+    assert progress_values == sorted(progress_values)
 
 
 def test_friendly_failure_identifies_gpu_oom():
