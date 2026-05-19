@@ -385,6 +385,89 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Not Found");
   });
 
+  it("does not show a stale timeline lookup error after creating a workspace", async () => {
+    const requests = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests.push({ method: options.method ?? "GET", path });
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects") && options.method === "POST") {
+        return Promise.resolve(response({ id: "project-2", name: "Fresh Workspace" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project One" }]));
+      }
+      if (path.endsWith("/projects/project-1/timelines/timeline-1")) {
+        return Promise.resolve(
+          response({
+            id: "timeline-1",
+            projectId: "project-1",
+            name: "Main timeline",
+            aspectRatio: "16:9",
+            width: 1280,
+            height: 720,
+            fps: 30,
+            duration: 0,
+            tracks: [],
+            transitions: [],
+          }),
+        );
+      }
+      if (path.endsWith("/projects/project-1/timelines")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "timeline-1",
+              name: "Main timeline",
+              filePath: "timelines/main.sceneworks.timeline.json",
+              aspectRatio: "16:9",
+              width: 1280,
+              height: 720,
+              fps: 30,
+              duration: 0,
+              createdAt: "2026-05-19T12:00:00Z",
+              updatedAt: "2026-05-19T12:00:00Z",
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/projects/project-2/timelines/timeline-1")) {
+        return Promise.resolve(errorResponse(404, "Timeline not found"));
+      }
+      if (path.endsWith("/projects/project-2/timelines")) {
+        return Promise.resolve(response([]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector(".project-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "New workspace").click();
+    });
+    await changeField(container.querySelector('[aria-label="New workspace name"]'), "Fresh Workspace");
+    await act(async () => {
+      [...container.querySelectorAll(".project-menu-create button")].find((button) => button.textContent === "Create").click();
+    });
+    await settle();
+
+    expect(requests.some((request) => request.path.endsWith("/projects/project-2/timelines/timeline-1"))).toBe(false);
+    expect(container.textContent).toContain("Fresh Workspace");
+    expect(container.textContent).not.toContain("Timeline not found");
+  });
+
   it("switches Replace Person to the replacement-capable video model", async () => {
     root = createRoot(container);
     await act(async () => {

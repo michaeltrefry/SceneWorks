@@ -293,6 +293,7 @@ export function App() {
   const [characters, setCharacters] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
   const [timelines, setTimelines] = useState([]);
+  const [timelinesProjectId, setTimelinesProjectId] = useState(null);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
   const [activeTimeline, setActiveTimeline] = useState(null);
   const [selectedAssetId, setSelectedAssetId] = useState(null);
@@ -441,6 +442,7 @@ export function App() {
       setCharacters([]);
       setPersonTracks([]);
       setTimelines([]);
+      setTimelinesProjectId(null);
       setRecipePresets([]);
       setSelectedTimelineId(null);
       setActiveTimeline(null);
@@ -455,11 +457,11 @@ export function App() {
   }, [activeProject?.id, authenticated, token]);
 
   useEffect(() => {
-    if (!activeProject || !selectedTimelineId) {
+    if (!activeProject || !selectedTimelineId || timelinesProjectId !== activeProject.id) {
       return;
     }
     loadTimeline(activeProject.id, selectedTimelineId);
-  }, [activeProject?.id, selectedTimelineId]);
+  }, [activeProject?.id, selectedTimelineId, timelinesProjectId]);
 
   useEffect(() => {
     if (!authenticated) {
@@ -843,8 +845,12 @@ export function App() {
     }
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token);
+      if (activeProjectRef.current?.id && activeProjectRef.current.id !== projectId) {
+        return;
+      }
       setTimelines(items);
-      setSelectedTimelineId((current) => current ?? items[0]?.id ?? null);
+      setTimelinesProjectId(projectId);
+      setSelectedTimelineId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
       if (!items.length) {
         setActiveTimeline(null);
       }
@@ -857,6 +863,9 @@ export function App() {
   async function loadTimeline(projectId, timelineId) {
     try {
       const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
+      if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
+        return;
+      }
       setActiveTimeline(timeline);
       setError("");
     } catch (err) {
@@ -875,6 +884,7 @@ export function App() {
         body: JSON.stringify(payload),
       });
       setTimelines((items) => [created, ...items.filter((item) => item.id !== created.id)]);
+      setTimelinesProjectId(activeProject.id);
       setSelectedTimelineId(created.id);
       setActiveTimeline(created);
       setError("");
