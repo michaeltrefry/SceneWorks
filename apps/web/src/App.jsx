@@ -80,6 +80,12 @@ function generatedResultAssetCount(job) {
 
 const localJobStackLimit = 4;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
+const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
+
+function uploadLimitLabel(bytes) {
+  const gib = bytes / (1024 * 1024 * 1024);
+  return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
+}
 
 export function App() {
   const [health, setHealth] = useState(null);
@@ -517,8 +523,8 @@ export function App() {
 
   async function createModelImportJob(payload, options = {}) {
     const { file, ...metadata } = payload;
-    if (file?.size > maxLoraUploadBytes) {
-      throw new Error("Uploaded model file exceeds the 2GB limit");
+    if (file?.size > maxModelUploadBytes) {
+      throw new Error(`Uploaded model file exceeds the ${uploadLimitLabel(maxModelUploadBytes)} limit`);
     }
     let body;
     if (file) {

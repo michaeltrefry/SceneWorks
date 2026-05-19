@@ -1673,7 +1673,7 @@ describe("SceneWorks app shell", () => {
       expect.objectContaining({
         sourceUrl: "https://example.com/models/custom.safetensors",
         name: "Custom Model",
-        type: "image",
+        modelType: "image",
       }),
     );
     expect(onImportModel.mock.calls[0][0]).not.toHaveProperty("family");

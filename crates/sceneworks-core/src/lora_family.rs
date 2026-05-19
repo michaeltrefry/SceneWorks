@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 /// Maximum allowed safetensors header size, in bytes. Matches the
 /// pre-existing 16 MiB cap enforced by the rust-api.
@@ -128,6 +128,127 @@ pub fn detect_model_family(path: &Path) -> Result<Option<String>, SafetensorsHea
     };
     let header = read_safetensors_header(&safetensors_path)?;
     Ok(detect_lora_family(&header))
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FamilyMismatch {
+    pub supplied: String,
+    pub detected: String,
+}
+
+/// Applies the shared import policy for detected architecture families.
+///
+/// A confident detector result rejects a conflicting user-supplied family; a
+/// missing detector result keeps the supplied family, if any.
+pub fn reconcile_detected_family(
+    supplied: Option<String>,
+    detected: Option<String>,
+) -> Result<Option<String>, FamilyMismatch> {
+    match (supplied, detected) {
+        (Some(supplied), Some(detected)) if supplied != detected => {
+            Err(FamilyMismatch { supplied, detected })
+        }
+        (Some(supplied), Some(_)) => Ok(Some(supplied)),
+        (None, Some(detected)) => Ok(Some(detected)),
+        (Some(supplied), None) => Ok(Some(supplied)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Adds model-manifest defaults derived from the imported model type/family.
+/// Existing author-supplied fields are preserved.
+pub fn apply_model_manifest_defaults(
+    entry: &mut Map<String, Value>,
+    model_type: &str,
+    family: Option<&str>,
+) {
+    entry
+        .entry("downloads".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    entry
+        .entry("defaults".to_owned())
+        .or_insert_with(|| json!({}));
+    entry
+        .entry("limits".to_owned())
+        .or_insert_with(|| json!({}));
+    entry.entry("ui".to_owned()).or_insert_with(|| json!({}));
+
+    let Some(family) = family
+        .map(normalize_model_family)
+        .filter(|value| !value.is_empty())
+    else {
+        entry
+            .entry("loraCompatibility".to_owned())
+            .or_insert_with(|| json!({}));
+        return;
+    };
+
+    if let Some(adapter) = model_adapter_for_family(&family) {
+        entry
+            .entry("adapter".to_owned())
+            .or_insert_with(|| Value::String(adapter.to_owned()));
+    }
+
+    let capabilities = model_capabilities_for_type_and_family(model_type, &family);
+    if !capabilities.is_empty() {
+        entry.entry("capabilities".to_owned()).or_insert_with(|| {
+            Value::Array(
+                capabilities
+                    .into_iter()
+                    .map(|capability| Value::String(capability.to_owned()))
+                    .collect(),
+            )
+        });
+    }
+
+    let compatibility = entry
+        .entry("loraCompatibility".to_owned())
+        .or_insert_with(|| json!({}));
+    if let Some(object) = compatibility.as_object_mut() {
+        object
+            .entry("families".to_owned())
+            .or_insert_with(|| json!([family]));
+    }
+}
+
+pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
+    match normalize_model_family(family).as_str() {
+        "z-image" => Some("z_image_diffusers"),
+        "qwen-image" => Some("qwen_image"),
+        "ltx-video" => Some("ltx_video"),
+        "wan-video" => Some("wan_video"),
+        _ => None,
+    }
+}
+
+pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) -> Vec<&'static str> {
+    match (
+        model_type.trim().to_ascii_lowercase().as_str(),
+        normalize_model_family(family).as_str(),
+    ) {
+        ("image", "z-image") => vec!["text_to_image", "character_image", "style_variations"],
+        ("image", "qwen-image") => vec!["text_to_image", "style_variations"],
+        ("video", "ltx-video") => vec![
+            "image_to_video",
+            "text_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+        ],
+        ("video", "wan-video") => vec![
+            "image_to_video",
+            "text_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_model_family(family: &str) -> String {
+    family.trim().to_ascii_lowercase().replace('_', "-")
 }
 
 fn read_diffusers_model_index_family(dir: &Path) -> Option<String> {
@@ -652,6 +773,57 @@ mod tests {
             Some("sdxl")
         );
         assert!(diffusers_class_name_to_family("UnknownCustomPipeline").is_none());
+    }
+
+    #[test]
+    fn reconcile_detected_family_rejects_mismatches_only() {
+        assert_eq!(
+            reconcile_detected_family(Some("z-image".to_owned()), Some("z-image".to_owned()))
+                .unwrap()
+                .as_deref(),
+            Some("z-image")
+        );
+        assert_eq!(
+            reconcile_detected_family(None, Some("qwen-image".to_owned()))
+                .unwrap()
+                .as_deref(),
+            Some("qwen-image")
+        );
+        assert_eq!(
+            reconcile_detected_family(Some("wan-video".to_owned()), None)
+                .unwrap()
+                .as_deref(),
+            Some("wan-video")
+        );
+        assert_eq!(
+            reconcile_detected_family(Some("z-image".to_owned()), Some("qwen-image".to_owned()))
+                .unwrap_err(),
+            FamilyMismatch {
+                supplied: "z-image".to_owned(),
+                detected: "qwen-image".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn model_manifest_defaults_follow_supported_families() {
+        let mut entry = serde_json::Map::new();
+        apply_model_manifest_defaults(&mut entry, "video", Some("wan_video"));
+
+        assert_eq!(entry["adapter"], "wan_video");
+        assert_eq!(
+            entry["capabilities"],
+            json!([
+                "image_to_video",
+                "text_to_video",
+                "first_last_frame",
+                "extend_clip",
+                "video_bridge",
+                "replace_person"
+            ])
+        );
+        assert_eq!(entry["loraCompatibility"]["families"], json!(["wan-video"]));
+        assert_eq!(entry["downloads"], json!([]));
     }
 
     #[test]

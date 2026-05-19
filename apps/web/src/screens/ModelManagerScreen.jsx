@@ -165,7 +165,7 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
       const job = await onImportModel({
         ...(isFileImport ? { file: modelImportForm.file } : { sourceUrl: modelImportForm.sourceUrl.trim() }),
         name: modelImportForm.name.trim() || undefined,
-        type: modelImportForm.type,
+        modelType: modelImportForm.type,
         ...familyOverride,
       });
       const modelId = job?.payload?.modelId;

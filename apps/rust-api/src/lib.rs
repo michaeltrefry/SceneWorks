@@ -28,8 +28,8 @@ use sceneworks_core::jobs_store::{
     WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
-    detect_lora_family, detect_model_family, first_safetensors_path, read_safetensors_header,
-    SafetensorsHeaderError,
+    apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
+    read_safetensors_header, reconcile_detected_family, SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url, LoraUrlError};
 use sceneworks_core::project_store::{
@@ -69,13 +69,18 @@ const HEARTBEAT_SSE_DATA: &str = "{}";
 #[cfg(test)]
 const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
-const MAX_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
+const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
+const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
+const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
 const STALE_LORA_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 const MANIFEST_CACHE_LIMIT: usize = 16;
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 const API_MANAGED_MANIFEST_HEADER: &str = "// This file is rewritten by the SceneWorks API. Inline JSONC comments are not preserved across writes.";
 #[cfg(test)]
 static TEST_MAX_LORA_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_MAX_MODEL_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
@@ -490,12 +495,14 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         )
         .route(
             "/api/v1/models/import",
-            post(create_model_import_job).layer(DefaultBodyLimit::max(MAX_MULTIPART_BODY_BYTES)),
+            post(create_model_import_job)
+                .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
         .route("/api/v1/loras", get(list_loras))
         .route(
             "/api/v1/loras/import",
-            post(create_lora_import_job).layer(DefaultBodyLimit::max(MAX_MULTIPART_BODY_BYTES)),
+            post(create_lora_import_job)
+                .layer(DefaultBodyLimit::max(MAX_LORA_MULTIPART_BODY_BYTES)),
         )
         .route(
             "/api/v1/recipe-presets",
@@ -886,7 +893,7 @@ struct ModelImportRequest {
     model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "type", skip_serializing_if = "Option::is_none")]
     model_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repo: Option<String>,
@@ -2752,7 +2759,8 @@ async fn queue_model_import_job(
             allowed_source_roots
         };
         validate_lora_import_source_path(source_path, &allowed_source_roots)?;
-        let detected = detect_family_from_local_model_path(source_path)?;
+        let detected =
+            detect_model_family(FsPath::new(source_path)).map_err(model_family_inspection_error)?;
         payload.family = reconcile_model_family(
             payload.family.take(),
             detected,
@@ -2788,6 +2796,9 @@ async fn queue_model_import_job(
         if let Some(object) = manifest_entry.as_object_mut() {
             object.insert("family".to_owned(), Value::String(family));
         }
+    }
+    if let Some(object) = manifest_entry.as_object_mut() {
+        apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
     }
     let mut payload = to_json_object(&payload)?;
     payload.insert("modelId".to_owned(), manifest_entry["id"].clone());
@@ -2912,10 +2923,11 @@ async fn write_model_upload_field_to_staged_file(
             .map_err(|error| ApiError::bad_request(error.to_string()))?
         {
             uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-            if uploaded_bytes > max_lora_upload_bytes() {
-                return Err(ApiError::payload_too_large(
-                    "Uploaded model file exceeds the size limit",
-                ));
+            if uploaded_bytes > max_model_upload_bytes() {
+                return Err(ApiError::payload_too_large(format!(
+                    "Uploaded model file exceeds the {} limit",
+                    format_bytes(max_model_upload_bytes() as u64)
+                )));
             }
             file.write_all(&chunk)
                 .await
@@ -2952,19 +2964,15 @@ fn model_import_source_provider(payload: &ModelImportRequest) -> &'static str {
     }
 }
 
-/// Inspects a local model source (file or directory) and returns the detected
-/// family. Returns `Ok(None)` when the directory has no diffusers
-/// `model_index.json` and no readable `.safetensors`, or when the signal is
-/// ambiguous — callers should treat that as "unassociated".
-fn detect_family_from_local_model_path(source_path: &str) -> Result<Option<String>, ApiError> {
-    detect_model_family(FsPath::new(source_path)).map_err(|error| match error {
+fn model_family_inspection_error(error: SafetensorsHeaderError) -> ApiError {
+    match error {
         SafetensorsHeaderError::Io(io_error) => {
             ApiError::bad_request(format!("Unable to inspect model file: {io_error}"))
         }
         SafetensorsHeaderError::InvalidHeader => {
             ApiError::bad_request("Model file has an invalid safetensors header".to_owned())
         }
-    })
+    }
 }
 
 /// Applies the import-time policy for base models: confident detection rejects
@@ -2974,27 +2982,14 @@ fn detect_family_from_local_model_path(source_path: &str) -> Result<Option<Strin
 fn reconcile_model_family(
     supplied: Option<String>,
     detected: Option<String>,
-    context: &str,
+    _context: &str,
 ) -> Result<Option<String>, ApiError> {
-    match (supplied, detected) {
-        (Some(supplied), Some(detected)) => {
-            if supplied == detected {
-                Ok(Some(supplied))
-            } else {
-                Err(ApiError::bad_request(format!(
-                    "Model files appear to be {detected}, but family was declared as {supplied}. Re-import with family {detected} or pick different files."
-                )))
-            }
-        }
-        (None, Some(detected)) => Ok(Some(detected)),
-        (Some(supplied), None) => {
-            println!(
-                "Model import {context}: architecture detection inconclusive; accepting supplied family {supplied}"
-            );
-            Ok(Some(supplied))
-        }
-        (None, None) => Ok(None),
-    }
+    reconcile_detected_family(supplied, detected).map_err(|mismatch| {
+        ApiError::bad_request(format!(
+            "Model files appear to be {}, but family was declared as {}. Re-import with family {} or pick different files.",
+            mismatch.detected, mismatch.supplied, mismatch.detected
+        ))
+    })
 }
 
 fn max_lora_upload_bytes() -> usize {
@@ -3006,6 +3001,17 @@ fn max_lora_upload_bytes() -> usize {
         }
     }
     MAX_UPLOAD_BYTES
+}
+
+fn max_model_upload_bytes() -> usize {
+    #[cfg(test)]
+    {
+        let limit = TEST_MAX_MODEL_UPLOAD_BYTES.load(std::sync::atomic::Ordering::SeqCst);
+        if limit > 0 {
+            return limit;
+        }
+    }
+    MAX_MODEL_UPLOAD_BYTES
 }
 
 async fn list_jobs(
@@ -3471,6 +3477,11 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
                     .join(safe_download_dir(&download_context.repo));
                 let installed = model_is_installed(&installed_path);
                 (true, Some(installed_path.display().to_string()), installed)
+            } else if let Some(installed_path) =
+                model_manifest_installed_path(model, &state.settings.data_dir)
+            {
+                let installed = model_is_installed(&installed_path);
+                (false, Some(installed_path.display().to_string()), installed)
             } else {
                 (false, None, false)
             };
@@ -5129,6 +5140,24 @@ fn now_rfc3339() -> String {
 
 fn model_is_installed(path: &FsPath) -> bool {
     path.is_dir() && path.join(".sceneworks-download-complete.json").is_file()
+}
+
+fn model_manifest_installed_path(model: &Value, data_dir: &FsPath) -> Option<PathBuf> {
+    let raw_path = model
+        .get("paths")
+        .and_then(|paths| paths.get("model"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if raw_path.contains("${") {
+        return None;
+    }
+    let path = PathBuf::from(raw_path);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        data_dir.join(path)
+    })
 }
 
 fn lora_families(lora: &Value) -> Vec<String> {
@@ -7217,6 +7246,18 @@ mod tests {
             upload_job["payload"]["manifestEntry"]["family"],
             "qwen-image"
         );
+        assert_eq!(
+            upload_job["payload"]["manifestEntry"]["adapter"],
+            "qwen_image"
+        );
+        assert_eq!(
+            upload_job["payload"]["manifestEntry"]["capabilities"],
+            json!(["text_to_image", "style_variations"])
+        );
+        assert_eq!(
+            upload_job["payload"]["manifestEntry"]["loraCompatibility"]["families"],
+            json!(["qwen-image"])
+        );
         let source_path = std::path::PathBuf::from(
             upload_job["payload"]["sourcePath"]
                 .as_str()
@@ -7261,6 +7302,69 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("Hugging Face repo"));
+    }
+
+    #[tokio::test]
+    async fn imported_model_catalog_uses_paths_model_install_marker() {
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        let model_dir = temp_dir.path().join("data/models/imports/custom_model");
+        std::fs::create_dir_all(&model_dir).expect("model dir creates");
+        std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+            .expect("marker writes");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            format!(
+                r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "custom_model",
+                    "name": "Custom Model",
+                    "type": "image",
+                    "family": "z-image",
+                    "paths": {{ "model": "{}" }}
+                  }}]
+                }}"#,
+                model_dir.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user presets writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(models[0]["id"], "custom_model");
+        assert_eq!(models[0]["downloadable"], false);
+        assert_eq!(models[0]["installState"], "installed");
+        assert_eq!(models[0]["installedPath"], model_dir.display().to_string());
     }
 
     #[tokio::test]
