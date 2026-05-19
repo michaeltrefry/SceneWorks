@@ -12,6 +12,9 @@ use sceneworks_core::contracts::{
     ProgressRequest, ProgressStage, WorkerCapability, WorkerHeartbeatRequest,
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
+use sceneworks_core::lora_family::{
+    detect_lora_family, first_safetensors_path, read_safetensors_header, SafetensorsHeaderError,
+};
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
     validate_public_ip,
@@ -1049,6 +1052,26 @@ async fn run_model_download_job(
     Ok(())
 }
 
+/// Locates the first `.safetensors` under `dir`, reads its header, and
+/// runs the architecture detector. Returns `Ok(None)` when no header is
+/// available or the signature is inconclusive. Returns `Err(message)`
+/// only when a file was found but its header is unreadable or malformed —
+/// the caller surfaces that message via `fail_job`.
+fn detect_family_in_target_dir(dir: &Path) -> Result<Option<String>, String> {
+    let Some(safetensors_path) = first_safetensors_path(dir) else {
+        return Ok(None);
+    };
+    let header = read_safetensors_header(&safetensors_path).map_err(|error| match error {
+        SafetensorsHeaderError::Io(io_error) => {
+            format!("Unable to inspect downloaded LoRA file: {io_error}")
+        }
+        SafetensorsHeaderError::InvalidHeader => {
+            "Downloaded LoRA file has an invalid safetensors header.".to_owned()
+        }
+    })?;
+    Ok(detect_lora_family(&header))
+}
+
 async fn run_lora_import_job(
     api: &ApiClient,
     settings: &Settings,
@@ -1157,6 +1180,39 @@ async fn run_lora_import_job(
         .await;
     }
 
+    let detected_family = match detect_family_in_target_dir(&target_dir) {
+        Ok(detected) => detected,
+        Err(detail) => {
+            return fail_job(api, &job.id, "LoRA import failed.", Some(detail)).await;
+        }
+    };
+    let supplied_family = optional_payload_string(&job.payload, "family").map(str::to_owned);
+    let resolved_family = match (supplied_family, detected_family) {
+        (Some(supplied), Some(detected)) => {
+            if supplied != detected {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "LoRA import failed.",
+                    Some(format!(
+                        "LoRA file appears to be a {detected} model, but family was declared as {supplied}. Re-import with family {detected} or pick a different file."
+                    )),
+                )
+                .await;
+            }
+            Some(supplied)
+        }
+        (None, Some(detected)) => Some(detected),
+        (Some(supplied), None) => {
+            println!(
+                "LoRA import job {}: architecture detection inconclusive; accepting supplied family {supplied}",
+                job.id
+            );
+            Some(supplied)
+        }
+        (None, None) => None,
+    };
+
     write_lora_install_marker(&target_dir, &job.payload, &job.id).await?;
     if let Some(manifest_entry) = job
         .payload
@@ -1164,6 +1220,12 @@ async fn run_lora_import_job(
         .and_then(Value::as_object)
         .cloned()
     {
+        let mut manifest_entry = manifest_entry;
+        if let Some(family) = resolved_family {
+            manifest_entry
+                .entry("family")
+                .or_insert(Value::String(family));
+        }
         let manifest_path = lora_manifest_target(settings, &job.payload)?;
         upsert_lora_manifest_entry(&manifest_path, manifest_entry).await?;
     }

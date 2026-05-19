@@ -27,6 +27,9 @@ use sceneworks_core::jobs_store::{
     CreateJob, DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker,
     WorkerHeartbeat, JOB_STATUSES,
 };
+use sceneworks_core::lora_family::{
+    detect_lora_family, first_safetensors_path, read_safetensors_header, SafetensorsHeaderError,
+};
 use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url, LoraUrlError};
 use sceneworks_core::project_store::{
     AssetStatusPatch, CharacterCreateInput, CharacterLookInput, CharacterLookUpdateInput,
@@ -2415,6 +2418,12 @@ async fn queue_lora_import_job(
             allowed_source_roots
         };
         validate_lora_import_source_path(source_path, &allowed_source_roots)?;
+        let detected = detect_family_from_local_path(source_path)?;
+        payload.family = reconcile_lora_family(
+            payload.family.take(),
+            detected,
+            &format!("source_path={source_path}"),
+        )?;
     }
     let timestamp = now_rfc3339();
     let mut manifest_entry = json!({
@@ -3945,79 +3954,34 @@ fn validate_recipe_preset_lora_compatibility(
     Ok(())
 }
 
-fn validate_lora_safetensors_header(lora_id: &str, lora: &Value) -> Result<(), ApiError> {
+/// Returns the parsed safetensors header for `lora` when one is available
+/// on disk. Returns `Ok(None)` when the manifest entry has no installed
+/// path or no `.safetensors` file is present under it (the same "skip"
+/// semantics this helper has always had). Returns an error if the file
+/// exists but the header is malformed.
+fn validate_lora_safetensors_header(
+    lora_id: &str,
+    lora: &Value,
+) -> Result<Option<Value>, ApiError> {
     let Some(path) = lora.get("installedPath").and_then(Value::as_str) else {
-        return Ok(());
+        return Ok(None);
     };
     let path = PathBuf::from(path);
     let Some(safetensors_path) = first_safetensors_path(&path) else {
-        return Ok(());
+        return Ok(None);
     };
-    let metadata = std::fs::metadata(&safetensors_path).map_err(|error| {
-        ApiError::bad_request(format!("Unable to inspect LoRA {lora_id}: {error}"))
-    })?;
-    if metadata.len() < 8 {
-        return Err(ApiError::bad_request(format!(
-            "LoRA {lora_id} has an invalid safetensors header"
-        )));
-    }
-    let mut file = std::fs::File::open(&safetensors_path).map_err(|error| {
-        ApiError::bad_request(format!("Unable to inspect LoRA {lora_id}: {error}"))
-    })?;
-    let mut length_bytes = [0_u8; 8];
-    std::io::Read::read_exact(&mut file, &mut length_bytes).map_err(|_| {
-        ApiError::bad_request(format!("LoRA {lora_id} has an invalid safetensors header"))
-    })?;
-    let header_len = u64::from_le_bytes(length_bytes);
-    if header_len == 0 || header_len > 16 * 1024 * 1024 || header_len + 8 > metadata.len() {
-        return Err(ApiError::bad_request(format!(
-            "LoRA {lora_id} has an invalid safetensors header"
-        )));
-    }
-    let mut header = vec![
-        0_u8;
-        usize::try_from(header_len).map_err(|_| ApiError::bad_request(
-            format!("LoRA {lora_id} has an invalid safetensors header")
-        ))?
-    ];
-    std::io::Read::read_exact(&mut file, &mut header).map_err(|_| {
-        ApiError::bad_request(format!("LoRA {lora_id} has an invalid safetensors header"))
-    })?;
-    serde_json::from_slice::<Value>(&header).map_err(|_| {
-        ApiError::bad_request(format!("LoRA {lora_id} has an invalid safetensors header"))
-    })?;
-    Ok(())
+    read_safetensors_header_for_api(lora_id, &safetensors_path).map(Some)
 }
 
-fn first_safetensors_path(path: &FsPath) -> Option<PathBuf> {
-    if path.is_file()
-        && path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
-    {
-        return Some(path.to_path_buf());
-    }
-    if !path.is_dir() {
-        return None;
-    }
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let entries = std::fs::read_dir(path).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
-            {
-                return Some(path);
-            }
+fn read_safetensors_header_for_api(lora_id: &str, path: &FsPath) -> Result<Value, ApiError> {
+    read_safetensors_header(path).map_err(|error| match error {
+        SafetensorsHeaderError::Io(io_error) => {
+            ApiError::bad_request(format!("Unable to inspect LoRA {lora_id}: {io_error}"))
         }
-    }
-    None
+        SafetensorsHeaderError::InvalidHeader => {
+            ApiError::bad_request(format!("LoRA {lora_id} has an invalid safetensors header"))
+        }
+    })
 }
 
 fn model_lora_families(model: &Value) -> Vec<String> {
@@ -4604,6 +4568,59 @@ fn lora_source_provider(payload: &LoraImportRequest) -> &'static str {
 
 fn lora_url_error_message(error: LoraUrlError) -> &'static str {
     error.message()
+}
+
+/// Parses the safetensors header at `source_path` (or the first
+/// `.safetensors` file under it) and runs the architecture detector.
+/// Returns `Ok(None)` when no header is available or the signature is
+/// inconclusive. Returns `Err` only when the file exists but its header
+/// is malformed — that mirrors the pre-existing validation behaviour and
+/// gives the user a clear "the file is broken" message instead of a
+/// silent acceptance.
+fn detect_family_from_local_path(source_path: &str) -> Result<Option<String>, ApiError> {
+    let path = FsPath::new(source_path);
+    let Some(safetensors_path) = first_safetensors_path(path) else {
+        return Ok(None);
+    };
+    let header = read_safetensors_header(&safetensors_path).map_err(|error| match error {
+        SafetensorsHeaderError::Io(io_error) => {
+            ApiError::bad_request(format!("Unable to inspect LoRA file: {io_error}"))
+        }
+        SafetensorsHeaderError::InvalidHeader => {
+            ApiError::bad_request("LoRA file has an invalid safetensors header".to_owned())
+        }
+    })?;
+    Ok(detect_lora_family(&header))
+}
+
+/// Applies the import-time family policy: confident detection rejects a
+/// mismatched user-supplied family; an unsupplied family is filled in from
+/// the detection; an inconclusive detection logs a warning and accepts the
+/// supplied family unchanged.
+fn reconcile_lora_family(
+    supplied: Option<String>,
+    detected: Option<String>,
+    context: &str,
+) -> Result<Option<String>, ApiError> {
+    match (supplied, detected) {
+        (Some(supplied), Some(detected)) => {
+            if supplied == detected {
+                Ok(Some(supplied))
+            } else {
+                Err(ApiError::bad_request(format!(
+                    "LoRA file appears to be a {detected} model, but family was declared as {supplied}. Re-import with family {detected} or pick a different file."
+                )))
+            }
+        }
+        (None, Some(detected)) => Ok(Some(detected)),
+        (Some(supplied), None) => {
+            println!(
+                "LoRA import {context}: architecture detection inconclusive; accepting supplied family {supplied}"
+            );
+            Ok(Some(supplied))
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 fn validate_lora_family(models: &[Value], family: &str) -> Result<String, ApiError> {
@@ -5244,12 +5261,76 @@ mod tests {
     }
 
     fn write_test_safetensors(path: &std::path::Path) {
-        let header = br#"{"__metadata__":{"format":"pt"}}"#;
+        std::fs::write(path, test_safetensors_bytes()).expect("test safetensors writes");
+    }
+
+    fn write_test_safetensors_with_keys(path: &std::path::Path, tensor_keys: &[String]) {
+        std::fs::write(path, test_safetensors_bytes_with_keys(tensor_keys))
+            .expect("test safetensors writes");
+    }
+
+    fn test_safetensors_bytes() -> Vec<u8> {
+        test_safetensors_bytes_with_keys(&[])
+    }
+
+    fn test_safetensors_bytes_with_keys(tensor_keys: &[String]) -> Vec<u8> {
+        let mut object = serde_json::Map::new();
+        object.insert("__metadata__".to_owned(), json!({"format": "pt"}));
+        for key in tensor_keys {
+            object.insert(
+                key.clone(),
+                json!({"dtype": "F16", "shape": [16, 1024], "data_offsets": [0, 32768]}),
+            );
+        }
+        let header = serde_json::to_vec(&Value::Object(object)).expect("header serializes");
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&header);
         bytes.extend_from_slice(b"tensor-bytes");
-        std::fs::write(path, bytes).expect("test safetensors writes");
+        bytes
+    }
+
+    fn z_image_tensor_keys() -> Vec<String> {
+        mm_dit_tensor_keys(24)
+    }
+
+    fn qwen_image_tensor_keys() -> Vec<String> {
+        mm_dit_tensor_keys(60)
+    }
+
+    fn mm_dit_tensor_keys(block_count: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for block in 0..block_count {
+            for module in [
+                "attn.to_q",
+                "attn.to_k",
+                "attn.to_v",
+                "attn.to_out.0",
+                "attn.add_q_proj",
+                "attn.add_k_proj",
+                "img_mlp.net.0.proj",
+                "txt_mlp.net.0.proj",
+            ] {
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_B.weight"
+                ));
+            }
+        }
+        keys
+    }
+
+    fn wan_video_tensor_keys() -> Vec<String> {
+        let mut keys = Vec::new();
+        for block in 0..30 {
+            for module in ["self_attn.q", "self_attn.k", "cross_attn.q", "ffn.0"] {
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_A.weight"));
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_B.weight"));
+            }
+        }
+        keys
     }
 
     async fn request(
@@ -6276,6 +6357,7 @@ mod tests {
         assert_eq!(url_job["payload"]["manifestEntry"]["family"], "z-image");
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let upload_bytes = test_safetensors_bytes();
         let (status, upload_job) = request_multipart_lora_upload(
             app,
             &[
@@ -6284,7 +6366,7 @@ mod tests {
                 ("family", "z-image"),
             ],
             "detail.safetensors",
-            b"local-lora",
+            &upload_bytes,
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -6306,7 +6388,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(&source_path).expect("staged upload reads"),
-            b"local-lora"
+            upload_bytes
         );
         assert_eq!(
             source_path.file_name().and_then(|value| value.to_str()),
@@ -6332,7 +6414,7 @@ mod tests {
         let lora_source_dir = temp_dir.path().join("data").join("loras");
         std::fs::create_dir_all(&lora_source_dir).expect("lora source dir creates");
         let lora_source = lora_source_dir.join("safe-local.safetensors");
-        std::fs::write(&lora_source, b"local-source").expect("local source writes");
+        write_test_safetensors(&lora_source);
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (status, source_path_job) = request(
             app,
@@ -6351,7 +6433,7 @@ mod tests {
         );
 
         let outside_source = temp_dir.path().join("outside.safetensors");
-        std::fs::write(&outside_source, b"private").expect("outside source writes");
+        write_test_safetensors(&outside_source);
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (bad_status, bad_error) = request(
             app,
@@ -6408,6 +6490,186 @@ mod tests {
             normalized_family["payload"]["manifestEntry"]["family"],
             "z-image"
         );
+
+        // sc-1378: architecture detection at import time. The detection
+        // policy lets the user supply any family the catalog declares, so
+        // expand the catalog now to include the families we exercise below.
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "base-model",
+                  "name": "Base Model",
+                  "family": "z-image",
+                  "type": "image",
+                  "adapter": "z_image_diffusers",
+                  "capabilities": ["text_to_image", "edit_image"],
+                  "downloads": [
+                    { "provider": "huggingface", "repo": "owner/alternate-model", "files": ["*.bin"], "estimatedSizeBytes": 536870912 },
+                    { "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"], "default": true, "estimatedSizeBytes": 12884901888 }
+                  ],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": {},
+                  "ui": { "label": "Base" }
+                },
+                {
+                  "id": "qwen-image-base",
+                  "name": "Qwen Image",
+                  "family": "qwen-image",
+                  "type": "image",
+                  "adapter": "qwen_image",
+                  "capabilities": ["text_to_image"],
+                  "downloads": [],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": {},
+                  "ui": {}
+                },
+                {
+                  "id": "wan-video-base",
+                  "name": "Wan Video",
+                  "family": "wan-video",
+                  "type": "video",
+                  "adapter": "wan_video",
+                  "capabilities": ["text_to_video"],
+                  "downloads": [],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": {},
+                  "ui": {}
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin models rewrites for detection tests");
+
+        let detect_dir = temp_dir.path().join("data").join("loras");
+        std::fs::create_dir_all(&detect_dir).expect("detect dir creates");
+
+        // Qwen-Image-shaped file with a mismatched user-supplied family is
+        // rejected with both values surfaced in the error message.
+        let mismatch_path = detect_dir.join("qwen-as-wan.safetensors");
+        write_test_safetensors_with_keys(&mismatch_path, &qwen_image_tensor_keys());
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, mismatch_error) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourcePath": mismatch_path.display().to_string(),
+                "family": "wan-video",
+                "name": "Mismatched"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let detail = mismatch_error["detail"].as_str().expect("detail string");
+        assert!(
+            detail.contains("qwen-image") && detail.contains("wan-video"),
+            "mismatch error must surface both detected and supplied families, got: {detail}"
+        );
+
+        // Low-block MMDiT tensors are inconclusive rather than treated as
+        // Z-Image; sparse Qwen LoRAs can target only early blocks.
+        let auto_path = detect_dir.join("low-mmdit-no-autofill.safetensors");
+        write_test_safetensors_with_keys(&auto_path, &z_image_tensor_keys());
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, auto_job) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourcePath": auto_path.display().to_string(),
+                "name": "Auto Family"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(auto_job["payload"]["manifestEntry"].get("family").is_none());
+
+        // Supplied family + inconclusive MMDiT detection succeeds, and the
+        // user-supplied family is kept.
+        let match_path = detect_dir.join("z-match.safetensors");
+        write_test_safetensors_with_keys(&match_path, &z_image_tensor_keys());
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, match_job) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourcePath": match_path.display().to_string(),
+                "family": "z-image",
+                "name": "Matched"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(match_job["payload"]["manifestEntry"]["family"], "z-image");
+
+        // Wan-shaped tensors are detected and accepted when the user agrees.
+        let wan_match_path = detect_dir.join("wan-match.safetensors");
+        write_test_safetensors_with_keys(&wan_match_path, &wan_video_tensor_keys());
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, wan_job) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourcePath": wan_match_path.display().to_string(),
+                "family": "wan-video",
+                "name": "Wan Matched"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(wan_job["payload"]["manifestEntry"]["family"], "wan-video");
+
+        // Inconclusive header (only `__metadata__`) + supplied family is
+        // accepted unchanged — the user-supplied label survives.
+        let inconclusive_path = detect_dir.join("inconclusive.safetensors");
+        write_test_safetensors(&inconclusive_path);
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, inconclusive_job) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourcePath": inconclusive_path.display().to_string(),
+                "family": "z-image",
+                "name": "Inconclusive"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            inconclusive_job["payload"]["manifestEntry"]["family"],
+            "z-image"
+        );
+
+        // Confident Qwen-Image detection (block count > 40) auto-fills.
+        let qwen_path = detect_dir.join("qwen-autofill.safetensors");
+        write_test_safetensors_with_keys(&qwen_path, &qwen_image_tensor_keys());
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, qwen_job) = request(
+            app,
+            "POST",
+            "/api/v1/loras/import",
+            json!({
+                "sourcePath": qwen_path.display().to_string(),
+                "name": "Qwen Auto"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(qwen_job["payload"]["manifestEntry"]["family"], "qwen-image");
     }
 
     #[tokio::test]

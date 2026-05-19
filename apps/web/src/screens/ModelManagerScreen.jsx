@@ -120,12 +120,15 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
         family: importForm.family || undefined,
       });
       const loraId = job?.payload?.loraId;
+      const resolvedFamily = job?.payload?.manifestEntry?.family;
+      const detectionNote =
+        !importForm.family && resolvedFamily ? ` Detected family: ${resolvedFamily}.` : "";
       setImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
       // Force a re-mount so choosing the same file again still emits a change event.
       setFileInputKey((current) => current + 1);
       setImportMessage({
         tone: "success",
-        text: loraId ? `LoRA import queued for ${loraId}.` : "LoRA import queued.",
+        text: `${loraId ? `LoRA import queued for ${loraId}.` : "LoRA import queued."}${detectionNote}`,
       });
     } catch (err) {
       setImportMessage({ tone: "error", text: err.message });
@@ -269,11 +272,14 @@ export function ModelManagerScreen({ activeProject, jobs, loras, models, onDownl
                 value={importForm.family}
               >
                 {families.length ? (
-                  families.map((family) => (
-                    <option key={family} value={family}>
-                      {family}
-                    </option>
-                  ))
+                  <>
+                    <option value="">Auto-detect from file</option>
+                    {families.map((family) => (
+                      <option key={family} value={family}>
+                        {family}
+                      </option>
+                    ))}
+                  </>
                 ) : (
                   <option value="">No model families</option>
                 )}
