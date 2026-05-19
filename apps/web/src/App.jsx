@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, eventUrl } from "./api.js";
+import { Icon } from "./components/Icons.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview } from "./components/assetPanels.jsx";
-import { fallbackModels, navItems, terminalStatuses } from "./constants.js";
+import { fallbackModels, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
@@ -82,6 +83,193 @@ const localJobStackLimit = 4;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
 
+const navSections = [
+  {
+    label: "Workspace",
+    items: [
+      { id: "Library", icon: Icon.Library },
+      { id: "Image", icon: Icon.Image },
+      { id: "Video", icon: Icon.Video },
+      { id: "Editor", icon: Icon.Editor },
+    ],
+  },
+  {
+    label: "Library",
+    items: [
+      { id: "Characters", icon: Icon.Character },
+      { id: "Presets", icon: Icon.Preset },
+      { id: "Models", icon: Icon.Model },
+    ],
+  },
+  {
+    label: "System",
+    items: [{ id: "Queue", icon: Icon.Queue }],
+  },
+];
+
+const viewTitles = {
+  Library: { title: "Library", blurb: "Browse stills and clips across all your projects." },
+  Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
+  Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
+  Editor: { title: "Editor", blurb: "Cut, sequence and export your timeline." },
+  Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
+  Presets: { title: "Recipes", blurb: "Save and share recurring generation setups." },
+  Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
+  Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
+};
+
+function readStoredTheme() {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+  try {
+    const saved = window.localStorage.getItem("sceneworks-theme");
+    return saved === "dark" || saved === "light" ? saved : "light";
+  } catch {
+    return "light";
+  }
+}
+
+function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled }) {
+  const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const containerRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+    function onDocMouseDown(event) {
+      if (!containerRef.current?.contains(event.target)) {
+        setOpen(false);
+        setCreating(false);
+        setName("");
+      }
+    }
+    function onDocKey(event) {
+      if (event.key === "Escape") {
+        setOpen(false);
+        setCreating(false);
+        setName("");
+      }
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onDocKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onDocKey);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (creating) {
+      inputRef.current?.focus();
+    }
+  }, [creating]);
+
+  async function submitNew(event) {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed || submitting) {
+      return;
+    }
+    setSubmitting(true);
+    const created = await onCreate(trimmed);
+    setSubmitting(false);
+    if (created) {
+      setName("");
+      setCreating(false);
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div className="project-switcher" ref={containerRef}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        className="project-pill"
+        disabled={disabled}
+        onClick={() => setOpen((value) => !value)}
+        title={activeProject?.name ?? "Pick a workspace"}
+        type="button"
+      >
+        <span className="project-pill-thumb" aria-hidden="true" />
+        <span className="project-pill-meta">
+          <strong>{activeProject?.name ?? "No workspace open"}</strong>
+          <span>
+            {projects.length} workspace{projects.length === 1 ? "" : "s"}
+          </span>
+        </span>
+        <Icon.ChevDown className="chev" />
+      </button>
+
+      {open ? (
+        <div className="project-menu" role="listbox">
+          {projects.length === 0 ? (
+            <p className="project-menu-empty">No workspaces yet — create the first one below.</p>
+          ) : (
+            projects.map((project) => (
+              <button
+                aria-selected={project.id === activeProject?.id}
+                className={project.id === activeProject?.id ? "project-menu-item active" : "project-menu-item"}
+                key={project.id}
+                onClick={() => {
+                  onSelect(project);
+                  setOpen(false);
+                  setCreating(false);
+                  setName("");
+                }}
+                role="option"
+                type="button"
+              >
+                <span className="project-menu-thumb" aria-hidden="true" />
+                <span className="project-menu-label">{project.name}</span>
+              </button>
+            ))
+          )}
+
+          {creating ? (
+            <form className="project-menu-create" onSubmit={submitNew}>
+              <input
+                aria-label="New workspace name"
+                disabled={submitting}
+                onChange={(event) => setName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setCreating(false);
+                    setName("");
+                  }
+                }}
+                placeholder="Workspace name"
+                ref={inputRef}
+                value={name}
+              />
+              <button disabled={!name.trim() || submitting} type="submit">
+                {submitting ? "Creating…" : "Create"}
+              </button>
+            </form>
+          ) : (
+            <button
+              className="project-menu-item project-menu-item-new"
+              disabled={disabled}
+              onClick={() => setCreating(true)}
+              type="button"
+            >
+              <Icon.Plus />
+              <span className="project-menu-label">New workspace</span>
+            </button>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function uploadLimitLabel(bytes) {
   const gib = bytes / (1024 * 1024 * 1024);
   return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
@@ -94,7 +282,6 @@ export function App() {
   const [projects, setProjects] = useState([]);
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
-  const [projectName, setProjectName] = useState("");
   const [jobs, setJobs] = useState([]);
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [] });
   const [workers, setWorkers] = useState([]);
@@ -106,6 +293,7 @@ export function App() {
   const [characters, setCharacters] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
   const [timelines, setTimelines] = useState([]);
+  const [timelinesProjectId, setTimelinesProjectId] = useState(null);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
   const [activeTimeline, setActiveTimeline] = useState(null);
   const [selectedAssetId, setSelectedAssetId] = useState(null);
@@ -116,6 +304,7 @@ export function App() {
   const [previewAsset, setPreviewAsset] = useState(null);
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
+  const [theme, setTheme] = useState(readStoredTheme);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
@@ -219,6 +408,18 @@ export function App() {
   }, [selectedTimelineId]);
 
   useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      window.localStorage.setItem("sceneworks-theme", theme);
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, [theme]);
+
+  useEffect(() => {
     apiFetch("/api/v1/health", "")
       .then(setHealth)
       .catch((err) => setError(err.message));
@@ -241,6 +442,7 @@ export function App() {
       setCharacters([]);
       setPersonTracks([]);
       setTimelines([]);
+      setTimelinesProjectId(null);
       setRecipePresets([]);
       setSelectedTimelineId(null);
       setActiveTimeline(null);
@@ -255,11 +457,11 @@ export function App() {
   }, [activeProject?.id, authenticated, token]);
 
   useEffect(() => {
-    if (!activeProject || !selectedTimelineId) {
+    if (!activeProject || !selectedTimelineId || timelinesProjectId !== activeProject.id) {
       return;
     }
     loadTimeline(activeProject.id, selectedTimelineId);
-  }, [activeProject?.id, selectedTimelineId]);
+  }, [activeProject?.id, selectedTimelineId, timelinesProjectId]);
 
   useEffect(() => {
     if (!authenticated) {
@@ -643,8 +845,12 @@ export function App() {
     }
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token);
+      if (activeProjectRef.current?.id && activeProjectRef.current.id !== projectId) {
+        return;
+      }
       setTimelines(items);
-      setSelectedTimelineId((current) => current ?? items[0]?.id ?? null);
+      setTimelinesProjectId(projectId);
+      setSelectedTimelineId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
       if (!items.length) {
         setActiveTimeline(null);
       }
@@ -657,6 +863,9 @@ export function App() {
   async function loadTimeline(projectId, timelineId) {
     try {
       const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
+      if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
+        return;
+      }
       setActiveTimeline(timeline);
       setError("");
     } catch (err) {
@@ -675,6 +884,7 @@ export function App() {
         body: JSON.stringify(payload),
       });
       setTimelines((items) => [created, ...items.filter((item) => item.id !== created.id)]);
+      setTimelinesProjectId(activeProject.id);
       setSelectedTimelineId(created.id);
       setActiveTimeline(created);
       setError("");
@@ -732,24 +942,24 @@ export function App() {
     refreshData();
   }
 
-  async function createProject(event) {
-    event.preventDefault();
-    if (!projectName.trim()) {
-      return;
+  async function createProject(name) {
+    const trimmed = String(name ?? "").trim();
+    if (!trimmed) {
+      return null;
     }
-
     try {
       const created = await apiFetch("/api/v1/projects", token, {
         method: "POST",
-        body: JSON.stringify({ name: projectName }),
+        body: JSON.stringify({ name: trimmed }),
       });
       setProjects((items) => [created, ...items.filter((item) => item.id !== created.id)]);
       setActiveProject(created);
-      setProjectName("");
       setActiveView("Image");
       setError("");
+      return created;
     } catch (err) {
       setError(err.message);
+      return null;
     }
   }
 
@@ -1317,50 +1527,95 @@ export function App() {
     }
   }
 
+  const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
+  // Activity dots only — counts live in the topbar so nav button textContent stays clean.
+  const activeIndicators = {
+    Editor: timelines.length > 0,
+    Queue: queueCounts.active > 0,
+  };
+
   return (
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
-          <span className="brand-mark">SW</span>
+          <span className="brand-mark" aria-hidden="true">
+            SW
+          </span>
           <div>
             <h1>SceneWorks</h1>
             <p>Local creative studio</p>
           </div>
         </div>
 
-        <nav className="nav-list">
-          {navItems.map((item) => (
-            <button
-              className={activeView === item ? "nav-item active" : "nav-item"}
-              key={item}
-              onClick={() => setActiveView(item)}
-              type="button"
-            >
-              {item}
-            </button>
-          ))}
-        </nav>
+        <ProjectSwitcher
+          activeProject={activeProject}
+          disabled={!authenticated}
+          onCreate={createProject}
+          onSelect={setActiveProject}
+          projects={projects}
+        />
+
+        {navSections.map((section) => (
+          <div className="sidebar-section" key={section.label}>
+            <div className="sidebar-section-title">{section.label}</div>
+            <nav className="nav-list">
+              {section.items.map((item) => {
+                const IconComponent = item.icon;
+                const active = activeIndicators[item.id];
+                return (
+                  <button
+                    className={activeView === item.id ? "nav-item active" : "nav-item"}
+                    key={item.id}
+                    onClick={() => setActiveView(item.id)}
+                    title={item.id}
+                    type="button"
+                  >
+                    <IconComponent />
+                    <span className="nav-label">{item.id}</span>
+                    {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+        ))}
+
       </aside>
 
       <section className="workspace">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">Project</p>
-            <strong>{activeProject?.name ?? "No project open"}</strong>
+          <div className="topbar-title">
+            <h1>{titleInfo.title}</h1>
+            <p>{titleInfo.blurb}</p>
           </div>
+          <span className="topbar-spacer" />
           <div className="topbar-status">
-            <span>
+            <span className={health?.status === "ok" ? "status-pill" : "status-pill warning"}>
               <StatusDot ok={health?.status === "ok"} />
-              API
+              {health?.status === "ok" ? "API ready" : "API offline"}
             </span>
-            <span>
+            <span className="status-pill">
+              <span className={visibleWorkers.length ? "dot" : "dot idle"} />
               {visibleWorkers.length ? `${visibleWorkers.length} worker${visibleWorkers.length === 1 ? "" : "s"}` : "No workers"}
             </span>
-            <span>{gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}</span>
+            <span className="status-pill">
+              {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}
+            </span>
             <button className="queue-chip" onClick={() => setActiveView("Queue")} type="button">
               Queue {queueCounts.active}
             </button>
           </div>
+          <button className="icon-btn" title="Notifications" type="button">
+            <Icon.Bell />
+          </button>
+          <button
+            className="icon-btn"
+            onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+            title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+            type="button"
+          >
+            {theme === "light" ? <Icon.Moon /> : <Icon.Sun />}
+          </button>
         </header>
 
         {error ? <p className="notice error">{error}</p> : null}
@@ -1383,48 +1638,9 @@ export function App() {
           </section>
         ) : null}
 
-        <section className="project-band">
-          <div className="project-list">
-            <div className="section-heading">
-              <p className="eyebrow">Recent projects</p>
-              <h2>Open a workspace</h2>
-            </div>
-            <div className="project-buttons">
-              {projects.length === 0 ? (
-                <span className="empty-state">No projects yet</span>
-              ) : (
-                projects.map((project) => (
-                  <button
-                    className={activeProject?.id === project.id ? "project-pill active" : "project-pill"}
-                    key={project.id}
-                    onClick={() => setActiveProject(project)}
-                    type="button"
-                  >
-                    {project.name}
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-
-          <form className="create-project" onSubmit={createProject}>
-            <label htmlFor="project-name">New project</label>
-            <div className="form-row">
-              <input
-                id="project-name"
-                onChange={(event) => setProjectName(event.target.value)}
-                placeholder="Noir Alley"
-                value={projectName}
-              />
-              <button disabled={!authenticated} type="submit">
-                Create
-              </button>
-            </div>
-          </form>
-        </section>
-
         {activeView === "Library" ? (
           <LibraryScreen
+            activeProject={activeProject}
             assets={assets}
             deleteAsset={deleteAsset}
             purgeAsset={purgeAsset}
@@ -1455,6 +1671,7 @@ export function App() {
             loras={loras}
             localJobs={imageLocalJobs}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("image", job)}
+            onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             recipePresets={recipePresets}
@@ -1484,8 +1701,15 @@ export function App() {
             jobs={jobs}
             localJobs={videoLocalJobs}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("video", job)}
+            onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
+            onSendToEditor={(asset) => {
+              if (asset?.id) {
+                setSelectedAssetId(asset.id);
+              }
+              setActiveView("Editor");
+            }}
             personTracks={personTracks}
             recipePresets={recipePresets}
             requestedGpu={requestedGpu}

@@ -387,10 +387,13 @@ export function EditorScreen({
 
   return (
     <section className="main-surface editor-surface">
-      <div className="surface-header editor-header">
+      <div className="surface-header editor-header hero">
         <div className="section-heading">
           <p className="eyebrow">Editor</p>
           <h2>{activeTimeline?.name ?? "Timelines"}</h2>
+          <p className="hero-blurb">
+            Sequence clips on the timeline, scrub through the preview, and export when the cut feels right.
+          </p>
         </div>
         <div className="editor-actions">
           <select onChange={(event) => setSelectedTimelineId(event.target.value)} value={selectedTimelineId ?? ""}>

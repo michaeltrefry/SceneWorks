@@ -6,6 +6,7 @@ imageio>=2.37,<3
 imageio-ffmpeg>=0.6,<1
 torch>=2.7
 transformers>=4.57
+sentencepiece>=0.2,<1
 accelerate>=1.11
 peft>=0.17,<1
 safetensors>=0.6

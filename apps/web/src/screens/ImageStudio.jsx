@@ -1,7 +1,33 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
+import { Icon } from "../components/Icons.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
+
+const PROMPT_SUGGESTION_POOL = [
+  "Barista pouring espresso, morning light",
+  "Runner cresting a dune at dawn",
+  "Dewdrop on a fern, soft bokeh",
+  "Watchmaker at her bench, warm tungsten",
+  "Cyclist on a wet cobblestone street, neon reflections",
+  "Cellist mid-bow, theater spotlight from above",
+  "Glassblower shaping a vessel, kiln glow",
+  "Fox watching from the edge of a snowy forest",
+  "Surfer at golden hour, backlit spray",
+  "Quiet kitchen window, herbs in low afternoon light",
+  "Vintage typewriter on a roll-top desk, dust motes",
+  "Lighthouse beam slicing through coastal fog",
+];
+
+function pickSuggestions(count) {
+  const pool = [...PROMPT_SUGGESTION_POOL];
+  const result = [];
+  for (let index = 0; index < count && pool.length; index += 1) {
+    const pick = Math.floor(Math.random() * pool.length);
+    result.push(pool.splice(pick, 1)[0]);
+  }
+  return result;
+}
 import {
   loraMatchesModel,
   loraWeight,
@@ -93,6 +119,7 @@ export function ImageStudio({
   localJobs: trackedLocalJobs = [],
   loras = [],
   onLocalJobCreated,
+  onOpenPresets,
   onOpenQueue,
   onPreview,
   recipePresets = [],
@@ -101,6 +128,7 @@ export function ImageStudio({
   setRequestedGpu,
   updateAssetStatus,
 }) {
+  const [suggestions] = useState(() => pickSuggestions(4));
   const [mode, setMode] = useState("text_to_image");
   const [prompt, setPrompt] = useState("A cinematic frame of a neon street at midnight");
   const [count, setCount] = useState(4);
@@ -392,30 +420,177 @@ export function ImageStudio({
     }
   }
 
+  const generateDisabled =
+    submitting ||
+    !activeProject ||
+    !prompt.trim() ||
+    (mode === "character_image" && !characterId) ||
+    !presetValidationResult.ok ||
+    !selectedLoraValidationResult.ok;
+
+  function onPromptKeyDown(event) {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  }
+
   return (
     <section className="main-surface image-studio">
-      <div className="surface-header">
-        <div className="section-heading">
-          <p className="eyebrow">Image Studio</p>
-          <h2>{activeProject ? activeProject.name : "Create a project"}</h2>
-        </div>
-        <div className="segmented-control" role="tablist" aria-label="Image mode">
-          {[
-            ["text_to_image", "Text"],
-            ["edit_image", "Edit"],
-            ["character_image", "Character"],
-            ["style_variations", "Variations"],
-          ].map(([value, label]) => (
-            <button className={mode === value ? "active" : ""} key={value} onClick={() => setMode(value)} type="button">
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <form className="studio-shell" onSubmit={submit}>
+        <div className="surface-header hero studio-prompt-hero">
+          <div className="prompt-hero-top">
+            <div className="segmented-control" role="tablist" aria-label="Image mode">
+              {[
+                ["text_to_image", "Text"],
+                ["edit_image", "Edit"],
+                ["character_image", "With character"],
+                ["style_variations", "Variations"],
+              ].map(([value, label]) => (
+                <button
+                  className={mode === value ? "active" : ""}
+                  key={value}
+                  onClick={() => setMode(value)}
+                  type="button"
+                >
+                  {value === "text_to_image" ? <Icon.Sparkle size={13} /> : null}
+                  {label}
+                </button>
+              ))}
+            </div>
+            {onOpenPresets ? (
+              <button className="hero-link" onClick={onOpenPresets} type="button">
+                <Icon.Folder size={14} /> Saved recipes
+              </button>
+            ) : null}
+          </div>
 
-      <form className="studio-layout" onSubmit={submit}>
-        <section className="studio-controls">
-          <div className="control-grid generation-primary-grid">
+          <div className="prompt-input-row">
+            <textarea
+              aria-label="Prompt"
+              className="prompt-input"
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={onPromptKeyDown}
+              placeholder="Describe your shot — subject, lighting, mood, lens…"
+              value={prompt}
+            />
+            <button className="prompt-cta" disabled={generateDisabled} type="submit">
+              <Icon.Sparkle size={14} />
+              {submitting ? "Queueing…" : "Generate"}
+            </button>
+          </div>
+
+          <div className="suggestion-row">
+            <span className="suggestion-row-label">Try:</span>
+            {suggestions.map((suggestion) => (
+              <button
+                className="suggestion"
+                key={suggestion}
+                onClick={() => setPrompt(suggestion)}
+                type="button"
+              >
+                <Icon.Sparkle size={11} />
+                {suggestion}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {mode === "edit_image" || mode === "character_image" ? (
+          <div className="studio-source-band">
+            {mode === "edit_image" ? (
+              <AssetPickerField
+                assets={editImageAssets}
+                buttonLabel="Select image"
+                emptyLabel="No source image selected"
+                label="Source"
+                onChange={setSourceAssetId}
+                value={sourceAssetId}
+              />
+            ) : null}
+
+            {mode === "character_image" ? (
+              <>
+                <div className="control-grid compact-controls">
+                  <label>
+                    Character
+                    <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+                      <option value="">Select character</option>
+                      {characters.map((character) => (
+                        <option key={character.id} value={character.id}>
+                          {character.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Look
+                    <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
+                      <option value="">Default look</option>
+                      {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
+                        <option key={look.id} value={look.id}>
+                          {look.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="guidance-strip">
+                  <strong>Recipe-only character</strong>
+                  <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="studio-results">
+          <section className="review-panel">
+            <div className="review-panel-head">
+              <h2>Latest batch</h2>
+              <span className="kbd-hint">
+                <kbd>⌘</kbd>
+                <kbd>↵</kbd>
+                to generate
+              </span>
+            </div>
+            {localJobs.length ? (
+              <div className="local-job-stack">
+                {localJobs.map((job) => (
+                  <JobProgressCard job={job} key={job.id} label="Image generation" onOpenQueue={onOpenQueue} />
+                ))}
+              </div>
+            ) : null}
+            {reviewSlots.length ? (
+              <div className="review-grid">
+                {reviewSlots.map((slot) =>
+                  slot.type === "asset" ? (
+                    <AssetCard
+                      asset={slot.asset}
+                      deleteAsset={deleteAsset}
+                      key={slot.id}
+                      onPreview={onPreview}
+                      purgeAsset={purgeAsset}
+                      updateAssetStatus={updateAssetStatus}
+                    />
+                  ) : (
+                    <div className={slot.isError ? "review-placeholder failed" : "review-placeholder"} key={slot.id}>
+                      <span>{slot.label}</span>
+                    </div>
+                  ),
+                )}
+              </div>
+            ) : hasReviewContent ? null : (
+              <div className="empty-panel">No fresh image batch</div>
+            )}
+          </section>
+
+          <section className="studio-controls recipe-rail">
+            <div className="recipe-head">
+              <h3>Recipe</h3>
+              <span className="recipe-model-tag">{selectedModel?.name ?? "—"}</span>
+            </div>
+
             <label>
               Model
               <select onChange={(event) => setModel(event.target.value)} value={model}>
@@ -426,225 +601,149 @@ export function ImageStudio({
                 ))}
               </select>
             </label>
-            <label>
-              Preset
-              <select onChange={(event) => setStylePreset(event.target.value)} value={selectedRecipePreset?.id ?? noRecipePresetId}>
-                <option value={noRecipePresetId}>None</option>
+
+            <div className="style-preset-strip">
+              <span className="style-preset-label">Style preset</span>
+              <div className="preset-chips">
+                <button
+                  className={!selectedRecipePreset ? "preset-chip active" : "preset-chip"}
+                  onClick={() => setStylePreset(noRecipePresetId)}
+                  type="button"
+                >
+                  None
+                </button>
                 {availableRecipePresets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
+                  <button
+                    className={selectedRecipePreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                    key={preset.id}
+                    onClick={() => setStylePreset(preset.id)}
+                    type="button"
+                  >
                     {preset.name ?? preset.id}
-                  </option>
+                  </button>
                 ))}
-              </select>
-            </label>
-          </div>
-
-          {mode === "edit_image" ? (
-            <AssetPickerField
-              assets={editImageAssets}
-              buttonLabel="Select image"
-              emptyLabel="No source image selected"
-              label="Source"
-              onChange={setSourceAssetId}
-              value={sourceAssetId}
-            />
-          ) : null}
-
-          {mode === "character_image" ? (
-            <>
-              <div className="control-grid compact-controls">
-                <label>
-                  Character
-                  <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
-                    <option value="">Select character</option>
-                    {characters.map((character) => (
-                      <option key={character.id} value={character.id}>
-                        {character.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Look
-                  <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
-                    <option value="">Default look</option>
-                    {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
-                      <option key={look.id} value={look.id}>
-                        {look.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
               </div>
-              <div className="guidance-strip">
-                <strong>Recipe-only character</strong>
-                <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
-              </div>
-            </>
-          ) : null}
-
-          <label className="prompt-field">
-            Prompt
-            <textarea onChange={(event) => setPrompt(event.target.value)} value={prompt} />
-          </label>
-
-          <label>
-            Count
-            <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
-          </label>
-          {selectedRecipePreset ? (
-            <div className="guidance-strip">
-              <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
-              <span>
-                {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
-                {presetLoraDetails.length
-                  ? ` | Preset LoRA applied at generation: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
-                  : " | No preset LoRAs"}
-                {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
-              </span>
             </div>
-          ) : (
-            <div className="guidance-strip">
-              <strong>No preset selected</strong>
-              <span>Generation will use only the visible prompt, count, model, and advanced settings.</span>
-            </div>
-          )}
 
-          <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
-            {advancedOpen ? "Hide advanced" : "Advanced"}
-          </button>
-
-          {advancedOpen ? (
-            <div className="advanced-panel">
+            <div className="control-grid recipe-row">
               <label>
-                GPU
-                <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
-                  {gpuOptions.map((gpu) => (
-                    <option key={gpu} value={gpu}>
-                      {gpu === "auto" ? "Auto" : gpu}
-                    </option>
-                  ))}
-                </select>
+                Variations
+                <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
               </label>
               <label>
-                Seed
-                <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
-              </label>
-              <label>
-                Resolution
+                Aspect
                 <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
-                  <option value="768x768">768 x 768</option>
-                  <option value="1024x1024">1024 x 1024</option>
-                  <option value="1280x720">1280 x 720</option>
-                  <option value="720x1280">720 x 1280</option>
+                  <option value="768x768">768 × 768</option>
+                  <option value="1024x1024">1024 × 1024</option>
+                  <option value="1280x720">1280 × 720</option>
+                  <option value="720x1280">720 × 1280</option>
                 </select>
               </label>
-              <label className="prompt-field">
-                Negative prompt
-                <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
-              </label>
-              <section className="lora-picker" aria-label="LoRA selection">
-                <div>
-                  <strong>LoRAs</strong>
-                  <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
-                </div>
-                <label className="checkline">
-                  <input
-                    checked={showIncompatibleLoras}
-                    onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
-                    type="checkbox"
-                  />
-                  Show incompatible
+            </div>
+
+            {selectedRecipePreset ? (
+              <div className="guidance-strip">
+                <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
+                <span>
+                  {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
+                  {presetLoraDetails.length
+                    ? ` | Preset LoRA applied at generation: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
+                    : " | No preset LoRAs"}
+                  {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
+                </span>
+              </div>
+            ) : (
+              <div className="guidance-strip">
+                <strong>No preset selected</strong>
+                <span>Generation uses only the prompt, model, and visible recipe settings.</span>
+              </div>
+            )}
+
+            <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
+              <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
+              {advancedOpen ? "Hide advanced" : "Advanced"}
+            </button>
+
+            {advancedOpen ? (
+              <div className="advanced-panel">
+                <label>
+                  GPU
+                  <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
+                    {gpuOptions.map((gpu) => (
+                      <option key={gpu} value={gpu}>
+                        {gpu === "auto" ? "Auto" : gpu}
+                      </option>
+                    ))}
+                  </select>
                 </label>
-                {compatibleLoras.length ? (
-                  <div className="lora-choice-list">
-                    {compatibleLoras.map((lora) => {
-                      const checked = selectedLoraIds.includes(lora.id);
-                      const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
-                      return (
-                        <label className={checked ? "lora-choice active" : "lora-choice"} key={lora.id}>
-                          <input
-                            checked={checked}
-                            disabled={userLimitReached}
-                            onChange={() => toggleLora(lora)}
-                            type="checkbox"
-                          />
-                          <span>
-                            <strong>{lora.name ?? lora.id}</strong>
-                            <small>
-                              {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
-                            </small>
-                          </span>
-                        </label>
-                      );
-                    })}
+                <label>
+                  Seed
+                  <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
+                </label>
+                <label className="prompt-field">
+                  Negative prompt
+                  <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+                </label>
+                <section className="lora-picker" aria-label="LoRA selection">
+                  <div>
+                    <strong>LoRAs</strong>
+                    <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
                   </div>
-                ) : (
-                  <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
-                )}
-              </section>
-            </div>
-          ) : null}
+                  <label className="checkline">
+                    <input
+                      checked={showIncompatibleLoras}
+                      onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
+                      type="checkbox"
+                    />
+                    Show incompatible
+                  </label>
+                  {compatibleLoras.length ? (
+                    <div className="lora-choice-list">
+                      {compatibleLoras.map((lora) => {
+                        const checked = selectedLoraIds.includes(lora.id);
+                        const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
+                        return (
+                          <label className={checked ? "lora-choice active" : "lora-choice"} key={lora.id}>
+                            <input
+                              checked={checked}
+                              disabled={userLimitReached}
+                              onChange={() => toggleLora(lora)}
+                              type="checkbox"
+                            />
+                            <span>
+                              <strong>{lora.name ?? lora.id}</strong>
+                              <small>
+                                {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
+                              </small>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
+                  )}
+                </section>
+              </div>
+            ) : null}
 
-          {presetValidationResult.missing.length ? (
-            <p className="inline-warning">
-              Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
-            </p>
-          ) : null}
-          {presetValidationResult.incompatible.length ? (
-            <p className="inline-warning">
-              Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
-            </p>
-          ) : null}
-          {selectedLoraValidationResult.incompatible.length ? (
-            <p className="inline-warning">
-              Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
-            </p>
-          ) : null}
-          <button
-            className="primary-action"
-            disabled={submitting || !activeProject || !prompt.trim() || (mode === "character_image" && !characterId) || !presetValidationResult.ok || !selectedLoraValidationResult.ok}
-            type="submit"
-          >
-            {submitting ? "Queueing..." : "Generate"}
-          </button>
-        </section>
-
-        <section className="review-panel">
-          <div className="section-heading">
-            <p className="eyebrow">Fresh batch</p>
-            <h2>Review</h2>
-          </div>
-          {localJobs.length ? (
-            <div className="local-job-stack">
-              {localJobs.map((job) => (
-                <JobProgressCard job={job} key={job.id} label="Image generation" onOpenQueue={onOpenQueue} />
-              ))}
-            </div>
-          ) : null}
-          {reviewSlots.length ? (
-            <div className="review-grid">
-              {reviewSlots.map((slot) => (
-                slot.type === "asset" ? (
-                  <AssetCard
-                    asset={slot.asset}
-                    deleteAsset={deleteAsset}
-                    key={slot.id}
-                    onPreview={onPreview}
-                    purgeAsset={purgeAsset}
-                    updateAssetStatus={updateAssetStatus}
-                  />
-                ) : (
-                  <div className={slot.isError ? "review-placeholder failed" : "review-placeholder"} key={slot.id}>
-                    <span>{slot.label}</span>
-                  </div>
-                )
-              ))}
-            </div>
-          ) : hasReviewContent ? null : (
-            <div className="empty-panel">No fresh image batch</div>
-          )}
-        </section>
+            {presetValidationResult.missing.length ? (
+              <p className="inline-warning">
+                Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
+              </p>
+            ) : null}
+            {presetValidationResult.incompatible.length ? (
+              <p className="inline-warning">
+                Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
+              </p>
+            ) : null}
+            {selectedLoraValidationResult.incompatible.length ? (
+              <p className="inline-warning">
+                Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
+              </p>
+            ) : null}
+          </section>
+        </div>
       </form>
     </section>
   );

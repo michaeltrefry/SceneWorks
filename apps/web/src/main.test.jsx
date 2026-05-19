@@ -385,6 +385,89 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Not Found");
   });
 
+  it("does not show a stale timeline lookup error after creating a workspace", async () => {
+    const requests = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests.push({ method: options.method ?? "GET", path });
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects") && options.method === "POST") {
+        return Promise.resolve(response({ id: "project-2", name: "Fresh Workspace" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project One" }]));
+      }
+      if (path.endsWith("/projects/project-1/timelines/timeline-1")) {
+        return Promise.resolve(
+          response({
+            id: "timeline-1",
+            projectId: "project-1",
+            name: "Main timeline",
+            aspectRatio: "16:9",
+            width: 1280,
+            height: 720,
+            fps: 30,
+            duration: 0,
+            tracks: [],
+            transitions: [],
+          }),
+        );
+      }
+      if (path.endsWith("/projects/project-1/timelines")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "timeline-1",
+              name: "Main timeline",
+              filePath: "timelines/main.sceneworks.timeline.json",
+              aspectRatio: "16:9",
+              width: 1280,
+              height: 720,
+              fps: 30,
+              duration: 0,
+              createdAt: "2026-05-19T12:00:00Z",
+              updatedAt: "2026-05-19T12:00:00Z",
+            },
+          ]),
+        );
+      }
+      if (path.endsWith("/projects/project-2/timelines/timeline-1")) {
+        return Promise.resolve(errorResponse(404, "Timeline not found"));
+      }
+      if (path.endsWith("/projects/project-2/timelines")) {
+        return Promise.resolve(response([]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector(".project-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "New workspace").click();
+    });
+    await changeField(container.querySelector('[aria-label="New workspace name"]'), "Fresh Workspace");
+    await act(async () => {
+      [...container.querySelectorAll(".project-menu-create button")].find((button) => button.textContent === "Create").click();
+    });
+    await settle();
+
+    expect(requests.some((request) => request.path.endsWith("/projects/project-2/timelines/timeline-1"))).toBe(false);
+    expect(container.textContent).toContain("Fresh Workspace");
+    expect(container.textContent).not.toContain("Timeline not found");
+  });
+
   it("switches Replace Person to the replacement-capable video model", async () => {
     root = createRoot(container);
     await act(async () => {
@@ -397,7 +480,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace Person").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -471,7 +554,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace Person").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -855,7 +938,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text to Video").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text → Video").click();
     });
     await settle();
     await act(async () => {
@@ -2689,20 +2772,27 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const primaryLabels = [
-      ...container.querySelectorAll(".studio-controls > .generation-primary-grid label, .studio-controls > label"),
-    ].map((label) => label.childNodes[0]?.textContent.trim());
-    expect(primaryLabels).toEqual(["Model", "Preset", "Prompt", "Count"]);
-    expect(field(container, "Preset").textContent).toContain("None");
-    expect(field(container, "Count").value).toBe("2");
+    // Primary recipe controls are surfaced in the rail (no longer behind Advanced),
+    // alongside the hero-mounted prompt + preset chip strip.
+    const railLabels = [...container.querySelectorAll(".recipe-rail > label, .recipe-rail .recipe-row label")].map(
+      (label) => label.childNodes[0]?.textContent.trim(),
+    );
+    expect(railLabels).toEqual(expect.arrayContaining(["Model", "Variations", "Aspect"]));
+    expect(container.querySelector(".prompt-input")).not.toBeNull();
+    expect(container.querySelector(".preset-chips").textContent).toContain("None");
+    expect(field(container, "Variations").value).toBe("2");
     expect(field(container, "GPU")).toBeUndefined();
     expect(container.textContent).not.toContain("LoRAs");
 
-    await changeField(field(container, "Preset"), field(container, "Preset").options[0].value);
+    await act(async () => {
+      [...container.querySelectorAll(".preset-chip")]
+        .find((chip) => chip.textContent.trim() === "None")
+        .click();
+    });
     await settle();
 
     expect(container.textContent).toContain("No preset selected");
-    expect(field(container, "Count").value).toBe("4");
+    expect(field(container, "Variations").value).toBe("4");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
@@ -2844,7 +2934,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate Clip");
+    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
     expect(container.textContent).toContain("Preset cannot run with LTX");
     expect(container.textContent).toContain("wan_motion");
     expect(generate.disabled).toBe(true);
@@ -3008,7 +3098,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Preset LoRA applied at generation: Video Motion");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate Clip").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
     });
 
     expect(createVideoJob).toHaveBeenCalledWith(
@@ -3084,7 +3174,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Wan Motion");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text to Video").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text → Video").click();
     });
     await settle();
 
@@ -3161,7 +3251,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Start Frame");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "First/Last Frame").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "First → Last").click();
     });
     await settle();
 

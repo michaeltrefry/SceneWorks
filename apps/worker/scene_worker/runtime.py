@@ -214,6 +214,22 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
                 f"Technical detail: {detail}"
             ),
         )
+    tokenizer_backend_markers = (
+        "sentencepiece",
+        "tokenization_t5",
+        "t5.tokenization",
+        "does not seem to have any of the loading methods",
+    )
+    if any(marker in lowered for marker in tokenizer_backend_markers):
+        return (
+            f"{job_kind} failed because the worker is missing a tokenizer backend.",
+            (
+                "The selected video model needs the SentencePiece tokenizer runtime. "
+                "For bare-metal workers, run `pip install -r apps/worker/requirements.txt`; "
+                "for Docker Compose, run `docker compose build worker --no-cache`, then restart the worker and retry. "
+                f"Technical detail: {detail}"
+            ),
+        )
     missing_model_markers = (
         "repo id",
         "repository not found",
@@ -379,11 +395,22 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         progress("loading_model", "loading_model", 0.14, "Resolving video adapter target.")
         adapter.ensure_models(request)
         requirements = adapter.estimate_requirements(request)
+        estimated_frames = (
+            requirements.get("previewFrames")
+            or requirements.get("estimatedFrames")
+            or requirements.get("requestedFrames")
+        )
+        frame_label = "preview frames" if "previewFrames" in requirements else "frames"
+        estimate_message = (
+            f"Estimated {estimated_frames} {frame_label} for this clip."
+            if estimated_frames
+            else "Estimated video generation requirements."
+        )
         progress(
             "running",
             "estimating",
             0.18,
-            f"Estimated {requirements['previewFrames']} preview frames for this clip.",
+            estimate_message,
         )
         result = run_blocking_job_step(
             api,

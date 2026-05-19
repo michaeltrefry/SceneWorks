@@ -2,7 +2,34 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
+import { Icon } from "../components/Icons.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
+
+const MOTIONS = [
+  "static",
+  "slow push-in",
+  "pull out",
+  "pan left",
+  "pan right",
+  "tilt up",
+  "tilt down",
+  "handheld",
+];
+
+function formatGpuLabel(requestedGpu) {
+  if (!requestedGpu || requestedGpu === "auto") {
+    return "auto GPU";
+  }
+  return `GPU ${requestedGpu}`;
+}
+
+function estimateRenderSeconds(durationSeconds, quality) {
+  // Rough heuristic: every clip second ~3s on Balanced, ±50% for Draft/Final.
+  const base = Math.max(1, Number(durationSeconds) || 6) * 3;
+  if (quality === "fast") return Math.round(base * 0.5);
+  if (quality === "best") return Math.round(base * 1.5);
+  return Math.round(base);
+}
 import {
   clearPresetDefault,
   noRecipePresetId,
@@ -33,8 +60,10 @@ export function VideoStudio({
   jobs = [],
   localJobs: trackedLocalJobs = [],
   onLocalJobCreated,
+  onOpenPresets,
   onOpenQueue,
   onPreview,
+  onSendToEditor,
   personTracks = [],
   recipePresets = [],
   requestedGpu,
@@ -43,6 +72,7 @@ export function VideoStudio({
   updateAssetStatus,
   videoModels,
 }) {
+  const [motion, setMotion] = useState("slow push-in");
   const imageAssets = assets.filter((asset) => asset.type === "image" || asset.type === "frame");
   const videoAssets = assets.filter((asset) => asset.type === "video");
   const [mode, setMode] = useState("image_to_video");
@@ -229,11 +259,11 @@ export function VideoStudio({
   }, [mode, personTracks, personTrackId, sourceClipAssetId]);
 
   const modeOptions = [
-    ["image_to_video", "Image to Video"],
-    ["text_to_video", "Text to Video"],
-    ["first_last_frame", "First/Last Frame"],
-    ["extend_clip", "Extend Clip"],
-    ["replace_person", "Replace Person"],
+    ["image_to_video", "Image → Video"],
+    ["text_to_video", "Text → Video"],
+    ["first_last_frame", "First → Last"],
+    ["extend_clip", "Extend"],
+    ["replace_person", "Replace person"],
   ];
   const matchingTracks = personTracks.filter((track) => track.sourceAssetId === sourceClipAssetId);
   const latestDetectionJob = jobs
@@ -349,6 +379,7 @@ export function VideoStudio({
         advanced: {
           resolution,
           durationHint,
+          motion,
           recipePresetName: selectedRecipePreset?.name ?? null,
           recipePresetPrompt: selectedRecipePreset?.prompt ?? null,
           selectedPersonTrack: selectedTrack ?? null,
@@ -361,333 +392,471 @@ export function VideoStudio({
     }
   }
 
+  const generateDisabled = submitting || !canSubmit;
+  const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";
+  const previewAsset = latestAssets[0] ?? null;
+  const estimateSeconds = estimateRenderSeconds(duration, quality);
+  const gpuLabel = formatGpuLabel(requestedGpu);
+
+  function onPromptKeyDown(event) {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  }
+
   return (
     <section className="main-surface video-studio">
-      <div className="surface-header">
-        <div className="section-heading">
-          <p className="eyebrow">Video Studio</p>
-          <h2>{activeProject ? activeProject.name : "Create a project"}</h2>
-        </div>
-        <div className="segmented-control mode-control" role="tablist" aria-label="Video mode">
-          {modeOptions.map(([value, label]) => (
-            <button className={mode === value ? "active" : ""} key={value} onClick={() => setMode(value)} type="button">
-              {label}
+      <form className="studio-shell" onSubmit={submit}>
+        <div className="surface-header hero studio-prompt-hero video-prompt-hero">
+          <div className="prompt-hero-top">
+            <div className="segmented-control mode-control" role="tablist" aria-label="Video mode">
+              {modeOptions.map(([value, label]) => (
+                <button
+                  className={mode === value ? "active" : ""}
+                  key={value}
+                  onClick={() => setMode(value)}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {onOpenPresets ? (
+              <button className="hero-link" onClick={onOpenPresets} type="button">
+                <Icon.Folder size={14} /> Saved recipes
+              </button>
+            ) : null}
+          </div>
+
+          <div className="prompt-input-row">
+            <textarea
+              aria-label="Prompt"
+              className="prompt-input"
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={onPromptKeyDown}
+              placeholder="Describe the motion — what moves, where the camera goes, how it feels…"
+              value={prompt}
+            />
+            <button className="prompt-cta" disabled={generateDisabled} type="submit">
+              <Icon.Sparkle size={14} />
+              {submitting ? "Queueing…" : renderLabel}
             </button>
-          ))}
+          </div>
+
+          <div className="motion-row">
+            <span className="motion-row-label">Motion:</span>
+            {MOTIONS.map((option) => (
+              <button
+                className={motion === option ? "motion-chip active" : "motion-chip"}
+                key={option}
+                onClick={() => setMotion(option)}
+                type="button"
+              >
+                <span aria-hidden="true" className="motion-arrow">→</span>
+                {option}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
 
-      <form className="studio-layout video-layout" onSubmit={submit}>
-        <section className="studio-controls">
-          <div className="control-grid generation-primary-grid">
-            <label>
-              Model
-              <select onChange={(event) => setModel(event.target.value)} value={model}>
-                {videoModels.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Preset
-              <select onChange={(event) => setRecipePresetId(event.target.value)} value={selectedRecipePreset?.id ?? noRecipePresetId}>
-                <option value={noRecipePresetId}>None</option>
-                {availableRecipePresets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.name ?? preset.id}
-                  </option>
-                ))}
-              </select>
-            </label>
+        {mode !== "text_to_video" ? (
+          <div className="studio-source-band">
+            {mode === "image_to_video" || mode === "first_last_frame" ? (
+              <AssetPickerField
+                assets={imageAssets}
+                buttonLabel="Select image"
+                emptyLabel="No first frame selected"
+                label="First frame"
+                onChange={setSourceAssetId}
+                value={sourceAssetId}
+              />
+            ) : null}
+
+            {mode === "first_last_frame" ? (
+              <AssetPickerField
+                assets={imageAssets}
+                buttonLabel="Select image"
+                emptyLabel="No last frame selected"
+                label="Last frame"
+                onChange={setLastFrameAssetId}
+                value={lastFrameAssetId}
+              />
+            ) : null}
+
+            {mode === "extend_clip" ? (
+              <AssetPickerField
+                assets={videoAssets}
+                buttonLabel="Select clip"
+                emptyLabel="No source clip selected"
+                label="Source clip"
+                onChange={setSourceClipAssetId}
+                value={sourceClipAssetId}
+              />
+            ) : null}
+
+            {mode === "replace_person" ? (
+              <ReplacePersonPanel
+                createPersonDetectionJob={createPersonDetectionJob}
+                createPersonTrackJob={createPersonTrackJob}
+                detectionResult={detectionResult}
+                matchingTracks={matchingTracks}
+                personTrackId={personTrackId}
+                replacementMode={replacementMode}
+                representativeFrame={representativeFrame}
+                selectedDetection={selectedDetection}
+                selectedTrack={selectedTrack}
+                setPersonTrackId={setPersonTrackId}
+                setReplacementMode={setReplacementMode}
+                setSelectedDetectionId={setSelectedDetectionId}
+                setSourceClipAssetId={setSourceClipAssetId}
+                setTrackName={setTrackName}
+                sourceClipAssetId={sourceClipAssetId}
+                trackName={trackName}
+                videoAssets={videoAssets}
+              />
+            ) : null}
           </div>
+        ) : null}
 
-          {mode === "image_to_video" || mode === "first_last_frame" ? (
-            <AssetPickerField
-              assets={imageAssets}
-              buttonLabel="Select image"
-              emptyLabel="No first frame selected"
-              label="First frame"
-              onChange={setSourceAssetId}
-              value={sourceAssetId}
-            />
-          ) : null}
-
-          {mode === "first_last_frame" ? (
-            <AssetPickerField
-              assets={imageAssets}
-              buttonLabel="Select image"
-              emptyLabel="No last frame selected"
-              label="Last frame"
-              onChange={setLastFrameAssetId}
-              value={lastFrameAssetId}
-            />
-          ) : null}
-
-          {mode === "extend_clip" ? (
-            <AssetPickerField
-              assets={videoAssets}
-              buttonLabel="Select clip"
-              emptyLabel="No source clip selected"
-              label="Source clip"
-              onChange={setSourceClipAssetId}
-              value={sourceClipAssetId}
-            />
-          ) : null}
-
-          {mode === "replace_person" ? (
-            <ReplacePersonPanel
-              createPersonDetectionJob={createPersonDetectionJob}
-              createPersonTrackJob={createPersonTrackJob}
-              detectionResult={detectionResult}
-              matchingTracks={matchingTracks}
-              personTrackId={personTrackId}
-              replacementMode={replacementMode}
-              representativeFrame={representativeFrame}
-              selectedDetection={selectedDetection}
-              selectedTrack={selectedTrack}
-              setPersonTrackId={setPersonTrackId}
-              setReplacementMode={setReplacementMode}
-              setSelectedDetectionId={setSelectedDetectionId}
-              setSourceClipAssetId={setSourceClipAssetId}
-              setTrackName={setTrackName}
-              sourceClipAssetId={sourceClipAssetId}
-              trackName={trackName}
-              videoAssets={videoAssets}
-            />
-          ) : null}
-
-          <div className="control-grid compact-controls">
-            <label>
-              Character
-              <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
-                <option value="">No character</option>
-                {characters.map((character) => (
-                  <option key={character.id} value={character.id}>
-                    {character.name}
-                  </option>
+        <div className="video-results">
+          <div className="video-main-stack">
+            {localJobs.length ? (
+              <div className="local-job-stack">
+                {localJobs.map((job) => (
+                  <JobProgressCard job={job} key={job.id} label="Video generation" onOpenQueue={onOpenQueue} />
                 ))}
-              </select>
-            </label>
-            <label>
-              Look
-              <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
-                <option value="">Default look</option>
-                {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
-                  <option key={look.id} value={look.id}>
-                    {look.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          {characterId ? (
-            <div className="guidance-strip">
-              <strong>Recipe-only character</strong>
-              <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
+              </div>
+            ) : null}
+
+            <div className="video-preview-card">
+              <div className="video-preview-stage">
+                {previewAsset ? (
+                  <AssetMedia asset={previewAsset} />
+                ) : (
+                  <span className="video-preview-empty">No clip rendered yet — set up the prompt above and hit Render</span>
+                )}
+              </div>
+
+              <div className="video-playback-bar">
+                <button aria-label="Play preview" className="play-btn" type="button">
+                  <Icon.Play size={14} />
+                </button>
+                <div aria-hidden="true" className="video-playback-scrub">
+                  <span className="video-playback-scrub-fill" />
+                </div>
+                <span className="video-playback-time">0:00 / 0:{String(Math.round(Number(duration) || 0)).padStart(2, "0")}</span>
+                <span className="video-playback-estimate">~{estimateSeconds}s on {gpuLabel}</span>
+                <button
+                  className="send-editor-btn"
+                  disabled={!previewAsset || !onSendToEditor}
+                  onClick={() => previewAsset && onSendToEditor?.(previewAsset)}
+                  type="button"
+                >
+                  <Icon.Editor size={14} /> Send to editor
+                </button>
+              </div>
             </div>
-          ) : null}
 
-          <label className="prompt-field">
-            Prompt
-            <textarea onChange={(event) => setPrompt(event.target.value)} value={prompt} />
-          </label>
+            {videoAssets.length ? (
+              <div className="recent-clips-card">
+                <div className="recent-clips-head">
+                  <h3>Recent clips</h3>
+                  <span className="meta">{localJobs.length || latestAssets.length} this session</span>
+                </div>
+                <div className="recent-clips-strip">
+                  {videoAssets.slice(0, 4).map((asset) => (
+                    <button className="tray-item" key={asset.id} onClick={() => onPreview(asset)} type="button">
+                      <AssetMedia asset={asset} />
+                      <span>{asset.displayName}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
-          <div className="control-grid video-preset-grid">
-            <label>
-              Duration
-              <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
-                {durationOptions.map((value) => (
-                  <option key={value} value={value}>
-                    {value}s
-                  </option>
+            {comparisonAsset?.recipe?.mode === "replace_person" && comparisonSource ? (
+              <div className="comparison-panel">
+                <div className="comparison-toolbar">
+                  <div className="segmented-control compact-segment" aria-label="Comparison mode">
+                    <button className={comparisonMode === "side_by_side" ? "active" : ""} onClick={() => setComparisonMode("side_by_side")} type="button">
+                      Side by Side
+                    </button>
+                    <button className={comparisonMode === "ab" ? "active" : ""} onClick={() => setComparisonMode("ab")} type="button">
+                      A/B
+                    </button>
+                  </div>
+                  {comparisonMode === "ab" ? (
+                    <div className="segmented-control compact-segment" aria-label="A/B source">
+                      <button className={abSide === "original" ? "active" : ""} onClick={() => setAbSide("original")} type="button">
+                        A
+                      </button>
+                      <button className={abSide === "replacement" ? "active" : ""} onClick={() => setAbSide("replacement")} type="button">
+                        B
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+                {comparisonMode === "side_by_side" ? (
+                  <div className="comparison-grid">
+                    <div>
+                      <p className="eyebrow">Original</p>
+                      <AssetMedia asset={comparisonSource} />
+                    </div>
+                    <div>
+                      <p className="eyebrow">Replacement</p>
+                      <AssetMedia asset={comparisonAsset} />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="comparison-single">
+                    <p className="eyebrow">{abSide === "original" ? "A Original" : "B Replacement"}</p>
+                    <AssetMedia asset={abSide === "original" ? comparisonSource : comparisonAsset} />
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {latestAssets.length > 1 ? (
+              <div className="review-grid video-review-grid">
+                {latestAssets.slice(1).map((asset) => (
+                  <AssetCard
+                    asset={asset}
+                    deleteAsset={deleteAsset}
+                    key={asset.id}
+                    onPreview={onPreview}
+                    purgeAsset={purgeAsset}
+                    updateAssetStatus={updateAssetStatus}
+                  />
                 ))}
-              </select>
-            </label>
-            <label>
-              Quality
-              <select onChange={(event) => setQuality(event.target.value)} value={quality}>
-                <option value="fast">Fast</option>
-                <option value="balanced">Balanced</option>
-                <option value="best">Best</option>
-              </select>
-            </label>
+              </div>
+            ) : null}
+
+            {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
+            {presetValidationResult.missing.length ? (
+              <p className="inline-warning">
+                Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
+              </p>
+            ) : null}
+            {presetValidationResult.incompatible.length ? (
+              <p className="inline-warning">
+                Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
+              </p>
+            ) : null}
           </div>
 
-          {selectedRecipePreset ? (
-            <div className="guidance-strip">
-              <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
-              <span>
-                {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
-                {presetLoraDetails.length
-                  ? ` | Preset LoRA applied at generation: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
-                  : " | No preset LoRAs"}
-                {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
-              </span>
-            </div>
-          ) : (
-            <div className="guidance-strip">
-              <strong>No preset selected</strong>
-              <span>Generation will use only the visible prompt, model, and advanced settings.</span>
-            </div>
-          )}
+          <div className="video-rail">
+            <aside className="render-rail">
+              <div className="recipe-head">
+                <h3>Render settings</h3>
+                <span className="recipe-model-tag">{selectedModel?.name ?? "—"}</span>
+              </div>
 
-          <div className="guidance-strip">
-            <strong>{selectedModel?.name ?? "Video model"}</strong>
-            <span>{durationHint}</span>
-          </div>
-
-          <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
-            {advancedOpen ? "Hide advanced" : "Advanced"}
-          </button>
-
-          {advancedOpen ? (
-            <div className="advanced-panel">
               <label>
-                GPU
-                <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
-                  {gpuOptions.map((gpu) => (
-                    <option key={gpu} value={gpu}>
-                      {gpu === "auto" ? "Auto" : gpu}
+                Model
+                <select onChange={(event) => setModel(event.target.value)} value={model}>
+                  {videoModels.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
                     </option>
                   ))}
                 </select>
               </label>
+
+              {availableRecipePresets.length ? (
+                <div className="style-preset-strip">
+                  <span className="style-preset-label">Style preset</span>
+                  <div className="preset-chips">
+                    <button
+                      className={!selectedRecipePreset ? "preset-chip active" : "preset-chip"}
+                      onClick={() => setRecipePresetId(noRecipePresetId)}
+                      type="button"
+                    >
+                      None
+                    </button>
+                    {availableRecipePresets.map((preset) => (
+                      <button
+                        className={selectedRecipePreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                        key={preset.id}
+                        onClick={() => setRecipePresetId(preset.id)}
+                        type="button"
+                      >
+                        {preset.name ?? preset.id}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <label>
+                Quality
+                <div className="quality-segment" role="radiogroup" aria-label="Quality">
+                  {[
+                    ["fast", "Draft"],
+                    ["balanced", "Balanced"],
+                    ["best", "Final"],
+                  ].map(([value, label]) => (
+                    <button
+                      aria-checked={quality === value}
+                      className={quality === value ? "active" : ""}
+                      key={value}
+                      onClick={() => setQuality(value)}
+                      role="radio"
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </label>
+
+              <div className="control-grid recipe-row">
+                <label>
+                  Duration
+                  <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
+                    {durationOptions.map((value) => (
+                      <option key={value} value={value}>
+                        {value}s
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Frames
+                  <select onChange={(event) => setFps(Number(event.target.value))} value={fps}>
+                    {fpsOptions.map((value) => (
+                      <option key={value} value={value}>
+                        {value} fps
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
               <label>
                 Resolution
                 <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
                   {resolutionOptions.map((value) => (
                     <option key={value} value={value}>
-                      {value.replace("x", " x ")}
+                      {value.replace("x", " × ")}
                     </option>
                   ))}
                 </select>
               </label>
-              <label>
-                FPS
-                <select onChange={(event) => setFps(Number(event.target.value))} value={fps}>
-                  {fpsOptions.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Seed
-                <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
-              </label>
-              <label className="prompt-field">
-                Negative prompt
-                <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
-              </label>
-            </div>
-          ) : null}
 
-          {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
-          {presetValidationResult.missing.length ? (
-            <p className="inline-warning">
-              Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
-            </p>
-          ) : null}
-          {presetValidationResult.incompatible.length ? (
-            <p className="inline-warning">
-              Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
-            </p>
-          ) : null}
-          <button className="primary-action" disabled={submitting || !canSubmit} type="submit">
-            {submitting ? "Queueing..." : mode === "replace_person" ? "Replace Person" : "Generate Clip"}
-          </button>
-        </section>
-
-        <section className="review-panel video-review">
-          <div className="section-heading">
-            <p className="eyebrow">Fresh clip</p>
-            <h2>Review</h2>
-          </div>
-          {localJobs.length ? (
-            <div className="local-job-stack">
-              {localJobs.map((job) => (
-                <JobProgressCard job={job} key={job.id} label="Video generation" onOpenQueue={onOpenQueue} />
-              ))}
-            </div>
-          ) : null}
-          {latestAssets.length ? (
-            <div className="review-grid video-review-grid">
-              {latestAssets.map((asset) => (
-                <AssetCard
-                  asset={asset}
-                  deleteAsset={deleteAsset}
-                  key={asset.id}
-                  onPreview={onPreview}
-                  purgeAsset={purgeAsset}
-                  updateAssetStatus={updateAssetStatus}
-                />
-              ))}
-            </div>
-          ) : hasReviewContent ? null : (
-            <div className="empty-panel">No fresh video clip</div>
-          )}
-
-          {comparisonAsset?.recipe?.mode === "replace_person" && comparisonSource ? (
-            <div className="comparison-panel">
-              <div className="comparison-toolbar">
-                <div className="segmented-control compact-segment" aria-label="Comparison mode">
-                  <button className={comparisonMode === "side_by_side" ? "active" : ""} onClick={() => setComparisonMode("side_by_side")} type="button">
-                    Side by Side
-                  </button>
-                  <button className={comparisonMode === "ab" ? "active" : ""} onClick={() => setComparisonMode("ab")} type="button">
-                    A/B
-                  </button>
-                </div>
-                {comparisonMode === "ab" ? (
-                  <div className="segmented-control compact-segment" aria-label="A/B source">
-                    <button className={abSide === "original" ? "active" : ""} onClick={() => setAbSide("original")} type="button">
-                      A
-                    </button>
-                    <button className={abSide === "replacement" ? "active" : ""} onClick={() => setAbSide("replacement")} type="button">
-                      B
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-              {comparisonMode === "side_by_side" ? (
-                <div className="comparison-grid">
-                  <div>
-                    <p className="eyebrow">Original</p>
-                    <AssetMedia asset={comparisonSource} />
-                  </div>
-                  <div>
-                    <p className="eyebrow">Replacement</p>
-                    <AssetMedia asset={comparisonAsset} />
-                  </div>
+              {selectedRecipePreset ? (
+                <div className="guidance-strip">
+                  <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
+                  <span>
+                    {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
+                    {presetLoraDetails.length
+                      ? ` | Preset LoRA applied at generation: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
+                      : " | No preset LoRAs"}
+                    {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
+                  </span>
                 </div>
               ) : (
-                <div className="comparison-single">
-                  <p className="eyebrow">{abSide === "original" ? "A Original" : "B Replacement"}</p>
-                  <AssetMedia asset={abSide === "original" ? comparisonSource : comparisonAsset} />
+                <div className="guidance-strip">
+                  <strong>No preset selected</strong>
+                  <span>Generation uses only the prompt, model, and visible render settings.</span>
                 </div>
               )}
-            </div>
-          ) : null}
 
-          <div className="asset-tray">
-            <div className="section-heading">
-              <p className="eyebrow">Asset tray</p>
-              <h2>Recent videos</h2>
-            </div>
-            <div className="tray-grid">
-              {videoAssets.slice(0, 4).map((asset) => (
-                <button className="tray-item" key={asset.id} onClick={() => onPreview(asset)} type="button">
-                  <AssetMedia asset={asset} />
-                  <span>{asset.displayName}</span>
-                </button>
-              ))}
-              {videoAssets.length === 0 ? <div className="empty-panel compact-panel">No video assets</div> : null}
-            </div>
+              {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
+
+              <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
+                <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
+                {advancedOpen ? "Hide advanced" : "Advanced"}
+              </button>
+
+              {advancedOpen ? (
+                <div className="advanced-panel">
+                  <label>
+                    GPU
+                    <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
+                      {gpuOptions.map((gpu) => (
+                        <option key={gpu} value={gpu}>
+                          {gpu === "auto" ? "Auto" : gpu}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Seed
+                    <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
+                  </label>
+                  <label>
+                    Character
+                    <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+                      <option value="">No character</option>
+                      {characters.map((character) => (
+                        <option key={character.id} value={character.id}>
+                          {character.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Look
+                    <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
+                      <option value="">Default look</option>
+                      {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
+                        <option key={look.id} value={look.id}>
+                          {look.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="prompt-field">
+                    Negative prompt
+                    <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+                  </label>
+                  {characterId ? (
+                    <div className="guidance-strip">
+                      <strong>Recipe-only character</strong>
+                      <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </aside>
+
+            <aside className="tips-card">
+              <h3>Tips</h3>
+              <ul>
+                <li>Short clips (4–6s) compose better in the editor.</li>
+                <li>Describe the motion, not just the scene.</li>
+                <li>Pick a motion chip above to guide the camera.</li>
+              </ul>
+            </aside>
+
+            <aside className="keyboard-card">
+              <h3>Keyboard</h3>
+              <dl>
+                <div className="kbd-row">
+                  <span>Render</span>
+                  <span className="kbd-keys">
+                    <kbd>⌘</kbd>
+                    <kbd>↵</kbd>
+                  </span>
+                </div>
+                <div className="kbd-row">
+                  <span>Send to editor</span>
+                  <span className="kbd-keys">
+                    <kbd>⇧</kbd>
+                    <kbd>E</kbd>
+                  </span>
+                </div>
+                <div className="kbd-row">
+                  <span>Loop preview</span>
+                  <span className="kbd-keys">
+                    <kbd>L</kbd>
+                  </span>
+                </div>
+              </dl>
+            </aside>
           </div>
-        </section>
+        </div>
       </form>
     </section>
   );

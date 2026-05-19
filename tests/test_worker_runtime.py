@@ -700,6 +700,24 @@ def test_friendly_failure_identifies_missing_peft_backend():
     assert "Technical detail" in error
 
 
+def test_friendly_failure_identifies_missing_sentencepiece_backend():
+    message, error = friendly_failure(
+        "Video generation",
+        RuntimeError(
+            "The component <class 'transformers.models.t5.tokenization_t5."
+            "_LazyModule.__getattr__.<locals>.Placeholder'> of <class "
+            "'diffusers.pipelines.ltx.pipeline_ltx_image2video.LTXImageToVideoPipeline'> "
+            "cannot be loaded as it does not seem to have any of the loading methods defined."
+        ),
+    )
+
+    assert message == "Video generation failed because the worker is missing a tokenizer backend."
+    assert "SentencePiece" in error
+    assert "pip install -r apps/worker/requirements.txt" in error
+    assert "docker compose build worker --no-cache" in error
+    assert "Technical detail" in error
+
+
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     events = []
     monkeypatch.setattr("scene_worker.runtime.emit", events.append)
@@ -946,6 +964,55 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
         ["video-model-running"],
     ]
     assert blocking_models == [["video-model-loaded"], ["video-model-running"]]
+
+
+def test_video_job_estimate_progress_accepts_non_preview_frame_requirements(monkeypatch):
+    progress_messages = []
+
+    class Api:
+        def post(self, path, payload):
+            if path.endswith("/heartbeat"):
+                return {}
+            if path.endswith("/progress"):
+                progress_messages.append(payload["message"])
+                return {"status": payload["status"], "stage": payload["stage"]}
+            raise AssertionError(path)
+
+        def get(self, _path):
+            return {"cancelRequested": False}
+
+    class VideoAdapter:
+        def prepare(self, *, settings, job):
+            return {"job": job["id"]}
+
+        def ensure_models(self, _request):
+            return None
+
+        def estimate_requirements(self, _request):
+            return {"estimatedFrames": 121, "requestedFrames": 120}
+
+        def run(self, *, settings, job, request, progress, cancel_requested):
+            return {"assetId": "asset-video-1"}
+
+        def cancel(self, _job_id):
+            raise AssertionError("cancel should not be called")
+
+        def cleanup(self, _job_id):
+            raise AssertionError("cleanup should not be called")
+
+    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda: VideoAdapter())
+    monkeypatch.setattr(
+        "scene_worker.runtime.run_blocking_job_step",
+        lambda *_args, **_kwargs: _args[4](),
+    )
+
+    run_video_job(
+        Api(),
+        SimpleNamespace(worker_id="worker-1"),
+        {"id": "job-1", "payload": {"projectId": "project-1", "prompt": "clip"}},
+    )
+
+    assert "Estimated 121 frames for this clip." in progress_messages
 
 
 def test_random_batch_seeds_are_used_per_image():
