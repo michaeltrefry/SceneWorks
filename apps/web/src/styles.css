@@ -1117,6 +1117,696 @@ label {
   }
 }
 
+/* ---------- Studio prompt hero (Image Studio) ----------
+   A vertically-stacked hero: mode tabs + saved-recipes link on top,
+   prompt textarea + Generate CTA, then suggestion chips. */
+.surface-header.hero.studio-prompt-hero {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px 22px;
+}
+
+.prompt-hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hero-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  border-radius: var(--r-sm);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.hero-link:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.prompt-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.prompt-input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+  min-height: 96px;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+  box-shadow: var(--shadow-sm);
+}
+
+.prompt-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.prompt-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 148px;
+  padding: 0 22px;
+  font-size: 14.5px;
+  font-weight: 600;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--accent-fg);
+  box-shadow:
+    0 1px 2px color-mix(in oklch, var(--accent) 40%, transparent),
+    0 8px 22px color-mix(in oklch, var(--accent) 28%, transparent);
+  transition: background var(--t-fast);
+}
+
+.prompt-cta:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.prompt-cta:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.suggestion-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.suggestion-row-label {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+.suggestion {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+
+.suggestion:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+@media (max-width: 720px) {
+  .prompt-input-row {
+    grid-template-columns: 1fr;
+  }
+
+  .prompt-cta {
+    width: 100%;
+  }
+}
+
+/* ---------- Studio results: latest batch + recipe rail ---------- */
+.studio-results {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .studio-results {
+    grid-template-columns: 1fr;
+  }
+}
+
+.studio-source-band {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.review-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-panel-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.kbd-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.kbd-hint kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  color: var(--text-muted);
+}
+
+/* Recipe rail */
+.studio-controls.recipe-rail {
+  padding: 16px;
+  align-content: start;
+}
+
+.recipe-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.recipe-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.recipe-model-tag {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.style-preset-strip {
+  display: grid;
+  gap: 7px;
+}
+
+.style-preset-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
+
+.preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.preset-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 11px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+
+.preset-chip:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.preset-chip.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: transparent;
+  font-weight: 600;
+}
+
+[data-theme="dark"] .preset-chip.active {
+  color: var(--accent);
+}
+
+.recipe-row {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 10px;
+}
+
+.advanced-toggle {
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--r-sm);
+}
+
+.advanced-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+.advanced-toggle .chev-rotate {
+  transition: transform var(--t-fast) var(--ease-out);
+}
+
+.advanced-toggle .chev-rotate.open {
+  transform: rotate(180deg);
+}
+
+/* ---------- Video Studio hero variants ---------- */
+/* Hero contains: mode tabs row, source-thumb + prompt + render CTA row, motion chips row. */
+.surface-header.hero.video-prompt-hero .prompt-input-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.prompt-source-thumb {
+  display: block;
+  width: 140px;
+  height: 96px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  overflow: hidden;
+  padding: 0;
+  position: relative;
+}
+
+.prompt-source-thumb img,
+.prompt-source-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.prompt-source-thumb-empty {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  background:
+    repeating-linear-gradient(45deg, color-mix(in oklch, var(--text-faint) 10%, transparent) 0 8px, transparent 8px 16px),
+    var(--surface-2);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+}
+
+.prompt-source-thumb:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.motion-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.motion-row-label {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+.motion-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+
+.motion-chip:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.motion-chip.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: transparent;
+  font-weight: 600;
+}
+
+[data-theme="dark"] .motion-chip.active {
+  color: var(--accent);
+}
+
+.motion-chip .motion-arrow {
+  opacity: 0.55;
+}
+
+.motion-chip.active .motion-arrow {
+  opacity: 1;
+}
+
+@media (max-width: 720px) {
+  .surface-header.hero.video-prompt-hero .prompt-input-row {
+    grid-template-columns: 1fr;
+  }
+
+  .prompt-source-thumb {
+    width: 100%;
+    height: 140px;
+  }
+}
+
+/* Video results: preview + render rail */
+.video-results {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .video-results {
+    grid-template-columns: 1fr;
+  }
+}
+
+.video-main-stack,
+.video-rail {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+
+.video-preview-card,
+.render-rail,
+.tips-card,
+.keyboard-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.video-preview-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.video-preview-stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background:
+    radial-gradient(140% 100% at 50% 0%, color-mix(in oklch, var(--accent) 10%, var(--bg-2)), var(--bg-2) 60%);
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+}
+
+.video-preview-stage img,
+.video-preview-stage video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.video-preview-empty {
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  color: var(--text-faint);
+  padding: 24px;
+  text-align: center;
+}
+
+.video-playback-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.video-playback-bar .play-btn {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.video-playback-bar .play-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.video-playback-scrub {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  position: relative;
+  min-width: 80px;
+}
+
+.video-playback-scrub-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  background: var(--accent);
+  border-radius: var(--r-pill);
+}
+
+.video-playback-time {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.video-playback-estimate {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.video-playback-bar .send-editor-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.video-playback-bar .send-editor-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.video-playback-bar .send-editor-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.recent-clips-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.recent-clips-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recent-clips-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.recent-clips-head .meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.recent-clips-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+/* Render rail (right column) */
+.render-rail {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.render-rail .recipe-head h3 {
+  font-size: 15px;
+}
+
+.quality-segment {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 3px;
+  gap: 2px;
+}
+
+.quality-segment button {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.quality-segment button:hover {
+  color: var(--text);
+}
+
+.quality-segment button.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.render-rail .recipe-row {
+  grid-template-columns: 1fr 1fr;
+}
+
+/* Tips + Keyboard side-panel cards */
+.tips-card,
+.keyboard-card {
+  padding: 14px 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.tips-card h3,
+.keyboard-card h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.tips-card ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.keyboard-card dl {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.keyboard-card .kbd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.keyboard-card .kbd-row .kbd-keys {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.keyboard-card .kbd-row .kbd-keys kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  color: var(--text-muted);
+}
+
 .checkline {
   display: inline-flex;
   gap: 6px;

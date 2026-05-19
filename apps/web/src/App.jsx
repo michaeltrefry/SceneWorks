@@ -1671,6 +1671,7 @@ export function App() {
             loras={loras}
             localJobs={imageLocalJobs}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("image", job)}
+            onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
             recipePresets={recipePresets}
@@ -1700,8 +1701,15 @@ export function App() {
             jobs={jobs}
             localJobs={videoLocalJobs}
             onLocalJobCreated={(job) => rememberLocalGenerationJob("video", job)}
+            onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
+            onSendToEditor={(asset) => {
+              if (asset?.id) {
+                setSelectedAssetId(asset.id);
+              }
+              setActiveView("Editor");
+            }}
             personTracks={personTracks}
             recipePresets={recipePresets}
             requestedGpu={requestedGpu}
