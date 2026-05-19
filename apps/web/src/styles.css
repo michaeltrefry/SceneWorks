@@ -990,12 +990,17 @@ button:disabled {
   gap: 10px;
 }
 
+.generation-primary-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .advanced-panel {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 12px;
 }
 
-.advanced-panel .prompt-field {
+.advanced-panel .prompt-field,
+.advanced-panel .lora-picker {
   grid-column: 1 / -1;
 }
 
@@ -1042,7 +1047,7 @@ button:disabled {
 }
 
 .video-preset-grid {
-  grid-template-columns: minmax(0, 1.2fr) repeat(3, minmax(0, 0.8fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .guidance-strip,

@@ -2449,10 +2449,15 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(container.textContent).toContain("Built In");
+    expect(container.textContent).not.toContain("Built In");
     expect(container.textContent).not.toContain("Qwen Only");
     expect(container.textContent).not.toContain("Missing LoRA");
 
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+
+    expect(container.textContent).toContain("Built In");
     const checkboxes = [...container.querySelectorAll('.lora-choice input[type="checkbox"]')];
     await act(async () => {
       checkboxes[0].click();
@@ -2462,9 +2467,6 @@ describe("SceneWorks app shell", () => {
 
     expect(checkboxes[3].disabled).toBe(true);
 
-    await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
-    });
     await act(async () => {
       container.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
     });
@@ -2526,6 +2528,14 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Generate is blocked");
     expect(container.textContent).toContain("Qwen Only");
     expect(generate.disabled).toBe(true);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Hide advanced").click();
+    });
+    await settle();
+
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Hide advanced")).toBe(true);
+    expect(container.textContent).toContain("Qwen Only");
 
     await act(async () => {
       generate.click();
@@ -2601,6 +2611,79 @@ describe("SceneWorks app shell", () => {
         advanced: { resolution: "1280x720" },
       }),
     );
+  });
+
+  it("surfaces model and preset first and lets image generation run with no preset", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={createImageJob}
+          deleteAsset={() => {}}
+          gpuOptions={["auto", "1"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          loras={[{ id: "cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", presetManaged: true }]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          recipePresets={[
+            {
+              id: "cinematic",
+              name: "Cinematic",
+              model: "z_image_turbo",
+              workflow: "text_to_image",
+              defaults: { count: 2, negativePrompt: "flat lighting" },
+              builtInLoras: [{ id: "cinematic_detail" }],
+            },
+          ]}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    const primaryLabels = [
+      ...container.querySelectorAll(".studio-controls > .generation-primary-grid label, .studio-controls > label"),
+    ].map((label) => label.childNodes[0]?.textContent.trim());
+    expect(primaryLabels).toEqual(["Model", "Preset", "Prompt", "Count"]);
+    expect(field(container, "Preset").textContent).toContain("None");
+    expect(field(container, "Count").value).toBe("2");
+    expect(field(container, "GPU")).toBeUndefined();
+    expect(container.textContent).not.toContain("LoRAs");
+
+    await changeField(field(container, "Preset"), field(container, "Preset").options[0].value);
+    await settle();
+
+    expect(container.textContent).toContain("No preset selected");
+    expect(field(container, "Count").value).toBe("4");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+
+    expect(field(container, "GPU")).not.toBeUndefined();
+    expect(container.textContent).toContain("LoRAs");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        count: 4,
+        negativePrompt: "",
+        recipePresetId: null,
+        loras: [],
+      }),
+    );
+    expect(createImageJob.mock.calls[0][0]).not.toHaveProperty("stylePreset");
   });
 
   it("blocks image presets whose managed LoRAs do not match the selected model", async () => {
@@ -2974,7 +3057,7 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Model"), "wan_2_2");
     await settle();
 
-    expect(container.textContent).toContain("Presets unavailable");
+    expect(container.textContent).toContain("No preset selected");
     expect(container.textContent).not.toContain("LTX Story");
   });
 

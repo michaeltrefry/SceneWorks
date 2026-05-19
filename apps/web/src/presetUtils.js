@@ -1,3 +1,25 @@
+export const noRecipePresetId = "__no_recipe_preset__";
+
+export function rememberPresetDefault(snapshots, key, currentValue, appliedValue) {
+  const previousSnapshot = snapshots.current[key];
+  snapshots.current[key] = {
+    appliedValue,
+    previousValue:
+      previousSnapshot && Object.is(currentValue, previousSnapshot.appliedValue)
+        ? previousSnapshot.previousValue
+        : currentValue,
+  };
+}
+
+export function clearPresetDefault(setter, snapshots, key) {
+  const snapshot = snapshots.current[key];
+  if (!snapshot) {
+    return;
+  }
+  setter((current) => (Object.is(current, snapshot.appliedValue) ? snapshot.previousValue : current));
+  delete snapshots.current[key];
+}
+
 export const defaultModesByWorkflow = {
   text_to_image: ["text_to_image", "character_image", "style_variations"],
   edit_image: ["edit_image"],

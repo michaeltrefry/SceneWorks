@@ -1,14 +1,17 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import {
+  clearPresetDefault,
+  noRecipePresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
   presetPromptParts as buildPresetPromptParts,
   presetValidation,
+  rememberPresetDefault,
 } from "../presetUtils.js";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 
@@ -45,9 +48,9 @@ export function VideoStudio({
   const [mode, setMode] = useState("image_to_video");
   const [prompt, setPrompt] = useState("Camera slowly pushes in while the scene comes alive");
   const [quality, setQuality] = useState("balanced");
-  const [recipePresetId, setRecipePresetId] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? "ltx_2_3");
+  const [recipePresetId, setRecipePresetId] = useState(null);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   const [duration, setDuration] = useState(selectedModel?.defaults?.duration ?? 6);
   const [resolution, setResolution] = useState(selectedModel?.defaults?.resolution ?? "768x512");
@@ -67,13 +70,19 @@ export function VideoStudio({
   const [abSide, setAbSide] = useState("replacement");
   const [submitting, setSubmitting] = useState(false);
   const [resultFallbackTick, setResultFallbackTick] = useState(0);
+  const presetDefaultSnapshots = useRef({});
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
   const availableRecipePresets = useMemo(() => {
     return recipePresets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
   }, [mode, recipePresets, selectedModel?.id]);
-  const selectedRecipePreset = availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? availableRecipePresets[0] ?? null;
+  const selectedRecipePreset =
+    recipePresetId === noRecipePresetId
+      ? null
+      : recipePresetId
+        ? availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? null
+        : availableRecipePresets[0] ?? null;
   const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
   const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
   const presetValidationResult = useMemo(
@@ -154,30 +163,58 @@ export function VideoStudio({
   }, [mode, supportsMode, videoModels]);
 
   useEffect(() => {
-    if (!availableRecipePresets.some((preset) => preset.id === recipePresetId)) {
-      setRecipePresetId(availableRecipePresets[0]?.id ?? "");
+    if (!recipePresetId || recipePresetId === noRecipePresetId) {
+      return;
     }
-  }, [availableRecipePresets, recipePresetId]);
+    if (!selectedRecipePreset) {
+      setRecipePresetId(availableRecipePresets[0]?.id ?? noRecipePresetId);
+    }
+  }, [availableRecipePresets, recipePresetId, selectedRecipePreset]);
 
   useEffect(() => {
     if (!selectedRecipePreset) {
+      clearPresetDefault(setDuration, presetDefaultSnapshots, "duration");
+      clearPresetDefault(setFps, presetDefaultSnapshots, "fps");
+      clearPresetDefault(setQuality, presetDefaultSnapshots, "quality");
+      clearPresetDefault(setResolution, presetDefaultSnapshots, "resolution");
+      clearPresetDefault(setNegativePrompt, presetDefaultSnapshots, "negativePrompt");
       return;
     }
     const defaults = selectedRecipePreset.defaults ?? {};
     if (defaults.duration) {
-      setDuration(Number(defaults.duration));
+      const appliedValue = Number(defaults.duration);
+      setDuration((current) => {
+        rememberPresetDefault(presetDefaultSnapshots, "duration", current, appliedValue);
+        return appliedValue;
+      });
     }
     if (defaults.fps) {
-      setFps(Number(defaults.fps));
+      const appliedValue = Number(defaults.fps);
+      setFps((current) => {
+        rememberPresetDefault(presetDefaultSnapshots, "fps", current, appliedValue);
+        return appliedValue;
+      });
     }
     if (defaults.quality) {
-      setQuality(defaults.quality);
+      const appliedValue = defaults.quality;
+      setQuality((current) => {
+        rememberPresetDefault(presetDefaultSnapshots, "quality", current, appliedValue);
+        return appliedValue;
+      });
     }
     if (defaults.resolution) {
-      setResolution(defaults.resolution);
+      const appliedValue = defaults.resolution;
+      setResolution((current) => {
+        rememberPresetDefault(presetDefaultSnapshots, "resolution", current, appliedValue);
+        return appliedValue;
+      });
     }
     if (Object.prototype.hasOwnProperty.call(defaults, "negativePrompt")) {
-      setNegativePrompt(defaults.negativePrompt ?? "");
+      const appliedValue = defaults.negativePrompt ?? "";
+      setNegativePrompt((current) => {
+        rememberPresetDefault(presetDefaultSnapshots, "negativePrompt", current, appliedValue);
+        return appliedValue;
+      });
     }
   }, [selectedRecipePreset?.id]);
 
@@ -342,6 +379,30 @@ export function VideoStudio({
 
       <form className="studio-layout video-layout" onSubmit={submit}>
         <section className="studio-controls">
+          <div className="control-grid generation-primary-grid">
+            <label>
+              Model
+              <select onChange={(event) => setModel(event.target.value)} value={model}>
+                {videoModels.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Preset
+              <select onChange={(event) => setRecipePresetId(event.target.value)} value={selectedRecipePreset?.id ?? noRecipePresetId}>
+                <option value={noRecipePresetId}>None</option>
+                {availableRecipePresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name ?? preset.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
           {mode === "image_to_video" || mode === "first_last_frame" ? (
             <AssetPickerField
               assets={imageAssets}
@@ -435,20 +496,6 @@ export function VideoStudio({
 
           <div className="control-grid video-preset-grid">
             <label>
-              Preset
-              <select disabled={!availableRecipePresets.length} onChange={(event) => setRecipePresetId(event.target.value)} value={recipePresetId}>
-                {availableRecipePresets.length ? (
-                  availableRecipePresets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.name ?? preset.id}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">No presets</option>
-                )}
-              </select>
-            </label>
-            <label>
               Duration
               <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
                 {durationOptions.map((value) => (
@@ -466,16 +513,6 @@ export function VideoStudio({
                 <option value="best">Best</option>
               </select>
             </label>
-            <label>
-              GPU
-              <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
-                {gpuOptions.map((gpu) => (
-                  <option key={gpu} value={gpu}>
-                    {gpu === "auto" ? "Auto" : gpu}
-                  </option>
-                ))}
-              </select>
-            </label>
           </div>
 
           {selectedRecipePreset ? (
@@ -491,8 +528,8 @@ export function VideoStudio({
             </div>
           ) : (
             <div className="guidance-strip">
-              <strong>Presets unavailable</strong>
-              <span>Generation can continue without preset defaults.</span>
+              <strong>No preset selected</strong>
+              <span>Generation will use only the visible prompt, model, and advanced settings.</span>
             </div>
           )}
 
@@ -508,11 +545,11 @@ export function VideoStudio({
           {advancedOpen ? (
             <div className="advanced-panel">
               <label>
-                Model
-                <select onChange={(event) => setModel(event.target.value)} value={model}>
-                  {videoModels.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
+                GPU
+                <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
+                  {gpuOptions.map((gpu) => (
+                    <option key={gpu} value={gpu}>
+                      {gpu === "auto" ? "Auto" : gpu}
                     </option>
                   ))}
                 </select>
