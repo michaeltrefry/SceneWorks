@@ -517,6 +517,49 @@ def test_image_asset_writer_reports_partial_result_assets(tmp_path):
     assert result["expectedCount"] == 2
 
 
+def test_image_asset_writer_persists_each_image_before_requesting_next(tmp_path):
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    job = {
+        "id": "job-1",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "Neon alley",
+            "model": "z_image_turbo",
+            "count": 2,
+            "width": 16,
+            "height": 16,
+        },
+    }
+
+    def image_at_index(index):
+        if index == 1:
+            assert len(list((project_path / "assets" / "images").glob("*.png"))) == 1
+            assert len(list((project_path / "assets" / "images").glob("*.sceneworks.json"))) == 1
+        return Image.new("RGB", (16, 16), (255, 0, 0) if index == 0 else (0, 255, 0))
+
+    result = ImageAssetWriter().write_incremental_outputs(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        image_count=2,
+        image_at_index=image_at_index,
+        adapter_id="z_image_diffusers",
+        progress=lambda *_args, **_kwargs: None,
+        cancel_requested=lambda: False,
+        raw_settings={"realModelInference": True},
+    )
+
+    assert len(result["assetIds"]) == 2
+    assert len(list((project_path / "assets" / "images").glob("*.png"))) == 2
+
+
 def test_friendly_failure_identifies_gpu_oom():
     message, error = friendly_failure("Image generation", RuntimeError("CUDA error: out of memory"))
 

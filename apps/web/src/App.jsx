@@ -256,15 +256,18 @@ export function App() {
 
     function handleJobUpdated(event) {
       const job = JSON.parse(event.data);
+      const hasGeneratedAssets = Boolean(job.result?.generationSetId || job.result?.assetIds?.length);
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
-      if (job.status === "completed" && (job.result?.generationSetId || job.result?.assetIds?.length)) {
+      if (hasGeneratedAssets) {
         if (job.result?.generationSetId) {
           setLatestGenerationSetId(job.result.generationSetId);
         }
-        enqueueTimelineGenerationApply(job);
         if (job.projectId) {
           refreshAssets(job.projectId);
         }
+      }
+      if (job.status === "completed" && hasGeneratedAssets) {
+        enqueueTimelineGenerationApply(job);
       }
       if (job.status === "completed" && job.projectId && job.type === "person_track") {
         refreshPersonTracks(job.projectId);

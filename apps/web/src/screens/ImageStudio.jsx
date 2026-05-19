@@ -22,14 +22,49 @@ const localErrorLabels = {
 
 function jobResultAssets(job, assets) {
   const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
-  return (job.result?.assets ?? [])
-    .map((asset) => catalogById.get(asset.id) ?? asset)
-    .filter((asset) => asset?.type === "image");
+  const resultAssets = (job.result?.assets ?? []).filter((asset) => asset?.type === "image");
+  const resultById = new Map(resultAssets.map((asset) => [asset.id, catalogById.get(asset.id) ?? asset]));
+  const assetIds = job.result?.assetIds ?? [];
+  if (assetIds.length) {
+    return assetIds
+      .map((id) => resultById.get(id) ?? catalogById.get(id))
+      .filter((asset) => asset?.type === "image");
+  }
+  if (resultAssets.length) {
+    return resultAssets.map((asset) => catalogById.get(asset.id) ?? asset);
+  }
+  if (job.result?.generationSetId) {
+    return assets
+      .filter((asset) => asset.type === "image" && asset.generationSetId === job.result.generationSetId)
+      .sort((left, right) => assetBatchIndex(left) - assetBatchIndex(right));
+  }
+  return [];
 }
 
 function jobExpectedCount(job, completedCount) {
   const expected = Number(job.result?.expectedCount ?? job.result?.count ?? job.payload?.count);
   return Number.isFinite(expected) && expected > 0 ? Math.max(expected, completedCount) : completedCount;
+}
+
+function assetBatchIndex(asset) {
+  const candidates = [
+    asset?.batchIndex,
+    asset?.recipe?.batchIndex,
+    asset?.recipe?.normalizedSettings?.batchIndex,
+    asset?.lineage?.batchIndex,
+  ];
+  for (const candidate of candidates) {
+    const value = Number(candidate);
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+  const fileMatch = String(asset?.file?.path ?? "").match(/_(\d{4})\.[^./\\]+$/);
+  if (fileMatch) {
+    return Number(fileMatch[1]) - 1;
+  }
+  const nameMatch = String(asset?.displayName ?? "").match(/#(\d+)\s*$/);
+  return nameMatch ? Number(nameMatch[1]) - 1 : Number.POSITIVE_INFINITY;
 }
 
 function jobPendingSlotLabel(job, index) {

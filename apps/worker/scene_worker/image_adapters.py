@@ -168,6 +168,29 @@ class ImageAssetWriter:
         cancel_requested: CancelCallback,
         raw_settings: dict[str, Any],
     ) -> dict[str, Any]:
+        return self.write_incremental_outputs(
+            settings=settings,
+            job=job,
+            image_count=len(images),
+            image_at_index=lambda index: images[index],
+            adapter_id=adapter_id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings=raw_settings,
+        )
+
+    def write_incremental_outputs(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        image_count: int,
+        image_at_index: Callable[[int], Image.Image],
+        adapter_id: str,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+        raw_settings: dict[str, Any],
+    ) -> dict[str, Any]:
         request = image_request_from_job(job)
         project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
         for folder in ("assets/images", "generation-sets", "recipes"):
@@ -189,12 +212,16 @@ class ImageAssetWriter:
             "model": request.model,
             "prompt": request.prompt,
             "negativePrompt": request.negative_prompt,
-            "count": len(images),
+            "count": image_count,
             "createdAt": created_at,
         }
         write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
 
-        for index, image in enumerate(images):
+        for index in range(image_count):
+            if cancel_requested():
+                raise InterruptedError("Image generation canceled by user.")
+
+            image = image_at_index(index)
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
 
@@ -227,13 +254,13 @@ class ImageAssetWriter:
             progress(
                 "saving",
                 "saving",
-                0.78 + ((index + 1) / len(images)) * 0.17,
-                f"Saved image asset {index + 1} of {len(images)}.",
+                0.78 + ((index + 1) / image_count) * 0.17,
+                f"Saved image asset {index + 1} of {image_count}.",
                 {
                     "generationSetId": generation_set_id,
                     "assetIds": [item["id"] for item in assets],
                     "assets": assets,
-                    "expectedCount": len(images),
+                    "expectedCount": image_count,
                     "adapter": adapter_id,
                     "model": request.model,
                 },
@@ -243,7 +270,7 @@ class ImageAssetWriter:
             "generationSetId": generation_set_id,
             "assetIds": [asset["id"] for asset in assets],
             "assets": assets,
-            "expectedCount": len(images),
+            "expectedCount": image_count,
             "adapter": adapter_id,
             "model": request.model,
         }
@@ -281,19 +308,20 @@ class ZImageDiffusersAdapter:
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress)
         self._apply_loras(pipe, request)
-        images = []
         total = request.count
-        for index in range(total):
+
+        def image_at_index(index: int) -> Image.Image:
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
             progress("running", "generating", 0.24 + (index / total) * 0.48, f"Running Z-Image {index + 1} of {total}.")
-            images.append(self._run_pipeline(settings, pipe, request, seed))
+            return self._run_pipeline(settings, pipe, request, seed)
 
-        return ImageAssetWriter().write_outputs(
+        return ImageAssetWriter().write_incremental_outputs(
             settings=settings,
             job=job,
-            images=images,
+            image_count=total,
+            image_at_index=image_at_index,
             adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
@@ -452,18 +480,19 @@ class QwenImageAdapter:
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress)
         self._apply_loras(pipe, request)
-        images = []
-        for index in range(request.count):
+
+        def image_at_index(index: int) -> Image.Image:
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
             progress("running", "generating", 0.24 + (index / request.count) * 0.48, f"Running Qwen Image {index + 1} of {request.count}.")
-            images.append(self._run_pipeline(settings, pipe, request, seed))
+            return self._run_pipeline(settings, pipe, request, seed)
 
-        return ImageAssetWriter().write_outputs(
+        return ImageAssetWriter().write_incremental_outputs(
             settings=settings,
             job=job,
-            images=images,
+            image_count=request.count,
+            image_at_index=image_at_index,
             adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
@@ -595,23 +624,23 @@ class ProceduralImageAdapter:
         if request.mode == "edit_image" and not model_supports_edit(request.model):
             raise RuntimeError(f"{request.model} does not support image editing.")
 
-        images = []
-        for index in range(request.count):
+        def image_at_index(index: int) -> Image.Image:
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            images.append(render_preview_image(request, model_target, seed, index))
             progress(
                 "running",
                 "generating",
                 0.2 + ((index + 1) / request.count) * 0.55,
                 f"Generated preview image {index + 1} of {request.count}.",
             )
+            return render_preview_image(request, model_target, seed, index)
 
-        return ImageAssetWriter().write_outputs(
+        return ImageAssetWriter().write_incremental_outputs(
             settings=settings,
             job=job,
-            images=images,
+            image_count=request.count,
+            image_at_index=image_at_index,
             adapter_id=self.id,
             progress=progress,
             cancel_requested=cancel_requested,
