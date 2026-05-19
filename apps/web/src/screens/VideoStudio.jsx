@@ -32,7 +32,7 @@ function estimateRenderSeconds(durationSeconds, quality) {
 }
 import {
   clearPresetDefault,
-  noRecipePresetId,
+  noPresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
@@ -65,7 +65,7 @@ export function VideoStudio({
   onPreview,
   onSendToEditor,
   personTracks = [],
-  recipePresets = [],
+  presets = [],
   requestedGpu,
   selectedAsset,
   setRequestedGpu,
@@ -80,7 +80,7 @@ export function VideoStudio({
   const [quality, setQuality] = useState("balanced");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? "ltx_2_3");
-  const [recipePresetId, setRecipePresetId] = useState(null);
+  const [selectedPresetId, setSelectedPresetId] = useState(null);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   const [duration, setDuration] = useState(selectedModel?.defaults?.duration ?? 6);
   const [resolution, setResolution] = useState(selectedModel?.defaults?.resolution ?? "768x512");
@@ -104,20 +104,20 @@ export function VideoStudio({
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
-  const availableRecipePresets = useMemo(() => {
-    return recipePresets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
-  }, [mode, recipePresets, selectedModel?.id]);
-  const selectedRecipePreset =
-    recipePresetId === noRecipePresetId
+  const availablePresets = useMemo(() => {
+    return presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
+  }, [mode, presets, selectedModel?.id]);
+  const selectedPreset =
+    selectedPresetId === noPresetId
       ? null
-      : recipePresetId
-        ? availableRecipePresets.find((preset) => preset.id === recipePresetId) ?? null
-        : availableRecipePresets[0] ?? null;
-  const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
-  const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
+      : selectedPresetId
+        ? availablePresets.find((preset) => preset.id === selectedPresetId) ?? null
+        : availablePresets[0] ?? null;
+  const presetPromptParts = buildPresetPromptParts(selectedPreset);
+  const presetLoraDetails = buildPresetLoraDetails(selectedPreset, loras);
   const presetValidationResult = useMemo(
-    () => presetValidation(selectedRecipePreset, loras, selectedModel),
-    [selectedRecipePreset, loras, selectedModel],
+    () => presetValidation(selectedPreset, loras, selectedModel),
+    [selectedPreset, loras, selectedModel],
   );
 
   useEffect(() => {
@@ -193,16 +193,16 @@ export function VideoStudio({
   }, [mode, supportsMode, videoModels]);
 
   useEffect(() => {
-    if (!recipePresetId || recipePresetId === noRecipePresetId) {
+    if (!selectedPresetId || selectedPresetId === noPresetId) {
       return;
     }
-    if (!selectedRecipePreset) {
-      setRecipePresetId(availableRecipePresets[0]?.id ?? noRecipePresetId);
+    if (!selectedPreset) {
+      setSelectedPresetId(availablePresets[0]?.id ?? noPresetId);
     }
-  }, [availableRecipePresets, recipePresetId, selectedRecipePreset]);
+  }, [availablePresets, selectedPresetId, selectedPreset]);
 
   useEffect(() => {
-    if (!selectedRecipePreset) {
+    if (!selectedPreset) {
       clearPresetDefault(setDuration, presetDefaultSnapshots, "duration");
       clearPresetDefault(setFps, presetDefaultSnapshots, "fps");
       clearPresetDefault(setQuality, presetDefaultSnapshots, "quality");
@@ -210,7 +210,7 @@ export function VideoStudio({
       clearPresetDefault(setNegativePrompt, presetDefaultSnapshots, "negativePrompt");
       return;
     }
-    const defaults = selectedRecipePreset.defaults ?? {};
+    const defaults = selectedPreset.defaults ?? {};
     if (defaults.duration) {
       const appliedValue = Number(defaults.duration);
       setDuration((current) => {
@@ -246,7 +246,7 @@ export function VideoStudio({
         return appliedValue;
       });
     }
-  }, [selectedRecipePreset?.id]);
+  }, [selectedPreset?.id]);
 
   useEffect(() => {
     if (mode !== "replace_person") {
@@ -367,7 +367,7 @@ export function VideoStudio({
         height,
         quality,
         seed: seed === "" ? null : Number(seed),
-        recipePresetId: selectedRecipePreset?.id ?? null,
+        recipePresetId: selectedPreset?.id ?? null,
         characterId: characterId || null,
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
@@ -380,8 +380,8 @@ export function VideoStudio({
           resolution,
           durationHint,
           motion,
-          recipePresetName: selectedRecipePreset?.name ?? null,
-          recipePresetPrompt: selectedRecipePreset?.prompt ?? null,
+          recipePresetName: selectedPreset?.name ?? null,
+          recipePresetPrompt: selectedPreset?.prompt ?? null,
           selectedPersonTrack: selectedTrack ?? null,
           replacementModeLabel: replacementModeLabels[replacementMode],
         },
@@ -424,7 +424,7 @@ export function VideoStudio({
             </div>
             {onOpenPresets ? (
               <button className="hero-link" onClick={onOpenPresets} type="button">
-                <Icon.Folder size={14} /> Saved recipes
+                <Icon.Folder size={14} /> Saved presets
               </button>
             ) : null}
           </div>
@@ -647,9 +647,9 @@ export function VideoStudio({
 
           <div className="video-rail">
             <aside className="render-rail">
-              <div className="recipe-head">
+              <div className="preset-rail-head">
                 <h3>Render settings</h3>
-                <span className="recipe-model-tag">{selectedModel?.name ?? "—"}</span>
+                <span className="preset-rail-model-tag">{selectedModel?.name ?? "—"}</span>
               </div>
 
               <label>
@@ -663,22 +663,22 @@ export function VideoStudio({
                 </select>
               </label>
 
-              {availableRecipePresets.length ? (
+              {availablePresets.length ? (
                 <div className="style-preset-strip">
                   <span className="style-preset-label">Style preset</span>
                   <div className="preset-chips">
                     <button
-                      className={!selectedRecipePreset ? "preset-chip active" : "preset-chip"}
-                      onClick={() => setRecipePresetId(noRecipePresetId)}
+                      className={!selectedPreset ? "preset-chip active" : "preset-chip"}
+                      onClick={() => setSelectedPresetId(noPresetId)}
                       type="button"
                     >
                       None
                     </button>
-                    {availableRecipePresets.map((preset) => (
+                    {availablePresets.map((preset) => (
                       <button
-                        className={selectedRecipePreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                        className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
                         key={preset.id}
-                        onClick={() => setRecipePresetId(preset.id)}
+                        onClick={() => setSelectedPresetId(preset.id)}
                         type="button"
                       >
                         {preset.name ?? preset.id}
@@ -710,7 +710,7 @@ export function VideoStudio({
                 </div>
               </label>
 
-              <div className="control-grid recipe-row">
+              <div className="control-grid preset-rail-row">
                 <label>
                   Duration
                   <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
@@ -744,9 +744,9 @@ export function VideoStudio({
                 </select>
               </label>
 
-              {selectedRecipePreset ? (
+              {selectedPreset ? (
                 <div className="guidance-strip">
-                  <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
+                  <strong>{selectedPreset.ui?.description ?? "Preset defaults active"}</strong>
                   <span>
                     {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
                     {presetLoraDetails.length
@@ -813,8 +813,8 @@ export function VideoStudio({
                   </label>
                   {characterId ? (
                     <div className="guidance-strip">
-                      <strong>Recipe-only character</strong>
-                      <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
+                      <strong>Preset-only character</strong>
+                      <span>Character and look are saved with the preset; adapter-level reference and LoRA conditioning are not active yet.</span>
                     </div>
                   ) : null}
                 </div>

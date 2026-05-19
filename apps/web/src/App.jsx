@@ -113,7 +113,7 @@ const viewTitles = {
   Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
   Editor: { title: "Editor", blurb: "Cut, sequence and export your timeline." },
   Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
-  Presets: { title: "Recipes", blurb: "Save and share recurring generation setups." },
+  Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
   Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
 };
@@ -288,7 +288,7 @@ export function App() {
   const [queueSummary, setQueueSummary] = useState(null);
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
-  const [recipePresets, setRecipePresets] = useState([]);
+  const [presets, setPresets] = useState([]);
   const [assets, setAssets] = useState([]);
   const [characters, setCharacters] = useState([]);
   const [personTracks, setPersonTracks] = useState([]);
@@ -443,7 +443,7 @@ export function App() {
       setPersonTracks([]);
       setTimelines([]);
       setTimelinesProjectId(null);
-      setRecipePresets([]);
+      setPresets([]);
       setSelectedTimelineId(null);
       setActiveTimeline(null);
       return;
@@ -451,7 +451,7 @@ export function App() {
     refreshAssets(activeProject.id);
     refreshCharacters(activeProject.id);
     refreshLoras(activeProject.id);
-    refreshRecipePresets(activeProject.id);
+    refreshPresets(activeProject.id);
     refreshPersonTracks(activeProject.id);
     refreshTimelines(activeProject.id);
   }, [activeProject?.id, authenticated, token]);
@@ -591,13 +591,13 @@ export function App() {
         return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
       }
     };
-    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, recipePresetsResult] = await Promise.all([
+    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult] = await Promise.all([
       fetchInitial("Projects", "/api/v1/projects", []),
       fetchInitial("Jobs", "/api/v1/jobs", []),
       fetchInitial("Workers", "/api/v1/workers", []),
       fetchInitial("Models", "/api/v1/models", []),
       fetchInitial("LoRAs", "/api/v1/loras", []),
-      fetchInitial("Recipe presets", "/api/v1/recipe-presets", [], true),
+      fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
     ]);
     const projectItems = projectsResult.value;
     setProjects(projectItems);
@@ -607,8 +607,8 @@ export function App() {
     setQueueSummary(null);
     setModels(modelsResult.value);
     setLoras(lorasResult.value);
-    setRecipePresets(recipePresetsResult.value);
-    setError([projectsResult, jobsResult, workersResult, modelsResult, lorasResult, recipePresetsResult].map((result) => result.error).filter(Boolean).join("; "));
+    setPresets(presetsResult.value);
+    setError([projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult].map((result) => result.error).filter(Boolean).join("; "));
   }
 
   async function refreshAssets(projectId = activeProject?.id) {
@@ -660,11 +660,11 @@ export function App() {
       .catch(() => {});
   }
 
-  async function refreshRecipePresets(projectId = activeProject?.id) {
+  async function refreshPresets(projectId = activeProject?.id) {
     try {
       const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
       const items = await apiFetch(`/api/v1/recipe-presets${query}`, token);
-      setRecipePresets(items);
+      setPresets(items);
       setError("");
       return items;
     } catch (err) {
@@ -673,7 +673,7 @@ export function App() {
     }
   }
 
-  function recipePresetQuery(scope = null) {
+  function presetQuery(scope = null) {
     const params = new URLSearchParams();
     if (scope) {
       params.set("scope", scope);
@@ -685,41 +685,41 @@ export function App() {
     return value ? `?${value}` : "";
   }
 
-  async function createRecipePreset(payload) {
+  async function createPreset(payload) {
     if (payload.scope === "project" && !activeProject) {
       throw new Error("Create or open a project first.");
     }
-    const created = await apiFetch(`/api/v1/recipe-presets${recipePresetQuery(payload.scope)}`, token, {
+    const created = await apiFetch(`/api/v1/recipe-presets${presetQuery(payload.scope)}`, token, {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    await refreshRecipePresets(activeProject?.id);
+    await refreshPresets(activeProject?.id);
     return created;
   }
 
-  async function updateRecipePreset(presetId, payload, scope = payload.scope) {
-    const updated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${recipePresetQuery(scope)}`, token, {
+  async function updatePreset(presetId, payload, scope = payload.scope) {
+    const updated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${presetQuery(scope)}`, token, {
       method: "PATCH",
       body: JSON.stringify(payload),
     });
-    await refreshRecipePresets(activeProject?.id);
+    await refreshPresets(activeProject?.id);
     return updated;
   }
 
-  async function duplicateRecipePreset(presetId, scope = null) {
-    const duplicated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}/duplicate${recipePresetQuery(scope)}`, token, {
+  async function duplicatePreset(presetId, scope = null) {
+    const duplicated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}/duplicate${presetQuery(scope)}`, token, {
       method: "POST",
       body: JSON.stringify({}),
     });
-    await refreshRecipePresets(activeProject?.id);
+    await refreshPresets(activeProject?.id);
     return duplicated;
   }
 
-  async function deleteRecipePreset(presetId, scope = null) {
-    const archived = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${recipePresetQuery(scope)}`, token, {
+  async function deletePreset(presetId, scope = null) {
+    const archived = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${presetQuery(scope)}`, token, {
       method: "DELETE",
     });
-    await refreshRecipePresets(activeProject?.id);
+    await refreshPresets(activeProject?.id);
     return archived;
   }
 
@@ -1674,7 +1674,7 @@ export function App() {
             onOpenPresets={() => setActiveView("Presets")}
             onOpenQueue={() => setActiveView("Queue")}
             onPreview={setPreviewAsset}
-            recipePresets={recipePresets}
+            presets={presets}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}
             setRequestedGpu={setRequestedGpu}
@@ -1711,7 +1711,7 @@ export function App() {
               setActiveView("Editor");
             }}
             personTracks={personTracks}
-            recipePresets={recipePresets}
+            presets={presets}
             requestedGpu={requestedGpu}
             selectedAsset={selectedAsset}
             setRequestedGpu={setRequestedGpu}
@@ -1723,14 +1723,14 @@ export function App() {
         {activeView === "Presets" ? (
           <PresetManagerScreen
             activeProject={activeProject}
-            createRecipePreset={createRecipePreset}
-            deleteRecipePreset={deleteRecipePreset}
-            duplicateRecipePreset={duplicateRecipePreset}
+            createPreset={createPreset}
+            deletePreset={deletePreset}
+            duplicatePreset={duplicatePreset}
             imageModels={imageModels}
             loras={loras}
             onOpenModels={() => setActiveView("Models")}
-            recipePresets={recipePresets}
-            updateRecipePreset={updateRecipePreset}
+            presets={presets}
+            updatePreset={updatePreset}
             videoModels={videoModels}
           />
         ) : null}
@@ -1766,7 +1766,7 @@ export function App() {
             onImportLora={createLoraImportJob}
             onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}
-            recipePresets={recipePresets}
+            presets={presets}
           />
         ) : null}
 

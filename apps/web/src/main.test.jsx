@@ -353,7 +353,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Beta");
   });
 
-  it("keeps the shell usable when recipe presets are unavailable", async () => {
+  it("keeps the shell usable when presets are unavailable", async () => {
     global.fetch.mockImplementation((url) => {
       const path = new URL(url).pathname;
       if (path.endsWith("/health")) {
@@ -2627,7 +2627,7 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
-  it("applies recipe preset defaults and hidden preset LoRAs to image jobs", async () => {
+  it("applies preset defaults and hidden preset LoRAs to image jobs", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -2653,7 +2653,7 @@ describe("SceneWorks app shell", () => {
           ]}
           onPreview={() => {}}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             {
               id: "cinematic",
               name: "Cinematic",
@@ -2713,7 +2713,7 @@ describe("SceneWorks app shell", () => {
           loras={[{ id: "cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", presetManaged: true }]}
           onPreview={() => {}}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             {
               id: "cinematic",
               name: "Cinematic",
@@ -2732,9 +2732,9 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // Primary recipe controls are surfaced in the rail (no longer behind Advanced),
+    // Primary preset controls are surfaced in the rail (no longer behind Advanced),
     // alongside the hero-mounted prompt + preset chip strip.
-    const railLabels = [...container.querySelectorAll(".recipe-rail > label, .recipe-rail .recipe-row label")].map(
+    const railLabels = [...container.querySelectorAll(".preset-rail > label, .preset-rail .preset-rail-row label")].map(
       (label) => label.childNodes[0]?.textContent.trim(),
     );
     expect(railLabels).toEqual(expect.arrayContaining(["Model", "Variations", "Aspect"]));
@@ -2804,7 +2804,7 @@ describe("SceneWorks app shell", () => {
           ]}
           onPreview={() => {}}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             {
               id: "cinematic",
               name: "Cinematic",
@@ -2866,7 +2866,7 @@ describe("SceneWorks app shell", () => {
           onPreview={() => {}}
           personTracks={[]}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             {
               id: "dream_motion",
               name: "Dream Motion",
@@ -2926,7 +2926,7 @@ describe("SceneWorks app shell", () => {
           loras={[]}
           onPreview={() => {}}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             { id: "qwen_detail", name: "Qwen Detail", model: "qwen_image", workflow: "text_to_image", defaults: { count: 1 } },
             { id: "cinematic", name: "Cinematic", model: "z_image_turbo", workflow: "text_to_image", defaults: { count: 4 } },
           ]}
@@ -2965,7 +2965,7 @@ describe("SceneWorks app shell", () => {
           loras={[]}
           onPreview={() => {}}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             {
               id: "cinematic",
               name: "Cinematic",
@@ -3002,7 +3002,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Portrait Only");
   });
 
-  it("applies recipe preset defaults to video jobs", async () => {
+  it("applies preset defaults to video jobs", async () => {
     const createVideoJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -3021,7 +3021,7 @@ describe("SceneWorks app shell", () => {
           onPreview={() => {}}
           personTracks={[]}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             {
               id: "dream_motion",
               name: "Dream Motion",
@@ -3098,7 +3098,7 @@ describe("SceneWorks app shell", () => {
           onPreview={() => {}}
           personTracks={[]}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             { id: "ltx_motion", name: "LTX Motion", workflow: "image_to_video", model: "ltx_2_3" },
             { id: "ltx_story", name: "LTX Story", workflow: "text_to_video", model: "ltx_2_3" },
             { id: "wan_motion", name: "Wan Motion", workflow: "image_to_video", model: "wan_2_2" },
@@ -3172,7 +3172,7 @@ describe("SceneWorks app shell", () => {
           onPreview={() => {}}
           personTracks={[]}
           purgeAsset={() => {}}
-          recipePresets={[
+          presets={[
             {
               id: "camera_bridge",
               name: "Camera Bridge",
@@ -3219,26 +3219,26 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Start Frame");
   });
 
-  it("creates, edits, duplicates, and archives recipe presets from the manager", async () => {
-    const createRecipePreset = vi.fn(async (payload) => payload);
-    const updateRecipePreset = vi.fn(async (id, payload) => ({ ...payload, id }));
-    const duplicateRecipePreset = vi.fn(async (id) => ({ id: `${id}_copy` }));
-    const deleteRecipePreset = vi.fn(async (id) => ({ id, archived: true }));
+  it("creates, edits, duplicates, and archives presets from the manager", async () => {
+    const createPreset = vi.fn(async (payload) => payload);
+    const updatePreset = vi.fn(async (id, payload) => ({ ...payload, id }));
+    const duplicatePreset = vi.fn(async (id) => ({ id: `${id}_copy` }));
+    const deletePreset = vi.fn(async (id) => ({ id, archived: true }));
     root = createRoot(container);
     await act(async () => {
       root.render(
         <PresetManagerScreen
           activeProject={{ id: "project-1", name: "Noir" }}
-          createRecipePreset={createRecipePreset}
-          deleteRecipePreset={deleteRecipePreset}
-          duplicateRecipePreset={duplicateRecipePreset}
+          createPreset={createPreset}
+          deletePreset={deletePreset}
+          duplicatePreset={duplicatePreset}
           imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
           loras={[
             { id: "cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", defaultWeight: 0.55 },
             { id: "global_detail", name: "Global Detail", family: "z-image", scope: "global", defaultWeight: 0.7 },
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
           ]}
-          recipePresets={[
+          presets={[
             {
               id: "cinematic",
               name: "Cinematic",
@@ -3257,7 +3257,7 @@ describe("SceneWorks app shell", () => {
               ui: { description: "Low key color." },
             },
           ]}
-          updateRecipePreset={updateRecipePreset}
+          updatePreset={updatePreset}
           videoModels={[{ id: "ltx_2_3", name: "LTX", type: "video" }]}
         />,
       );
@@ -3267,16 +3267,21 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await changeField(field(container, "Name"), "Soft Morning");
-    await changeField(field(container, "Add LoRA"), "global_detail");
+    // New flow: open the LoRA picker, then click the compatible LoRA row to add it.
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".lora-pick-row")]
+        .find((button) => button.textContent.includes("Global Detail"))
+        .click();
     });
     await changeField(field(container, "Weight"), "0.35");
     expect(field(container, "ID").value).toBe("soft_morning");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Preset").click();
     });
-    expect(createRecipePreset).toHaveBeenCalledWith(
+    expect(createPreset).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "soft_morning",
         name: "Soft Morning",
@@ -3292,9 +3297,13 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await changeField(field(container, "Name"), "Plain Morning");
-    await changeField(field(container, "Add LoRA"), "global_detail");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".lora-pick-row")]
+        .find((button) => button.textContent.includes("Global Detail"))
+        .click();
     });
     expect(container.querySelector(".lora-choice-list").textContent).toContain("Global Detail");
     await act(async () => {
@@ -3318,12 +3327,12 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").click();
     });
-    expect(updateRecipePreset).toHaveBeenCalledWith("moody", expect.objectContaining({ ui: { description: "Richer low key color." } }), "global");
+    expect(updatePreset).toHaveBeenCalledWith("moody", expect.objectContaining({ ui: { description: "Richer low key color." } }), "global");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Duplicate").click();
     });
-    expect(duplicateRecipePreset).toHaveBeenCalledWith("moody", "global");
+    expect(duplicatePreset).toHaveBeenCalledWith("moody", "global");
 
     await act(async () => {
       [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
@@ -3331,22 +3340,22 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Archive").click();
     });
-    expect(deleteRecipePreset).toHaveBeenCalledWith("moody", "global");
+    expect(deletePreset).toHaveBeenCalledWith("moody", "global");
   });
 
   it("explains preset save blockers and selected LoRA warning states", async () => {
-    const updateRecipePreset = vi.fn();
+    const updatePreset = vi.fn();
     root = createRoot(container);
     await act(async () => {
       root.render(
         <PresetManagerScreen
           activeProject={{ id: "project-1", name: "Noir" }}
-          createRecipePreset={() => {}}
-          deleteRecipePreset={() => {}}
-          duplicateRecipePreset={() => {}}
+          createPreset={() => {}}
+          deletePreset={() => {}}
+          duplicatePreset={() => {}}
           imageModels={[]}
           loras={[{ id: "pending_style", name: "Pending Style", family: "z-image", scope: "global", installState: "missing" }]}
-          recipePresets={[
+          presets={[
             {
               id: "blocked",
               name: "Blocked",
@@ -3356,7 +3365,7 @@ describe("SceneWorks app shell", () => {
               loras: [{ id: "pending_style" }],
             },
           ]}
-          updateRecipePreset={updateRecipePreset}
+          updatePreset={updatePreset}
           videoModels={[]}
         />,
       );
@@ -3369,6 +3378,6 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Save blocked: pending_style has not finished importing.");
     expect(field(container, "Weight").disabled).toBe(true);
     expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").disabled).toBe(true);
-    expect(updateRecipePreset).not.toHaveBeenCalled();
+    expect(updatePreset).not.toHaveBeenCalled();
   });
 });

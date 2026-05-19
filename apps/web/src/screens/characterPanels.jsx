@@ -108,7 +108,7 @@ export function CharacterLooks({
     <section className="character-section">
       <div className="section-heading">
         <p className="eyebrow">Looks</p>
-        <h2>Saved recipes</h2>
+        <h2>Saved presets</h2>
       </div>
       <form className="look-composer" onSubmit={submitLook}>
         <input
@@ -330,7 +330,7 @@ export function CharacterTest({
           </label>
         </div>
         <div className="guidance-strip">
-          <strong>Recipe-only test</strong>
+          <strong>Preset-only test</strong>
           <span>Outputs use the prompt and record this character in metadata; image-reference conditioning and LoRA loading are not active yet.</span>
         </div>
         <button className="primary-action" disabled={!testPrompt.trim()} type="submit">

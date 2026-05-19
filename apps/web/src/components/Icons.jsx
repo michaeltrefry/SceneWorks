@@ -38,5 +38,10 @@ export const Icon = {
   ChevDown: (p) => <I {...p} d="M6 9l6 6 6-6" />,
   Sliders: (p) => <I {...p} d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h14M18 18h2M14 4v4M6 10v4M16 16v4" />,
   Play: (p) => <I {...p} fill d="M7 4l13 8-13 8z" />,
+  ArrowLeft: (p) => <I {...p} d="M19 12H5M11 6l-6 6 6 6" />,
+  ArrowRight: (p) => <I {...p} d="M5 12h14M13 6l6 6-6 6" />,
+  Wand: (p) => <I {...p} d="M15 4l5 5L9 20l-5-5zM14 5l5 5M3 14l3 3" />,
+  Stars: (p) => <I {...p} fill d="M12 2l2.4 7.4H22l-6.2 4.5L18 21l-6-4.4L6 21l2.2-7.1L2 9.4h7.6z" />,
+  Trash: (p) => <I {...p} d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />,
 };
 
