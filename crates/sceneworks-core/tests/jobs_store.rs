@@ -182,6 +182,44 @@ fn claim_skips_jobs_not_supported_by_worker_capabilities() {
 }
 
 #[test]
+fn gpu_generation_jobs_reject_cpu_requested_gpu() {
+    let store = store("gpu-jobs-reject-cpu");
+
+    let error = store
+        .create_job(CreateJob {
+            requested_gpu: " cpu ".to_owned(),
+            ..image_job(Map::new())
+        })
+        .expect_err("cpu requestedGpu should be rejected");
+
+    assert!(matches!(error, JobsStoreError::InvalidRequestedGpu(_)));
+    assert!(error.to_string().contains("cannot target CPU workers"));
+}
+
+#[test]
+fn cpu_worker_cannot_claim_auto_gpu_generation_job_even_with_capability() {
+    let store = store("cpu-cannot-claim-auto-gpu-job");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-cpu".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            gpu_name: Some("CPU inference worker".to_owned()),
+            capabilities: vec![WorkerCapability::Cpu, WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    store
+        .create_job(image_job(Map::new()))
+        .expect("gpu job creates");
+
+    assert!(store
+        .claim_next_job("worker-cpu")
+        .expect("claim succeeds")
+        .is_none());
+}
+
+#[test]
 fn auto_claim_prefers_job_matching_loaded_model() {
     let store = store("loaded-model-preference");
     store

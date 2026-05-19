@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import importlib
 import json
 import os
 import signal
@@ -53,9 +54,20 @@ class ApiClient:
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
     capabilities = set(gpu["capabilities"]) - {"placeholder"}
-    if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities:
+    if "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities and torch_cuda_available():
         capabilities |= set(SUPPORTED_JOB_TYPES)
     return sorted(capabilities)
+
+
+def torch_cuda_available() -> bool:
+    try:
+        torch = importlib.import_module("torch")
+    except Exception:
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
 
 
 def loaded_models_from_adapter(adapter: object, *, job_id: str | None = None) -> list[str]:
@@ -148,6 +160,15 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
             (
                 "GPU memory was exhausted. Try a lower resolution, shorter clip, smaller batch count, "
                 f"or a different GPU. Technical detail: {detail}"
+            ),
+        )
+    if "cuda-enabled pytorch" in lowered or "torch.cuda.is_available" in lowered:
+        return (
+            f"{job_kind} failed because the worker is missing CUDA-enabled PyTorch.",
+            (
+                "The worker claimed a GPU inference job, but PyTorch cannot use CUDA in that environment. "
+                "Rebuild the worker image with CUDA PyTorch support, then restart the worker and retry. "
+                f"Technical detail: {detail}"
             ),
         )
     ltx_frame_markers = (

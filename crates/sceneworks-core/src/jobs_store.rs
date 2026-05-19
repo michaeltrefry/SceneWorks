@@ -57,6 +57,7 @@ pub enum JobsStoreError {
     NotFound(String),
     InvalidStatus(String),
     InvalidNumber(String),
+    InvalidRequestedGpu(String),
     RetryLimit { max_attempts: u32 },
 }
 
@@ -69,6 +70,7 @@ impl std::fmt::Display for JobsStoreError {
             Self::NotFound(id) => write!(formatter, "Record not found: {id}"),
             Self::InvalidStatus(status) => write!(formatter, "Unsupported job status: {status}"),
             Self::InvalidNumber(field) => write!(formatter, "Invalid numeric value for {field}"),
+            Self::InvalidRequestedGpu(detail) => write!(formatter, "{detail}"),
             Self::RetryLimit { max_attempts } => {
                 write!(
                     formatter,
@@ -786,6 +788,13 @@ impl JobsStore {
         connection: &Connection,
         request: CreateJob,
     ) -> JobsStoreResult<JobSnapshot> {
+        let requested_gpu = normalize_requested_gpu(&request.requested_gpu);
+        if job_requires_gpu(&request.job_type) && requested_gpu == "cpu" {
+            return Err(JobsStoreError::InvalidRequestedGpu(format!(
+                "{} jobs cannot target CPU workers. Choose auto or a GPU id.",
+                request.job_type.as_str()
+            )));
+        }
         let now = utc_now();
         let job_hex: String =
             connection.query_row("select lower(hex(randomblob(16)))", [], |row| row.get(0))?;
@@ -804,11 +813,7 @@ impl JobsStore {
                 request.project_id,
                 request.project_name,
                 dumps(&request.payload)?,
-                if request.requested_gpu.is_empty() {
-                    "auto".to_owned()
-                } else {
-                    request.requested_gpu
-                },
+                requested_gpu,
                 "Waiting for an available worker.",
                 request.attempts,
                 request.source_job_id,
@@ -1225,6 +1230,9 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
 }
 
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
+    if job_requires_gpu(&job.job_type) && worker.gpu_id == "cpu" {
+        return false;
+    }
     worker
         .capabilities
         .iter()
@@ -1360,6 +1368,27 @@ fn push_string_value(output: &mut Vec<String>, value: Option<&Value>) {
     {
         output.push(value.to_owned());
     }
+}
+
+fn normalize_requested_gpu(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "auto".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn job_requires_gpu(job_type: &JobType) -> bool {
+    matches!(
+        job_type,
+        JobType::ImageGenerate
+            | JobType::ImageEdit
+            | JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    )
 }
 
 fn placeholders_from(start: usize, count: usize) -> String {

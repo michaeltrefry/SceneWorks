@@ -30,6 +30,11 @@ container and is exposed on the same host port.
 `SCENEWORKS_WEB_PORT` controls the host port for the Vite web service. The web
 service receives `VITE_API_BASE_URL=http://localhost:${SCENEWORKS_API_PORT}`,
 and workers call `http://api:${SCENEWORKS_API_PORT}` on the compose network.
+Compose builds the Python inference worker with CUDA PyTorch wheels by default
+using `SCENEWORKS_PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu128`.
+Set `SCENEWORKS_PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu` before
+building only when you intentionally want a CPU-only worker; CPU-only PyTorch
+workers do not advertise image or video inference capabilities.
 
 API volume contracts:
 

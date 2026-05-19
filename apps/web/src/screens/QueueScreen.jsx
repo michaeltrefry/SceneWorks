@@ -4,6 +4,7 @@ import { actionStatuses, terminalStatuses } from "../constants.js";
 import { formatSeconds, percent } from "../formatting.js";
 
 const nonGpuJobTypes = new Set(["model_download", "lora_import"]);
+const gpuRequiredJobTypes = new Set(["image_generate", "image_edit", "video_generate", "video_extend", "video_bridge", "person_replace"]);
 const terminalStatusesForBlocking = new Set(["completed", "failed", "canceled", "interrupted"]);
 
 function formatJobType(type) {
@@ -20,6 +21,9 @@ function workerCanClaim(job, worker) {
   }
   if (nonGpuJobTypes.has(job.type)) {
     return true;
+  }
+  if (gpuRequiredJobTypes.has(job.type) && worker.gpuId === "cpu") {
+    return false;
   }
   return job.requestedGpu === "auto" || job.requestedGpu === worker.gpuId;
 }

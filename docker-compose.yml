@@ -29,6 +29,9 @@ services:
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
+      args:
+        PYTORCH_INDEX_URL: ${SCENEWORKS_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
+        PYTORCH_SPEC: ${SCENEWORKS_PYTORCH_SPEC:-torch>=2.7,<2.8}
     environment:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8000}
       SCENEWORKS_DATA_DIR: /sceneworks/data

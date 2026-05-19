@@ -16,6 +16,7 @@ from scene_worker.image_adapters import (
     create_image_adapter,
     huggingface_repo_cache_path,
     image_request_from_job,
+    require_cuda_for_gpu_worker,
     resolve_seed,
     select_torch_device,
 )
@@ -103,7 +104,8 @@ def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
     assert "placeholder" not in capabilities
 
 
-def test_gpu_worker_advertises_generation_capabilities():
+def test_gpu_worker_advertises_generation_capabilities(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_cuda_available", lambda: True)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
 
     assert "image_generate" in capabilities
@@ -112,7 +114,15 @@ def test_gpu_worker_advertises_generation_capabilities():
     assert "placeholder" not in capabilities
 
 
-def test_python_worker_only_advertises_inference_job_capabilities():
+def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_cuda_available", lambda: False)
+    capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "nvidia"]})
+
+    assert capabilities == ["gpu", "nvidia"]
+
+
+def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.torch_cuda_available", lambda: True)
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
     job_capabilities = [capability for capability in capabilities if capability != "gpu"]
 
@@ -176,6 +186,17 @@ def test_select_torch_device_uses_visible_cuda_default_when_child_process_is_nar
             mps = None
 
     assert select_torch_device(Torch, "1") == "cuda"
+
+
+def test_gpu_worker_fails_fast_when_torch_cuda_is_unavailable():
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+    with pytest.raises(RuntimeError, match="CUDA-enabled PyTorch"):
+        require_cuda_for_gpu_worker(Torch, "0")
 
 
 def test_loaded_models_are_collected_from_adapter_cache():
@@ -453,6 +474,14 @@ def test_friendly_failure_identifies_gpu_oom():
     assert "Technical detail" in error
 
 
+def test_friendly_failure_identifies_cpu_only_torch_worker():
+    message, error = friendly_failure("Image generation", RuntimeError("CUDA-enabled PyTorch is not available."))
+
+    assert message == "Image generation failed because the worker is missing CUDA-enabled PyTorch."
+    assert "Rebuild the worker image" in error
+    assert "Technical detail" in error
+
+
 def test_friendly_failure_identifies_missing_model_files():
     message, error = friendly_failure("Image generation", RuntimeError("Repository not found: owner/model"))
 
@@ -485,6 +514,7 @@ def test_friendly_failure_identifies_missing_peft_backend():
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     events = []
     monkeypatch.setattr("scene_worker.runtime.emit", events.append)
+    monkeypatch.setattr("scene_worker.runtime.torch_cuda_available", lambda: True)
     monkeypatch.setattr(
         "scene_worker.runtime.discover_gpu",
         lambda _gpu_id: {"id": "0", "name": "GPU 0", "capabilities": ["gpu"]},

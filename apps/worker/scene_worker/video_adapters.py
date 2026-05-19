@@ -25,7 +25,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import filter_call_kwargs
-from .image_adapters import select_torch_device, select_torch_dtype, write_json
+from .image_adapters import require_cuda_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
 from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline, reject_loras_if_unsupported
 from .settings import WorkerSettings
 
@@ -316,7 +316,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
 
         target = model_target(request.model)
         progress("loading_model", "loading_model", 0.2, f"Loading {target['label']} Diffusers pipeline.")
-        pipe = self._load_pipeline(request, target)
+        pipe = self._load_pipeline(settings, request, target)
         self._apply_loras(pipe, request, target)
 
         first_image = self._first_condition_image(project_path, request)
@@ -421,7 +421,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             "realModelInference": True,
         }
 
-    def _load_pipeline(self, request: VideoRequest, target: dict[str, Any]) -> Any:
+    def _load_pipeline(self, settings: WorkerSettings, request: VideoRequest, target: dict[str, Any]) -> Any:
         key = self._pipeline_key(request, target)
         repo = self._repo_for_request(request, target)
         if self._pipeline is not None and self._pipeline_key_value == key:
@@ -430,7 +430,8 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
 
         torch = importlib.import_module("torch")
         diffusers = importlib.import_module("diffusers")
-        device = select_torch_device(torch)
+        require_cuda_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         self._evict_pipeline(torch)
         pipeline_class = self._pipeline_class(diffusers, request, target)
