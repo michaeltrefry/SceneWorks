@@ -948,6 +948,55 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
     assert blocking_models == [["video-model-loaded"], ["video-model-running"]]
 
 
+def test_video_job_estimate_progress_accepts_non_preview_frame_requirements(monkeypatch):
+    progress_messages = []
+
+    class Api:
+        def post(self, path, payload):
+            if path.endswith("/heartbeat"):
+                return {}
+            if path.endswith("/progress"):
+                progress_messages.append(payload["message"])
+                return {"status": payload["status"], "stage": payload["stage"]}
+            raise AssertionError(path)
+
+        def get(self, _path):
+            return {"cancelRequested": False}
+
+    class VideoAdapter:
+        def prepare(self, *, settings, job):
+            return {"job": job["id"]}
+
+        def ensure_models(self, _request):
+            return None
+
+        def estimate_requirements(self, _request):
+            return {"estimatedFrames": 121, "requestedFrames": 120}
+
+        def run(self, *, settings, job, request, progress, cancel_requested):
+            return {"assetId": "asset-video-1"}
+
+        def cancel(self, _job_id):
+            raise AssertionError("cancel should not be called")
+
+        def cleanup(self, _job_id):
+            raise AssertionError("cleanup should not be called")
+
+    monkeypatch.setattr("scene_worker.runtime.create_video_adapter", lambda: VideoAdapter())
+    monkeypatch.setattr(
+        "scene_worker.runtime.run_blocking_job_step",
+        lambda *_args, **_kwargs: _args[4](),
+    )
+
+    run_video_job(
+        Api(),
+        SimpleNamespace(worker_id="worker-1"),
+        {"id": "job-1", "payload": {"projectId": "project-1", "prompt": "clip"}},
+    )
+
+    assert "Estimated 121 frames for this clip." in progress_messages
+
+
 def test_random_batch_seeds_are_used_per_image():
     assert resolve_seed(None, "city at night", 2, [101, 202, 303, 404]) == 303
 

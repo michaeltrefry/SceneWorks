@@ -379,11 +379,22 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         progress("loading_model", "loading_model", 0.14, "Resolving video adapter target.")
         adapter.ensure_models(request)
         requirements = adapter.estimate_requirements(request)
+        estimated_frames = (
+            requirements.get("previewFrames")
+            or requirements.get("estimatedFrames")
+            or requirements.get("requestedFrames")
+        )
+        frame_label = "preview frames" if "previewFrames" in requirements else "frames"
+        estimate_message = (
+            f"Estimated {estimated_frames} {frame_label} for this clip."
+            if estimated_frames
+            else "Estimated video generation requirements."
+        )
         progress(
             "running",
             "estimating",
             0.18,
-            f"Estimated {requirements['previewFrames']} preview frames for this clip.",
+            estimate_message,
         )
         result = run_blocking_job_step(
             api,
