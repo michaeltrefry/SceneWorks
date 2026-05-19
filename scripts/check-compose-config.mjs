@@ -21,6 +21,13 @@ function assertEqual(actual, expected, label) {
   }
 }
 
+function assertServiceMountsTarget(service, target, label) {
+  const volumes = service?.volumes ?? [];
+  if (!volumes.some((volume) => volume?.target === target)) {
+    throw new Error(`${label}: expected a volume mounted at ${target}`);
+  }
+}
+
 function assertMissing(object, key, label) {
   if (Object.prototype.hasOwnProperty.call(object ?? {}, key)) {
     throw new Error(`${label}: expected ${key} to be absent`);
@@ -44,6 +51,8 @@ function assertRuntimeDefaults(config, label) {
     `${label} python HF hub cache`,
   );
   assertEqual(rustWorker?.environment?.SCENEWORKS_GPU_ID, "cpu", `${label} rust worker gpu mode`);
+  assertEqual(rustWorker?.environment?.SCENEWORKS_CONFIG_DIR, "/sceneworks/config", `${label} rust worker config dir`);
+  assertServiceMountsTarget(rustWorker, "/sceneworks/config", `${label} rust worker config mount`);
 }
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "sceneworks-compose-config-"));

@@ -81,12 +81,12 @@ function presetStatusLabel(status) {
 
 export function PresetManagerScreen({
   activeProject,
-  createLoraImportJob,
   createRecipePreset,
   deleteRecipePreset,
   duplicateRecipePreset,
   imageModels,
   loras = [],
+  onOpenModels,
   recipePresets = [],
   updateRecipePreset,
   videoModels,
@@ -96,15 +96,16 @@ export function PresetManagerScreen({
   const selectedPreset = recipePresets.find((preset) => preset.id === selectedPresetId) ?? null;
   const [form, setForm] = useState(() => formFromPreset(selectedPreset, models[0]?.id));
   const [saving, setSaving] = useState(false);
-  const [importingLora, setImportingLora] = useState(false);
   const [message, setMessage] = useState({ tone: "neutral", text: "" });
-  const [importForm, setImportForm] = useState({ mode: "url", sourceUrl: "", file: null, name: "" });
-  const [fileInputKey, setFileInputKey] = useState(0);
+  const [selectedLoraToAdd, setSelectedLoraToAdd] = useState("");
   const editable = !selectedPreset || selectedPreset.scope !== "builtin";
-  const busy = saving || importingLora;
+  const busy = saving;
   const availableModels = modelOptions(models, form.workflow);
   const selectedModel = models.find((model) => model.id === form.model) ?? availableModels[0] ?? null;
-  const availableLoras = selectedModel ? loras.filter((lora) => lora.installState !== "missing" && loraMatchesModel(lora, selectedModel)) : [];
+  const installedLoras = loras.filter((lora) => lora.installState !== "missing");
+  const availableLoras = selectedModel ? installedLoras.filter((lora) => loraMatchesModel(lora, selectedModel)) : [];
+  const selectedIds = selectedLoraIds(form);
+  const addableLoras = availableLoras.filter((lora) => !selectedIds.includes(lora.id));
   const validation = presetValidation({ ...selectedPreset, loras: form.loras }, loras, selectedModel);
   const validationMessage = editable ? presetValidationMessage(validation) : "";
   const saveDisabledReason = !editable
@@ -117,9 +118,11 @@ export function PresetManagerScreen({
   const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
   const loraEmptyMessage = !selectedModel
     ? "No model selected"
-    : hasPendingCompatibleLoras
-      ? "No installed compatible LoRAs. Imports appear here after the Queue completes."
-      : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
+    : !installedLoras.length
+      ? "No uploaded LoRAs yet. Manage LoRAs on the Models page."
+      : hasPendingCompatibleLoras
+        ? "No installed compatible LoRAs. Imports appear here after the Queue completes."
+        : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
 
   useEffect(() => {
     if (selectedPreset && !recipePresets.some((preset) => preset.id === selectedPreset.id)) {
@@ -141,6 +144,12 @@ export function PresetManagerScreen({
     }
   }, [availableModels, form.model]);
 
+  useEffect(() => {
+    if (!addableLoras.some((lora) => lora.id === selectedLoraToAdd)) {
+      setSelectedLoraToAdd(addableLoras[0]?.id ?? "");
+    }
+  }, [addableLoras, selectedLoraToAdd]);
+
   function updateField(field, value) {
     setForm((current) => {
       if (field === "workflow") {
@@ -160,19 +169,24 @@ export function PresetManagerScreen({
     });
   }
 
-  function toggleLora(id) {
+  function addSelectedLora() {
+    const id = selectedLoraToAdd;
+    if (!id) {
+      return;
+    }
     setForm((current) => {
       const hasLora = current.loras.some((lora) => lora.id === id);
-      if (hasLora) {
-        return { ...current, loras: current.loras.filter((lora) => lora.id !== id) };
-      }
-      if (current.loras.length >= 3) {
+      if (hasLora || current.loras.length >= 3) {
         return current;
       }
       const source = loras.find((lora) => lora.id === id);
       const weight = source?.defaultWeight ?? source?.weight ?? 0.8;
       return { ...current, loras: [...current.loras, { id, weight: String(weight) }] };
     });
+  }
+
+  function removeLora(id) {
+    setForm((current) => ({ ...current, loras: current.loras.filter((lora) => lora.id !== id) }));
   }
 
   function updateLoraWeight(id, weight) {
@@ -299,44 +313,6 @@ export function PresetManagerScreen({
       setMessage({ tone: "error", text: err.message });
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function importLora(event) {
-    event.preventDefault();
-    const isFileImport = importForm.mode === "file";
-    if ((!isFileImport && !importForm.sourceUrl.trim()) || (isFileImport && !importForm.file)) {
-      return;
-    }
-    setImportingLora(true);
-    setMessage({
-      tone: "neutral",
-      text: isFileImport ? "Uploading LoRA file before queueing import." : "",
-    });
-    try {
-      const job = await createLoraImportJob({
-        ...(isFileImport ? { file: importForm.file } : { sourceUrl: importForm.sourceUrl.trim() }),
-        name: importForm.name.trim() || undefined,
-        scope: form.scope,
-        family: selectedModel?.family ?? undefined,
-      });
-      const importedId = job?.payload?.loraId;
-      if (importedId) {
-        setForm((current) => ({
-          ...current,
-          loras: current.loras.some((lora) => lora.id === importedId)
-            ? current.loras
-            : [...current.loras, { id: importedId, weight: "0.8" }].slice(0, 3),
-        }));
-      }
-      setImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
-      // Force a re-mount so choosing the same file again still emits a change event.
-      setFileInputKey((current) => current + 1);
-      setMessage({ tone: "success", text: "LoRA import queued. Save after the import finishes." });
-    } catch (err) {
-      setMessage({ tone: "error", text: err.message });
-    } finally {
-      setImportingLora(false);
     }
   }
 
@@ -503,23 +479,60 @@ export function PresetManagerScreen({
           <section className="lora-picker" aria-label="Preset LoRAs">
             <div>
               <strong>Applied LoRAs</strong>
-              <span>{form.loras.length}/3 installed and compatible</span>
+              <span>{form.loras.length}/3 selected</span>
             </div>
-            {availableLoras.length ? (
+            <div className="inline-create lora-add-row">
+              <label>
+                Add LoRA
+                <select
+                  disabled={!editable || !addableLoras.length || form.loras.length >= 3}
+                  onChange={(event) => setSelectedLoraToAdd(event.target.value)}
+                  value={selectedLoraToAdd}
+                >
+                  {addableLoras.length ? (
+                    addableLoras.map((lora) => (
+                      <option key={lora.id} value={lora.id}>
+                        {lora.name ?? lora.id}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">No LoRAs available</option>
+                  )}
+                </select>
+              </label>
+              <button disabled={!editable || !selectedLoraToAdd || form.loras.length >= 3} onClick={addSelectedLora} type="button">
+                Add LoRA
+              </button>
+            </div>
+            {!availableLoras.length ? (
+              <div className="empty-panel compact-panel">
+                <span>{loraEmptyMessage}</span>
+                {onOpenModels ? (
+                  <button onClick={onOpenModels} type="button">
+                    Open Models
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {form.loras.length ? (
               <div className="lora-choice-list">
-                {availableLoras.map((lora) => {
-                  const checked = selectedLoraIds(form).includes(lora.id);
-                  const selected = form.loras.find((item) => item.id === lora.id);
+                {form.loras.map((selected) => {
+                  const lora = loras.find((item) => item.id === selected.id);
+                  const missing = !lora || lora.installState === "missing";
+                  const incompatible = lora && selectedModel && !loraMatchesModel(lora, selectedModel);
                   return (
-                    <div className={checked ? "lora-choice active editable-lora-choice" : "lora-choice editable-lora-choice"} key={lora.id}>
-                      <label>
-                        <input checked={checked} disabled={!editable || (!checked && form.loras.length >= 3)} onChange={() => toggleLora(lora.id)} type="checkbox" />
-                        <span>
-                          <strong>{lora.name ?? lora.id}</strong>
-                          <small>{loraLabel(lora)}</small>
-                        </span>
-                      </label>
-                      {checked ? (
+                    <div className={incompatible || missing ? "lora-choice editable-lora-choice warning" : "lora-choice active editable-lora-choice"} key={selected.id}>
+                      <span>
+                        <strong>{lora?.name ?? selected.id}</strong>
+                        <small>
+                          {missing
+                            ? "Missing or still importing"
+                            : incompatible
+                              ? `${loraLabel(lora)} | incompatible with ${selectedModel?.name ?? selectedModel?.id}`
+                              : loraLabel(lora)}
+                        </small>
+                      </span>
+                      <div className="lora-selection-actions">
                         <label>
                           Weight
                           <input
@@ -532,86 +545,15 @@ export function PresetManagerScreen({
                             value={selected?.weight ?? ""}
                           />
                         </label>
-                      ) : null}
+                        <button disabled={!editable} onClick={() => removeLora(selected.id)} type="button">
+                          Remove
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
               </div>
-            ) : (
-              <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
-            )}
-          </section>
-
-          <section className="lora-import-panel" aria-label="Import LoRA">
-            <div>
-              <strong>Import LoRA</strong>
-              <span>{selectedModel?.family ?? selectedModel?.name ?? "choose a model first"}</span>
-            </div>
-            <div className="segmented-control compact-segment" aria-label="LoRA import source">
-              <button
-                className={importForm.mode === "url" ? "active" : ""}
-                disabled={!editable || importingLora}
-                onClick={() => setImportForm((current) => ({ ...current, mode: "url" }))}
-                type="button"
-              >
-                URL
-              </button>
-              <button
-                className={importForm.mode === "file" ? "active" : ""}
-                disabled={!editable || importingLora}
-                onClick={() => setImportForm((current) => ({ ...current, mode: "file" }))}
-                type="button"
-              >
-                Local File
-              </button>
-            </div>
-            <div className="inline-create">
-              {importForm.mode === "url" ? (
-                <label>
-                  Source URL
-                  <input
-                    disabled={!editable || !selectedModel || importingLora}
-                    onChange={(event) => setImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
-                    placeholder="https://..."
-                    value={importForm.sourceUrl}
-                  />
-                </label>
-              ) : (
-                <label>
-                  Local File
-                  <span className="file-picker-row">
-                    <span className="file-upload-button">
-                      Choose
-                      <input
-                        accept=".safetensors,.ckpt,.pt,.bin"
-                        disabled={!editable || !selectedModel || importingLora}
-                        key={fileInputKey}
-                        onChange={(event) => setImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
-                        type="file"
-                      />
-                    </span>
-                    <span className="selected-file-name">{importForm.file?.name ?? "No file selected"}</span>
-                  </span>
-                </label>
-              )}
-              <label>
-                Name
-                <input
-                  disabled={!editable || !selectedModel || importingLora}
-                  onChange={(event) => setImportForm((current) => ({ ...current, name: event.target.value }))}
-                  placeholder="Optional"
-                  value={importForm.name}
-                />
-              </label>
-              <button
-                disabled={!editable || busy || !selectedModel || (importForm.mode === "url" ? !importForm.sourceUrl.trim() : !importForm.file)}
-                onClick={importLora}
-                type="button"
-              >
-                {importingLora ? (importForm.mode === "file" ? "Uploading" : "Queueing...") : "Queue Import"}
-              </button>
-            </div>
-            {!selectedModel ? <p className="helper-copy">Choose a model before importing so compatibility can be recorded.</p> : null}
+            ) : null}
           </section>
 
           {saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}

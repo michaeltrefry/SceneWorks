@@ -989,6 +989,11 @@ button:disabled {
   background: #183f3a;
 }
 
+.lora-choice.warning {
+  border-color: #8f7552;
+  background: #2a251c;
+}
+
 .lora-choice input {
   width: auto;
 }
@@ -1002,6 +1007,16 @@ button:disabled {
 .editable-lora-choice {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(80px, 120px);
+  align-items: end;
+}
+
+.lora-add-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.lora-selection-actions {
+  display: flex;
+  gap: 8px;
   align-items: end;
 }
 

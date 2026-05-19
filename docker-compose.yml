@@ -61,6 +61,7 @@ services:
     environment:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8000}
       SCENEWORKS_DATA_DIR: /sceneworks/data
+      SCENEWORKS_CONFIG_DIR: /sceneworks/config
       SCENEWORKS_WORKER_ID: rust-utility-worker-0
       SCENEWORKS_GPU_ID: ${SCENEWORKS_RUST_WORKER_GPU_ID:-cpu}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
@@ -68,6 +69,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
+      - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
     depends_on:
       api:
         condition: service_healthy

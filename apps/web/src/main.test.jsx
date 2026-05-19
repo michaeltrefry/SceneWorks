@@ -722,8 +722,8 @@ describe("SceneWorks app shell", () => {
     expect(importCalls).toBe(0);
   });
 
-  it("keeps Preset Manager LoRA imports in context", async () => {
-    const createdJobs = [];
+  it("keeps Preset Manager LoRA acquisition on the Models page", async () => {
+    let importCalls = 0;
     global.fetch.mockImplementation((url, options = {}) => {
       const path = new URL(url).pathname;
       if (path.endsWith("/health")) {
@@ -744,17 +744,11 @@ describe("SceneWorks app shell", () => {
         );
       }
       if (path.endsWith("/jobs")) {
-        return Promise.resolve(response(createdJobs));
+        return Promise.resolve(response([]));
       }
       if (path.endsWith("/loras/import") && options.method === "POST") {
-        const job = {
-          id: "lora-import-job-1",
-          type: "lora_import",
-          status: "running",
-          payload: { loraId: "preset_detail" },
-        };
-        createdJobs.unshift(job);
-        return Promise.resolve(response(job));
+        importCalls += 1;
+        return Promise.resolve(response({ id: "lora-import-job-1", type: "lora_import", status: "running" }));
       }
       return Promise.resolve(response([]));
     });
@@ -769,15 +763,21 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Presets").click();
     });
     await settle();
-    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
+
+    expect(container.textContent).toContain("Preset Manager");
+    expect(container.textContent).toContain("No uploaded LoRAs yet. Manage LoRAs on the Models page.");
+    expect(container.textContent).not.toContain("Import LoRA");
+    expect(container.textContent).not.toContain("Queue Import");
+    expect(field(container, "Source URL")).toBeUndefined();
+
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Open Models").click();
     });
     await settle();
 
-    expect(container.textContent).toContain("Preset Manager");
-    expect(createdJobs).toHaveLength(1);
-    expect(container.textContent).not.toContain("Jobs and GPUs");
+    expect(container.textContent).toContain("Models");
+    expect(container.textContent).toContain("Import LoRA");
+    expect(importCalls).toBe(0);
   });
 
   it("queues LoRA URL imports from the Models page", async () => {
@@ -1837,13 +1837,11 @@ describe("SceneWorks app shell", () => {
     const updateRecipePreset = vi.fn(async (id, payload) => ({ ...payload, id }));
     const duplicateRecipePreset = vi.fn(async (id) => ({ id: `${id}_copy` }));
     const deleteRecipePreset = vi.fn(async (id) => ({ id, archived: true }));
-    const createLoraImportJob = vi.fn(async (payload) => ({ payload: { ...payload, loraId: "imported_detail" } }));
     root = createRoot(container);
     await act(async () => {
       root.render(
         <PresetManagerScreen
           activeProject={{ id: "project-1", name: "Noir" }}
-          createLoraImportJob={createLoraImportJob}
           createRecipePreset={createRecipePreset}
           deleteRecipePreset={deleteRecipePreset}
           duplicateRecipePreset={duplicateRecipePreset}
@@ -1882,8 +1880,9 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await changeField(field(container, "Name"), "Soft Morning");
+    await changeField(field(container, "Add LoRA"), "global_detail");
     await act(async () => {
-      [...container.querySelectorAll('.lora-choice input[type="checkbox"]')].find((input) => input.closest(".lora-choice").textContent.includes("Global Detail")).click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
     });
     await changeField(field(container, "Weight"), "0.35");
     expect(field(container, "ID").value).toBe("soft_morning");
@@ -1906,26 +1905,8 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
     });
     await changeField(field(container, "Description"), "Richer low key color.");
-    await changeField(field(container, "Source URL"), "https://example.com/loras/detail.safetensors");
-    await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
-    });
-    expect(createLoraImportJob).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceUrl: "https://example.com/loras/detail.safetensors", scope: "global", family: "z-image" }),
-    );
-    await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Local File").click();
-    });
-    const loraFile = new File(["lora"], "detail.safetensors", { type: "application/octet-stream" });
-    const importPanel = container.querySelector(".lora-import-panel");
-    await changeFile(field(importPanel, "Local File"), loraFile);
-    await changeField(field(importPanel, "Name"), "Uploaded Detail");
-    await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue Import").click();
-    });
-    expect(createLoraImportJob).toHaveBeenLastCalledWith(
-      expect.objectContaining({ file: loraFile, name: "Uploaded Detail", scope: "global", family: "z-image" }),
-    );
+    expect(container.textContent).not.toContain("Queue Import");
+    expect(field(container, "Source URL")).toBeUndefined();
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
@@ -1959,7 +1940,6 @@ describe("SceneWorks app shell", () => {
       root.render(
         <PresetManagerScreen
           activeProject={{ id: "project-1", name: "Noir" }}
-          createLoraImportJob={() => {}}
           createRecipePreset={() => {}}
           deleteRecipePreset={() => {}}
           duplicateRecipePreset={() => {}}

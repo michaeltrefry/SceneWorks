@@ -1359,12 +1359,12 @@ export function App() {
         {activeView === "Presets" ? (
           <PresetManagerScreen
             activeProject={activeProject}
-            createLoraImportJob={createLoraImportJob}
             createRecipePreset={createRecipePreset}
             deleteRecipePreset={deleteRecipePreset}
             duplicateRecipePreset={duplicateRecipePreset}
             imageModels={imageModels}
             loras={loras}
+            onOpenModels={() => setActiveView("Models")}
             recipePresets={recipePresets}
             updateRecipePreset={updateRecipePreset}
             videoModels={videoModels}
