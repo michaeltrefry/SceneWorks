@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, eventUrl } from "./api.js";
+import { Icon } from "./components/Icons.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview } from "./components/assetPanels.jsx";
-import { fallbackModels, navItems, terminalStatuses } from "./constants.js";
+import { fallbackModels, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
@@ -82,6 +83,53 @@ const localJobStackLimit = 4;
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
 
+const navSections = [
+  {
+    label: "Workspace",
+    items: [
+      { id: "Library", icon: Icon.Library },
+      { id: "Image", icon: Icon.Image },
+      { id: "Video", icon: Icon.Video },
+      { id: "Editor", icon: Icon.Editor },
+    ],
+  },
+  {
+    label: "Library",
+    items: [
+      { id: "Characters", icon: Icon.Character },
+      { id: "Presets", icon: Icon.Preset },
+      { id: "Models", icon: Icon.Model },
+    ],
+  },
+  {
+    label: "System",
+    items: [{ id: "Queue", icon: Icon.Queue }],
+  },
+];
+
+const viewTitles = {
+  Library: { title: "Library", blurb: "Browse stills and clips across all your projects." },
+  Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
+  Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
+  Editor: { title: "Editor", blurb: "Cut, sequence and export your timeline." },
+  Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
+  Presets: { title: "Recipes", blurb: "Save and share recurring generation setups." },
+  Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
+  Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
+};
+
+function readStoredTheme() {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+  try {
+    const saved = window.localStorage.getItem("sceneworks-theme");
+    return saved === "dark" || saved === "light" ? saved : "light";
+  } catch {
+    return "light";
+  }
+}
+
 function uploadLimitLabel(bytes) {
   const gib = bytes / (1024 * 1024 * 1024);
   return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
@@ -116,6 +164,7 @@ export function App() {
   const [previewAsset, setPreviewAsset] = useState(null);
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
+  const [theme, setTheme] = useState(readStoredTheme);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
@@ -125,12 +174,12 @@ export function App() {
 
   const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
   const imageModels = useMemo(() => {
-    const items = models.filter((model) => model.type === "image");
-    return items.length ? items : fallbackModels.filter((model) => model.type === "image");
+    const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
+    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
   }, [models]);
   const videoModels = useMemo(() => {
-    const items = models.filter((model) => model.type === "video");
-    return items.length ? items : fallbackModels.filter((model) => model.type === "video");
+    const items = models.filter((model) => model.type === "video" && model.installState !== "missing");
+    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
   }, [models]);
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
@@ -217,6 +266,18 @@ export function App() {
   useEffect(() => {
     selectedTimelineIdRef.current = selectedTimelineId;
   }, [selectedTimelineId]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      window.localStorage.setItem("sceneworks-theme", theme);
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, [theme]);
 
   useEffect(() => {
     apiFetch("/api/v1/health", "")
@@ -519,6 +580,38 @@ export function App() {
     });
     await refreshRecipePresets(activeProject?.id);
     return archived;
+  }
+
+  async function deleteModel(model) {
+    const result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
+      method: "DELETE",
+    });
+    if (result.removedManifestEntry) {
+      setModels((items) => items.filter((item) => item.id !== model.id));
+    }
+    setError("");
+    await refreshData();
+    return result;
+  }
+
+  async function deleteLora(lora) {
+    const params = new URLSearchParams();
+    if (lora.scope) {
+      params.set("scope", lora.scope);
+    }
+    if (lora.scope === "project" && activeProject?.id) {
+      params.set("projectId", activeProject.id);
+    }
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const result = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+      method: "DELETE",
+    });
+    if (result.removedManifestEntry) {
+      setLoras((items) => items.filter((item) => item.id !== lora.id || item.scope !== lora.scope));
+    }
+    setError("");
+    await refreshDataWithLoraOverlay(activeProject?.id);
+    return result;
   }
 
   async function createModelImportJob(payload, options = {}) {
@@ -1285,50 +1378,105 @@ export function App() {
     }
   }
 
+  const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
+  // Activity dots only — counts live in the topbar so nav button textContent stays clean.
+  const activeIndicators = {
+    Editor: timelines.length > 0,
+    Queue: queueCounts.active > 0,
+  };
+
   return (
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
-          <span className="brand-mark">SW</span>
+          <span className="brand-mark" aria-hidden="true">
+            SW
+          </span>
           <div>
             <h1>SceneWorks</h1>
             <p>Local creative studio</p>
           </div>
         </div>
 
-        <nav className="nav-list">
-          {navItems.map((item) => (
-            <button
-              className={activeView === item ? "nav-item active" : "nav-item"}
-              key={item}
-              onClick={() => setActiveView(item)}
-              type="button"
-            >
-              {item}
-            </button>
-          ))}
-        </nav>
+        {navSections.map((section) => (
+          <div className="sidebar-section" key={section.label}>
+            <div className="sidebar-section-title">{section.label}</div>
+            <nav className="nav-list">
+              {section.items.map((item) => {
+                const IconComponent = item.icon;
+                const active = activeIndicators[item.id];
+                return (
+                  <button
+                    className={activeView === item.id ? "nav-item active" : "nav-item"}
+                    key={item.id}
+                    onClick={() => setActiveView(item.id)}
+                    title={item.id}
+                    type="button"
+                  >
+                    <IconComponent />
+                    <span className="nav-label">{item.id}</span>
+                    {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+        ))}
+
+        <div className="sidebar-foot">
+          <button
+            className="project-pill"
+            onClick={() => setActiveView("Library")}
+            title={activeProject?.name ?? "No project open"}
+            type="button"
+          >
+            <span className="project-pill-thumb" aria-hidden="true" />
+            <span className="project-pill-meta">
+              <strong>{activeProject?.name ?? "No project open"}</strong>
+              <span>
+                {assets.length} asset{assets.length === 1 ? "" : "s"} ·{" "}
+                {visibleWorkers.length || "0"} worker{visibleWorkers.length === 1 ? "" : "s"}
+              </span>
+            </span>
+            <Icon.ChevDown className="chev" />
+          </button>
+        </div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">Project</p>
-            <strong>{activeProject?.name ?? "No project open"}</strong>
+          <div className="topbar-title">
+            <h1>{titleInfo.title}</h1>
+            <p>{titleInfo.blurb}</p>
           </div>
+          <span className="topbar-spacer" />
           <div className="topbar-status">
-            <span>
+            <span className={health?.status === "ok" ? "status-pill" : "status-pill warning"}>
               <StatusDot ok={health?.status === "ok"} />
-              API
+              {health?.status === "ok" ? "API ready" : "API offline"}
             </span>
-            <span>
+            <span className="status-pill">
+              <span className={visibleWorkers.length ? "dot" : "dot idle"} />
               {visibleWorkers.length ? `${visibleWorkers.length} worker${visibleWorkers.length === 1 ? "" : "s"}` : "No workers"}
             </span>
-            <span>{gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}</span>
+            <span className="status-pill">
+              {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}
+            </span>
             <button className="queue-chip" onClick={() => setActiveView("Queue")} type="button">
               Queue {queueCounts.active}
             </button>
           </div>
+          <button className="icon-btn" title="Notifications" type="button">
+            <Icon.Bell />
+          </button>
+          <button
+            className="icon-btn"
+            onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+            title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+            type="button"
+          >
+            {theme === "light" ? <Icon.Moon /> : <Icon.Sun />}
+          </button>
         </header>
 
         {error ? <p className="notice error">{error}</p> : null}
@@ -1504,10 +1652,13 @@ export function App() {
             jobs={jobs}
             loras={loras}
             models={models}
+            onDeleteLora={deleteLora}
+            onDeleteModel={deleteModel}
             onDownloadModel={createModelDownloadJob}
             onImportLora={createLoraImportJob}
             onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}
+            recipePresets={recipePresets}
           />
         ) : null}
 
