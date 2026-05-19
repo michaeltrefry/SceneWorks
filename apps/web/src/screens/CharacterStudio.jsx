@@ -312,7 +312,7 @@ export function CharacterStudio({
             </form>
             <div className="guidance-strip">
               <strong>Character conditioning</strong>
-              <span>Character selections are recorded in recipes now; adapter-level reference and LoRA conditioning will activate in a later runtime slice.</span>
+              <span>Character selections are recorded in presets now; adapter-level reference and LoRA conditioning will activate in a later runtime slice.</span>
             </div>
 
             <CharacterReferences

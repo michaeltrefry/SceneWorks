@@ -32,7 +32,7 @@ import {
   loraMatchesModel,
   loraWeight,
   clearPresetDefault,
-  noRecipePresetId,
+  noPresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
@@ -122,7 +122,7 @@ export function ImageStudio({
   onOpenPresets,
   onOpenQueue,
   onPreview,
-  recipePresets = [],
+  presets = [],
   requestedGpu,
   selectedAsset,
   setRequestedGpu,
@@ -216,15 +216,15 @@ export function ImageStudio({
     return item.type === "image";
   });
   const selectedModel = imageModels.find((item) => item.id === model);
-  const availableRecipePresets = useMemo(() => {
-    return recipePresets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
-  }, [mode, recipePresets, selectedModel?.id]);
-  const selectedRecipePreset =
-    stylePreset === noRecipePresetId
+  const availablePresets = useMemo(() => {
+    return presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
+  }, [mode, presets, selectedModel?.id]);
+  const selectedPreset =
+    stylePreset === noPresetId
       ? null
       : stylePreset
-        ? availableRecipePresets.find((preset) => preset.id === stylePreset) ?? null
-        : availableRecipePresets[0] ?? null;
+        ? availablePresets.find((preset) => preset.id === stylePreset) ?? null
+        : availablePresets[0] ?? null;
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
       return false;
@@ -247,11 +247,11 @@ export function ImageStudio({
       ok: incompatible.length === 0,
     };
   }, [selectedLoras, selectedModel]);
-  const presetLoraDetails = buildPresetLoraDetails(selectedRecipePreset, loras);
-  const presetPromptParts = buildPresetPromptParts(selectedRecipePreset);
+  const presetLoraDetails = buildPresetLoraDetails(selectedPreset, loras);
+  const presetPromptParts = buildPresetPromptParts(selectedPreset);
   const presetValidationResult = useMemo(
-    () => presetValidation(selectedRecipePreset, loras, selectedModel),
-    [selectedRecipePreset, loras, selectedModel],
+    () => presetValidation(selectedPreset, loras, selectedModel),
+    [selectedPreset, loras, selectedModel],
   );
   useEffect(() => {
     if (selectedLoraValidationResult.incompatible.length && !advancedOpen) {
@@ -269,22 +269,22 @@ export function ImageStudio({
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
   useEffect(() => {
-    if (!stylePreset || stylePreset === noRecipePresetId) {
+    if (!stylePreset || stylePreset === noPresetId) {
       return;
     }
-    if (!selectedRecipePreset) {
-      setStylePreset(availableRecipePresets[0]?.id ?? noRecipePresetId);
+    if (!selectedPreset) {
+      setStylePreset(availablePresets[0]?.id ?? noPresetId);
     }
-  }, [availableRecipePresets, selectedRecipePreset, stylePreset]);
+  }, [availablePresets, selectedPreset, stylePreset]);
 
   useEffect(() => {
-    if (!selectedRecipePreset) {
+    if (!selectedPreset) {
       clearPresetDefault(setCount, presetDefaultSnapshots, "count");
       clearPresetDefault(setResolution, presetDefaultSnapshots, "resolution");
       clearPresetDefault(setNegativePrompt, presetDefaultSnapshots, "negativePrompt");
       return;
     }
-    const defaults = selectedRecipePreset.defaults ?? {};
+    const defaults = selectedPreset.defaults ?? {};
     if (defaults.count) {
       const appliedValue = Number(defaults.count);
       setCount((current) => {
@@ -306,7 +306,7 @@ export function ImageStudio({
         return appliedValue;
       });
     }
-  }, [selectedRecipePreset?.id]);
+  }, [selectedPreset?.id]);
 
   useEffect(() => {
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
@@ -405,7 +405,7 @@ export function ImageStudio({
         seed: seed === "" ? null : Number(seed),
         width,
         height,
-        recipePresetId: selectedRecipePreset?.id ?? null,
+        recipePresetId: selectedPreset?.id ?? null,
         characterId: mode === "character_image" ? characterId || null : null,
         characterLookId: mode === "character_image" ? characterLookId || null : null,
         sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
@@ -460,7 +460,7 @@ export function ImageStudio({
             </div>
             {onOpenPresets ? (
               <button className="hero-link" onClick={onOpenPresets} type="button">
-                <Icon.Folder size={14} /> Saved recipes
+                <Icon.Folder size={14} /> Saved presets
               </button>
             ) : null}
           </div>
@@ -536,8 +536,8 @@ export function ImageStudio({
                   </label>
                 </div>
                 <div className="guidance-strip">
-                  <strong>Recipe-only character</strong>
-                  <span>Character and look are saved with the recipe; adapter-level reference and LoRA conditioning are not active yet.</span>
+                  <strong>Preset-only character</strong>
+                  <span>Character and look are saved with the preset; adapter-level reference and LoRA conditioning are not active yet.</span>
                 </div>
               </>
             ) : null}
@@ -585,10 +585,10 @@ export function ImageStudio({
             )}
           </section>
 
-          <section className="studio-controls recipe-rail">
-            <div className="recipe-head">
-              <h3>Recipe</h3>
-              <span className="recipe-model-tag">{selectedModel?.name ?? "—"}</span>
+          <section className="studio-controls preset-rail">
+            <div className="preset-rail-head">
+              <h3>Preset</h3>
+              <span className="preset-rail-model-tag">{selectedModel?.name ?? "—"}</span>
             </div>
 
             <label>
@@ -606,15 +606,15 @@ export function ImageStudio({
               <span className="style-preset-label">Style preset</span>
               <div className="preset-chips">
                 <button
-                  className={!selectedRecipePreset ? "preset-chip active" : "preset-chip"}
-                  onClick={() => setStylePreset(noRecipePresetId)}
+                  className={!selectedPreset ? "preset-chip active" : "preset-chip"}
+                  onClick={() => setStylePreset(noPresetId)}
                   type="button"
                 >
                   None
                 </button>
-                {availableRecipePresets.map((preset) => (
+                {availablePresets.map((preset) => (
                   <button
-                    className={selectedRecipePreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                    className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
                     key={preset.id}
                     onClick={() => setStylePreset(preset.id)}
                     type="button"
@@ -625,7 +625,7 @@ export function ImageStudio({
               </div>
             </div>
 
-            <div className="control-grid recipe-row">
+            <div className="control-grid preset-rail-row">
               <label>
                 Variations
                 <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
@@ -641,9 +641,9 @@ export function ImageStudio({
               </label>
             </div>
 
-            {selectedRecipePreset ? (
+            {selectedPreset ? (
               <div className="guidance-strip">
-                <strong>{selectedRecipePreset.ui?.description ?? "Preset defaults active"}</strong>
+                <strong>{selectedPreset.ui?.description ?? "Preset defaults active"}</strong>
                 <span>
                   {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
                   {presetLoraDetails.length
@@ -655,7 +655,7 @@ export function ImageStudio({
             ) : (
               <div className="guidance-strip">
                 <strong>No preset selected</strong>
-                <span>Generation uses only the prompt, model, and visible recipe settings.</span>
+                <span>Generation uses only the prompt, model, and visible preset settings.</span>
               </div>
             )}
 

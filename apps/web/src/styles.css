@@ -1118,7 +1118,7 @@ label {
 }
 
 /* ---------- Studio prompt hero (Image Studio) ----------
-   A vertically-stacked hero: mode tabs + saved-recipes link on top,
+   A vertically-stacked hero: mode tabs + saved-presets link on top,
    prompt textarea + Generate CTA, then suggestion chips. */
 .surface-header.hero.studio-prompt-hero {
   grid-template-columns: minmax(0, 1fr);
@@ -1247,7 +1247,7 @@ label {
   }
 }
 
-/* ---------- Studio results: latest batch + recipe rail ---------- */
+/* ---------- Studio results: latest batch + preset rail ---------- */
 .studio-results {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
@@ -1306,26 +1306,26 @@ label {
   color: var(--text-muted);
 }
 
-/* Recipe rail */
-.studio-controls.recipe-rail {
+/* Preset rail */
+.studio-controls.preset-rail {
   padding: 16px;
   align-content: start;
 }
 
-.recipe-head {
+.preset-rail-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
 }
 
-.recipe-head h3 {
+.preset-rail-head h3 {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
 }
 
-.recipe-model-tag {
+.preset-rail-model-tag {
   font-size: 12px;
   color: var(--text-muted);
   font-family: var(--font-mono);
@@ -1378,7 +1378,7 @@ label {
   color: var(--accent);
 }
 
-.recipe-row {
+.preset-rail-row {
   display: grid;
   grid-template-columns: 1fr 1.4fr;
   gap: 10px;
@@ -1699,7 +1699,7 @@ label {
   align-content: start;
 }
 
-.render-rail .recipe-head h3 {
+.render-rail .preset-rail-head h3 {
   font-size: 15px;
 }
 
@@ -1735,7 +1735,7 @@ label {
   box-shadow: var(--shadow-sm);
 }
 
-.render-rail .recipe-row {
+.render-rail .preset-rail-row {
   grid-template-columns: 1fr 1fr;
 }
 
@@ -2189,7 +2189,7 @@ label {
     grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
   }
 
-  .preset-layout.creating .recipe-summary {
+  .preset-layout.creating .preset-summary {
     grid-column: 1 / -1;
     position: static;
   }
@@ -2201,15 +2201,15 @@ label {
   }
 }
 
-/* ---------- New Preset (step-by-step recipe form) ---------- */
-.recipe-create-shell {
+/* ---------- New Preset (step-by-step preset form) ---------- */
+.preset-create-shell {
   display: grid;
   gap: var(--gap-3);
   min-width: 0;
   align-content: start;
 }
 
-.recipe-create-head {
+.preset-create-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -2217,7 +2217,7 @@ label {
   flex-wrap: wrap;
 }
 
-.recipe-create-back {
+.preset-create-back {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2230,17 +2230,17 @@ label {
   border: 0;
 }
 
-.recipe-create-back:hover {
+.preset-create-back:hover {
   color: var(--text);
   background: var(--surface-hover);
 }
 
-.recipe-create-actions {
+.preset-create-actions {
   display: inline-flex;
   gap: 8px;
 }
 
-.recipe-create-actions .btn-secondary {
+.preset-create-actions .btn-secondary {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2254,11 +2254,11 @@ label {
   font-weight: 500;
 }
 
-.recipe-create-actions .btn-secondary:hover:not(:disabled) {
+.preset-create-actions .btn-secondary:hover:not(:disabled) {
   background: var(--surface-hover);
 }
 
-.recipe-create-actions .btn-primary {
+.preset-create-actions .btn-primary {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2275,31 +2275,31 @@ label {
     0 6px 18px color-mix(in oklch, var(--accent) 25%, transparent);
 }
 
-.recipe-create-actions .btn-primary:hover:not(:disabled) {
+.preset-create-actions .btn-primary:hover:not(:disabled) {
   background: var(--accent-strong);
 }
 
-.recipe-create-actions .btn-primary:disabled {
+.preset-create-actions .btn-primary:disabled {
   opacity: 0.45;
   cursor: not-allowed;
   box-shadow: none;
 }
 
-.recipe-create-body {
+.preset-create-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--gap-4);
   align-items: start;
 }
 
-.recipe-form-stack {
+.preset-form-stack {
   display: flex;
   flex-direction: column;
   gap: 24px;
   min-width: 0;
 }
 
-.recipe-summary {
+.preset-summary {
   display: flex;
   flex-direction: column;
   gap: var(--gap-3);
@@ -2308,7 +2308,7 @@ label {
   min-width: 0;
 }
 
-.recipe-section {
+.preset-section {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr);
   gap: 18px;
@@ -2316,16 +2316,16 @@ label {
   border-bottom: 1px dashed var(--border);
 }
 
-.recipe-section:last-of-type {
+.preset-section:last-of-type {
   border-bottom: 0;
   padding-bottom: 0;
 }
 
-.recipe-section header {
+.preset-section header {
   display: contents;
 }
 
-.recipe-section .step {
+.preset-section .step {
   display: grid;
   place-items: center;
   width: 28px;
@@ -2339,31 +2339,31 @@ label {
   align-self: start;
 }
 
-[data-theme="dark"] .recipe-section .step {
+[data-theme="dark"] .preset-section .step {
   color: var(--accent);
 }
 
-.recipe-section h3 {
+.preset-section h3 {
   margin: 0 0 4px;
   font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.005em;
 }
 
-.recipe-section header p {
+.preset-section header p {
   margin: 0;
   font-size: 13px;
   color: var(--text-muted);
 }
 
-.recipe-section .optional-tag {
+.preset-section .optional-tag {
   margin-left: 8px;
   font-weight: 400;
   color: var(--text-faint);
   font-size: 12px;
 }
 
-.recipe-section-body {
+.preset-section-body {
   grid-column: 2;
   display: grid;
   gap: var(--gap-3);
@@ -2371,26 +2371,26 @@ label {
   min-width: 0;
 }
 
-/* Field — used inside recipe sections */
-.recipe-section-body .field {
+/* Field — used inside preset sections */
+.preset-section-body .field {
   display: grid;
   gap: 6px;
 }
 
-.recipe-section-body .field > span {
+.preset-section-body .field > span {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
   letter-spacing: 0.01em;
 }
 
-.recipe-section-body .field > small {
+.preset-section-body .field > small {
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
-.recipe-section-body .field-name input {
+.preset-section-body .field-name input {
   font-size: 16px;
   font-weight: 500;
   height: 44px;
@@ -2499,12 +2499,12 @@ label {
 }
 
 /* Model cards (radio list) */
-.recipe-model-cards {
+.preset-model-cards {
   display: grid;
   gap: 8px;
 }
 
-.recipe-model-row {
+.preset-model-row {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr) auto;
   gap: 12px;
@@ -2517,16 +2517,16 @@ label {
   transition: border-color var(--t-fast), box-shadow var(--t-fast);
 }
 
-.recipe-model-row:hover {
+.preset-model-row:hover {
   border-color: var(--border-strong);
 }
 
-.recipe-model-row.active {
+.preset-model-row.active {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
 }
 
-.recipe-model-radio {
+.preset-model-radio {
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -2535,37 +2535,37 @@ label {
   flex: 0 0 auto;
 }
 
-.recipe-model-radio.active {
+.preset-model-radio.active {
   border-color: var(--accent);
   background: var(--accent);
   box-shadow: inset 0 0 0 3px var(--surface);
 }
 
-.recipe-model-meta {
+.preset-model-meta {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.recipe-model-meta strong {
+.preset-model-meta strong {
   font-size: 14px;
   font-weight: 600;
 }
 
-.recipe-model-meta span {
+.preset-model-meta span {
   font-size: 12.5px;
   color: var(--text-muted);
 }
 
-.recipe-model-tags {
+.preset-model-tags {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
 }
 
-/* Chip used in recipe form */
-.recipe-section-body .chip,
-.recipe-summary .chip {
+/* Chip used in preset form */
+.preset-section-body .chip,
+.preset-summary .chip {
   display: inline-flex;
   align-items: center;
   padding: 3px 9px;
@@ -2578,15 +2578,15 @@ label {
   white-space: nowrap;
 }
 
-.recipe-section-body .chip.accent,
-.recipe-summary .chip.accent {
+.preset-section-body .chip.accent,
+.preset-summary .chip.accent {
   background: var(--accent-soft);
   border-color: transparent;
   color: var(--accent-strong);
 }
 
-[data-theme="dark"] .recipe-section-body .chip.accent,
-[data-theme="dark"] .recipe-summary .chip.accent {
+[data-theme="dark"] .preset-section-body .chip.accent,
+[data-theme="dark"] .preset-summary .chip.accent {
   color: var(--accent);
 }
 
@@ -2638,13 +2638,13 @@ label {
 }
 
 /* Defaults grid (Variations + Aspect, Duration + Frames, Quality) */
-.recipe-defaults-grid {
+.preset-defaults-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--gap-3);
 }
 
-.recipe-defaults-grid > .field-span-2 {
+.preset-defaults-grid > .field-span-2 {
   grid-column: span 2;
 }
 
@@ -2862,8 +2862,8 @@ label {
   background: var(--surface-hover);
 }
 
-/* Recipe summary cards (right column) */
-.recipe-summary .summary-card {
+/* Preset summary cards (right column) */
+.preset-summary .summary-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
@@ -2872,79 +2872,79 @@ label {
   gap: 10px;
 }
 
-.recipe-summary .summary-card h2 {
+.preset-summary .summary-card h2 {
   margin: 0;
   font-size: 14px;
   font-weight: 600;
 }
 
-.recipe-summary .summary-card .meta {
+.preset-summary .summary-card .meta {
   color: var(--text-faint);
   font-size: 11.5px;
 }
 
-.recipe-summary .summary-section-title {
+.preset-summary .summary-section-title {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
 }
 
-.recipe-summary .recipe-preview-card {
+.preset-summary .preset-preview-card {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   overflow: hidden;
   background: var(--surface);
 }
 
-.recipe-summary .recipe-preview-thumb {
+.preset-summary .preset-preview-thumb {
   aspect-ratio: 16 / 9;
   background:
     linear-gradient(135deg, color-mix(in oklch, var(--accent) 22%, transparent), transparent 60%),
     color-mix(in oklch, var(--warm) 16%, var(--surface));
 }
 
-.recipe-summary .recipe-preview-body {
+.preset-summary .preset-preview-body {
   padding: 12px;
   display: grid;
   gap: 4px;
 }
 
-.recipe-summary .recipe-preview-body strong {
+.preset-summary .preset-preview-body strong {
   font-size: 14px;
   font-weight: 600;
 }
 
-.recipe-summary .recipe-preview-body .preview-desc {
+.preset-summary .preset-preview-body .preview-desc {
   font-size: 12px;
   color: var(--text-muted);
 }
 
-.recipe-summary .recipe-preview-chips {
+.preset-summary .preset-preview-chips {
   display: flex;
   gap: 6px;
   margin-top: 6px;
   flex-wrap: wrap;
 }
 
-.recipe-summary .detail-stack {
+.preset-summary .detail-stack {
   display: grid;
   gap: 8px;
 }
 
-.recipe-summary .detail-row {
+.preset-summary .detail-row {
   display: grid;
   grid-template-columns: 100px 1fr;
   gap: 8px;
   font-size: 12.5px;
 }
 
-.recipe-summary .detail-row dt {
+.preset-summary .detail-row dt {
   margin: 0;
   color: var(--text-muted);
 }
 
-.recipe-summary .detail-row dd {
+.preset-summary .detail-row dd {
   margin: 0;
   color: var(--text);
   font-family: var(--font-mono);
@@ -2952,27 +2952,27 @@ label {
   overflow-wrap: anywhere;
 }
 
-.recipe-summary .summary-warning {
+.preset-summary .summary-warning {
   background: var(--warm-soft);
   border-color: color-mix(in oklch, var(--warm) 45%, var(--border));
   display: grid;
   gap: 4px;
 }
 
-.recipe-summary .summary-warning strong {
+.preset-summary .summary-warning strong {
   display: block;
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 2px;
 }
 
-.recipe-summary .summary-warning span {
+.preset-summary .summary-warning span {
   color: var(--text-muted);
   font-size: 12.5px;
 }
 
 /* Advanced expander button */
-.recipe-advanced-toggle {
+.preset-advanced-toggle {
   align-self: start;
   display: inline-flex;
   align-items: center;
@@ -2986,7 +2986,7 @@ label {
   border: 0;
 }
 
-.recipe-advanced-toggle:hover {
+.preset-advanced-toggle:hover {
   color: var(--text);
 }
 

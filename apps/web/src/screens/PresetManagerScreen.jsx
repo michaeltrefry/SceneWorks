@@ -42,7 +42,7 @@ function isVideoWorkflow(workflow) {
 
 function renderSection({ step, title, help, optional, children }) {
   return (
-    <section className="recipe-section" key={step}>
+    <section className="preset-section" key={step}>
       <header>
         <span className="step">{step}</span>
         <div>
@@ -53,7 +53,7 @@ function renderSection({ step, title, help, optional, children }) {
           {help ? <p>{help}</p> : null}
         </div>
       </header>
-      <div className="recipe-section-body">{children}</div>
+      <div className="preset-section-body">{children}</div>
     </section>
   );
 }
@@ -121,19 +121,19 @@ function presetStatusLabel(status) {
 
 export function PresetManagerScreen({
   activeProject,
-  createRecipePreset,
-  deleteRecipePreset,
-  duplicateRecipePreset,
+  createPreset,
+  deletePreset,
+  duplicatePreset,
   imageModels,
   loras = [],
   onOpenModels,
-  recipePresets = [],
-  updateRecipePreset,
+  presets = [],
+  updatePreset,
   videoModels,
 }) {
   const models = useMemo(() => [...imageModels, ...videoModels], [imageModels, videoModels]);
-  const [selectedPresetId, setSelectedPresetId] = useState(recipePresets.find((preset) => preset.scope !== "builtin")?.id ?? "");
-  const selectedPreset = recipePresets.find((preset) => preset.id === selectedPresetId) ?? null;
+  const [selectedPresetId, setSelectedPresetId] = useState(presets.find((preset) => preset.scope !== "builtin")?.id ?? "");
+  const selectedPreset = presets.find((preset) => preset.id === selectedPresetId) ?? null;
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState(() => formFromPreset(selectedPreset, models[0]?.id));
   const [saving, setSaving] = useState(false);
@@ -169,10 +169,10 @@ export function PresetManagerScreen({
         : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
 
   useEffect(() => {
-    if (selectedPreset && !recipePresets.some((preset) => preset.id === selectedPreset.id)) {
-      setSelectedPresetId(recipePresets.find((preset) => preset.scope !== "builtin")?.id ?? "");
+    if (selectedPreset && !presets.some((preset) => preset.id === selectedPreset.id)) {
+      setSelectedPresetId(presets.find((preset) => preset.scope !== "builtin")?.id ?? "");
     }
-  }, [recipePresets, selectedPreset?.id]);
+  }, [presets, selectedPreset?.id]);
 
   useEffect(() => {
     setForm(formFromPreset(selectedPreset, modelOptions(models, selectedPreset?.workflow ?? "text_to_image")[0]?.id ?? models[0]?.id));
@@ -307,10 +307,10 @@ export function PresetManagerScreen({
     try {
       const payload = buildPayload();
       if (selectedPreset) {
-        await updateRecipePreset(selectedPreset.id, payload, selectedPreset.scope);
+        await updatePreset(selectedPreset.id, payload, selectedPreset.scope);
         setMessage({ tone: "success", text: "Preset saved." });
       } else {
-        const created = await createRecipePreset(payload);
+        const created = await createPreset(payload);
         setSelectedPresetId(created?.id ?? payload.id);
         setCreating(false);
         setShowLoraPicker(false);
@@ -334,12 +334,12 @@ export function PresetManagerScreen({
         const payload = buildPayload();
         payload.id = slugify(`${selectedPreset.id}_copy`);
         payload.name = `${selectedPreset.name ?? selectedPreset.id} Copy`;
-        const created = await createRecipePreset(payload);
+        const created = await createPreset(payload);
         setSelectedPresetId(created.id);
         setMessage({ tone: "success", text: "Preset duplicated." });
         return;
       }
-      const duplicated = await duplicateRecipePreset(selectedPreset.id, form.scope);
+      const duplicated = await duplicatePreset(selectedPreset.id, form.scope);
       setSelectedPresetId(duplicated.id);
       setMessage({ tone: "success", text: "Preset duplicated." });
     } catch (err) {
@@ -356,7 +356,7 @@ export function PresetManagerScreen({
     setSaving(true);
     setMessage({ tone: "neutral", text: "" });
     try {
-      await deleteRecipePreset(selectedPreset.id, selectedPreset.scope);
+      await deletePreset(selectedPreset.id, selectedPreset.scope);
       setSelectedPresetId("");
       setMessage({ tone: "success", text: "Preset archived." });
     } catch (err) {
@@ -408,9 +408,9 @@ export function PresetManagerScreen({
       </div>
 
       <div className={creating ? "preset-layout creating" : "preset-layout"}>
-        <section className="preset-list" aria-label="Recipe presets">
-          {recipePresets.length ? (
-            recipePresets.map((preset) => {
+        <section className="preset-list" aria-label="Presets">
+          {presets.length ? (
+            presets.map((preset) => {
               const presetModel = models.find((model) => model.id === preset.model);
               const status = presetValidation(preset, loras, presetModel);
               return (
@@ -642,12 +642,12 @@ export function PresetManagerScreen({
       .join(", ");
 
     return (
-      <form className="recipe-create-shell" onSubmit={savePreset}>
-        <div className="recipe-create-head">
-          <button className="recipe-create-back" onClick={cancelCreate} type="button">
+      <form className="preset-create-shell" onSubmit={savePreset}>
+        <div className="preset-create-head">
+          <button className="preset-create-back" onClick={cancelCreate} type="button">
             <Icon.ArrowLeft size={14} /> Back to Presets
           </button>
-          <div className="recipe-create-actions">
+          <div className="preset-create-actions">
             <button className="btn-secondary" onClick={cancelCreate} type="button">
               Cancel
             </button>
@@ -662,8 +662,8 @@ export function PresetManagerScreen({
           </div>
         </div>
 
-        <div className="recipe-create-body">
-          <div className="recipe-form-stack">
+        <div className="preset-create-body">
+          <div className="preset-form-stack">
             {/* 1. Identity */}
             {renderSection({
               step: "1",
@@ -763,21 +763,21 @@ export function PresetManagerScreen({
                 ? `${availableModels.length} model${availableModels.length === 1 ? "" : "s"} compatible with ${workflowDef.label}.`
                 : `No models compatible with ${workflowDef.label} yet. Install one from Models.`,
               children: (
-                <div className="recipe-model-cards">
+                <div className="preset-model-cards">
                   {availableModels.length ? (
                     availableModels.map((modelOption) => (
                       <button
-                        className={form.model === modelOption.id ? "recipe-model-row active" : "recipe-model-row"}
+                        className={form.model === modelOption.id ? "preset-model-row active" : "preset-model-row"}
                         key={modelOption.id}
                         onClick={() => updateField("model", modelOption.id)}
                         type="button"
                       >
-                        <span className={form.model === modelOption.id ? "recipe-model-radio active" : "recipe-model-radio"} />
-                        <span className="recipe-model-meta">
+                        <span className={form.model === modelOption.id ? "preset-model-radio active" : "preset-model-radio"} />
+                        <span className="preset-model-meta">
                           <strong>{modelOption.name ?? modelOption.id}</strong>
                           <span>{modelOption.ui?.description ?? `${modelOption.type ?? "model"} family`}</span>
                         </span>
-                        <span className="recipe-model-tags">
+                        <span className="preset-model-tags">
                           {modelOption.family ? <span className="chip">{modelOption.family}</span> : null}
                           <span className="chip">{modelOption.type ?? "model"}</span>
                         </span>
@@ -843,7 +843,7 @@ export function PresetManagerScreen({
               title: "Defaults",
               help: "Pre-fill the studio with these. Anyone running the preset can still override.",
               children: (
-                <div className="recipe-defaults-grid">
+                <div className="preset-defaults-grid">
                   <label className="field">
                     <span>{isVideo ? "Clips per batch" : "Variations"}</span>
                     <select
@@ -1029,7 +1029,7 @@ export function PresetManagerScreen({
             })}
 
             <button
-              className="recipe-advanced-toggle"
+              className="preset-advanced-toggle"
               onClick={() => setShowAdvancedMeta((value) => !value)}
               type="button"
             >
@@ -1066,18 +1066,18 @@ export function PresetManagerScreen({
             {message.text ? <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p> : null}
           </div>
 
-          <aside className="recipe-summary">
+          <aside className="preset-summary">
             <div className="summary-card">
               <div className="summary-section-title">
                 <h2>Preview</h2>
                 <span className="meta">how it'll look</span>
               </div>
-              <div className="recipe-preview-card">
-                <div className="recipe-preview-thumb" />
-                <div className="recipe-preview-body">
+              <div className="preset-preview-card">
+                <div className="preset-preview-thumb" />
+                <div className="preset-preview-body">
                   <strong>{form.name.trim() || "Untitled preset"}</strong>
                   <span className="preview-desc">{form.description.trim() || "No description yet"}</span>
-                  <div className="recipe-preview-chips">
+                  <div className="preset-preview-chips">
                     <span className="chip accent">{workflowDef.label}</span>
                     {selectedModel ? <span className="chip">{selectedModel.name ?? selectedModel.id}</span> : null}
                     {form.loras.length ? (

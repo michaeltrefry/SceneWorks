@@ -1,4 +1,4 @@
-export const noRecipePresetId = "__no_recipe_preset__";
+export const noPresetId = "__no_preset__";
 
 export function rememberPresetDefault(snapshots, key, currentValue, appliedValue) {
   const previousSnapshot = snapshots.current[key];
