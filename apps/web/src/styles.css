@@ -423,6 +423,14 @@ button:focus-visible {
   background: var(--bg);
 }
 
+/* Children must size to their content, never shrink under the column's height.
+   Without this, descendants with `overflow: hidden` (image/video studio
+   hero strips, the editor preview, etc.) collapse to 0 because their flex
+   auto min-size becomes 0. */
+.workspace > * {
+  flex: 0 0 auto;
+}
+
 .topbar {
   display: flex;
   align-items: center;
