@@ -397,7 +397,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace Person").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -471,7 +471,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace Person").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -855,7 +855,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text to Video").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text → Video").click();
     });
     await settle();
     await act(async () => {
@@ -2811,7 +2811,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate Clip");
+    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
     expect(container.textContent).toContain("Preset cannot run with LTX");
     expect(container.textContent).toContain("wan_motion");
     expect(generate.disabled).toBe(true);
@@ -2975,7 +2975,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Preset LoRA applied at generation: Video Motion");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate Clip").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
     });
 
     expect(createVideoJob).toHaveBeenCalledWith(
@@ -3051,7 +3051,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Wan Motion");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text to Video").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text → Video").click();
     });
     await settle();
 
@@ -3128,7 +3128,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Start Frame");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "First/Last Frame").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "First → Last").click();
     });
     await settle();
 
