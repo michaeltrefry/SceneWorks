@@ -44,6 +44,8 @@ import {
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 
 const completedResultFallbackMs = 30000;
+const ltxVideoModelId = "ltx_2_3";
+const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
 
 export function VideoStudio({
   activeProject,
@@ -80,7 +82,7 @@ export function VideoStudio({
   const [prompt, setPrompt] = useState("Camera slowly pushes in while the scene comes alive");
   const [quality, setQuality] = useState("balanced");
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [model, setModel] = useState(videoModels[0]?.id ?? "ltx_2_3");
+  const [model, setModel] = useState(videoModels[0]?.id ?? ltxVideoModelId);
   const [selectedPresetId, setSelectedPresetId] = useState(null);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   const [duration, setDuration] = useState(selectedModel?.defaults?.duration ?? 6);
@@ -120,12 +122,12 @@ export function VideoStudio({
     () => presetValidation(selectedPreset, loras, selectedModel),
     [selectedPreset, loras, selectedModel],
   );
-  const requiresLtxIcLora = selectedModel?.id === "ltx_2_3" && ["extend_clip"].includes(mode);
+  const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
-      setModel(videoModels[0]?.id ?? "ltx_2_3");
+      setModel(videoModels[0]?.id ?? ltxVideoModelId);
     }
   }, [videoModels, model]);
 

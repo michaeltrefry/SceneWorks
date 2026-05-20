@@ -8,6 +8,8 @@
       "family": "ltx-video",
       "triggerWords": [],
       "compatibility": { "families": ["ltx-video"] },
+      "icLora": true,
+      "conditioningRole": "ic_lora",
       "defaultWeight": 0.8,
       "source": {
         "provider": "huggingface",
@@ -21,6 +23,8 @@
       "family": "ltx-video",
       "triggerWords": [],
       "compatibility": { "families": ["ltx-video"] },
+      "icLora": true,
+      "conditioningRole": "ic_lora",
       "defaultWeight": 0.8,
       "source": {
         "provider": "huggingface",
@@ -34,6 +38,8 @@
       "family": "ltx-video",
       "triggerWords": [],
       "compatibility": { "families": ["ltx-video"] },
+      "icLora": true,
+      "conditioningRole": "ic_lora",
       "defaultWeight": 0.8,
       "source": {
         "provider": "huggingface",
@@ -47,6 +53,8 @@
       "family": "ltx-video",
       "triggerWords": [],
       "compatibility": { "families": ["ltx-video"] },
+      "icLora": true,
+      "conditioningRole": "ic_lora",
       "defaultWeight": 0.8,
       "source": {
         "provider": "huggingface",

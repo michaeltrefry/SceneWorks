@@ -90,6 +90,12 @@ export function loraMatchesModel(lora, model) {
 }
 
 export function loraLooksLikeIcLora(lora) {
+  if (lora?.icLora === true || lora?.isIcLora === true) {
+    return true;
+  }
+  if (String(lora?.conditioningRole ?? "").trim().toLowerCase().replaceAll("-", "_") === "ic_lora") {
+    return true;
+  }
   const source = lora?.source ?? {};
   const files = Array.isArray(source.files) ? source.files : Array.isArray(lora?.files) ? lora.files : [];
   const text = [
@@ -147,6 +153,8 @@ export function serializePresetLora(lora, presetLora = {}) {
     weight: loraWeight(lora, presetLora),
     triggerWords: lora?.triggerWords ?? [],
     compatibility: lora?.compatibility ?? presetLora?.compatibility ?? {},
+    icLora: lora?.icLora ?? presetLora?.icLora ?? false,
+    conditioningRole: lora?.conditioningRole ?? presetLora?.conditioningRole ?? null,
     installedPath: lora?.installedPath ?? presetLora?.installedPath ?? null,
     source: lora?.source ?? presetLora?.source ?? null,
     presetManaged: true,

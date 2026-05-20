@@ -3922,12 +3922,12 @@ fn normalize_lora_entry(
         }
     });
     let lora_snapshot = Value::Object(object.clone());
-    let huggingface_path = lora_huggingface_cached_file(&lora_snapshot, data_dir);
-    let installed_path = match (local_path.as_ref(), huggingface_path.as_ref()) {
-        (Some(path), _) if lora_is_installed(path) => Some(path.clone()),
-        (_, Some(path)) if lora_is_installed(path) => Some(path.clone()),
-        (Some(path), _) => Some(path.clone()),
-        _ => None,
+    let installed_path = match local_path.as_ref() {
+        Some(path) if lora_is_installed(path) => Some(path.clone()),
+        _ => match lora_huggingface_cached_file(&lora_snapshot, data_dir) {
+            Some(path) if lora_is_installed(&path) => Some(path),
+            _ => local_path.clone(),
+        },
     };
     let install_state = match installed_path.as_ref() {
         Some(path) if lora_is_installed(path) => "installed",
@@ -4972,6 +4972,8 @@ fn serialize_preset_lora(lora: &Value, preset_lora: &Value, lora_id: &str) -> Va
         "modelFamilies": lora.get("modelFamilies").cloned().unwrap_or(Value::Null),
         "triggerWords": lora.get("triggerWords").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         "compatibility": lora.get("compatibility").cloned().unwrap_or_else(|| Value::Object(JsonObject::new())),
+        "icLora": lora.get("icLora").cloned().unwrap_or(Value::Bool(false)),
+        "conditioningRole": lora.get("conditioningRole").cloned().unwrap_or(Value::Null),
         "installedPath": lora.get("installedPath").cloned().unwrap_or(Value::Null),
         "source": lora.get("source").cloned().unwrap_or(Value::Null),
         "presetManaged": true
@@ -4990,6 +4992,8 @@ fn serialize_job_lora(lora: &Value, selected_lora: &Value, lora_id: &str) -> Val
         "modelFamilies": preferred_lora_value(selected_lora, lora, "modelFamilies"),
         "triggerWords": preferred_lora_array(selected_lora, lora, "triggerWords"),
         "compatibility": preferred_lora_object(selected_lora, lora, "compatibility"),
+        "icLora": preferred_lora_value(selected_lora, lora, "icLora"),
+        "conditioningRole": preferred_lora_value(selected_lora, lora, "conditioningRole"),
         "installedPath": preferred_lora_value(selected_lora, lora, "installedPath"),
         "sourcePath": preferred_lora_value(selected_lora, lora, "sourcePath"),
         "source": preferred_lora_value(selected_lora, lora, "source"),
@@ -5748,13 +5752,22 @@ fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<PathBuf> {
 
 fn lora_artifact_paths(lora: &Value, default_root: &FsPath) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(installed_path) = lora
-        .get("installedPath")
+    let is_huggingface_source = lora
+        .get("source")
+        .and_then(Value::as_object)
+        .and_then(|source| source.get("provider"))
+        .or_else(|| lora.get("provider"))
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.contains("${"))
-    {
-        paths.push(PathBuf::from(installed_path));
+        == Some("huggingface");
+    if !is_huggingface_source {
+        if let Some(installed_path) = lora
+            .get("installedPath")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.contains("${"))
+        {
+            paths.push(PathBuf::from(installed_path));
+        }
     }
     if let Some(source_path) = lora
         .get("source")
@@ -5771,9 +5784,6 @@ fn lora_artifact_paths(lora: &Value, default_root: &FsPath) -> Vec<PathBuf> {
         } else {
             default_root.join(path)
         });
-    }
-    if let Some(path) = lora_huggingface_cached_file(lora, default_root) {
-        paths.push(path);
     }
     unique_paths(paths)
 }
@@ -5810,23 +5820,50 @@ fn lora_huggingface_cached_file(lora: &Value, data_dir: &FsPath) -> Option<PathB
                 .and_then(Value::as_str)
         });
     if let Some(file_name) = file_name {
-        let snapshots = repo_root.join("snapshots");
-        if let Ok(entries) = std::fs::read_dir(&snapshots) {
-            let mut snapshots = entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.is_dir())
-                .collect::<Vec<_>>();
-            snapshots.sort();
-            for snapshot in snapshots {
-                let candidate = snapshot.join(file_name);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
+        for snapshot in huggingface_snapshot_dirs(&repo_root) {
+            let candidate = snapshot.join(file_name);
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
-    first_safetensors_path(&repo_root)
+    huggingface_main_snapshot_dir(&repo_root)
+        .and_then(|snapshot| first_safetensors_path(&snapshot))
+        .or_else(|| first_safetensors_path(&repo_root))
+}
+
+fn huggingface_snapshot_dirs(repo_root: &FsPath) -> Vec<PathBuf> {
+    let snapshots = repo_root.join("snapshots");
+    let mut snapshot_dirs = std::fs::read_dir(&snapshots)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    snapshot_dirs.sort();
+    if let Some(main_snapshot) = huggingface_main_snapshot_dir(repo_root) {
+        let mut ordered = vec![main_snapshot.clone()];
+        ordered.extend(
+            snapshot_dirs
+                .into_iter()
+                .filter(|path| path != &main_snapshot),
+        );
+        return ordered;
+    }
+    snapshot_dirs
+}
+
+fn huggingface_main_snapshot_dir(repo_root: &FsPath) -> Option<PathBuf> {
+    let revision = std::fs::read_to_string(repo_root.join("refs").join("main")).ok()?;
+    let revision = revision.trim();
+    if revision.is_empty() {
+        return None;
+    }
+    let snapshot = repo_root.join("snapshots").join(revision);
+    snapshot.is_dir().then_some(snapshot)
 }
 
 fn unique_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -6405,9 +6442,9 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage,
-        Settings, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
-        HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+        create_app, lora_artifact_paths, strip_jsonc_comments, sweep_stale_lora_uploads_before,
+        EventHub, EventMessage, Settings, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
+        HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -8493,6 +8530,8 @@ mod tests {
                 "id": "ltx_ic_union",
                 "name": "LTX IC Union",
                 "family": "ltx-video",
+                "icLora": true,
+                "conditioningRole": "ic_lora",
                 "compatibility": { "families": ["ltx-video"] },
                 "source": {
                   "provider": "huggingface",
@@ -8519,23 +8558,60 @@ mod tests {
             r#"{ "schemaVersion": 1, "presets": [] }"#,
         )
         .expect("user presets writes");
+        let stale_cache_file = temp_dir
+            .path()
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/aaa111/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+        std::fs::create_dir_all(
+            stale_cache_file
+                .parent()
+                .expect("stale cache file has parent"),
+        )
+        .expect("stale hf cache creates");
+        std::fs::write(&stale_cache_file, b"stale-lora").expect("stale lora cache writes");
         let cache_file = temp_dir
             .path()
-            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/abc123/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/zzz999/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
         std::fs::create_dir_all(cache_file.parent().expect("cache file has parent"))
             .expect("hf cache creates");
         std::fs::write(&cache_file, b"lora").expect("lora cache writes");
+        let refs_main = temp_dir
+            .path()
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/refs/main");
+        std::fs::create_dir_all(refs_main.parent().expect("refs main has parent"))
+            .expect("refs dir creates");
+        std::fs::write(&refs_main, b"zzz999").expect("refs main writes");
 
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
         let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(loras[0]["id"], "ltx_ic_union");
+        assert_eq!(loras[0]["icLora"], true);
+        assert_eq!(loras[0]["conditioningRole"], "ic_lora");
         assert_eq!(loras[0]["installState"], "installed");
         assert_eq!(
             std::path::PathBuf::from(loras[0]["installedPath"].as_str().expect("installed path")),
             cache_file
         );
+    }
+
+    #[test]
+    fn lora_artifact_paths_exclude_shared_huggingface_cache_files() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let cache_file = temp_dir.path().join(
+            "data/cache/huggingface/hub/models--owner--repo/snapshots/abc123/lora.safetensors",
+        );
+        let lora = json!({
+            "id": "hf_lora",
+            "installedPath": cache_file.display().to_string(),
+            "source": {
+                "provider": "huggingface",
+                "repo": "owner/repo",
+                "file": "lora.safetensors"
+            }
+        });
+
+        assert!(lora_artifact_paths(&lora, temp_dir.path()).is_empty());
     }
 
     #[tokio::test]

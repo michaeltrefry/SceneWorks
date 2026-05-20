@@ -8,7 +8,17 @@
     "schemaVersion": { "type": "integer", "minimum": 1 },
     "loras": {
       "type": "array",
-      "items": { "type": "object" }
+      "items": {
+        "type": "object",
+        "properties": {
+          "icLora": { "type": "boolean" },
+          "conditioningRole": {
+            "type": "string",
+            "enum": ["ic_lora"]
+          }
+        },
+        "additionalProperties": true
+      }
     }
   }
 }
