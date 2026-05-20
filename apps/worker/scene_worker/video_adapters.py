@@ -1541,6 +1541,10 @@ def resolve_manifest_path(settings: WorkerSettings, value: Any) -> Path:
     if "${DATA_DIR}" in raw_path:
         raw_path = raw_path.replace("${DATA_DIR}", str(settings.data_dir))
     if "${HF_CACHE}" in raw_path:
+        repo_ref = raw_path.split("${HF_CACHE}", 1)[1].strip("/\\").replace("\\", "/")
+        snapshot = huggingface_cached_snapshot_dir(settings, repo_ref) if repo_ref else None
+        if snapshot is not None:
+            return snapshot
         raw_path = raw_path.replace("${HF_CACHE}", str(huggingface_cache_root()))
     path = Path(raw_path)
     return path if path.is_absolute() else settings.data_dir / path
