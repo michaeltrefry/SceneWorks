@@ -802,7 +802,6 @@ label {
 .advanced-toggle,
 .detail-actions button,
 .review-actions button,
-.rating-row button,
 .file-upload-button,
 .modal-close,
 .asset-picker-head button,
@@ -844,7 +843,6 @@ label {
 .advanced-toggle:hover:not(:disabled),
 .detail-actions button:hover:not(:disabled),
 .review-actions button:hover:not(:disabled),
-.rating-row button:hover:not(:disabled),
 .file-upload-button:hover,
 .modal-close:hover:not(:disabled),
 .asset-picker-head button:hover:not(:disabled),
@@ -973,7 +971,6 @@ label {
 }
 
 .segmented-control button.active,
-.rating-row button.active,
 .compact-segment button.active {
   background: var(--surface);
   color: var(--text);
@@ -994,7 +991,6 @@ label {
 .toolbar,
 .review-actions,
 .detail-actions,
-.rating-row,
 .editor-actions,
 .timeline-create,
 .playback-bar,
@@ -1010,6 +1006,54 @@ label {
 .editor-header,
 .export-strip {
   align-items: end;
+}
+
+.rating-control {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.rating-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rating-stars {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.star-rating-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  transition: background var(--t-fast), color var(--t-fast), transform var(--t-fast);
+}
+
+.star-rating-button:hover {
+  background: var(--surface-hover);
+  color: var(--warm);
+}
+
+.star-rating-button.active {
+  color: var(--warm);
+}
+
+.star-rating-button:active {
+  transform: translateY(1px);
 }
 
 .surface-header {

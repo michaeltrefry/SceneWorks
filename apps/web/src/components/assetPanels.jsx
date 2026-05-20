@@ -1,5 +1,34 @@
 import React from "react";
 import { AssetMedia } from "./assetMedia.jsx";
+import { Icon } from "./Icons.jsx";
+
+function RatingControl({ asset, updateAssetStatus }) {
+  const currentRating = Number(asset.status?.rating) || 0;
+
+  return (
+    <div aria-label="Rating" className="rating-control" role="group">
+      <span className="rating-label">Rating</span>
+      <div className="rating-stars">
+        {[1, 2, 3, 4, 5].map((rating) => {
+          const active = currentRating >= rating;
+          return (
+            <button
+              aria-label={`Set rating to ${rating} ${rating === 1 ? "star" : "stars"}`}
+              aria-pressed={active}
+              className={active ? "star-rating-button active" : "star-rating-button"}
+              key={rating}
+              onClick={() => updateAssetStatus(asset, { rating })}
+              title={`${rating} ${rating === 1 ? "star" : "stars"}`}
+              type="button"
+            >
+              <Icon.Star filled={active} size={18} />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId }) {
   if (!assets.length) {
@@ -36,18 +65,7 @@ export function AssetDetail({ asset, deleteAsset, purgeAsset, onPreview, onSendI
       </button>
       <h3>{asset.displayName}</h3>
       <p>{asset.recipe?.prompt ?? "No prompt"}</p>
-      <div className="rating-row">
-        {[1, 2, 3, 4, 5].map((rating) => (
-          <button
-            className={asset.status?.rating >= rating ? "active" : ""}
-            key={rating}
-            onClick={() => updateAssetStatus(asset, { rating })}
-            type="button"
-          >
-            {rating}
-          </button>
-        ))}
-      </div>
+      <RatingControl asset={asset} updateAssetStatus={updateAssetStatus} />
       <div className="detail-actions">
         <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
           {asset.status?.favorite ? "Unfavorite" : "Favorite"}
