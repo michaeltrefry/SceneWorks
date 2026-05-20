@@ -81,6 +81,8 @@ export function VideoStudio({
   const [mode, setMode] = useState("image_to_video");
   const [prompt, setPrompt] = useState("Camera slowly pushes in while the scene comes alive");
   const [quality, setQuality] = useState("balanced");
+  const [ltxPipeline, setLtxPipeline] = useState("auto");
+  const [distilledVariant, setDistilledVariant] = useState("1.1");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? ltxVideoModelId);
   const [selectedPresetId, setSelectedPresetId] = useState(null);
@@ -399,6 +401,7 @@ export function VideoStudio({
           recipePresetPrompt: selectedPreset?.prompt ?? null,
           selectedPersonTrack: selectedTrack ?? null,
           replacementModeLabel: replacementModeLabels[replacementMode],
+          ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant } : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -786,6 +789,25 @@ export function VideoStudio({
 
               {advancedOpen ? (
                 <div className="advanced-panel">
+                  {model === ltxVideoModelId ? (
+                    <>
+                      <label>
+                        LTX pipeline
+                        <select onChange={(event) => setLtxPipeline(event.target.value)} value={ltxPipeline}>
+                          <option value="auto">Auto (follow quality)</option>
+                          <option value="distilled">Distilled (single-stage)</option>
+                          <option value="two_stage">Two-stage (dev + upscaler)</option>
+                        </select>
+                      </label>
+                      <label>
+                        Distilled variant
+                        <select onChange={(event) => setDistilledVariant(event.target.value)} value={distilledVariant}>
+                          <option value="1.1">1.1 (newer aesthetic + audio)</option>
+                          <option value="1.0">1.0 (original)</option>
+                        </select>
+                      </label>
+                    </>
+                  ) : null}
                   <label>
                     GPU
                     <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>

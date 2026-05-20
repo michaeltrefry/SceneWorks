@@ -166,12 +166,7 @@
         {
           "provider": "huggingface",
           "repo": "Lightricks/LTX-2.3",
-          "files": [
-            "ltx-2.3-22b-dev.safetensors",
-            "ltx-2.3-22b-distilled-1.1.safetensors",
-            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
-            "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
-          ],
+          "files": [],
           "default": true,
           "estimatedSizeBytes": 157004895813
         },
@@ -193,7 +188,11 @@
         },
         "distilledCheckpoint": {
           "repo": "Lightricks/LTX-2.3",
-          "file": "ltx-2.3-22b-distilled-1.1.safetensors"
+          "file": "ltx-2.3-22b-distilled-1.1.safetensors",
+          "variants": {
+            "1.1": "ltx-2.3-22b-distilled-1.1.safetensors",
+            "1.0": "ltx-2.3-22b-distilled.safetensors"
+          }
         },
         "spatialUpscaler": {
           "repo": "Lightricks/LTX-2.3",
@@ -201,7 +200,11 @@
         },
         "distilledLora": {
           "repo": "Lightricks/LTX-2.3",
-          "file": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+          "file": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "variants": {
+            "1.1": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+            "1.0": "ltx-2.3-22b-distilled-lora-384.safetensors"
+          }
         },
         "gemma": {
           "repo": "google/gemma-3-12b-it-qat-q4_0-unquantized"

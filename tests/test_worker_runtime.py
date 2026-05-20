@@ -1301,6 +1301,125 @@ def test_native_ltx_adapter_reports_mocked_pipeline_requirements(tmp_path):
     assert requirements["resources"]["checkpointPath"] == str(checkpoint)
 
 
+def test_native_ltx_pipeline_override_decouples_from_quality(tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    data_dir.mkdir()
+    checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
+    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+
+    def pipeline_for(quality, advanced):
+        adapter = LtxPipelinesVideoAdapter()
+        request = adapter.prepare(
+            settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+            job={
+                "id": "job-override",
+                "payload": {
+                    "projectId": "project-1",
+                    "mode": "text_to_video",
+                    "prompt": "city",
+                    "model": "ltx_2_3",
+                    "duration": 6,
+                    "fps": 25,
+                    "quality": quality,
+                    "advanced": {"mockNativeInference": True, **advanced},
+                },
+            },
+        )
+        adapter.ensure_models(request)
+        return adapter.estimate_requirements(request)["pipeline"]
+
+    # Distilled override forces single-stage even at balanced quality.
+    assert pipeline_for("balanced", {"ltxPipeline": "distilled"}) == "ltx_pipelines.distilled"
+    # Two-stage override forces the dev + upscaler path even at fast quality.
+    assert pipeline_for("fast", {"ltxPipeline": "two_stage"}) == "ltx_pipelines.ti2vid_two_stages"
+    # Auto preserves the quality-driven default.
+    assert pipeline_for("balanced", {"ltxPipeline": "auto"}) == "ltx_pipelines.ti2vid_two_stages"
+    assert pipeline_for("fast", {}) == "ltx_pipelines.distilled"
+
+
+def test_native_ltx_distilled_variant_switches_files(tmp_path):
+    data_dir = tmp_path / "data"
+    config_dir = tmp_path / "config"
+    data_dir.mkdir()
+    manifest_dir = config_dir / "manifests"
+    manifest_dir.mkdir(parents=True)
+    resources = {
+        "checkpoint": {"repo": "Lightricks/LTX-2.3", "file": "ltx-2.3-22b-dev.safetensors"},
+        "distilledCheckpoint": {
+            "repo": "Lightricks/LTX-2.3",
+            "file": "ltx-2.3-22b-distilled-1.1.safetensors",
+            "variants": {
+                "1.1": "ltx-2.3-22b-distilled-1.1.safetensors",
+                "1.0": "ltx-2.3-22b-distilled.safetensors",
+            },
+        },
+        "spatialUpscaler": {"repo": "Lightricks/LTX-2.3", "file": "spatial.safetensors"},
+        "distilledLora": {
+            "repo": "Lightricks/LTX-2.3",
+            "file": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+            "variants": {
+                "1.1": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+                "1.0": "ltx-2.3-22b-distilled-lora-384.safetensors",
+            },
+        },
+        "gemma": {"repo": "google/gemma-3-12b-it-qat-q4_0-unquantized"},
+    }
+    (manifest_dir / "builtin.models.jsonc").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "models": [
+                    {
+                        "id": "ltx_2_3",
+                        "name": "LTX-2.3",
+                        "family": "ltx-video",
+                        "type": "video",
+                        "adapter": "ltx_video",
+                        "capabilities": ["text_to_video"],
+                        "downloads": [],
+                        "paths": {},
+                        "resources": resources,
+                        "defaults": {},
+                        "limits": {},
+                        "loraCompatibility": {},
+                        "ui": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def resolve(quality, advanced):
+        adapter = LtxPipelinesVideoAdapter()
+        request = adapter.prepare(
+            settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
+            job={
+                "id": "job-variant",
+                "payload": {
+                    "projectId": "project-1",
+                    "mode": "text_to_video",
+                    "prompt": "city",
+                    "model": "ltx_2_3",
+                    "duration": 6,
+                    "fps": 25,
+                    "quality": quality,
+                    "advanced": advanced,
+                },
+            },
+        )
+        return adapter.resolve_resources(request)
+
+    # Single-stage distilled: the variant selects the checkpoint file.
+    assert resolve("fast", {}).checkpoint_path.name == "ltx-2.3-22b-distilled-1.1.safetensors"
+    assert resolve("fast", {"distilledVariant": "1.0"}).checkpoint_path.name == "ltx-2.3-22b-distilled.safetensors"
+    # Two-stage: the variant selects the distilled LoRA file (dev checkpoint is unversioned).
+    two_stage = resolve("balanced", {"distilledVariant": "1.0"})
+    assert two_stage.checkpoint_path.name == "ltx-2.3-22b-dev.safetensors"
+    assert two_stage.distilled_lora_path.name == "ltx-2.3-22b-distilled-lora-384.safetensors"
+
+
 def test_native_ltx_missing_resources_reports_all_paths(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"
     config_dir = tmp_path / "config"

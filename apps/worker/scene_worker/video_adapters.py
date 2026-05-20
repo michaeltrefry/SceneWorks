@@ -312,6 +312,13 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
     _supported_modes = {"text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge"}
 
+    # The two-stage pipeline holds the 22B base checkpoint, distilled LoRA,
+    # spatial upscaler, Gemma text encoder, and VAE. Without offloading, every
+    # component stays GPU-resident simultaneously and exhausts even 96GB cards.
+    # CPU offload mirrors ComfyUI's sequential component offloading (~half the
+    # peak VRAM); callers can override via advanced.offloadMode.
+    _default_offload_mode = "cpu"
+
     def __init__(self) -> None:
         super().__init__()
         self._loaded_models: set[str] = set()
@@ -712,6 +719,11 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
     def _pipeline_module(self, request: VideoRequest) -> str:
         if self._uses_ic_lora_pipeline(request):
             return "ltx_pipelines.ic_lora"
+        override = str(request.advanced.get("ltxPipeline", "auto")).strip().lower()
+        if override == "distilled":
+            return "ltx_pipelines.distilled"
+        if override in {"two_stage", "two-stage", "ti2vid", "ti2vid_two_stages"}:
+            return "ltx_pipelines.ti2vid_two_stages"
         if request.quality == "fast":
             return "ltx_pipelines.distilled"
         return "ltx_pipelines.ti2vid_two_stages"
@@ -741,7 +753,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 str(resources.spatial_upsampler_path),
                 str(resources.distilled_lora_path),
                 str(resources.gemma_root),
-                str(request.advanced.get("offloadMode", "none")),
+                str(request.advanced.get("offloadMode", self._default_offload_mode)),
                 lora_cache_key_for_specs(self._ltx_lora_specs(request)) if request.loras else "",
             ]
         )
@@ -765,8 +777,27 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             for spec in specs
         )
 
+    def _distilled_variant(self, request: VideoRequest) -> str | None:
+        value = request.advanced.get("distilledVariant")
+        if value in (None, ""):
+            return None
+        return str(value).strip()
+
+    def _apply_distilled_variant(self, resources: dict[str, Any], variant: str | None) -> dict[str, Any]:
+        if not variant:
+            return resources
+        updated = dict(resources)
+        for key in ("distilledCheckpoint", "distilledLora"):
+            entry = updated.get(key)
+            if not isinstance(entry, dict):
+                continue
+            variants = entry.get("variants")
+            if isinstance(variants, dict) and variant in variants:
+                updated[key] = {**entry, "file": variants[variant]}
+        return updated
+
     def _offload_mode(self, request: VideoRequest) -> Any:
-        offload_value = str(request.advanced.get("offloadMode", "none")).strip().lower()
+        offload_value = str(request.advanced.get("offloadMode", self._default_offload_mode)).strip().lower()
         install_ltx_pipelines_multigpu_compat()
         types_module = importlib.import_module("ltx_pipelines.utils.types")
         offload_mode = getattr(types_module, "OffloadMode")
@@ -797,6 +828,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         settings = self._settings or WorkerSettings()
         entry = ltx_model_manifest_entry(settings, request.model)
         resources = entry.get("resources", {}) if isinstance(entry.get("resources"), dict) else {}
+        resources = self._apply_distilled_variant(resources, self._distilled_variant(request))
         checkpoint_resource_key = "distilledCheckpoint" if self._pipeline_module(request) in {"ltx_pipelines.distilled", "ltx_pipelines.ic_lora"} else "checkpoint"
         return LtxPipelinesResources(
             checkpoint_path=self._resource_path(
