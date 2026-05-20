@@ -3423,8 +3423,9 @@ label {
 
 .editable-lora-choice {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(80px, 120px);
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 10px 14px;
+  align-items: center;
 }
 
 .lora-add-row {
@@ -3432,9 +3433,25 @@ label {
 }
 
 .lora-selection-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: 96px auto;
   gap: 8px;
   align-items: flex-end;
+}
+
+.lora-selection-actions label {
+  min-width: 0;
+  width: 96px;
+}
+
+.lora-selection-actions input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  text-align: right;
+}
+
+.lora-selection-actions button {
+  white-space: nowrap;
 }
 
 .editable-lora-choice > label:first-child {
