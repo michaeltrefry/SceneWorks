@@ -215,7 +215,8 @@ apps/web/node_modules/
 apps/web/dist/
 
 # SceneWorks local runtime data
-config/manifests/user.loras.jsonc
+# user.*.jsonc manifests are rewritten by the SceneWorks API at runtime (local state, not source).
+config/manifests/user.*.jsonc
 data/projects/*
 !data/projects/.gitkeep
 data/recent-projects.json
