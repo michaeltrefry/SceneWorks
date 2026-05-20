@@ -73,6 +73,28 @@ def lora_families(lora: dict[str, Any]) -> list[str]:
     return families
 
 
+def lora_looks_like_ic_lora(lora: dict[str, Any]) -> bool:
+    source = lora.get("source") if isinstance(lora.get("source"), dict) else {}
+    files = source.get("files") or lora.get("files") or []
+    if not isinstance(files, list):
+        files = [files]
+    values = [
+        lora.get("id"),
+        lora.get("loraId"),
+        lora.get("name"),
+        lora.get("displayName"),
+        lora.get("installedPath"),
+        lora.get("sourcePath"),
+        lora.get("path"),
+        source.get("repo"),
+        source.get("file"),
+        source.get("path"),
+        *files,
+    ]
+    text = " ".join(str(value) for value in values if value).lower().replace("_", "-")
+    return "ic-lora" in text or "ltx-2-3-ic-" in text
+
+
 def validate_lora_compatibility(loras: list[dict[str, Any]], *, model_family: str | None, adapter_id: str) -> None:
     normalized_model_family = normalize_lora_family(model_family)
     if not loras or not normalized_model_family:

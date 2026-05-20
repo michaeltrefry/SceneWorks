@@ -1782,6 +1782,7 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
             "loras": [
                 {
                     "id": "identity_ic",
+                    "name": "LTX-2.3 IC-LoRA Identity",
                     "installedPath": str(ic_lora),
                     "weight": 0.65,
                     "families": ["ltx-video"],
@@ -1810,13 +1811,85 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
     assert result["assets"][0]["recipe"]["rawAdapterSettings"]["realModelInference"] is True
 
 
-def test_native_ltx_image_to_video_requires_ic_lora(tmp_path):
+def test_native_ltx_image_to_video_falls_back_without_ic_lora(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"
     config_dir = tmp_path / "config"
+    project_path = tmp_path / "project"
     data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    image_rel = "assets/images/source.png"
+    (project_path / "assets" / "images").mkdir(parents=True)
+    Image.new("RGB", (16, 16), "teal").save(project_path / image_rel)
+    (project_path / "assets" / "images" / "source.sceneworks.json").write_text(
+        json.dumps({"id": "asset-source", "file": {"path": image_rel}}),
+        encoding="utf-8",
+    )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
     write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    style_lora = tmp_path / "cinematic-style.safetensors"
+    style_lora.write_bytes(b"style-lora")
+    calls = {"init": None, "run": None}
+
+    class FakePipeline:
+        def __init__(self, **kwargs):
+            calls["init"] = kwargs
+
+        def __call__(self, **kwargs):
+            calls["run"] = kwargs
+            return ["video-chunk"], None
+
+    class FakeConditioningInput(NamedTuple):
+        path: str
+        frame_idx: int
+        strength: float
+
+    class FakeTilingConfig:
+        @staticmethod
+        def default():
+            return "tiling-config"
+
+    class FakeOffloadMode:
+        NONE = "none"
+        CPU = "cpu"
+        DISK = "disk"
+
+    class FakeGuiderParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_encode_video(**kwargs):
+        Path(kwargs["output_path"]).write_bytes(b"mp4")
+
+    def fake_import_module(name):
+        if name == "ltx_core.loader":
+            return SimpleNamespace(
+                LoraPathStrengthAndSDOps=lambda path, strength, sd_ops: (path, strength, sd_ops),
+                LTXV_LORA_COMFY_RENAMING_MAP={"rename": "map"},
+            )
+        if name == "ltx_pipelines.utils.types":
+            return SimpleNamespace(OffloadMode=FakeOffloadMode)
+        if name == "ltx_pipelines.ti2vid_two_stages":
+            return SimpleNamespace(TI2VidTwoStagesPipeline=FakePipeline)
+        if name == "ltx_core.model.video_vae":
+            return SimpleNamespace(
+                TilingConfig=FakeTilingConfig,
+                get_video_chunks_number=lambda _frames, _tiling: 1,
+            )
+        if name == "ltx_pipelines.utils.media_io":
+            return SimpleNamespace(encode_video=fake_encode_video)
+        if name == "ltx_core.components.guiders":
+            return SimpleNamespace(MultiModalGuiderParams=FakeGuiderParams)
+        if name == "ltx_pipelines.utils.args":
+            return SimpleNamespace(ImageConditioningInput=FakeConditioningInput)
+        raise ImportError(name)
+
+    monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
     adapter = LtxPipelinesVideoAdapter()
+    monkeypatch.setattr(adapter, "_dependencies_available", lambda: True)
     request = adapter.prepare(
         settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
         job={
@@ -1827,13 +1900,40 @@ def test_native_ltx_image_to_video_requires_ic_lora(tmp_path):
                 "prompt": "Make the harbor move",
                 "model": "ltx_2_3",
                 "sourceAssetId": "asset-source",
-                "advanced": {},
+                "duration": 1,
+                "fps": 12,
+                "width": 320,
+                "height": 256,
+                "quality": "balanced",
+                "loras": [
+                    {
+                        "id": "cinematic_style",
+                        "name": "Cinematic Style",
+                        "installedPath": str(style_lora),
+                        "weight": 0.55,
+                        "families": ["ltx-video"],
+                    }
+                ],
+                "advanced": {"imageConditioningStrength": 0.75},
             },
         },
     )
 
-    with pytest.raises(RuntimeError, match="IC-LoRA video conditioning requires at least one"):
-        adapter.ensure_models(request)
+    adapter.ensure_models(request)
+    result = adapter.run(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job={"id": "job-i2v-missing-lora"},
+        request=request,
+        progress=lambda *_args: None,
+        cancel_requested=lambda: False,
+    )
+
+    assert calls["init"]["checkpoint_path"] == str(checkpoint)
+    assert calls["init"]["distilled_lora"] == [(str(lora), 0.8, {"rename": "map"})]
+    assert calls["init"]["loras"] == ((str(style_lora), 0.55, {"rename": "map"}),)
+    assert calls["run"]["images"] == [FakeConditioningInput(str(project_path / image_rel), 0, 0.75)]
+    assert "video_conditioning" not in calls["run"]
+    assert result["requirements"]["pipeline"] == "ltx_pipelines.ti2vid_two_stages"
 
 
 def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp_path):
@@ -1919,6 +2019,7 @@ def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp
             "loras": [
                 {
                     "id": "identity_ic",
+                    "name": "LTX-2.3 IC-LoRA Identity",
                     "installedPath": str(ic_lora),
                     "weight": 0.7,
                     "families": ["ltx-video"],

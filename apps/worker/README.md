@@ -31,9 +31,11 @@ Native LTX-2.3 text-to-video and image-to-video require these local resources:
 - `distilledLoraPath`
 - `gemmaRoot`
 
-Source-conditioned native LTX-2.3 modes such as image-to-video, first/last
-frame, and extend route through `ltx_pipelines.ic_lora` and require an
-installed LTX-compatible IC-LoRA in the selected preset.
+Image-conditioned native LTX-2.3 modes such as image-to-video and first/last
+frame route through `ltx_pipelines.ic_lora` when the selected preset includes
+an installed LTX-compatible IC-LoRA. Without an IC-LoRA they fall back to the
+standard distilled/two-stage LTX pipeline. Video-conditioned modes such as
+extend require an installed IC-LoRA preset.
 
 By default the worker resolves those from the model manifest `resources` block,
 preferring SceneWorks-managed imports under `data/models` and then the shared

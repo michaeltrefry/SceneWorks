@@ -89,6 +89,29 @@ export function loraMatchesModel(lora, model) {
   return !modelFamilies.length || !families.length || families.some((family) => modelFamilies.includes(family));
 }
 
+export function loraLooksLikeIcLora(lora) {
+  const source = lora?.source ?? {};
+  const files = Array.isArray(source.files) ? source.files : Array.isArray(lora?.files) ? lora.files : [];
+  const text = [
+    lora?.id,
+    lora?.loraId,
+    lora?.name,
+    lora?.displayName,
+    lora?.installedPath,
+    lora?.sourcePath,
+    lora?.path,
+    source.repo,
+    source.file,
+    source.path,
+    ...files,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .replaceAll("_", "-");
+  return text.includes("ic-lora") || text.includes("ltx-2-3-ic-");
+}
+
 export function presetMatchesWorkflow(preset, mode) {
   // A preset has one primary workflow for persistence, but modes describe every
   // Studio entry point where the picker should surface it.

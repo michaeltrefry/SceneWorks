@@ -87,7 +87,7 @@ SceneWorks must manage these as model resources, not hidden one-off paths:
   - or a validated lower-memory upscaler variant.
 - Distilled LoRA for two-stage pipelines:
   - `ltx-2.3-22b-distilled-lora-384-1.1.safetensors`
-- IC-LoRA for source-conditioned pipelines:
+- IC-LoRA for IC-conditioned pipelines:
   - one or more installed LTX-compatible IC-LoRA `.safetensors` files selected through a preset.
 - Gemma text encoder assets:
   - full local Gemma 3-12B repo or local text encoder path required by `ltx-pipelines`.
@@ -130,7 +130,7 @@ Recommended shape:
 }
 ```
 
-The official `ltx-pipelines` stack expects the Gemma 3-12B text encoder family; using Gemma 3-4B causes tensor shape mismatches during text encoder load. Source-conditioned modes should route through `ltx_pipelines.ic_lora.ICLoraPipeline` so image/video references can use IC-LoRA attention conditioning for better identity consistency.
+The official `ltx-pipelines` stack expects the Gemma 3-12B text encoder family; using Gemma 3-4B causes tensor shape mismatches during text encoder load. Image-conditioned modes should route through `ltx_pipelines.ic_lora.ICLoraPipeline` when an IC-LoRA preset is selected so references can use IC-LoRA attention conditioning for better identity consistency, and otherwise fall back to the standard distilled/two-stage LTX pipelines. Video-conditioned modes should require IC-LoRA because their video conditioning path depends on the IC-LoRA pipeline.
 
 ## Worker Dependency Plan
 

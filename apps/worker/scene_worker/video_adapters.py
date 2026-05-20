@@ -34,6 +34,7 @@ from .lora_adapters import (
     LoraPipelineState,
     apply_loras_to_pipeline,
     lora_cache_key,
+    lora_looks_like_ic_lora,
     normalize_lora_specs,
     reject_loras_if_unsupported,
     validate_lora_compatibility,
@@ -336,7 +337,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
         validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
         normalize_lora_specs(request.loras)
-        if self._uses_ic_lora_pipeline(request) and not request.loras and not self._mock_inference_enabled(request):
+        if self._uses_ic_lora_pipeline(request) and not self._has_ic_lora(request) and not self._mock_inference_enabled(request):
             raise RuntimeError(
                 "Native LTX IC-LoRA video conditioning requires at least one installed LTX-compatible LoRA. "
                 "Add an IC-LoRA to the selected preset before running source-video conditioning."
@@ -711,9 +712,14 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         return "ltx_pipelines.ti2vid_two_stages"
 
     def _uses_ic_lora_pipeline(self, request: VideoRequest) -> bool:
-        return request.mode in {"image_to_video", "first_last_frame", "extend_clip", "video_bridge"} or bool(
-            request.advanced.get("useIcLoraPipeline", False)
-        )
+        if bool(request.advanced.get("useIcLoraPipeline", False)):
+            return True
+        if request.mode in {"extend_clip", "video_bridge"}:
+            return True
+        return request.mode in {"image_to_video", "first_last_frame"} and self._has_ic_lora(request)
+
+    def _has_ic_lora(self, request: VideoRequest) -> bool:
+        return any(lora_looks_like_ic_lora(lora if isinstance(lora, dict) else {"id": str(lora)}) for lora in request.loras)
 
     def _num_inference_steps(self, request: VideoRequest, target: dict[str, Any]) -> int:
         default_steps = target["steps"].get(request.quality, target["steps"]["balanced"])
@@ -944,6 +950,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 return False
             install_ltx_pipelines_multigpu_compat()
             importlib.import_module("ltx_pipelines.distilled")
+            importlib.import_module("ltx_pipelines.ti2vid_two_stages")
             importlib.import_module("ltx_pipelines.ic_lora")
             return True
         except (ImportError, ValueError):

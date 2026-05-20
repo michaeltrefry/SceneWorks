@@ -32,6 +32,7 @@ function estimateRenderSeconds(durationSeconds, quality) {
 }
 import {
   clearPresetDefault,
+  loraLooksLikeIcLora,
   noPresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
@@ -119,8 +120,8 @@ export function VideoStudio({
     () => presetValidation(selectedPreset, loras, selectedModel),
     [selectedPreset, loras, selectedModel],
   );
-  const requiresLtxIcLora = selectedModel?.id === "ltx_2_3" && ["image_to_video", "first_last_frame", "extend_clip"].includes(mode);
-  const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing);
+  const requiresLtxIcLora = selectedModel?.id === "ltx_2_3" && ["extend_clip"].includes(mode);
+  const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
 
   useEffect(() => {
     if (!videoModels.some((item) => item.id === model)) {
@@ -312,7 +313,7 @@ export function VideoStudio({
       : !hasInputs
         ? "Required inputs are missing."
         : requiresLtxIcLora && !hasLtxIcLora
-          ? "LTX source-conditioned generation needs an installed IC-LoRA preset."
+          ? "LTX video-conditioned generation needs an installed IC-LoRA preset."
           : "";
   const replacementModeLabels = {
     face_only: "Face Only",
@@ -826,7 +827,9 @@ export function VideoStudio({
                   {characterId ? (
                     <div className="guidance-strip">
                       <strong>Character reference</strong>
-                      <span>Character and look are saved with the recipe; LTX source-conditioned generation uses the selected preset LoRA.</span>
+                      <span>
+                        Character and look are saved with the recipe; LTX image conditioning uses IC-LoRA when the selected preset includes one.
+                      </span>
                     </div>
                   ) : null}
                 </div>
