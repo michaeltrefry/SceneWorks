@@ -64,4 +64,38 @@ export const fallbackModels = [
       durationHint: "Keep clips short until local looping behavior is validated.",
     },
   },
+  {
+    id: "wan_2_2_t2v_14b",
+    name: "Wan2.2 14B (T2V)",
+    type: "video",
+    capabilities: ["text_to_video"],
+    defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
+    limits: {
+      durations: [3, 4, 5],
+      recommendedMaxDuration: 5,
+      fps: [16],
+      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
+    },
+    ui: {
+      description: "Wan2.2 A14B text-to-video (high/low-noise mixture-of-experts).",
+      durationHint: "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
+    },
+  },
+  {
+    id: "wan_2_2_i2v_14b",
+    name: "Wan2.2 14B (I2V)",
+    type: "video",
+    capabilities: ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+    defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
+    limits: {
+      durations: [3, 4, 5],
+      recommendedMaxDuration: 5,
+      fps: [16],
+      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
+    },
+    ui: {
+      description: "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts).",
+      durationHint: "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
+    },
+  },
 ];

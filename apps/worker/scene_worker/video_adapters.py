@@ -94,6 +94,38 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "steps": {"fast": 12, "balanced": 20, "best": 30},
         "durationHint": "Keep clips shorter until local looping behavior is validated.",
     },
+    # Wan2.2 A14B is a mixture-of-experts checkpoint split into separate text-to-video and
+    # image-to-video repos, registered here as two single-repo models. Each repo ships a
+    # high-noise expert (transformer) and a low-noise expert (transformer_2); diffusers' Wan
+    # pipelines load both and switch at the config boundary_ratio, so no custom dual-model
+    # sampling loop is required.
+    "wan_2_2_t2v_14b": {
+        "label": "Wan2.2 14B (T2V)",
+        "family": "wan-video",
+        "adapter": "wan_video",
+        "repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        "capabilities": ["text_to_video"],
+        "recommendedMaxDuration": 5,
+        "hardMaxDuration": 5,
+        "steps": {"fast": 20, "balanced": 30, "best": 40},
+        "guidanceScale": 4.0,
+        "durationHint": "A14B is heavier than 5B; keep clips at 5s or less. Native cadence is 16fps.",
+    },
+    "wan_2_2_i2v_14b": {
+        "label": "Wan2.2 14B (I2V)",
+        "family": "wan-video",
+        "adapter": "wan_video",
+        "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        "capabilities": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+        "recommendedMaxDuration": 5,
+        "hardMaxDuration": 5,
+        "steps": {"fast": 20, "balanced": 30, "best": 40},
+        "guidanceScale": 4.0,
+        # Wan2.2 A14B conditions image modes on VAE latents rather than a CLIP image encoder,
+        # so the repo ships no image_encoder subfolder to pre-load.
+        "noImageEncoder": True,
+        "durationHint": "A14B is heavier than 5B; keep clips at 5s or less. Native cadence is 16fps.",
+    },
 }
 
 
@@ -1328,11 +1360,16 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             vae_class = getattr(diffusers, "AutoencoderKLWan", None)
             if vae_class is not None:
                 kwargs["vae"] = vae_class.from_pretrained(repo, subfolder="vae", torch_dtype=dtype)
-            if request.mode != "text_to_video":
+            if request.mode != "text_to_video" and not target.get("noImageEncoder"):
                 transformers = importlib.import_module("transformers")
                 image_encoder_class = getattr(transformers, "CLIPVisionModel", None)
                 if image_encoder_class is not None:
-                    kwargs["image_encoder"] = image_encoder_class.from_pretrained(repo, subfolder="image_encoder", torch_dtype=dtype)
+                    try:
+                        kwargs["image_encoder"] = image_encoder_class.from_pretrained(repo, subfolder="image_encoder", torch_dtype=dtype)
+                    except (OSError, ValueError):
+                        # Repos that condition on VAE latents instead of CLIP (e.g. Wan2.2 A14B)
+                        # ship no image_encoder subfolder; the pipeline loads any components it needs.
+                        pass
 
         pipe = pipeline_class.from_pretrained(repo, **kwargs)
         if bool(request.advanced.get("cpuOffload", False)) and hasattr(pipe, "enable_model_cpu_offload"):
@@ -1456,7 +1493,16 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             "generator": generator,
         }
         if target["adapter"] == "wan_video":
-            kwargs["guidance_scale"] = self._guidance_scale(request, 5.0)
+            kwargs["guidance_scale"] = self._guidance_scale(request, float(target.get("guidanceScale", 5.0)))
+            # A14B exposes a second CFG scale for the low-noise expert and the high/low expert
+            # boundary. Pass them through when supplied; filter_call_kwargs drops them for
+            # single-expert pipelines (e.g. the 5B TI2V model) that don't accept them.
+            guidance_scale_2 = request.advanced.get("guidanceScale2", target.get("guidanceScale2"))
+            if guidance_scale_2 is not None:
+                kwargs["guidance_scale_2"] = float(guidance_scale_2)
+            boundary_ratio = request.advanced.get("boundaryRatio", target.get("boundaryRatio"))
+            if boundary_ratio is not None:
+                kwargs["boundary_ratio"] = float(boundary_ratio)
             if request.mode == "replace_person":
                 kwargs["video"] = load_source_video_frames(project_path, request.source_clip_asset_id, request.width, request.height, num_frames)
                 kwargs["mask"] = person_track_masks(project_path, request.person_track_id, request.width, request.height, num_frames)
@@ -2105,6 +2151,21 @@ def save_animated_preview(frames: list[Image.Image], path: Path, duration: float
     )
 
 
+def _frame_to_image(frame: Any) -> Image.Image:
+    if hasattr(frame, "convert"):
+        return frame.convert("RGB")
+    import numpy as np
+
+    array = np.asarray(frame)
+    # Diffusers video pipelines default to output_type="np", which returns
+    # float32 frames in [0, 1]. PIL cannot build an RGB image from float data
+    # ("Cannot handle this data type: (1, 1, 3), <f4"), so scale to uint8 the
+    # same way diffusers.utils.export_to_video does internally.
+    if np.issubdtype(array.dtype, np.floating):
+        array = (np.clip(array, 0.0, 1.0) * 255).round().astype(np.uint8)
+    return Image.fromarray(array).convert("RGB")
+
+
 def frames_from_output(output: Any) -> list[Image.Image]:
     frames = getattr(output, "frames", None)
     if frames is None and isinstance(output, tuple) and output:
@@ -2119,11 +2180,11 @@ def frames_from_output(output: Any) -> list[Image.Image]:
         array = np.asarray(frames)
         if array.ndim == 5:
             array = array[0]
-        return [Image.fromarray(frame).convert("RGB") for frame in array]
+        return [_frame_to_image(frame) for frame in array]
     if isinstance(frames, list) and frames and isinstance(frames[0], list):
-        return [frame.convert("RGB") if hasattr(frame, "convert") else Image.fromarray(frame).convert("RGB") for frame in frames[0]]
+        return [_frame_to_image(frame) for frame in frames[0]]
     if isinstance(frames, list):
-        return [frame.convert("RGB") if hasattr(frame, "convert") else Image.fromarray(frame).convert("RGB") for frame in frames]
+        return [_frame_to_image(frame) for frame in frames]
     return []
 
 

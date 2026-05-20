@@ -270,6 +270,93 @@
         "recommendedFor": ["image_to_video", "text_to_video"],
         "durationHint": "Use shorter clips until local looping behavior is validated."
       }
+    },
+    // Wan2.2 A14B is a high/low-noise mixture-of-experts model split into separate
+    // text-to-video and image-to-video repos. Each is registered as its own single-repo
+    // model so the download/readiness check (one repo per entry) tracks them accurately.
+    {
+      "id": "wan_2_2_t2v_14b",
+      "name": "Wan2.2 14B (T2V)",
+      "family": "wan-video",
+      "type": "video",
+      "adapter": "wan_video",
+      "capabilities": ["text_to_video"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+          "files": [],
+          "estimatedSizeBytes": 72000000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+      },
+      "defaults": {
+        "duration": 5,
+        "fps": 16,
+        "resolution": "1280x720",
+        "quality": "balanced"
+      },
+      "limits": {
+        "durations": [3, 4, 5],
+        "recommendedMaxDuration": 5,
+        "hardMaxDuration": 5,
+        "fps": [16],
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"]
+      },
+      "loraCompatibility": {
+        "families": ["wan-video"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "ui": {
+        "label": "Wan2.2 14B (T2V)",
+        "description": "Wan2.2 A14B text-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
+        "recommendedFor": ["text_to_video"],
+        "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps."
+      }
+    },
+    {
+      "id": "wan_2_2_i2v_14b",
+      "name": "Wan2.2 14B (I2V)",
+      "family": "wan-video",
+      "type": "video",
+      "adapter": "wan_video",
+      "capabilities": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+          "files": [],
+          "estimatedSizeBytes": 72000000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "defaults": {
+        "duration": 5,
+        "fps": 16,
+        "resolution": "1280x720",
+        "quality": "balanced"
+      },
+      "limits": {
+        "durations": [3, 4, 5],
+        "recommendedMaxDuration": 5,
+        "hardMaxDuration": 5,
+        "fps": [16],
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"]
+      },
+      "loraCompatibility": {
+        "families": ["wan-video"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "ui": {
+        "label": "Wan2.2 14B (I2V)",
+        "description": "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
+        "recommendedFor": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+        "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps."
+      }
     }
   ]
 }

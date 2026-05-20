@@ -1230,6 +1230,8 @@ def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
     monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
     assert create_video_adapter({"payload": {"model": "ltx_2_3"}}).__class__.__name__ == "LtxPipelinesVideoAdapter"
     assert create_video_adapter({"payload": {"model": "wan_2_2"}}).__class__.__name__ == "DiffusersVideoAdapter"
+    assert create_video_adapter({"payload": {"model": "wan_2_2_t2v_14b"}}).__class__.__name__ == "DiffusersVideoAdapter"
+    assert create_video_adapter({"payload": {"model": "wan_2_2_i2v_14b"}}).__class__.__name__ == "DiffusersVideoAdapter"
     assert create_video_adapter().__class__.__name__ == "LtxPipelinesVideoAdapter"
 
     monkeypatch.setenv("SCENEWORKS_VIDEO_ADAPTER", "procedural")
@@ -2595,6 +2597,23 @@ def test_frames_from_output_accepts_nested_frames():
     frames = frames_from_output(SimpleNamespace(frames=[[red, blue]]))
 
     assert len(frames) == 2
+    assert frames[0].getpixel((0, 0)) == (255, 0, 0)
+
+
+def test_frames_from_output_scales_float_numpy_frames():
+    np = pytest.importorskip("numpy")
+
+    # Diffusers video pipelines default to output_type="np": a float32 array in
+    # [0, 1] shaped (batch, frames, H, W, 3). PIL rejects float RGB data, so
+    # frames_from_output must scale to uint8 instead of raising
+    # "Cannot handle this data type: (1, 1, 3), <f4".
+    array = np.zeros((1, 2, 2, 2, 3), dtype=np.float32)
+    array[0, 0, :, :, 0] = 1.0  # first frame fully red
+
+    frames = frames_from_output(SimpleNamespace(frames=array))
+
+    assert len(frames) == 2
+    assert frames[0].mode == "RGB"
     assert frames[0].getpixel((0, 0)) == (255, 0, 0)
 
 
