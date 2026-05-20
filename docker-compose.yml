@@ -34,7 +34,7 @@ services:
       context: .
       dockerfile: docker/worker.Dockerfile
       args:
-        PYTORCH_INDEX_URL: ${SCENEWORKS_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu129}
+        PYTORCH_INDEX_URL: ${SCENEWORKS_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
         PYTORCH_SPEC: ${SCENEWORKS_PYTORCH_SPEC:-torch>=2.8,<2.9}
         PYTORCH_AUDIO_SPEC: ${SCENEWORKS_PYTORCH_AUDIO_SPEC:-torchaudio>=2.8,<2.9}
         INCLUDE_LTX_PIPELINES: ${SCENEWORKS_INCLUDE_LTX_PIPELINES:-1}
