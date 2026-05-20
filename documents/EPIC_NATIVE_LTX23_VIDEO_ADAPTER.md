@@ -88,7 +88,7 @@ SceneWorks must manage these as model resources, not hidden one-off paths:
 - Distilled LoRA for two-stage pipelines:
   - `ltx-2.3-22b-distilled-lora-384-1.1.safetensors`
 - Gemma text encoder assets:
-  - full local Gemma repo or local text encoder path required by `ltx-pipelines`.
+  - full local Gemma 3-12B repo or local text encoder path required by `ltx-pipelines`.
 
 The adapter should not hardcode absolute user paths. Add advanced settings and manifest fields for:
 
@@ -122,13 +122,13 @@ Recommended shape:
       "file": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     },
     "gemma": {
-      "repo": "google/gemma-3-4b-it"
+      "repo": "google/gemma-3-12b-it-qat-q4_0-unquantized"
     }
   }
 }
 ```
 
-Exact Gemma repo and file requirements must be validated against the installed `ltx-pipelines` version before implementation is marked complete.
+The official `ltx-pipelines` stack expects the Gemma 3-12B text encoder family; using Gemma 3-4B causes tensor shape mismatches during text encoder load.
 
 ## Worker Dependency Plan
 

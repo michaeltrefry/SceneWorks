@@ -1151,7 +1151,7 @@ def write_native_ltx_manifest(config_dir, *, checkpoint=None, spatial=None, lora
         "checkpoint": {"repo": "Lightricks/LTX-2.3", "file": "checkpoint.safetensors"},
         "spatialUpscaler": {"repo": "Lightricks/LTX-2.3", "file": "spatial.safetensors"},
         "distilledLora": {"repo": "Lightricks/LTX-2.3", "file": "distilled-lora.safetensors"},
-        "gemma": {"repo": "google/gemma-3-4b-it"},
+        "gemma": {"repo": "google/gemma-3-12b-it-qat-q4_0-unquantized"},
     }
     if checkpoint is not None:
         resources["checkpoint"] = {"path": str(checkpoint)}
@@ -1278,7 +1278,7 @@ def test_native_ltx_missing_resources_reports_all_paths(monkeypatch, tmp_path):
     assert "distilledLoraPath" in message
     assert "gemmaRoot" in message
     assert str(data_dir / "models" / safe_download_dir("Lightricks/LTX-2.3") / "checkpoint.safetensors") in message
-    assert str(data_dir / "models" / safe_download_dir("google/gemma-3-4b-it")) in message
+    assert str(data_dir / "models" / safe_download_dir("google/gemma-3-12b-it-qat-q4_0-unquantized")) in message
 
 
 def test_native_ltx_resources_resolve_from_huggingface_cache(monkeypatch, tmp_path):
@@ -1291,7 +1291,7 @@ def test_native_ltx_resources_resolve_from_huggingface_cache(monkeypatch, tmp_pa
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "checkpoint.safetensors")
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "spatial.safetensors")
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "distilled-lora.safetensors")
-    gemma_snapshot = write_huggingface_cache_resource(cache_root, "google/gemma-3-4b-it", "config.json")
+    gemma_snapshot = write_huggingface_cache_resource(cache_root, "google/gemma-3-12b-it-qat-q4_0-unquantized", "config.json")
     adapter = LtxPipelinesVideoAdapter()
     request = adapter.prepare(
         settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
@@ -1329,7 +1329,7 @@ def test_native_ltx_resources_resolve_from_mounted_data_cache_without_hf_env(mon
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "checkpoint.safetensors")
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "spatial.safetensors")
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "distilled-lora.safetensors")
-    gemma_snapshot = write_huggingface_cache_resource(cache_root, "google/gemma-3-4b-it", "config.json")
+    gemma_snapshot = write_huggingface_cache_resource(cache_root, "google/gemma-3-12b-it-qat-q4_0-unquantized", "config.json")
     adapter = LtxPipelinesVideoAdapter()
     request = adapter.prepare(
         settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
