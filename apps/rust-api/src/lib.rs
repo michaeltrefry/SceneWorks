@@ -1723,6 +1723,28 @@ fn human_gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
+/// The trusted `files` list for a trained LoRA: the `.safetensors` actually
+/// present under the recomputed output dir, expressed as forward-slash path
+/// components relative to that dir. Returns `None` when no adapter is found or
+/// the discovered path is not a plain in-tree file, so a crafted job payload can
+/// never inject a `..`-traversing `files` value that generation would later join
+/// to `installedPath` and resolve to a different safetensors.
+fn trained_adapter_files(output_dir: &FsPath) -> Option<Vec<String>> {
+    let adapter = first_safetensors_path(output_dir)?;
+    let relative = adapter.strip_prefix(output_dir).ok()?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_str()?.to_owned()),
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(vec![parts.join("/")])
+}
+
 async fn get_project_file(
     State(state): State<AppState>,
     Path((project_id, relative_path)): Path<(String, String)>,
@@ -4068,12 +4090,16 @@ async fn register_trained_lora(
     let (output_dir, manifest_path) =
         resolve_training_output_location(state, &scope, job.project_id.as_deref(), &lora_id)
             .await?;
-    if !lora_is_installed(&output_dir) {
+    // Derive `files` from the adapter actually on disk under the recomputed
+    // output dir, never from the payload: a crafted entry could otherwise list a
+    // `..`-traversing file name that generation would later join to
+    // `installedPath` and load a different safetensors than the one registered.
+    let Some(files) = trained_adapter_files(&output_dir) else {
         return Err(ApiError::internal(format!(
             "Trained adapter not found under {}; skipping LoRA registration",
             output_dir.display()
         )));
-    }
+    };
 
     // Overwrite the security-sensitive fields with the trusted values, keeping
     // the descriptive metadata (name, family, triggerWords, baseModel,
@@ -4085,6 +4111,10 @@ async fn register_trained_lora(
     entry.insert(
         "source".to_owned(),
         json!({ "provider": "training", "path": format!("loras/{lora_id}") }),
+    );
+    entry.insert(
+        "files".to_owned(),
+        Value::Array(files.into_iter().map(Value::String).collect()),
     );
     entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
 
@@ -8628,7 +8658,7 @@ mod tests {
                         "scope": "project",
                         "family": "z-image",
                         "source": { "provider": "evil", "path": "../../../../escape/loras" },
-                        "files": ["crafted.safetensors"]
+                        "files": ["../../../../escape/evil.safetensors"]
                     }
                 }
             }),
@@ -8688,6 +8718,10 @@ mod tests {
         assert_eq!(entry["scope"], "project");
         assert_eq!(entry["source"]["provider"], "training");
         assert_eq!(entry["source"]["path"], format!("loras/{crafted_lora_id}"));
+        // `files` was derived from the adapter actually on disk, not the
+        // `..`-traversing value in the payload, so generation cannot be pointed
+        // at a safetensors outside the registered output dir.
+        assert_eq!(entry["files"], json!(["crafted.safetensors"]));
 
         // A traversal id is rejected outright: nothing registers and the failure
         // is visible.
