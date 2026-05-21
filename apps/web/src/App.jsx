@@ -273,6 +273,53 @@ function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled
   );
 }
 
+function FirstRunProjectGate({ onCreate, disabled }) {
+  const [name, setName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed || submitting) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onCreate(trimmed);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="first-run-gate">
+      <div className="first-run-card">
+        <span className="first-run-mark" aria-hidden="true">
+          <img src="/sceneworks-logo.svg" alt="" />
+        </span>
+        <h2>Create your first workspace</h2>
+        <p className="first-run-lede">
+          SceneWorks keeps your images, videos, characters, and timelines inside a
+          workspace. Create one to start generating.
+        </p>
+        <form className="first-run-form" onSubmit={submit}>
+          <input
+            aria-label="Workspace name"
+            autoFocus
+            disabled={disabled || submitting}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="e.g. My First Project"
+            value={name}
+          />
+          <button className="first-run-cta" disabled={disabled || submitting || !name.trim()} type="submit">
+            {submitting ? "Creating…" : "Create workspace"}
+          </button>
+        </form>
+      </div>
+    </section>
+  );
+}
+
 function uploadLimitLabel(bytes) {
   const gib = bytes / (1024 * 1024 * 1024);
   return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
@@ -283,6 +330,7 @@ export function App() {
   const [access, setAccess] = useState({ authRequired: false });
   const [token, setToken] = useState(() => window.localStorage.getItem("sceneworks-token") ?? "");
   const [projects, setProjects] = useState([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
   const [jobs, setJobs] = useState([]);
@@ -629,6 +677,7 @@ export function App() {
     ]);
     const projectItems = projectsResult.value;
     setProjects(projectItems);
+    setProjectsLoaded(true);
     setActiveProject((current) => current ?? projectItems[0] ?? null);
     setJobs((current) => mergeFreshJobs(current, jobsResult.value));
     setWorkers(workersResult.value.sort(sortWorkers));
@@ -1625,6 +1674,9 @@ export function App() {
     Editor: timelines.length > 0,
     Queue: queueCounts.active > 0,
   };
+  // First-run gate: until at least one workspace exists, replace the studio area
+  // with a create prompt so navigation never lands on dead, project-scoped controls.
+  const needsFirstProject = authenticated && projectsLoaded && projects.length === 0;
 
   return (
     <main className="app">
@@ -1730,6 +1782,10 @@ export function App() {
           </section>
         ) : null}
 
+        {needsFirstProject ? (
+          <FirstRunProjectGate disabled={!authenticated} onCreate={createProject} />
+        ) : (
+          <>
         {activeView === "Library" ? (
           <LibraryScreen
             activeProject={activeProject}
@@ -1929,6 +1985,8 @@ export function App() {
             updateCharacterReference={updateCharacterReference}
           />
         ) : null}
+          </>
+        )}
       </section>
 
       {previewedAsset ? (

@@ -105,6 +105,9 @@ describe("SceneWorks app shell", () => {
       if (path.endsWith("/jobs/events/ticket")) {
         return Promise.resolve(response({ ticket: "stream-ticket" }));
       }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+      }
       return Promise.resolve(response([]));
     });
   });
@@ -127,6 +130,46 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Library");
     expect(container.textContent).toContain("Train");
     expect(container.textContent).toContain("Queue");
+  });
+
+  it("gates the studios behind workspace creation when no projects exist", async () => {
+    const requests = [];
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests.push({ path, method: options.method ?? "GET" });
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects") && options.method === "POST") {
+        return Promise.resolve(response({ id: "project-new", name: "My First Project" }));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    // With zero workspaces the studio area is replaced by the create gate.
+    expect(container.textContent).toContain("Create your first workspace");
+
+    await changeField(container.querySelector('[aria-label="Workspace name"]'), "My First Project");
+    await act(async () => {
+      buttonInside(container, "Create workspace").click();
+    });
+    await settle();
+
+    // Creating the first workspace clears the gate and lands in a studio.
+    expect(requests.some((request) => request.path.endsWith("/projects") && request.method === "POST")).toBe(true);
+    expect(container.textContent).not.toContain("Create your first workspace");
   });
 
   it("opens the Train navigation item without exposing a queue action", async () => {
@@ -1223,6 +1266,9 @@ describe("SceneWorks app shell", () => {
       if (path.endsWith("/access")) {
         return Promise.resolve(response({ authRequired: false }));
       }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project One" }]));
+      }
       if (path.endsWith("/models")) {
         return Promise.resolve(
           response([
@@ -2183,6 +2229,9 @@ describe("SceneWorks app shell", () => {
       }
       if (path.endsWith("/jobs/events/ticket")) {
         return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Project One" }]));
       }
       if (path.endsWith("/workers")) {
         return Promise.resolve(
