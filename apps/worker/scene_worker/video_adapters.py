@@ -30,7 +30,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import filter_call_kwargs
-from .image_adapters import emit_worker_event, gpu_memory_snapshot, require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
+from .image_adapters import emit_worker_event, empty_torch_cache, gpu_memory_snapshot, require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
 from .lora_adapters import (
     LoraPipelineState,
     LoraSpec,
@@ -990,9 +990,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         gc.collect()
         try:
             torch = importlib.import_module("torch")
-            cuda = getattr(torch, "cuda", None)
-            if cuda is not None and cuda.is_available():
-                cuda.empty_cache()
+            empty_torch_cache(torch)
         except Exception:
             return
 
@@ -1391,8 +1389,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         self._pipeline_key_value = None
         self._loaded_models.clear()
         self._loaded_lora_state = LoraPipelineState()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_torch_cache(torch)
 
     def _apply_loras(self, pipe: Any, request: VideoRequest, target: dict[str, Any]) -> None:
         self._loaded_lora_state = apply_loras_to_pipeline(

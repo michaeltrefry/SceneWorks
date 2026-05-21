@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 
 
 def gpu_worker_id(base_worker_id: str, gpu_id: str) -> str:
@@ -75,6 +76,28 @@ def query_nvidia_gpus() -> list[dict]:
         return []
 
 
+def query_mps_gpus() -> list[dict]:
+    """Detect an Apple Silicon MPS device, mirroring the nvidia-smi probe shape.
+
+    Returns a single-entry list when torch reports MPS available, otherwise [].
+    macOS-only — a no-op (empty) on every other platform (sc-1334).
+    """
+    if sys.platform != "darwin":
+        return []
+    try:
+        import torch
+    except Exception:
+        return []
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    try:
+        available = bool(mps and mps.is_available())
+    except Exception:
+        available = False
+    if not available:
+        return []
+    return [{"id": "mps", "name": "Apple GPU (unified)", "capabilities": ["gpu", "mps"]}]
+
+
 def gpu_utilization(gpu_id: str) -> dict | None:
     if gpu_id == "cpu":
         return None
@@ -94,7 +117,9 @@ def visible_gpu_ids() -> list[str] | None:
 
 
 def discover_gpus() -> list[dict]:
-    ids = visible_gpu_ids()
+    # NVIDIA_VISIBLE_DEVICES is a CUDA/Linux concept; ignore it on macOS, where
+    # the only accelerator is the unified-memory MPS device (sc-1334/sc-1335).
+    ids = None if sys.platform == "darwin" else visible_gpu_ids()
     if ids == []:
         return []
 
@@ -105,7 +130,10 @@ def discover_gpus() -> list[dict]:
             by_id.get(gpu_id, {"id": gpu_id, "name": f"GPU {gpu_id}", "capabilities": ["gpu"]})
             for gpu_id in ids
         ]
-    return gpus
+    if gpus:
+        return gpus
+    # No NVIDIA GPUs → fall back to MPS on Apple Silicon (empty elsewhere → CPU).
+    return query_mps_gpus()
 
 
 def discover_gpu(requested_gpu_id: str) -> dict:

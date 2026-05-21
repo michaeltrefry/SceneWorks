@@ -623,8 +623,7 @@ class ZImageDiffusersAdapter:
         self._empty_cuda_cache(torch)
 
     def _empty_cuda_cache(self, torch: Any) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_torch_cache(torch)
 
     def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -877,8 +876,7 @@ class QwenImageAdapter:
         return pipe
 
     def _empty_cuda_cache(self, torch: Any) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_torch_cache(torch)
 
     def _run_pipeline(self, settings: WorkerSettings, pipe: Any, request: ImageRequest, seed: int) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -1019,6 +1017,10 @@ def image_batch_progress(completed_count: int, total: int) -> float:
 
 
 def select_torch_device(torch: Any, gpu_id: str | None = None) -> str:
+    # An explicit "cpu" forces CPU on any platform, including Apple Silicon where
+    # MPS would otherwise be picked (honors SCENEWORKS_GPU_ID=cpu, sc-1335).
+    if str(gpu_id or "").strip().lower() == "cpu":
+        return "cpu"
     if torch.cuda.is_available():
         gpu_id = str(gpu_id or "").strip()
         if gpu_id.isdigit():
@@ -1031,8 +1033,27 @@ def select_torch_device(torch: Any, gpu_id: str | None = None) -> str:
                 return f"cuda:{physical_index}"
         return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        # Route the few diffusers ops that lack an MPS kernel to CPU instead of
+        # erroring out. Set only when MPS is actually selected — never on CUDA
+        # or CPU hosts (sc-1332).
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
         return "mps"
     return "cpu"
+
+
+def empty_torch_cache(torch: Any) -> None:
+    """Release cached accelerator memory on whichever backend is active.
+
+    Clears the CUDA allocator cache on NVIDIA and the MPS allocator cache on
+    Apple Silicon; a no-op on CPU-only hosts (sc-1332).
+    """
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    if mps and mps.is_available():
+        mps_backend = getattr(torch, "mps", None)
+        if mps_backend is not None and hasattr(mps_backend, "empty_cache"):
+            mps_backend.empty_cache()
 
 
 def torch_inference_backend_available(torch: Any) -> bool:
@@ -1062,6 +1083,13 @@ def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:
         return torch.float16
     if requested == "float32" or device == "cpu":
         return torch.float32
+    # bfloat16 for both CUDA and MPS. On MPS, float16 overflows to NaN and yields
+    # all-black images — the denoiser latents go NaN before the VAE, so upcasting
+    # only the VAE does not help. bfloat16 keeps float32's exponent range (no
+    # overflow) at half float32's memory and renders correctly + fast on Apple
+    # Silicon. Verified on an M-series Mac with Z-Image-Turbo: fp16 = black,
+    # bf16 = OK (~18s), fp32 = OK but ~2x memory and slower. Explicit
+    # float16/float32 requests above still win (sc-1336).
     return torch.bfloat16
 
 

@@ -1,11 +1,16 @@
 import os
+import sys
 from pathlib import Path
 
 
 class WorkerSettings:
     def __init__(self) -> None:
         self.worker_id = os.getenv("SCENEWORKS_WORKER_ID", "worker-local-0")
-        self.gpu_id = os.getenv("SCENEWORKS_GPU_ID", "auto")
+        # Apple Silicon has no NVIDIA card to supervise, so default straight to
+        # the MPS backend. Windows/Linux keep "auto" (supervise visible NVIDIA
+        # GPUs). An explicit SCENEWORKS_GPU_ID always wins, including "cpu" (sc-1335).
+        default_gpu_id = "mps" if sys.platform == "darwin" else "auto"
+        self.gpu_id = os.getenv("SCENEWORKS_GPU_ID", default_gpu_id)
         self.api_url = os.getenv("SCENEWORKS_API_URL", "http://localhost:8000")
         self.data_dir = Path(os.getenv("SCENEWORKS_DATA_DIR", "data")).resolve()
         self.config_dir = Path(os.getenv("SCENEWORKS_CONFIG_DIR", "config")).resolve()

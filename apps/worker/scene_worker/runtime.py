@@ -784,6 +784,10 @@ def child_environment(settings: WorkerSettings, *, worker_id: str, gpu_id: str) 
     env["SCENEWORKS_GPU_ID"] = gpu_id
     if gpu_id == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
+    elif gpu_id == "mps":
+        # MPS is not a CUDA device; leave CUDA_VISIBLE_DEVICES untouched rather
+        # than pinning it to a bogus "mps" value (sc-1335).
+        pass
     else:
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
     return env
