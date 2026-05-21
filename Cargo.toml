@@ -7,6 +7,16 @@ members = [
     "crates/sceneworks-core",
     "crates/sceneworks-worker",
 ]
+# apps/desktop (Tauri) needs platform GUI libs (WebKit/GTK on Linux) and is built
+# per-platform via `tauri build` on macOS/Windows — it is NOT shipped on Linux
+# (Docker covers Linux). Excluding it from default-members keeps bare cargo and
+# the Linux/server CI checks from trying to compile the GUI stack.
+default-members = [
+    "apps/rust-api",
+    "apps/rust-worker",
+    "crates/sceneworks-core",
+    "crates/sceneworks-worker",
+]
 
 [workspace.package]
 version = "0.2.0"
