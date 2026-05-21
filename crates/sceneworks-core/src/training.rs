@@ -458,7 +458,9 @@ impl std::error::Error for TrainingPlanError {}
 /// Normalizes resolved request inputs into the [`TrainingPlan`] the Python
 /// kernel consumes. Validates the dataset is non-empty and the config is
 /// runnable; absolute paths and ids are resolved by the caller.
-pub fn build_training_plan(input: BuildTrainingPlan<'_>) -> Result<TrainingPlan, TrainingPlanError> {
+pub fn build_training_plan(
+    input: BuildTrainingPlan<'_>,
+) -> Result<TrainingPlan, TrainingPlanError> {
     validate_training_config(&input.config)?;
     if input.dataset.items.is_empty() {
         return Err(TrainingPlanError::EmptyDataset);

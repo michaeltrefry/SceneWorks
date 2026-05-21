@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use sceneworks_core::training::{
     build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
     TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
-    TrainingPlanError, TrainingProvenance, TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION,
-    TRAINING_PLAN_VERSION,
+    TrainingPlanError, TrainingProvenance, TrainingTargetRegistry,
+    TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;

@@ -1428,7 +1428,8 @@ async fn create_training_job(
     })
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
-    let plan_value = serde_json::to_value(&plan).map_err(|error| ApiError::internal(error.to_string()))?;
+    let plan_value =
+        serde_json::to_value(&plan).map_err(|error| ApiError::internal(error.to_string()))?;
     let mut job_payload = JsonObject::new();
     job_payload.insert("dryRun".to_owned(), Value::Bool(payload.dry_run));
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
@@ -7730,7 +7731,8 @@ mod tests {
         .await;
         let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
 
-        let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
         let target = registry["targets"][0].clone();
         let target_id = target["id"].as_str().expect("target id").to_owned();
         let config = target["defaults"].clone();
@@ -7788,7 +7790,13 @@ mod tests {
         );
 
         // The job is queued and visible to the queue/worker surface.
-        let (status, queued) = request(app.clone(), "GET", "/api/v1/jobs?status=queued", Value::Null).await;
+        let (status, queued) = request(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs?status=queued",
+            Value::Null,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queued[0]["id"], job_id);
         assert_eq!(queued[0]["type"], "lora_train");
@@ -7807,7 +7815,8 @@ mod tests {
         .await;
         let project_id = project["id"].as_str().expect("project id").to_owned();
 
-        let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
         let config = registry["targets"][0]["defaults"].clone();
 
         let (status, error) = request(

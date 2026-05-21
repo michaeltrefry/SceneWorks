@@ -819,8 +819,9 @@ impl JobsStore {
         let job_id = match job_id {
             Some(job_id) => job_id,
             None => {
-                let job_hex: String = connection
-                    .query_row("select lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+                let job_hex: String =
+                    connection
+                        .query_row("select lower(hex(randomblob(16)))", [], |row| row.get(0))?;
                 format!("job_{job_hex}")
             }
         };
