@@ -5,11 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-# Placeholder desktop shell crate (sc-1331). The Tauri scaffold (WebView2 +
-# WebKit) and its dependencies land in sc-1345; this crate exists now so the
-# apps/desktop workspace member is wired into the Cargo workspace and CI checks.
+# SceneWorks desktop shell (Tauri v2). Hosts the native webview (WebView2 on
+# Windows, WebKit on macOS) and, from sc-1346, manages the sceneworks-api and
+# Python inference sidecars.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
+tauri = { version = "2", features = [] }
 
-[lints]
-workspace = true
+[lints.rust]
+# Tauri's generate_context!/Builder can emit unsafe at the webview FFI boundary,
+# so the workspace-wide forbid(unsafe_code) is relaxed for this GUI shell crate
+# only. All other crates keep the forbid.
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"

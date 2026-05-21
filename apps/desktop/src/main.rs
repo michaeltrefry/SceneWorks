@@ -1,5 +1,8 @@
+// Hide the extra console window on Windows in release builds.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() {
-    // Placeholder entry point (sc-1331). The Tauri shell that manages the
-    // sceneworks-api and Python inference sidecars is implemented in sc-1345.
-    println!("sceneworks-desktop placeholder — Tauri shell lands in sc-1345");
+    tauri::Builder::default()
+        .run(tauri::generate_context!())
+        .expect("error while running the SceneWorks desktop shell");
 }

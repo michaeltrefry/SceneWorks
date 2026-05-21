@@ -19,7 +19,9 @@
     "desktop:build": "cargo build -p sceneworks-desktop",
     "desktop:check": "cargo check -p sceneworks-desktop",
     "web:build": "npm --prefix apps/web run build",
-    "api:build:embedded": "npm run web:build && cargo build -p sceneworks-rust-api --release --features embed-web"
+    "api:build:embedded": "npm run web:build && cargo build -p sceneworks-rust-api --release --features embed-web",
+    "tauri:dev": "npm --prefix apps/desktop run dev",
+    "tauri:build": "npm --prefix apps/desktop run build"
   },
   "engines": {
     "node": ">=20"

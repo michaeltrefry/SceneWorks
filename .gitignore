@@ -214,6 +214,9 @@ node_modules/
 apps/web/node_modules/
 apps/web/dist/
 
+# Tauri desktop shell generated artifacts
+apps/desktop/gen/
+
 # SceneWorks local runtime data
 # user.*.jsonc manifests are rewritten by the SceneWorks API at runtime (local state, not source).
 config/manifests/user.*.jsonc

@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Default capability set for the SceneWorks desktop shell window.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
