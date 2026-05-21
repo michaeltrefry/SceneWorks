@@ -1079,6 +1079,13 @@ def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:
         return torch.float16
     if requested == "float32" or device == "cpu":
         return torch.float32
+    if device == "mps":
+        # bfloat16 coverage on the MPS backend is incomplete and frequently
+        # forces slow CPU fallbacks (via PYTORCH_ENABLE_MPS_FALLBACK) or hard
+        # errors; float16 is the well-supported half-precision path on Apple
+        # Silicon. Explicit float16/float32 requests above still take priority
+        # (sc-1336).
+        return torch.float16
     return torch.bfloat16
 
 
