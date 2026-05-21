@@ -287,6 +287,9 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
 /// Returns the detected LoRA architecture family or `None` if the header
 /// is ambiguous, empty, or matches no known signature with confidence.
 pub fn detect_lora_family(header: &Value) -> Option<String> {
+    if let Some(family) = detect_metadata_family(header) {
+        return Some(family);
+    }
     let keys = collect_tensor_keys(header);
     if keys.is_empty() {
         return None;
@@ -332,12 +335,15 @@ const SIGNATURES: &[BucketSignature] = &[
         bucket: Bucket::Flux,
         // Flux is the only architecture that ships both double-stream and
         // single-stream transformer blocks together. The single-block prefix
-        // alone is enough to identify it.
-        require_all_of: &[&["single_transformer_blocks.", "double_blocks."]],
+        // alone is enough to identify it. Kohya-style Flux LoRAs flatten the
+        // same names into `lora_unet_single_blocks_...` tensor keys.
+        require_all_of: &[&["single_transformer_blocks.", "single_blocks_"]],
         disqualifiers: &[],
         markers: &[
             "single_transformer_blocks.",
+            "single_blocks_",
             "double_blocks.",
+            "double_blocks_",
             "transformer_blocks.",
         ],
     },
@@ -529,6 +535,52 @@ fn parse_block_index(key: &str) -> Option<usize> {
     None
 }
 
+fn detect_metadata_family(header: &Value) -> Option<String> {
+    let metadata = header.get("__metadata__")?.as_object()?;
+    for key in [
+        "ss_base_model_version",
+        "modelspec.architecture",
+        "modelspec.implementation",
+    ] {
+        let Some(value) = metadata.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(family) = metadata_value_to_family(value) {
+            return Some(family);
+        }
+    }
+    None
+}
+
+fn metadata_value_to_family(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.contains("flux") {
+        return Some("flux".to_owned());
+    }
+    if normalized.contains("zimage") || normalized.contains("z-image") {
+        return Some("z-image".to_owned());
+    }
+    if normalized.contains("qwen") && normalized.contains("image") {
+        return Some("qwen-image".to_owned());
+    }
+    if normalized.contains("ltx") {
+        return Some("ltx-video".to_owned());
+    }
+    if normalized.contains("wan") {
+        return Some("wan-video".to_owned());
+    }
+    if normalized.contains("sdxl") {
+        return Some("sdxl".to_owned());
+    }
+    if normalized == "sd1" || normalized == "sd1.5" || normalized.contains("stable-diffusion-v1") {
+        return Some("sd1.5".to_owned());
+    }
+    None
+}
+
 /// The safetensors header is a JSON object whose top-level keys are tensor
 /// names plus a special `__metadata__` entry. Returns the tensor names only.
 fn collect_tensor_keys(header: &Value) -> Vec<String> {
@@ -641,6 +693,46 @@ mod tests {
             ));
         }
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("flux"));
+    }
+
+    #[test]
+    fn detects_kohya_flux() {
+        let mut keys = Vec::new();
+        for block in 0..19 {
+            for module in ["img_mlp_0", "txt_mlp_0", "img_attn_qkv", "txt_attn_qkv"] {
+                keys.push(format!(
+                    "lora_unet_double_blocks_{block}_{module}.lora_down.weight"
+                ));
+                keys.push(format!(
+                    "lora_unet_double_blocks_{block}_{module}.lora_up.weight"
+                ));
+            }
+        }
+        for block in 0..38 {
+            keys.push(format!(
+                "lora_unet_single_blocks_{block}_linear1.lora_down.weight"
+            ));
+            keys.push(format!(
+                "lora_unet_single_blocks_{block}_linear1.lora_up.weight"
+            ));
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("flux"));
+    }
+
+    #[test]
+    fn detects_metadata_family_before_keys() {
+        let mut header = header_from_keys(&[
+            "lora_unet_double_blocks_0_img_mlp_0.lora_down.weight",
+            "lora_unet_double_blocks_0_img_mlp_0.lora_up.weight",
+        ]);
+        header["__metadata__"] = json!({
+            "ss_base_model_version": "flux1",
+            "modelspec.architecture": "flux-1-dev/lora"
+        });
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("flux"));
     }

@@ -4655,7 +4655,18 @@ fn validate_lora_specs_for_model(
                 "{lora_label} is not installed: {lora_id}"
             )));
         }
-        validate_lora_safetensors_header(lora_id, lora)?;
+        let header = validate_lora_safetensors_header(lora_id, lora)?;
+        if let Some(detected_family) = header.as_ref().and_then(detect_lora_family) {
+            if !model_families
+                .iter()
+                .any(|model_family| model_family == &detected_family)
+            {
+                let model_family_list = model_families.join(", ");
+                return Err(ApiError::bad_request(format!(
+                    "LoRA {lora_id} appears to be a {detected_family} LoRA, which is not compatible with model {model_id} ({model_family_list})"
+                )));
+            }
+        }
         let families = lora_families(lora);
         if families.is_empty() {
             return Err(ApiError::bad_request(format!(
