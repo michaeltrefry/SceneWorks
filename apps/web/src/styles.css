@@ -1380,7 +1380,10 @@ label {
 .training-empty-state,
 .training-panel,
 .training-dataset-row,
-.training-step-block {
+.training-step-block,
+.training-dataset-list-panel,
+.training-dataset-editor,
+.training-asset-card {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface-2);
@@ -1470,6 +1473,13 @@ label {
   gap: 12px;
 }
 
+.training-head-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .training-panel-head h3 {
   margin: 2px 0 0;
   font-size: 18px;
@@ -1494,13 +1504,37 @@ label {
   gap: 10px;
 }
 
+.training-dataset-workspace {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.training-dataset-list-panel,
+.training-dataset-editor {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+}
+
 .training-dataset-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  width: 100%;
   padding: 12px;
+  text-align: left;
   background: var(--surface);
+  color: var(--text);
+}
+
+.training-dataset-row:hover:not(:disabled),
+.training-dataset-row.active {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
+  background: var(--surface-hover);
 }
 
 .training-dataset-row > div,
@@ -1514,6 +1548,135 @@ label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.training-dataset-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, 160px) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.training-dataset-form label:not(.file-upload-button) {
+  display: grid;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.training-import-button {
+  min-height: 40px;
+}
+
+.training-health-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.training-health-grid > div {
+  display: grid;
+  gap: 3px;
+  min-height: 62px;
+  align-content: center;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.training-health-grid strong {
+  font-size: 18px;
+}
+
+.training-health-grid span,
+.training-validity,
+.training-dataset-actions span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.training-health-grid .needs-attention {
+  border-color: color-mix(in oklch, var(--danger) 42%, var(--border));
+  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+}
+
+.training-validity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.training-valid-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.training-valid-dot.valid {
+  background: var(--success);
+}
+
+.training-asset-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.training-asset-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  background: var(--surface);
+}
+
+.training-asset-card.selected {
+  border-color: color-mix(in oklch, var(--accent) 58%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent) 34%, transparent);
+}
+
+.training-asset-card > button {
+  overflow: hidden;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.training-asset-card img,
+.training-asset-card video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.training-asset-card label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 24px;
+  font-size: 12px;
+}
+
+.training-asset-card label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-dataset-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .training-workflow-grid {
@@ -4774,6 +4937,9 @@ label {
   .training-summary-band,
   .training-tabs,
   .training-metrics,
+  .training-dataset-workspace,
+  .training-dataset-form,
+  .training-health-grid,
   .training-workflow-grid,
   .training-config-preview,
   .preset-layout,

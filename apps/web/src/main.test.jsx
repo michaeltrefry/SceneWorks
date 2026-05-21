@@ -196,6 +196,102 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Training submission is disabled");
   });
 
+  it("creates a training dataset from selected image assets", async () => {
+    const createDataset = vi.fn(async (payload) => ({
+      id: "dataset-new",
+      name: payload.name,
+      version: 1,
+      items: payload.items.map((item) => ({ ...item, caption: { text: "", triggerWords: [] } })),
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          createDataset={createDataset}
+          datasets={[]}
+        />,
+      );
+    });
+
+    await changeField(field(container, "Dataset name"), "Mira Set");
+    await act(async () => {
+      container.querySelector(".training-asset-card input").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
+    });
+
+    expect(createDataset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Mira Set",
+        modality: "image",
+        items: [expect.objectContaining({ assetId: "asset-a", displayName: "Mira.png" })],
+      }),
+    );
+    expect(container.textContent).toContain("Dataset created");
+  });
+
+  it("opens and saves an existing training dataset membership", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [{ assetId: "asset-a", displayName: "Mira.png", caption: { text: "mira portrait", triggerWords: [] } }],
+    }));
+    const updateDataset = vi.fn(async (datasetId, payload) => ({
+      id: datasetId,
+      name: payload.name,
+      version: 4,
+      items: payload.items.map((item) => ({ ...item, caption: item.caption ?? { text: "", triggerWords: [] } })),
+    }));
+    const assets = [
+      { id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } },
+      { id: "asset-b", type: "image", displayName: "Mira close.png", file: { path: "assets/images/Mira-close.png", mimeType: "image/png" } },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={assets}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          updateDataset={updateDataset}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    expect(loadDataset).toHaveBeenCalledWith("dataset-a");
+    expect(container.querySelectorAll(".training-asset-card input")[0].checked).toBe(true);
+
+    await act(async () => {
+      container.querySelectorAll(".training-asset-card input")[1].click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+    });
+
+    expect(updateDataset).toHaveBeenCalledWith(
+      "dataset-a",
+      expect.objectContaining({
+        name: "Portrait Set",
+        items: [
+          expect.objectContaining({ assetId: "asset-a" }),
+          expect.objectContaining({ assetId: "asset-b" }),
+        ],
+      }),
+    );
+    expect(container.textContent).toContain("Dataset changes saved");
+  });
+
   it("selects duplicate-titled assets through the thumbnail asset picker", async () => {
     const onChange = vi.fn();
     const assets = [

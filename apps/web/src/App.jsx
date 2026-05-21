@@ -725,6 +725,37 @@ export function App() {
     }
   }
 
+  async function loadTrainingDataset(datasetId, projectId = activeProject?.id) {
+    if (!projectId || !datasetId) {
+      return null;
+    }
+    return apiFetch(`/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}`, token);
+  }
+
+  async function createTrainingDataset(payload, projectId = activeProject?.id) {
+    if (!projectId) {
+      throw new Error("Create or open a project first.");
+    }
+    const created = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await refreshTrainingDatasets(projectId);
+    return created;
+  }
+
+  async function updateTrainingDataset(datasetId, payload, projectId = activeProject?.id) {
+    if (!projectId || !datasetId) {
+      throw new Error("Select a training dataset first.");
+    }
+    const updated = await apiFetch(`/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}`, token, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    await refreshTrainingDatasets(projectId);
+    return updated;
+  }
+
   function presetQuery(scope = null) {
     const params = new URLSearchParams();
     if (scope) {
@@ -1545,8 +1576,10 @@ export function App() {
       setAssets((items) => [imported, ...items.filter((item) => item.id !== imported.id)]);
       setSelectedAssetId(imported.id);
       setError("");
+      return imported;
     } catch (err) {
       setError(err.message);
+      return null;
     }
   }
 
@@ -1776,10 +1809,16 @@ export function App() {
           <TrainingStudio
             activeProject={activeProject}
             authenticated={authenticated}
+            assets={assets}
+            createDataset={createTrainingDataset}
             datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
             datasetsError={trainingDatasetsError}
+            importAsset={importAsset}
+            loadDataset={loadTrainingDataset}
             loadingDatasets={loadingTrainingDatasets}
+            onPreview={setPreviewAsset}
             onRefreshDatasets={() => refreshTrainingDatasets(activeProject?.id)}
+            updateDataset={updateTrainingDataset}
           />
         ) : null}
 
