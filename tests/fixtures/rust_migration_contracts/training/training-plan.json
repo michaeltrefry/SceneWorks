@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "planVersion": 1,
+  "jobId": "job_777",
+  "target": {
+    "targetId": "z_image_turbo_lora",
+    "kernel": "z_image_lora",
+    "family": "z-image",
+    "modality": "image",
+    "outputKind": "lora",
+    "baseModel": "z_image_turbo",
+    "baseModelPath": "/sceneworks/data/cache/huggingface/Tongyi-MAI/Z-Image-Turbo"
+  },
+  "dataset": {
+    "datasetId": "ds_abc123",
+    "datasetVersion": 3,
+    "rootPath": "/sceneworks/data/training/ds_abc123",
+    "items": [
+      {
+        "imagePath": "/sceneworks/data/training/ds_abc123/images/001.png",
+        "caption": "a portrait of auroraStyle woman, soft light",
+        "width": 1024,
+        "height": 1024
+      },
+      {
+        "imagePath": "/sceneworks/data/training/ds_abc123/images/002.png",
+        "caption": "auroraStyle landscape, distant mountains"
+      }
+    ]
+  },
+  "config": {
+    "rank": 32,
+    "alpha": 16,
+    "learningRate": 0.0002,
+    "steps": 2500,
+    "batchSize": 2,
+    "gradientAccumulation": 1,
+    "resolution": 1024,
+    "saveEvery": 250,
+    "seed": 7,
+    "optimizer": "adamw8bit",
+    "triggerWord": "auroraStyle",
+    "advanced": {
+      "mixedPrecision": "bf16",
+      "cacheLatents": true
+    }
+  },
+  "output": {
+    "loraId": "lora_aurora_001",
+    "outputDir": "/sceneworks/data/loras/lora_aurora_001",
+    "fileName": "aurora_style.safetensors",
+    "format": "safetensors",
+    "triggerWords": ["auroraStyle"]
+  },
+  "provenance": {
+    "datasetId": "ds_abc123",
+    "datasetVersion": 3,
+    "targetId": "z_image_turbo_lora",
+    "baseModel": "z_image_turbo",
+    "configSnapshot": {
+      "rank": 32,
+      "alpha": 16,
+      "learningRate": 0.0002,
+      "steps": 2500,
+      "batchSize": 2,
+      "gradientAccumulation": 1,
+      "resolution": 1024,
+      "saveEvery": 250,
+      "seed": 7,
+      "optimizer": "adamw8bit",
+      "triggerWord": "auroraStyle",
+      "advanced": {
+        "mixedPrecision": "bf16",
+        "cacheLatents": true
+      }
+    },
+    "outputLoraId": "lora_aurora_001",
+    "sourceJobId": "job_777",
+    "createdAt": "2026-05-20T13:00:00Z"
+  }
+}

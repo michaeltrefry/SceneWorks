@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "ds_abc123",
+  "version": 3,
+  "projectId": "proj_001",
+  "name": "Aurora style set",
+  "modality": "image",
+  "status": "ready",
+  "createdAt": "2026-05-20T10:00:00Z",
+  "updatedAt": "2026-05-20T12:30:00Z",
+  "items": [
+    {
+      "id": "item_001",
+      "assetId": "asset_900",
+      "path": "images/001.png",
+      "displayName": "001.png",
+      "caption": {
+        "text": "a portrait of auroraStyle woman, soft light",
+        "source": "manual",
+        "triggerWords": ["auroraStyle"],
+        "updatedAt": "2026-05-20T12:00:00Z"
+      },
+      "width": 1024,
+      "height": 1024,
+      "addedAt": "2026-05-20T11:00:00Z"
+    },
+    {
+      "id": "item_002",
+      "path": "images/002.png",
+      "displayName": "002.png",
+      "caption": {
+        "text": "auroraStyle landscape, distant mountains",
+        "source": "auto",
+        "triggerWords": ["auroraStyle"]
+      },
+      "addedAt": "2026-05-20T11:05:00Z"
+    }
+  ]
+}

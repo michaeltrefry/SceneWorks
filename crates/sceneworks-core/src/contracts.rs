@@ -104,6 +104,11 @@ macro_rules! string_enum {
     };
 }
 
+// Re-exported within the crate so sibling contract modules (for example
+// `training`) can declare their own forward-compatible string enums with the
+// same `Unknown(String)` fallback semantics.
+pub(crate) use string_enum;
+
 string_enum! {
     pub enum ContractMode {
         TextToImage => "text_to_image",

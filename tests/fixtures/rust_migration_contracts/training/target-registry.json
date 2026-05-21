@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "id": "z_image_turbo_lora",
+      "name": "Z-Image-Turbo LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "z-image",
+      "baseModel": "z_image_turbo",
+      "baseModelRepo": "Tongyi-MAI/Z-Image-Turbo",
+      "kernel": "z_image_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "networkType": "lora"
+        }
+      },
+      "limits": {
+        "rank": [4, 128],
+        "alpha": [1, 128],
+        "steps": [200, 6000],
+        "resolutions": [512, 768, 1024],
+        "batchSize": [1, 4]
+      },
+      "ui": {
+        "label": "Z-Image-Turbo LoRA",
+        "description": "Train an image LoRA for the Z-Image-Turbo base model.",
+        "recommendedFor": ["character", "style"]
+      }
+    }
+  ]
+}

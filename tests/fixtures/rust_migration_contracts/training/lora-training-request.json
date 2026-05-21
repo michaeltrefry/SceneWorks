@@ -1,0 +1,24 @@
+{
+  "targetId": "z_image_turbo_lora",
+  "datasetId": "ds_abc123",
+  "datasetVersion": 3,
+  "config": {
+    "rank": 32,
+    "alpha": 16,
+    "learningRate": 0.0002,
+    "steps": 2500,
+    "batchSize": 2,
+    "gradientAccumulation": 1,
+    "resolution": 1024,
+    "saveEvery": 250,
+    "seed": 7,
+    "optimizer": "adamw8bit",
+    "triggerWord": "auroraStyle",
+    "advanced": {
+      "mixedPrecision": "bf16",
+      "cacheLatents": true
+    }
+  },
+  "outputName": "Aurora Style",
+  "dryRun": true
+}

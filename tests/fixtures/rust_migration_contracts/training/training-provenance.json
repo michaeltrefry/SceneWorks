@@ -1,0 +1,26 @@
+{
+  "datasetId": "ds_abc123",
+  "datasetVersion": 3,
+  "targetId": "z_image_turbo_lora",
+  "baseModel": "z_image_turbo",
+  "configSnapshot": {
+    "rank": 32,
+    "alpha": 16,
+    "learningRate": 0.0002,
+    "steps": 2500,
+    "batchSize": 2,
+    "gradientAccumulation": 1,
+    "resolution": 1024,
+    "saveEvery": 250,
+    "seed": 7,
+    "optimizer": "adamw8bit",
+    "triggerWord": "auroraStyle",
+    "advanced": {
+      "mixedPrecision": "bf16",
+      "cacheLatents": true
+    }
+  },
+  "outputLoraId": "lora_aurora_001",
+  "sourceJobId": "job_777",
+  "createdAt": "2026-05-20T13:00:00Z"
+}
