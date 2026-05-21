@@ -4534,10 +4534,9 @@ mod tests {
         import_lora_source_path, now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
         restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
         utility_worker_specs, value_f64, visible_gpu_ids, worker_capabilities_with_utility,
-        write_model_install_marker,
-        ApiClient, DownloadContext, HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError,
-        WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        write_model_install_marker, ApiClient, DownloadContext, HuggingFaceSnapshot, Settings,
+        SupervisedChild, WorkerError, WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES,
+        DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[test]
