@@ -38,7 +38,9 @@ use sceneworks_core::project_store::{
     CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore, ProjectStoreError,
     UploadAsset,
 };
-use sceneworks_core::training::TrainingDataset;
+use sceneworks_core::training::{
+    builtin_training_targets, TrainingDataset, TrainingTargetRegistry,
+};
 use sceneworks_core::training_store::{
     TrainingCaptionSidecarsResult, TrainingDatasetBatchRenameInput,
     TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
@@ -485,6 +487,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/health", get(health))
         .route("/api/v1/access", get(access))
         .route("/api/v1/auth/verify", post(verify_access))
+        .route("/api/v1/training/targets", get(list_training_targets))
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route("/api/v1/projects/:project_id", get(get_project))
         .route(
@@ -1264,6 +1267,10 @@ async fn purge_asset(
         })
         .await?,
     ))
+}
+
+async fn list_training_targets() -> Json<TrainingTargetRegistry> {
+    Json(builtin_training_targets())
 }
 
 async fn list_training_datasets(
@@ -7246,6 +7253,24 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(purged, json!({ "id": asset_id, "status": "purged" }));
+    }
+
+    #[tokio::test]
+    async fn training_targets_route_returns_builtin_registry() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings).expect("app creates");
+
+        let (status, registry) = request(app, "GET", "/api/v1/training/targets", Value::Null).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(registry["schemaVersion"], 1);
+        assert_eq!(registry["targets"][0]["id"], "z_image_turbo_lora");
+        assert_eq!(registry["targets"][0]["defaults"]["rank"], 16);
+        assert_eq!(
+            registry["targets"][0]["defaults"]["advanced"]["qualityPreset"],
+            "balanced"
+        );
     }
 
     #[tokio::test]

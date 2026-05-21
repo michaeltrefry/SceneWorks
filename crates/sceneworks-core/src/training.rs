@@ -363,7 +363,15 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             advanced: object(json!({
                 "mixedPrecision": "bf16",
                 "cacheLatents": true,
-                "networkType": "lora"
+                "networkType": "lora",
+                "scheduler": "constant",
+                "epochs": 1,
+                "repeats": 10,
+                "bucketStrategy": "aspect",
+                "sampleEvery": 250,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
             })),
             extra: ExtraFields::new(),
         },
@@ -372,7 +380,9 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "alpha": [1, 128],
             "steps": [200, 6000],
             "resolutions": [512, 768, 1024],
-            "batchSize": [1, 4]
+            "batchSize": [1, 4],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",

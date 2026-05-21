@@ -1383,6 +1383,7 @@ label {
 .training-step-block,
 .training-dataset-list-panel,
 .training-dataset-editor,
+.training-advanced-panel,
 .training-asset-card {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
@@ -1500,6 +1501,9 @@ label {
 .training-dataset-list,
 .training-workflow-grid,
 .training-config-preview,
+.training-config-form,
+.training-config-grid,
+.training-advanced-grid,
 .training-caption-editor,
 .training-caption-list {
   display: grid;
@@ -1741,9 +1745,74 @@ label {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.training-config-preview label {
+.training-config-preview label,
+.training-config-grid label,
+.training-advanced-grid label {
   display: grid;
   gap: 7px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.training-config-grid {
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+}
+
+.training-advanced-panel {
+  padding: 12px;
+  background: var(--surface);
+}
+
+.training-advanced-panel summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.training-advanced-grid {
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  margin-top: 12px;
+}
+
+.training-config-warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.training-config-warnings span {
+  padding: 5px 8px;
+  border: 1px solid color-mix(in oklch, var(--danger) 40%, var(--border));
+  border-radius: var(--r-pill);
+  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.training-config-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.training-config-snapshot {
+  overflow: auto;
+  max-height: 280px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .training-caption-toolbar {
@@ -5069,6 +5138,8 @@ label {
   .training-health-grid,
   .training-workflow-grid,
   .training-config-preview,
+  .training-config-grid,
+  .training-advanced-grid,
   .training-caption-toolbar,
   .training-caption-row,
   .training-caption-fields,

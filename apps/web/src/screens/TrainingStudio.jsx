@@ -7,6 +7,7 @@ const tabs = [
   { id: "rename-caption", label: "Rename & Caption", title: "Rename and caption pass", status: "Needs valid dataset" },
   { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue disabled" },
 ];
+const defaultGpuOptions = ["auto"];
 
 function formatDatasetModality(dataset) {
   return String(dataset.modality ?? "image").replaceAll("_", " ");
@@ -142,6 +143,128 @@ function datasetPayload({ activeDataset, assetsById, name, selectedAssetIds }) {
   };
 }
 
+function asText(value) {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function numericDraft(value) {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function numberFromDraft(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function compactObject(object) {
+  return Object.fromEntries(
+    Object.entries(object).filter(([, value]) => value !== "" && value !== null && value !== undefined),
+  );
+}
+
+function rangeOptions(limits, key) {
+  return Array.isArray(limits?.[key]) ? limits[key] : [];
+}
+
+function configDraftFromTarget(target, dataset, gpuOptions) {
+  const defaults = target?.defaults ?? {};
+  const advanced = defaults.advanced ?? {};
+  const firstGpu = gpuOptions[0] ?? "";
+  const requestedGpu = asText(advanced.requestedGpu || firstGpu);
+  return {
+    outputName: dataset?.name ? `${dataset.name} LoRA` : "",
+    triggerWord: asText(defaults.triggerWord),
+    outputScope: asText(advanced.outputScope),
+    qualityPreset: asText(advanced.qualityPreset),
+    requestedGpu: gpuOptions.includes(requestedGpu) ? requestedGpu : firstGpu,
+    rank: numericDraft(defaults.rank),
+    alpha: numericDraft(defaults.alpha),
+    optimizer: asText(defaults.optimizer),
+    learningRate: numericDraft(defaults.learningRate),
+    scheduler: asText(advanced.scheduler),
+    steps: numericDraft(defaults.steps),
+    epochs: numericDraft(advanced.epochs),
+    repeats: numericDraft(advanced.repeats),
+    resolution: numericDraft(defaults.resolution),
+    bucketStrategy: asText(advanced.bucketStrategy),
+    precision: asText(advanced.mixedPrecision),
+    saveEvery: numericDraft(defaults.saveEvery),
+    sampleEvery: numericDraft(advanced.sampleEvery),
+    batchSize: numericDraft(defaults.batchSize),
+    gradientAccumulation: numericDraft(defaults.gradientAccumulation),
+    seed: numericDraft(defaults.seed),
+  };
+}
+
+function configValidation({ activeDataset, configDraft, selectedTarget }) {
+  const warnings = [];
+  if (!selectedTarget) {
+    warnings.push("Select a training target");
+  }
+  if (!activeDataset?.id) {
+    warnings.push("Select a saved dataset");
+  }
+  if (!configDraft.outputName?.trim()) {
+    warnings.push("Name the LoRA output");
+  }
+  if (!configDraft.triggerWord?.trim()) {
+    warnings.push("Add a trigger phrase");
+  }
+  for (const [field, label] of [
+    ["rank", "Rank"],
+    ["alpha", "Alpha"],
+    ["learningRate", "Learning rate"],
+    ["steps", "Steps"],
+    ["resolution", "Resolution"],
+  ]) {
+    const value = numberFromDraft(configDraft[field]);
+    if (!value || value <= 0) {
+      warnings.push(`${label} must be greater than zero`);
+    }
+  }
+  return warnings;
+}
+
+function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget }) {
+  const defaults = selectedTarget?.defaults ?? {};
+  const advanced = compactObject({
+    ...(defaults.advanced ?? {}),
+    scheduler: asText(configDraft.scheduler).trim(),
+    epochs: numberFromDraft(configDraft.epochs),
+    repeats: numberFromDraft(configDraft.repeats),
+    bucketStrategy: asText(configDraft.bucketStrategy).trim(),
+    mixedPrecision: asText(configDraft.precision).trim(),
+    sampleEvery: numberFromDraft(configDraft.sampleEvery),
+    qualityPreset: configDraft.qualityPreset,
+    outputScope: configDraft.outputScope,
+    requestedGpu: configDraft.requestedGpu,
+  });
+  return {
+    targetId: selectedTarget.id,
+    datasetId: activeDataset.id,
+    datasetVersion: activeDataset.version,
+    outputName: configDraft.outputName.trim(),
+    dryRun: true,
+    outputScope: configDraft.outputScope,
+    qualityPreset: configDraft.qualityPreset,
+    requestedGpu: configDraft.requestedGpu,
+    config: {
+      rank: numberFromDraft(configDraft.rank),
+      alpha: numberFromDraft(configDraft.alpha),
+      learningRate: numberFromDraft(configDraft.learningRate),
+      steps: numberFromDraft(configDraft.steps),
+      batchSize: numberFromDraft(configDraft.batchSize),
+      gradientAccumulation: numberFromDraft(configDraft.gradientAccumulation),
+      resolution: numberFromDraft(configDraft.resolution),
+      saveEvery: numberFromDraft(configDraft.saveEvery),
+      seed: numberFromDraft(configDraft.seed),
+      optimizer: asText(configDraft.optimizer).trim(),
+      triggerWord: asText(configDraft.triggerWord).trim(),
+      advanced,
+    },
+  };
+}
+
 function DatasetHealth({ health }) {
   return (
     <div className="training-health-grid" aria-label="Dataset health">
@@ -176,8 +299,12 @@ export function TrainingStudio({
   importAsset = async () => null,
   loadDataset = async () => null,
   loadingDatasets = false,
+  gpuOptions = defaultGpuOptions,
   onPreview = () => {},
+  prepareTrainingConfig = async (snapshot) => snapshot,
   onRefreshDatasets = () => {},
+  trainingTargets = [],
+  trainingTargetsError = "",
   updateDataset = async () => null,
   writeCaptionSidecars = async () => null,
 }) {
@@ -194,6 +321,13 @@ export function TrainingStudio({
   const [renamePrefix, setRenamePrefix] = useState("");
   const [renameCaptionDraftItems, setRenameCaptionDraftItems] = useState([]);
   const [savingRenameCaption, setSavingRenameCaption] = useState(false);
+  const [selectedTargetId, setSelectedTargetId] = useState("");
+  const [configDraft, setConfigDraft] = useState({});
+  const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
+  const [configSnapshot, setConfigSnapshot] = useState(null);
+  const [configMessage, setConfigMessage] = useState("");
+  const [configError, setConfigError] = useState("");
+  const [preparingConfig, setPreparingConfig] = useState(false);
   const tabRefs = useRef({});
 
   const activeIndex = tabs.findIndex((tab) => tab.id === activeTab);
@@ -227,6 +361,16 @@ export function TrainingStudio({
   );
   const canSaveRenameCaption =
     Boolean(activeDataset?.id) && renameCaptionHasDraft && !renameCaptionHasInvalidDraft && !savingRenameCaption;
+  const firstTarget = trainingTargets[0] ?? null;
+  const selectedTarget = useMemo(
+    () => trainingTargets.find((target) => target.id === selectedTargetId) ?? firstTarget,
+    [firstTarget, selectedTargetId, trainingTargets],
+  );
+  const qualityPresets = rangeOptions(selectedTarget?.limits, "qualityPresets");
+  const outputScopes = rangeOptions(selectedTarget?.limits, "outputScopes");
+  const resolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
+  const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
+  const canPrepareConfig = configWarnings.length === 0 && !preparingConfig;
 
   useEffect(() => {
     setActiveDataset(null);
@@ -237,12 +381,33 @@ export function TrainingStudio({
     setSelectedDatasetId("");
     setRenamePrefix("");
     setRenameCaptionDraftItems([]);
+    setConfigDraft({});
+    setConfigSnapshot(null);
+    setConfigMessage("");
+    setConfigError("");
   }, [activeProject?.id]);
 
   useEffect(() => {
     setRenameCaptionDraftItems(renameCaptionDrafts(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
   }, [activeDataset]);
+
+  useEffect(() => {
+    if (!selectedTargetId && firstTarget?.id) {
+      setSelectedTargetId(firstTarget.id);
+    }
+  }, [firstTarget?.id, selectedTargetId]);
+
+  useEffect(() => {
+    if (!selectedTarget) {
+      setConfigDraft({});
+      return;
+    }
+    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions));
+    setConfigSnapshot(null);
+    setConfigMessage("");
+    setConfigError("");
+  }, [activeDataset?.id, gpuOptions, selectedTarget]);
 
   function focusTab(index) {
     const next = tabs[(index + tabs.length) % tabs.length];
@@ -319,6 +484,23 @@ export function TrainingStudio({
     setRenameCaptionDraftItems((current) =>
       current.map((item) => (item.originalItemId === originalItemId ? { ...item, ...patch } : item)),
     );
+  }
+
+  function updateConfigDraft(field, value) {
+    setConfigMessage("");
+    setConfigError("");
+    setConfigSnapshot(null);
+    setConfigDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function resetConfigDefaults() {
+    if (!selectedTarget) {
+      return;
+    }
+    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions));
+    setConfigSnapshot(null);
+    setConfigMessage("Defaults restored");
+    setConfigError("");
   }
 
   function applyOrderedNames() {
@@ -427,6 +609,25 @@ export function TrainingStudio({
       setDatasetError(err.message);
     } finally {
       setSavingRenameCaption(false);
+    }
+  }
+
+  async function prepareConfig() {
+    if (!canPrepareConfig) {
+      return;
+    }
+    setPreparingConfig(true);
+    setConfigError("");
+    setConfigMessage("");
+    try {
+      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget });
+      const result = await prepareTrainingConfig(snapshot);
+      setConfigSnapshot(result ?? snapshot);
+      setConfigMessage("Config snapshot ready");
+    } catch (err) {
+      setConfigError(err.message);
+    } finally {
+      setPreparingConfig(false);
     }
   }
 
@@ -752,29 +953,195 @@ export function TrainingStudio({
                       <p className="eyebrow">Configure Job</p>
                       <h3>{active.title}</h3>
                     </div>
-                    <span className="training-status-pill">{health.valid ? "Dry run pending" : "Needs dataset"}</span>
+                    <span className="training-status-pill">{canPrepareConfig ? "Ready" : "Needs input"}</span>
                   </div>
-                  <div className="training-config-preview" aria-label="Training job placeholder settings">
-                    <label>
-                      Target
-                      <select defaultValue="z_image_turbo" disabled>
-                        <option value="z_image_turbo">Z-Image Turbo LoRA</option>
-                      </select>
-                    </label>
-                    <label>
-                      Dataset
-                      <select value={activeDataset?.id ?? ""} disabled>
-                        <option value="">{health.valid ? "Save to select dataset" : "Valid dataset required"}</option>
-                        {activeDataset ? <option value={activeDataset.id}>{activeDataset.name}</option> : null}
-                      </select>
-                    </label>
-                    <label>
-                      Preset
-                      <select defaultValue="simple" disabled>
-                        <option value="simple">Simple defaults</option>
-                      </select>
-                    </label>
-                  </div>
+                  {trainingTargetsError ? <p className="inline-warning">{trainingTargetsError}</p> : null}
+                  {configError ? <p className="inline-warning">{configError}</p> : null}
+                  {configMessage ? <p className="inline-success">{configMessage}</p> : null}
+                  {!selectedTarget ? (
+                    <div className="empty-panel compact-panel">Training target registry unavailable</div>
+                  ) : (
+                    <div className="training-config-form" aria-label="Training job configuration">
+                      <div className="training-config-grid">
+                        <label>
+                          Target
+                          <select onChange={(event) => setSelectedTargetId(event.target.value)} value={selectedTarget.id}>
+                            {trainingTargets.map((target) => (
+                              <option key={target.id} value={target.id}>
+                                {target.ui?.label ?? target.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Base model
+                          <input disabled readOnly value={selectedTarget.baseModel ?? ""} />
+                        </label>
+                        <label>
+                          Dataset
+                          <select onChange={(event) => openDataset(event.target.value)} value={activeDataset?.id ?? ""}>
+                            <option value="">Select a saved dataset</option>
+                            {datasets.map((dataset) => (
+                              <option key={dataset.id} value={dataset.id}>
+                                {dataset.name ?? dataset.id}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          LoRA name
+                          <input onChange={(event) => updateConfigDraft("outputName", event.target.value)} value={configDraft.outputName ?? ""} />
+                        </label>
+                        <label>
+                          Trigger phrase
+                          <input onChange={(event) => updateConfigDraft("triggerWord", event.target.value)} value={configDraft.triggerWord ?? ""} />
+                        </label>
+                        <label>
+                          Output scope
+                          <select onChange={(event) => updateConfigDraft("outputScope", event.target.value)} value={configDraft.outputScope ?? ""}>
+                            {outputScopes.length ? null : <option value={configDraft.outputScope ?? ""}>{configDraft.outputScope || "Default"}</option>}
+                            {outputScopes.map((scope) => (
+                              <option key={scope} value={scope}>
+                                {scope}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Quality preset
+                          <select
+                            onChange={(event) => updateConfigDraft("qualityPreset", event.target.value)}
+                            value={configDraft.qualityPreset ?? ""}
+                          >
+                            {qualityPresets.length ? null : (
+                              <option value={configDraft.qualityPreset ?? ""}>{configDraft.qualityPreset || "Default"}</option>
+                            )}
+                            {qualityPresets.map((preset) => (
+                              <option key={preset} value={preset}>
+                                {preset}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Requested GPU
+                          <select onChange={(event) => updateConfigDraft("requestedGpu", event.target.value)} value={configDraft.requestedGpu ?? ""}>
+                            {gpuOptions.map((gpu) => (
+                              <option key={gpu} value={gpu}>
+                                {gpu === "auto" ? "Auto" : `GPU ${gpu}`}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+
+                      <details
+                        className="training-advanced-panel"
+                        onToggle={(event) => setShowAdvancedConfig(event.currentTarget.open)}
+                        open={showAdvancedConfig}
+                      >
+                        <summary>
+                          <Icon.Sliders size={14} />
+                          Advanced
+                        </summary>
+                        <div className="training-advanced-grid">
+                          <label>
+                            Rank
+                            <input onChange={(event) => updateConfigDraft("rank", event.target.value)} type="number" value={configDraft.rank ?? ""} />
+                          </label>
+                          <label>
+                            Alpha
+                            <input onChange={(event) => updateConfigDraft("alpha", event.target.value)} type="number" value={configDraft.alpha ?? ""} />
+                          </label>
+                          <label>
+                            Optimizer
+                            <input onChange={(event) => updateConfigDraft("optimizer", event.target.value)} value={configDraft.optimizer ?? ""} />
+                          </label>
+                          <label>
+                            Learning rate
+                            <input
+                              onChange={(event) => updateConfigDraft("learningRate", event.target.value)}
+                              step="0.00001"
+                              type="number"
+                              value={configDraft.learningRate ?? ""}
+                            />
+                          </label>
+                          <label>
+                            Scheduler
+                            <input onChange={(event) => updateConfigDraft("scheduler", event.target.value)} value={configDraft.scheduler ?? ""} />
+                          </label>
+                          <label>
+                            Steps
+                            <input onChange={(event) => updateConfigDraft("steps", event.target.value)} type="number" value={configDraft.steps ?? ""} />
+                          </label>
+                          <label>
+                            Epochs
+                            <input onChange={(event) => updateConfigDraft("epochs", event.target.value)} type="number" value={configDraft.epochs ?? ""} />
+                          </label>
+                          <label>
+                            Repeats
+                            <input onChange={(event) => updateConfigDraft("repeats", event.target.value)} type="number" value={configDraft.repeats ?? ""} />
+                          </label>
+                          <label>
+                            Resolution
+                            <select onChange={(event) => updateConfigDraft("resolution", event.target.value)} value={configDraft.resolution ?? ""}>
+                              {resolutionOptions.length ? null : <option value={configDraft.resolution ?? ""}>{configDraft.resolution ?? ""}</option>}
+                              {resolutionOptions.map((resolution) => (
+                                <option key={resolution} value={resolution}>
+                                  {resolution}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            Buckets
+                            <input
+                              onChange={(event) => updateConfigDraft("bucketStrategy", event.target.value)}
+                              value={configDraft.bucketStrategy ?? ""}
+                            />
+                          </label>
+                          <label>
+                            Precision
+                            <input onChange={(event) => updateConfigDraft("precision", event.target.value)} value={configDraft.precision ?? ""} />
+                          </label>
+                          <label>
+                            Checkpoint cadence
+                            <input
+                              onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
+                              type="number"
+                              value={configDraft.saveEvery ?? ""}
+                            />
+                          </label>
+                          <label>
+                            Sample cadence
+                            <input
+                              onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
+                              type="number"
+                              value={configDraft.sampleEvery ?? ""}
+                            />
+                          </label>
+                        </div>
+                      </details>
+
+                      {configWarnings.length ? (
+                        <div className="training-config-warnings" aria-label="Configuration warnings">
+                          {configWarnings.map((warning) => (
+                            <span key={warning}>{warning}</span>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      <div className="training-config-actions">
+                        <button className="secondary-action" onClick={resetConfigDefaults} type="button">
+                          Reset defaults
+                        </button>
+                        <button className="primary-action" disabled={!canPrepareConfig} onClick={prepareConfig} type="button">
+                          {preparingConfig ? "Preparing" : "Prepare config"}
+                        </button>
+                      </div>
+                      {configSnapshot ? <pre className="training-config-snapshot">{JSON.stringify(configSnapshot, null, 2)}</pre> : null}
+                    </div>
+                  )}
                   <p className="inline-warning">Training submission is disabled until the dry-run plan story wires queue semantics.</p>
                 </>
               ) : null}

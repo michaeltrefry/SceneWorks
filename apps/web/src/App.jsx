@@ -340,6 +340,8 @@ export function App() {
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
   const [presets, setPresets] = useState([]);
+  const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
+  const [trainingTargetsError, setTrainingTargetsError] = useState("");
   const [trainingDatasets, setTrainingDatasets] = useState([]);
   const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useState(null);
   const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
@@ -516,6 +518,7 @@ export function App() {
       setTimelines([]);
       setTimelinesProjectId(null);
       setPresets([]);
+      setTrainingTargetsError("");
       setTrainingDatasets([]);
       setTrainingDatasetsProjectId(null);
       setTrainingDatasetsError("");
@@ -667,14 +670,16 @@ export function App() {
         return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
       }
     };
-    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult] = await Promise.all([
-      fetchInitial("Projects", "/api/v1/projects", []),
-      fetchInitial("Jobs", "/api/v1/jobs", []),
-      fetchInitial("Workers", "/api/v1/workers", []),
-      fetchInitial("Models", "/api/v1/models", []),
-      fetchInitial("LoRAs", "/api/v1/loras", []),
-      fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
-    ]);
+    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult] =
+      await Promise.all([
+        fetchInitial("Projects", "/api/v1/projects", []),
+        fetchInitial("Jobs", "/api/v1/jobs", []),
+        fetchInitial("Workers", "/api/v1/workers", []),
+        fetchInitial("Models", "/api/v1/models", []),
+        fetchInitial("LoRAs", "/api/v1/loras", []),
+        fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
+        fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
+      ]);
     const projectItems = projectsResult.value;
     setProjects(projectItems);
     setProjectsLoaded(true);
@@ -685,7 +690,14 @@ export function App() {
     setModels(modelsResult.value);
     setLoras(lorasResult.value);
     setPresets(presetsResult.value);
-    setError([projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult].map((result) => result.error).filter(Boolean).join("; "));
+    setTrainingTargets(trainingTargetsResult.value);
+    setTrainingTargetsError(trainingTargetsResult.error);
+    setError(
+      [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult]
+        .map((result) => result.error)
+        .filter(Boolean)
+        .join("; "),
+    );
   }
 
   async function refreshAssets(projectId = activeProject?.id) {
@@ -1912,8 +1924,11 @@ export function App() {
             importAsset={(file) => importAsset(file, { throwOnError: true })}
             loadDataset={loadTrainingDataset}
             loadingDatasets={loadingTrainingDatasets}
+            gpuOptions={gpuOptions}
             onPreview={setPreviewAsset}
             onRefreshDatasets={() => refreshTrainingDatasets(activeProject?.id)}
+            trainingTargets={trainingTargets.targets ?? []}
+            trainingTargetsError={trainingTargetsError}
             updateDataset={updateTrainingDataset}
             writeCaptionSidecars={writeTrainingDatasetCaptionSidecars}
           />
