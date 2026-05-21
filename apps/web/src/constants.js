@@ -34,7 +34,7 @@ export const fallbackModels = [
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",
-    capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+    capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
     defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],

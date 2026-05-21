@@ -1199,7 +1199,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Timeline not found");
   });
 
-  it("switches Replace Person to the replacement-capable video model", async () => {
+  it("shows the real Replace Person panel for a replacement-capable model", async () => {
     root = createRoot(container);
     await act(async () => {
       root.render(<App />);
@@ -1215,8 +1215,10 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Wan2.2");
-    expect(container.textContent).toContain("V1 placeholder tracking");
+    // LTX-2.3 is now the primary replacement-capable model, and the placeholder
+    // copy is gone in favor of the real-tracking guidance (sc-1487).
+    expect(container.textContent).toContain("Real person tracking");
+    expect(container.textContent).not.toContain("V1 placeholder tracking");
   });
 
   it("keeps completed Replace Person detections visible in Video Studio", async () => {

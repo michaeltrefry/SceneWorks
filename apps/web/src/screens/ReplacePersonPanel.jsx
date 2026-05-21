@@ -6,6 +6,19 @@ export function findReplacementModel(videoModels) {
   return videoModels.find((item) => item.capabilities?.includes("replace_person")) ?? null;
 }
 
+const MASK_STATE_COPY = {
+  active: "Per-frame segmentation masks generated for tracked frames.",
+  generated: "Per-frame segmentation masks generated for most tracked frames.",
+  degraded: "Box-derived masks (segmentation backend unavailable on the worker).",
+  missing: "No masks yet — re-run tracking or correct the track.",
+  deferred: "Procedural preview track — not real tracking output.",
+};
+
+function maskStateCopy(track) {
+  const state = track?.status?.maskState;
+  return MASK_STATE_COPY[state] ?? "Tracked boxes are stored in the track sidecar.";
+}
+
 export function ReplacePersonPanel({
   createPersonDetectionJob,
   createPersonTrackJob,
@@ -59,8 +72,8 @@ export function ReplacePersonPanel({
       />
 
       <div className="guidance-strip">
-        <strong>V1 placeholder tracking</strong>
-        <span>Candidate boxes, tracking, and replacement output are procedural previews until a model adapter is connected.</span>
+        <strong>Real person tracking</strong>
+        <span>Detection and tracking run on a GPU worker (YOLO + ByteTrack). Replacement uses per-frame segmentation masks when a segmenter is installed and falls back to box masks otherwise.</span>
       </div>
 
       <div className="replace-actions">
@@ -120,7 +133,7 @@ export function ReplacePersonPanel({
       {selectedTrack ? (
         <div className="guidance-strip">
           <strong>{selectedTrack.status?.averageConfidence ? `${Math.round(selectedTrack.status.averageConfidence * 100)}% track` : "Reusable track"}</strong>
-          <span>Box corrections are represented in the track sidecar; mask correction is deferred for the model adapter.</span>
+          <span>{maskStateCopy(selectedTrack)}</span>
         </div>
       ) : null}
 
