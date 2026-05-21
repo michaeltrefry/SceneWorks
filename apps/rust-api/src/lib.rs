@@ -1370,6 +1370,14 @@ async fn create_training_job(
     Path(project_id): Path<String>,
     ApiJson(payload): ApiJson<LoraTrainingRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    // Only dry-run plan validation exists today; refuse to queue a job that would
+    // complete without producing weights (real execution arrives in story 1417).
+    if !payload.dry_run {
+        return Err(ApiError::bad_request(
+            "Real LoRA training is not available yet. Submit with \"dryRun\": true to validate the training plan.",
+        ));
+    }
+
     // Targets come from the Rust-owned registry; the request only names one.
     let registry = builtin_training_targets();
     let target = registry
@@ -7852,6 +7860,54 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(error["detail"], "Training dataset not found");
+    }
+
+    #[tokio::test]
+    async fn create_training_job_rejects_non_dry_run_until_execution_exists() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let target_id = registry["targets"][0]["id"].as_str().unwrap().to_owned();
+
+        // dryRun:false must be refused before any job is queued — real training
+        // execution does not exist yet, so a "completed" job would be a false success.
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": "ds_missing",
+                "config": registry["targets"][0]["defaults"].clone(),
+                "outputName": "Aurora",
+                "dryRun": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Real LoRA training is not available yet"));
+
+        let (status, queued) = request(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs?status=queued",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queued.as_array().expect("jobs list").len(), 0);
     }
 
     #[tokio::test]

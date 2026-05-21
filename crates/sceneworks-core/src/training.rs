@@ -218,12 +218,17 @@ pub struct LoraTrainingRequest {
     pub config: TrainingConfig,
     /// Human-facing name for the resulting LoRA.
     pub output_name: String,
-    /// When true, the queue produces a [`TrainingPlan`] and stops short of
-    /// running the kernel (story 1416).
-    #[serde(default)]
+    /// When true, the queue resolves a [`TrainingPlan`] and stops short of
+    /// running the kernel. Defaults to true: dry-run is the only mode supported
+    /// today, so the API rejects `false` until real execution exists.
+    #[serde(default = "default_dry_run")]
     pub dry_run: bool,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+fn default_dry_run() -> bool {
+    true
 }
 
 /// The fully normalized plan Rust hands to the Python execution kernel.

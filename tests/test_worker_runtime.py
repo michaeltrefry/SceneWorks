@@ -950,6 +950,24 @@ def test_lora_train_dry_run_fails_on_unsupported_plan_version(monkeypatch):
     assert "version" in terminal["error"].lower()
 
 
+def test_lora_train_refuses_non_dry_run_job(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    api = _DryRunApi()
+    # Defense-in-depth: even if a non-dry-run job reaches the worker, it must not
+    # report success without producing weights (real execution is not implemented).
+    job = {
+        "id": "job-train-1",
+        "type": "lora_train",
+        "payload": {"dryRun": False, "plan": {"planVersion": 1, "dataset": {"items": []}}},
+    }
+
+    run_lora_train_dry_run_job(api, SimpleNamespace(worker_id="worker-1", gpu_id="cpu"), job)
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "failed"
+    assert "not available" in terminal["error"].lower()
+
+
 def test_main_check_exits_without_api_loop(monkeypatch):
     calls = []
     monkeypatch.setattr("scene_worker.runtime.run_check", lambda settings: calls.append(settings.worker_id))

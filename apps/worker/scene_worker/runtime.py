@@ -576,6 +576,12 @@ def run_lora_train_dry_run_job(api: ApiClient, settings: WorkerSettings, job: di
     try:
         progress("preparing", "preparing", 0.1, "Validating training plan.")
         payload = job.get("payload") or {}
+        # Real training execution does not exist yet; never let a non-dry-run job
+        # report success without producing weights (the API also rejects this).
+        if not payload.get("dryRun", True):
+            raise ValueError(
+                "Real LoRA training execution is not available yet; this worker only validates dry-run plans."
+            )
         plan = payload.get("plan")
         if not isinstance(plan, dict):
             raise ValueError("Training job payload is missing a resolved plan.")
