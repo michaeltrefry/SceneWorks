@@ -21,11 +21,13 @@ use tauri_plugin_shell::ShellExt;
 const SETUP_VERSION: &str = "1";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Process handles + run guard shared across the app.
+/// Process handles + run guards shared across the app.
 #[derive(Default)]
 pub struct Managed {
     pub api: Mutex<Option<CommandChild>>,
+    pub worker: Mutex<Option<CommandChild>>,
     running: AtomicBool,
+    pub shutting_down: AtomicBool,
 }
 
 #[derive(Clone, Serialize)]
@@ -140,6 +142,42 @@ fn requirements_path(app: &AppHandle) -> PathBuf {
         .join("..")
         .join("worker")
         .join("requirements.txt")
+}
+
+fn data_dir() -> PathBuf {
+    app_support_dir().join("data")
+}
+
+fn config_dir() -> PathBuf {
+    app_support_dir().join("config")
+}
+
+/// Directory containing the Python `scene_worker` package + requirements: the
+/// bundled resource in a packaged app, the repo copy during development.
+fn worker_src_dir(app: &AppHandle) -> PathBuf {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("python-src");
+        if bundled.join("scene_worker").exists() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("worker")
+}
+
+fn append_log(path: &Path, line: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+        let _ = file.flush();
+    }
 }
 
 fn reserve_free_port() -> std::io::Result<u16> {
@@ -315,18 +353,20 @@ fn spawn_api(app: &AppHandle, port: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// Health-gate the window on a background thread: navigate to the API once it
-/// answers, or show an error after the timeout.
+/// Health-gate the window on a background thread: once the API answers, navigate
+/// to it and start the Python worker; show an error after the timeout.
 fn gate_window(app: AppHandle, port: u16) {
     let base_url = format!("http://127.0.0.1:{port}");
     std::thread::spawn(move || {
         let deadline = Instant::now() + HEALTH_TIMEOUT;
         loop {
             if health_ok(port) {
-                if let (Some(window), Ok(url)) = (app.get_webview_window("main"), base_url.parse())
-                {
-                    let _ = window.navigate(url);
+                if let Ok(url) = base_url.parse() {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.navigate(url);
+                    }
                 }
+                supervise_worker(app, port);
                 return;
             }
             if Instant::now() >= deadline {
@@ -336,6 +376,162 @@ fn gate_window(app: AppHandle, port: u16) {
             std::thread::sleep(Duration::from_millis(300));
         }
     });
+}
+
+/// Spawn and supervise the Python inference worker on a background thread,
+/// restarting it with exponential backoff if it dies unexpectedly while the app
+/// is open. Output is appended to worker.log.
+fn supervise_worker(app: AppHandle, api_port: u16) {
+    std::thread::spawn(move || {
+        let log_path = logs_dir().join("worker.log");
+        let python = venv_python(&venv_dir());
+        let src = worker_src_dir(&app);
+        let api_url = format!("http://127.0.0.1:{api_port}");
+        let mut backoff = 1u64;
+        loop {
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            if !python.exists() {
+                append_log(
+                    &log_path,
+                    "[desktop] cannot start worker: venv python missing\n",
+                );
+                return;
+            }
+            let spawned = app
+                .shell()
+                .command(python.to_string_lossy().to_string())
+                .args(["-m", "scene_worker"])
+                .current_dir(&src)
+                .env("SCENEWORKS_API_URL", &api_url)
+                .env(
+                    "SCENEWORKS_DATA_DIR",
+                    data_dir().to_string_lossy().to_string(),
+                )
+                .env(
+                    "SCENEWORKS_CONFIG_DIR",
+                    config_dir().to_string_lossy().to_string(),
+                )
+                .spawn();
+            let (mut events, child) = match spawned {
+                Ok(pair) => pair,
+                Err(error) => {
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] worker spawn failed: {error}\n"),
+                    );
+                    std::thread::sleep(Duration::from_secs(backoff));
+                    backoff = (backoff * 2).min(30);
+                    continue;
+                }
+            };
+            app.state::<Managed>()
+                .worker
+                .lock()
+                .expect("worker lock")
+                .replace(child);
+            let started = Instant::now();
+            loop {
+                match tauri::async_runtime::block_on(events.recv()) {
+                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
+                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
+                    }
+                    Some(CommandEvent::Terminated(payload)) => {
+                        append_log(
+                            &log_path,
+                            &format!(
+                                "[desktop] worker terminated: code={:?} signal={:?}\n",
+                                payload.code, payload.signal
+                            ),
+                        );
+                        break;
+                    }
+                    Some(CommandEvent::Error(error)) => {
+                        append_log(&log_path, &format!("[desktop] worker error: {error}\n"));
+                        break;
+                    }
+                    None => break,
+                    _ => {}
+                }
+            }
+            let _ = app
+                .state::<Managed>()
+                .worker
+                .lock()
+                .expect("worker lock")
+                .take();
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            // Reset backoff after a stable run; otherwise grow it to avoid a
+            // tight crash loop.
+            if started.elapsed() > Duration::from_secs(20) {
+                backoff = 1;
+            }
+            append_log(
+                &log_path,
+                &format!("[desktop] restarting worker in {backoff}s\n"),
+            );
+            std::thread::sleep(Duration::from_secs(backoff));
+            backoff = (backoff * 2).min(30);
+        }
+    });
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+}
+
+/// Begin graceful shutdown: stop the Python worker then the API sidecar. On Unix
+/// this sends SIGTERM and waits up to the grace period before force-killing; on
+/// Windows it force-kills (CTRL_BREAK handling is a Windows-session refinement).
+/// Returns true if shutdown was initiated (caller should prevent the immediate
+/// exit), false if it was already in progress.
+pub fn begin_shutdown(app: &AppHandle) -> bool {
+    let managed = app.state::<Managed>();
+    if managed.shutting_down.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let worker = managed.worker.lock().expect("worker lock").take();
+    let api_child = managed.api.lock().expect("api lock").take();
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        #[cfg(unix)]
+        {
+            let grace = std::env::var("SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(10)
+                .clamp(1, 30);
+            let worker_pid = worker.as_ref().map(CommandChild::pid);
+            let api_pid = api_child.as_ref().map(CommandChild::pid);
+            // SIGTERM the worker first, then the API.
+            for pid in [worker_pid, api_pid].into_iter().flatten() {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
+            let deadline = Instant::now() + Duration::from_secs(grace);
+            while Instant::now() < deadline {
+                if ![worker_pid, api_pid].into_iter().flatten().any(pid_alive) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        // Force-kill anything still alive.
+        if let Some(child) = worker {
+            let _ = child.kill();
+        }
+        if let Some(child) = api_child {
+            let _ = child.kill();
+        }
+        handle.exit(0);
+    });
+    true
 }
 
 async fn run_startup(app: AppHandle) {

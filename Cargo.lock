@@ -3043,6 +3043,7 @@ dependencies = [
 name = "sceneworks-desktop"
 version = "0.2.0"
 dependencies = [
+ "nix",
  "serde",
  "tauri",
  "tauri-build",

@@ -3,7 +3,7 @@
 
 mod setup;
 
-use tauri::{Manager, RunEvent};
+use tauri::RunEvent;
 
 fn main() {
     let app = tauri::Builder::default()
@@ -14,15 +14,11 @@ fn main() {
         .expect("error while building the SceneWorks desktop shell");
 
     app.run(|app_handle, event| {
-        if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-            if let Some(child) = app_handle
-                .state::<setup::Managed>()
-                .api
-                .lock()
-                .expect("api lock")
-                .take()
-            {
-                let _ = child.kill();
+        // Stop the Python worker then the API sidecar gracefully, holding the
+        // app open until they exit (or the grace period elapses).
+        if let RunEvent::ExitRequested { api, .. } = event {
+            if setup::begin_shutdown(app_handle) {
+                api.prevent_exit();
             }
         }
     });
