@@ -2,7 +2,7 @@
 // Builds the sceneworks-rust-api binary (with the embedded web UI) and stages it
 // as a Tauri sidecar named for the host target triple. Wired as the
 // tauri.conf.json `beforeBuildCommand` so `tauri build` is self-contained.
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { copyFileSync, mkdirSync, chmodSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
