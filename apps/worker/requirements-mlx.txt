@@ -1,0 +1,12 @@
+# Apple Silicon (MPS) MLX video inference deps for the Mac Hybrid path
+# (SCENEWORKS_VIDEO_ADAPTER=mlx). macOS-only: installed by the desktop venv
+# bootstrap on darwin (apps/desktop/src/setup.rs). Never installed on Windows /
+# Linux / Docker, which keep the PyTorch worker unchanged.
+#
+# Validated 2026-05-21 on M-series (137 GB): mlx 0.31, mlx-video-with-audio 0.1.36,
+# mlx-vlm 0.5. The package is a native-MLX reimplementation of LTX-2.3 and Wan2.2.
+# Pulls transitively: numpy, safetensors, huggingface_hub, transformers[tokenizers],
+# opencv-python, Pillow, soundfile (most already pinned in requirements.txt).
+mlx-video-with-audio>=0.1.36,<0.2
+mlx>=0.31,<1
+mlx-vlm>=0.5,<1

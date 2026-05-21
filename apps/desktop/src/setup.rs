@@ -17,7 +17,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 /// Bump to force a re-provision even if requirements.txt is unchanged.
-const SETUP_VERSION: &str = "2";
+const SETUP_VERSION: &str = "3";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Process handles + run guards shared across the app.
@@ -159,6 +159,24 @@ fn requirements_ltx_path(app: &AppHandle) -> PathBuf {
         .join("..")
         .join("worker")
         .join("requirements-ltx.txt")
+}
+
+/// requirements-mlx.txt location (Apple Silicon MLX video inference deps): the
+/// bundled resource in a packaged app, or the repo copy during development.
+/// Optional and macOS-only — installed by `provision_venv` only on darwin so the
+/// Windows/Linux PyTorch worker is unaffected.
+#[cfg(target_os = "macos")]
+fn requirements_mlx_path(app: &AppHandle) -> PathBuf {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("python-src").join("requirements-mlx.txt");
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("worker")
+        .join("requirements-mlx.txt")
 }
 
 fn data_dir() -> PathBuf {
@@ -376,8 +394,18 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     // torchaudio). Optional: absent in older worker checkouts.
     let requirements_ltx = requirements_ltx_path(app);
     let requirements_ltx_body = std::fs::read_to_string(&requirements_ltx).unwrap_or_default();
+    // Apple Silicon MLX video inference deps — macOS-only; empty body elsewhere so
+    // the marker stays stable and the Windows/Linux PyTorch worker is untouched.
+    #[cfg(target_os = "macos")]
+    let requirements_mlx = requirements_mlx_path(app);
+    #[cfg(target_os = "macos")]
+    let requirements_mlx_body = std::fs::read_to_string(&requirements_mlx).unwrap_or_default();
+    #[cfg(not(target_os = "macos"))]
+    let requirements_mlx_body = String::new();
     let marker = marker_path();
-    let expected = format!("v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}");
+    let expected = format!(
+        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# mlx\n{requirements_mlx_body}"
+    );
 
     if python.exists() {
         if let Ok(found) = std::fs::read_to_string(&marker) {
@@ -416,6 +444,12 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let mut requirement_files = vec![requirements.clone()];
     if requirements_ltx.exists() {
         requirement_files.push(requirements_ltx.clone());
+    }
+    // MLX deps (Apple Silicon only): the native-MLX LTX/Wan video path. Resolved
+    // in the same uv pass so transformers/numpy stay on one ABI-compatible set.
+    #[cfg(target_os = "macos")]
+    if requirements_mlx.exists() {
+        requirement_files.push(requirements_mlx.clone());
     }
     run_uv(app, pip_install_args(&python, &requirement_files)).await?;
 
