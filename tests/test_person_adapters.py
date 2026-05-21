@@ -26,6 +26,13 @@ from scene_worker.person_adapters import (
     select_target_index,
     xyxy_to_normalized,
 )
+from scene_worker.video_adapters import (
+    LtxPipelinesResources,
+    LtxPipelinesVideoAdapter,
+    build_video_asset_sidecar,
+    person_track_masks,
+    video_request_from_job,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -384,3 +391,208 @@ def test_load_track_masks_prefers_segmentation_then_degrades(tmp_path):
     masks, mode = pa.load_track_masks(project_path, track_no_masks, 32, 32, 1)
     assert mode == "degraded_box"
     assert masks[0].getbbox() is not None
+
+
+# ---------------------------------------------------------------------------
+# Active LTX masked-control replacement tests (sc-1483 / sc-1486)
+# ---------------------------------------------------------------------------
+
+
+def _write_person_track(project_path: Path, track_id: str, *, with_masks: bool) -> None:
+    masks_dir = project_path / "person-tracks" / track_id / "masks"
+    frames = []
+    for index in range(3):
+        box = {"x": 0.2 + index * 0.05, "y": 0.15, "width": 0.2, "height": 0.6}
+        mask_rel = None
+        if with_masks:
+            masks_dir.mkdir(parents=True, exist_ok=True)
+            mask_rel = pa.mask_relative_path(track_id, index + 1)
+            mask_img = Image.new("L", (CLIP_W, CLIP_H), 0)
+            ImageDraw.Draw(mask_img).ellipse((200, 100, 400, 520), fill=255)
+            mask_img.save(project_path / mask_rel)
+        frames.append({"timestamp": float(index), "box": box, "confidence": 0.9, "detected": True, "mask": mask_rel})
+    track = {
+        "schemaVersion": 1,
+        "id": track_id,
+        "projectId": "proj_1",
+        "name": "Hero",
+        "sourceAssetId": "asset_source_clip",
+        "selectedDetection": {"id": "person_1", "box": frames[0]["box"], "confidence": 0.9},
+        "frames": frames,
+        "status": {
+            "maskState": "active" if with_masks else "degraded",
+            "personTrackingActive": True,
+            "averageConfidence": 0.9,
+        },
+    }
+    write_json(project_path / "person-tracks" / f"{track_id}.sceneworks.person-track.json", track)
+
+
+def _write_character(project_path: Path, character_id: str) -> None:
+    ref_id = "asset_char_ref_1"
+    ref_rel = "assets/images/char_ref.png"
+    (project_path / "assets" / "images").mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (512, 512), (200, 120, 90)).save(project_path / ref_rel)
+    ref_asset = {
+        "schemaVersion": 1,
+        "id": ref_id,
+        "projectId": "proj_1",
+        "type": "image",
+        "displayName": "Character ref",
+        "createdAt": "2026-05-21T00:00:00Z",
+        "file": {"path": ref_rel, "mimeType": "image/png", "width": 512, "height": 512, "duration": None, "fps": None},
+        "status": {"favorite": False, "rating": 0, "rejected": False, "trashed": False},
+        "recipe": {},
+        "lineage": {},
+    }
+    write_json((project_path / ref_rel).with_suffix(".sceneworks.json"), ref_asset)
+    index_asset(project_path, ref_asset)
+    character = {
+        "schemaVersion": 1,
+        "id": character_id,
+        "name": "Mira",
+        "references": [{"assetId": ref_id, "approved": True}],
+        "looks": [],
+    }
+    write_json(project_path / "characters" / f"{character_id}.sceneworks.character.json", character)
+
+
+def _replacement_job(settings, *, mock: bool = False) -> dict:
+    advanced = {"mockNativeInference": True} if mock else {}
+    return {
+        "id": "job_replace_1",
+        "payload": {
+            "projectId": "proj_1",
+            "mode": "replace_person",
+            "model": "ltx_2_3",
+            "prompt": "replace the hero",
+            "duration": 1,
+            "fps": 8,
+            "width": 512,
+            "height": 320,
+            "sourceClipAssetId": settings.source_asset_id,
+            "personTrackId": "track_repl",
+            "characterId": "char_1",
+            "replacementMode": "full_person_keep_outfit",
+            "advanced": advanced,
+        },
+    }
+
+
+def _seed_replacement_project(tmp_path, *, with_masks: bool = True) -> SimpleNamespace:
+    settings = _make_project(tmp_path, _synthetic_clip(frames=8, present=True))
+    project_path = Path(settings.data_dir) / "project"
+    _write_person_track(project_path, "track_repl", with_masks=with_masks)
+    _write_character(project_path, "char_1")
+    return settings
+
+
+def test_person_track_masks_prefers_stored_segmentation(tmp_path):
+    settings = _seed_replacement_project(tmp_path, with_masks=True)
+    project_path = Path(settings.data_dir) / "project"
+    masks = person_track_masks(project_path, "track_repl", 256, 256, 3)
+    # Stored ellipse masks are non-rectangular; a box fallback would fill its bbox.
+    mask = masks[0]
+    nonzero = sum(mask.histogram()[1:])
+    bbox = mask.getbbox()
+    assert bbox is not None
+    assert nonzero < (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) * 0.95
+
+
+def test_build_sidecar_marks_replacement_inactive_without_status(tmp_path):
+    settings = _seed_replacement_project(tmp_path)
+    request = video_request_from_job(_replacement_job(settings))
+    asset = build_video_asset_sidecar(
+        asset_id="asset_x",
+        project_id="proj_1",
+        generation_set_id="gen_x",
+        request=request,
+        job_id="job_replace_1",
+        media_rel="assets/videos/out.mp4",
+        created_at="2026-05-21T00:00:00Z",
+        seed=1,
+        target={"family": "ltx-video"},
+        raw_settings={},
+        adapter_id="ltx_pipelines",
+        mime_type="video/mp4",
+    )
+    assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
+
+
+def test_ltx_replacement_control_builds_segmentation_package(tmp_path):
+    settings = _seed_replacement_project(tmp_path, with_masks=True)
+    project_path = Path(settings.data_dir) / "project"
+    adapter = LtxPipelinesVideoAdapter()
+    adapter._settings = settings
+    request = video_request_from_job(_replacement_job(settings))
+    clip_path = project_path / "cache" / "control.webp"
+    clip_path.parent.mkdir(parents=True, exist_ok=True)
+    control = adapter._ltx_replacement_control(project_path, request, 9, clip_path)
+    assert control.mask_mode == "segmentation"
+    assert control.character_reference_count == 1
+    assert control.person_tracking_active is True
+    assert clip_path.exists()
+
+
+def test_ltx_replace_person_active_run_marks_replacement_active(tmp_path, monkeypatch):
+    settings = _seed_replacement_project(tmp_path, with_masks=True)
+    project_path = Path(settings.data_dir) / "project"
+    adapter = LtxPipelinesVideoAdapter()
+    adapter._settings = settings
+    adapter._resources_by_model["ltx_2_3"] = LtxPipelinesResources(
+        checkpoint_path=Path("ckpt"),
+        spatial_upsampler_path=Path("ups"),
+        distilled_lora_path=Path("lora"),
+        gemma_root=Path("gemma"),
+    )
+    monkeypatch.setattr(adapter, "_load_ltx_pipeline", lambda request, resources: object())
+
+    def fake_encode(*, video, fps, audio, output_path, video_chunks_number):
+        Path(output_path).write_bytes(b"fake-mp4")
+
+    monkeypatch.setattr(
+        adapter,
+        "_run_ltx_pipeline",
+        lambda **_kwargs: (None, None, 1, fake_encode),
+    )
+
+    job = _replacement_job(settings)
+    request = video_request_from_job(job)
+    result = adapter._run_real_ltx_video(
+        settings=settings,
+        job=job,
+        request=request,
+        progress=lambda *_a, **_k: None,
+        cancel_requested=lambda: False,
+    )
+    normalized = result["assets"][0]["recipe"]["normalizedSettings"]
+    assert normalized["replacementActive"] is True
+    assert normalized["maskMode"] == "segmentation"
+    assert normalized["replacementAdapter"] == "ltx_pipelines"
+    assert normalized["personTrackId"] == "track_repl"
+
+
+def test_ltx_replace_person_mock_run_stays_inactive(tmp_path, monkeypatch):
+    settings = _seed_replacement_project(tmp_path, with_masks=True)
+    adapter = LtxPipelinesVideoAdapter()
+    adapter._settings = settings
+    job = _replacement_job(settings, mock=True)
+    request = video_request_from_job(job)
+    result = adapter.run(
+        settings=settings,
+        job=job,
+        request=request,
+        progress=lambda *_a, **_k: None,
+        cancel_requested=lambda: False,
+    )
+    asset = result["assets"][0]
+    assert asset["recipe"]["normalizedSettings"]["replacementActive"] is False
+
+
+def test_ensure_models_replace_person_requires_track_and_character(tmp_path):
+    settings = _make_project(tmp_path, _synthetic_clip(frames=4, present=True))
+    adapter = LtxPipelinesVideoAdapter()
+    adapter._settings = settings
+    request = video_request_from_job(_replacement_job(settings))
+    with pytest.raises(RuntimeError, match="saved person track"):
+        adapter.ensure_models(request)

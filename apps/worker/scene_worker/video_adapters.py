@@ -77,7 +77,7 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "adapter": "ltx_video",
         "repo": "Lightricks/LTX-2.3",
         "fallbackRepo": "Lightricks/LTX-Video",
-        "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+        "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "steps": {"fast": 6, "balanced": 8, "best": 20},
@@ -161,6 +161,25 @@ class LtxPipelinesResources:
     distilled_lora_path: Path
     gemma_root: Path
     temporal_upsampler_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class LtxReplacementControl:
+    """The shared source/control/mask package the native LTX replacement path
+    consumes (sc-1483). It is the model-agnostic product object the epic calls
+    for: source frames + per-frame person masks + masking strength, plus the
+    masked control clip built from them. ``mask_mode`` is ``"segmentation"`` when
+    real masks were loaded or ``"degraded_box"`` for the explicit box fallback.
+    """
+
+    track_id: str
+    masked_clip_path: Path
+    mask_mode: str
+    mask_state: str
+    person_tracking_active: bool
+    masking_strength: float
+    frame_count: int
+    character_reference_count: int
 
 
 def install_ltx_pipelines_multigpu_compat() -> None:
@@ -361,7 +380,7 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
 class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
     id = "ltx_pipelines"
 
-    _supported_modes = {"text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge"}
+    _supported_modes = {"text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"}
 
     # ltx-core builds each stage (text encoder, transformer, upscaler, VAE) inside
     # a gpu_model() context that frees it before the next stage, so the components
@@ -407,6 +426,8 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
         validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
         self._ltx_lora_specs(request)
+        if request.mode == "replace_person" and not self._mock_inference_enabled(request):
+            self._validate_replacement_inputs(request)
         if self._uses_ic_lora_pipeline(request) and not self._has_ic_lora(request) and not self._mock_inference_enabled(request):
             raise RuntimeError(
                 "Native LTX IC-LoRA video conditioning requires at least one installed LTX-compatible LoRA. "
@@ -605,8 +626,18 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         self._temporary_outputs.setdefault(job["id"], []).append(temp_path)
 
         progress("preparing", "validating_inputs", 0.2, "Validating native LTX-2.3 inputs.")
-        conditioning_images = self._ltx_conditioning_images(project_path, request, num_frames)
-        video_conditioning = self._ltx_video_conditioning(project_path, request)
+        replacement_control: LtxReplacementControl | None = None
+        replacement_status: dict[str, Any] | None = None
+        if request.mode == "replace_person":
+            control_clip = media_path.with_suffix(".control.webp")
+            self._temporary_outputs.setdefault(job["id"], []).append(control_clip)
+            progress("preparing", "building_control", 0.24, "Building masked control clip from person track.")
+            replacement_control = self._ltx_replacement_control(project_path, request, num_frames, control_clip)
+            conditioning_images = []
+            video_conditioning = [(str(replacement_control.masked_clip_path), replacement_control.masking_strength)]
+        else:
+            conditioning_images = self._ltx_conditioning_images(project_path, request, num_frames)
+            video_conditioning = self._ltx_video_conditioning(project_path, request)
         if cancel_requested():
             raise InterruptedError("Video generation canceled before native LTX pipeline load.")
 
@@ -652,6 +683,22 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             )
         temp_path.replace(media_path)
 
+        if replacement_control is not None:
+            # replacementActive is true ONLY here: the masked-control package was
+            # built from a real person track and run through the native LTX path.
+            replacement_status = {
+                "personDetectionActive": True,
+                "personTrackingActive": replacement_control.person_tracking_active,
+                "replacementActive": True,
+                "replacementAdapter": self.id,
+                "maskMode": replacement_control.mask_mode,
+                "maskState": replacement_control.mask_state,
+                "maskingStrength": replacement_control.masking_strength,
+                "personTrackId": replacement_control.track_id,
+                "characterReferenceCount": replacement_control.character_reference_count,
+                "controlFrameCount": replacement_control.frame_count,
+            }
+
         generation_set = {
             "schemaVersion": 1,
             "id": generation_set_id,
@@ -677,6 +724,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             adapter_id=self.id,
             mime_type="video/mp4",
             raw_settings=self.map_settings(request, target),
+            replacement_status=replacement_status,
         )
         write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
         write_json(media_path.with_suffix(".sceneworks.json"), asset)
@@ -749,6 +797,78 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 raise RuntimeError("Video Bridge requires a readable right-side source clip.")
             conditionings.append((str(right_path), self._advanced_float(request, "bridgeRightVideoConditioningStrength", 1.0)))
         return conditionings
+
+    def _validate_replacement_inputs(self, request: VideoRequest) -> None:
+        """Fail clearly when the required Replace Person inputs are missing,
+        before loading the LTX pipeline."""
+        settings = self._settings or WorkerSettings()
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+        if source_asset_media_path(project_path, request.source_clip_asset_id) is None:
+            raise RuntimeError("Replace Person requires a readable source clip.")
+        track = read_person_track(project_path, request.person_track_id)
+        if not track:
+            raise RuntimeError(
+                "Replace Person requires a saved person track. Run detection and tracking on the source clip first."
+            )
+        if not track.get("frames") and not track.get("selectedDetection", {}).get("box"):
+            raise RuntimeError("The selected person track has no usable boxes or masks.")
+        if not character_reference_images(
+            project_path, request.character_id, request.character_look_id, request.width, request.height
+        ):
+            raise RuntimeError("Replace Person requires at least one approved character reference image.")
+
+    def _ltx_replacement_control(
+        self,
+        project_path: Path,
+        request: VideoRequest,
+        num_frames: int,
+        clip_path: Path,
+    ) -> LtxReplacementControl:
+        """Assemble the source/control/mask package and write a masked control
+        clip that bakes the person masks into the source frames (the masked
+        region is neutralized by ``maskingStrength`` so the IC-LoRA path
+        regenerates it). This is the SceneWorks-native equivalent of Wan2GP's
+        masked control-video injection."""
+        from .person_adapters import load_track_masks  # local: avoids an import cycle
+
+        track = read_person_track(project_path, request.person_track_id)
+        if not track:
+            raise RuntimeError("Replace Person requires a saved person track.")
+        source_frames = load_source_video_frames(
+            project_path, request.source_clip_asset_id, request.width, request.height, num_frames
+        )
+        masks, mask_mode = load_track_masks(project_path, track, request.width, request.height, len(source_frames))
+        references = character_reference_images(
+            project_path, request.character_id, request.character_look_id, request.width, request.height
+        )
+        if not references:
+            raise RuntimeError("Replace Person requires at least one approved character reference image.")
+        masking_strength = self._advanced_float(request, "maskingStrength", 1.0)
+        masked_frames = [
+            self._apply_replacement_mask(frame, mask, masking_strength)
+            for frame, mask in zip(source_frames, masks)
+        ]
+        save_animated_preview(masked_frames, clip_path, request.duration)
+        status = track.get("status", {}) if isinstance(track.get("status"), dict) else {}
+        return LtxReplacementControl(
+            track_id=str(track.get("id") or request.person_track_id),
+            masked_clip_path=clip_path,
+            mask_mode=mask_mode,
+            mask_state=str(status.get("maskState", "missing")),
+            person_tracking_active=bool(status.get("personTrackingActive", False)),
+            masking_strength=masking_strength,
+            frame_count=len(masked_frames),
+            character_reference_count=len(references),
+        )
+
+    def _apply_replacement_mask(self, frame: Image.Image, mask: Image.Image, strength: float) -> Image.Image:
+        """Blend the masked person region toward neutral gray by ``strength`` so
+        the control video preserves the background and clears the replacement
+        region for regeneration."""
+        strength = max(0.0, min(1.0, strength))
+        neutral = Image.new("RGB", frame.size, (118, 118, 118))
+        gate = mask.convert("L").resize(frame.size).point(lambda value: int(value * strength))
+        return Image.composite(neutral, frame.convert("RGB"), gate)
 
     def _load_ltx_pipeline(self, request: VideoRequest, resources: LtxPipelinesResources) -> Any:
         key = self._pipeline_key(request, resources)
@@ -889,7 +1009,9 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
     def _uses_ic_lora_pipeline(self, request: VideoRequest) -> bool:
         if bool(request.advanced.get("useIcLoraPipeline", False)):
             return True
-        if request.mode in {"extend_clip", "video_bridge"}:
+        # Replace Person rides the IC-LoRA video-conditioning path: the masked
+        # control clip is injected as video_conditioning during denoising.
+        if request.mode in {"extend_clip", "video_bridge", "replace_person"}:
             return True
         return request.mode in {"image_to_video", "first_last_frame"} and self._has_ic_lora(request)
 
@@ -2207,37 +2329,20 @@ def ltx_conditions(
 
 
 def person_track_masks(project_path: Path, track_id: str | None, width: int, height: int, count: int) -> list[Image.Image]:
-    track = read_person_track(project_path, track_id)
-    boxes = []
-    if track:
-        boxes = [frame.get("box") for frame in track.get("frames", []) if isinstance(frame, dict) and isinstance(frame.get("box"), dict)]
-        selected_box = track.get("selectedDetection", {}).get("box")
-        if not boxes and isinstance(selected_box, dict):
-            boxes = [selected_box]
-    if not boxes:
-        raise RuntimeError(f"Person track has no usable boxes: {track_id}.")
+    """Load per-frame replacement masks for a track, preferring stored
+    segmentation masks and only falling back to rectangular box masks in the
+    explicit degraded path (sc-1482)."""
+    from .person_adapters import load_track_masks  # local: avoids an import cycle
 
-    masks = []
-    for index in range(count):
-        box = boxes[min(len(boxes) - 1, round(index * (len(boxes) - 1) / max(1, count - 1)))]
-        mask = Image.new("L", (width, height), 0)
-        draw = ImageDraw.Draw(mask)
-        left = int(safe_float(box.get("x"), 0, 0, 1) * width)
-        top = int(safe_float(box.get("y"), 0, 0, 1) * height)
-        right = int((safe_float(box.get("x"), 0, 0, 1) + safe_float(box.get("width"), 0, 0, 1)) * width)
-        bottom = int((safe_float(box.get("y"), 0, 0, 1) + safe_float(box.get("height"), 0, 0, 1)) * height)
-        padding_x = max(8, int(width * 0.03))
-        padding_y = max(8, int(height * 0.03))
-        draw.rectangle(
-            (
-                max(0, left - padding_x),
-                max(0, top - padding_y),
-                min(width, right + padding_x),
-                min(height, bottom + padding_y),
-            ),
-            fill=255,
-        )
-        masks.append(mask)
+    track = read_person_track(project_path, track_id)
+    if not track:
+        raise RuntimeError(f"Person track not found: {track_id}.")
+    if not track.get("frames"):
+        selected_box = track.get("selectedDetection", {}).get("box")
+        if not isinstance(selected_box, dict):
+            raise RuntimeError(f"Person track has no usable boxes: {track_id}.")
+        track = {**track, "frames": [{"box": selected_box, "mask": None}]}
+    masks, _mode = load_track_masks(project_path, track, width, height, count)
     return masks
 
 
@@ -2325,6 +2430,7 @@ def build_video_asset_sidecar(
     raw_settings: dict[str, Any],
     adapter_id: str,
     mime_type: str,
+    replacement_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     parents = [
         asset_id
@@ -2355,13 +2461,18 @@ def build_video_asset_sidecar(
         "timelineContextRef": "lineage.timeline",
     }
     if request.mode == "replace_person":
-        normalized_settings.update(
-            {
-                "personDetectionActive": False,
-                "personTrackingActive": False,
-                "replacementActive": False,
-            }
-        )
+        # Honest defaults: a replacement asset only claims active detection/
+        # tracking/replacement when the adapter actually ran a real masked-control
+        # path and reported it via replacement_status (sc-1483/sc-1487). Adapters
+        # that did not (mocked previews, not-yet-upgraded paths) leave these false.
+        replacement_settings = {
+            "personDetectionActive": False,
+            "personTrackingActive": False,
+            "replacementActive": False,
+        }
+        if replacement_status:
+            replacement_settings.update(replacement_status)
+        normalized_settings.update(replacement_settings)
     return {
         "schemaVersion": 1,
         "id": asset_id,

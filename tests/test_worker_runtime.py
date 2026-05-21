@@ -2383,7 +2383,7 @@ def test_native_ltx_adapter_rejects_unsupported_modes():
             "id": "job-1",
             "payload": {
                 "projectId": "project-1",
-                "mode": "replace_person",
+                "mode": "edit_image",
                 "prompt": "city",
                 "model": "ltx_2_3",
                 "advanced": {},
