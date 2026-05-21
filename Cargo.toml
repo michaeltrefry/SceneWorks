@@ -5,6 +5,7 @@ members = [
     "apps/rust-api",
     "apps/rust-worker",
     "crates/sceneworks-core",
+    "crates/sceneworks-worker",
 ]
 
 [workspace.package]

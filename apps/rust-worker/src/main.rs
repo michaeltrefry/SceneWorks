@@ -1,4 +1,4 @@
 #[tokio::main]
-async fn main() -> Result<(), sceneworks_rust_worker::WorkerError> {
-    sceneworks_rust_worker::run().await
+async fn main() -> Result<(), sceneworks_worker::WorkerError> {
+    sceneworks_worker::run().await
 }

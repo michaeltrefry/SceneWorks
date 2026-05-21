@@ -1162,6 +1162,7 @@ dependencies = [
  "parking_lot",
  "reqwest",
  "sceneworks-core",
+ "sceneworks-worker",
  "serde",
  "serde_json",
  "tempfile",
@@ -1176,6 +1177,14 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-rust-worker"
+version = "0.2.0"
+dependencies = [
+ "sceneworks-worker",
+ "tokio",
+]
+
+[[package]]
+name = "sceneworks-worker"
 version = "0.2.0"
 dependencies = [
  "axum",

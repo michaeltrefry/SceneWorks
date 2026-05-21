@@ -5,23 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-[dependencies]
-futures-util = "0.3"
-glob = "0.3"
-nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-sceneworks-core = { path = "../../crates/sceneworks-core" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-tempfile = "3.13"
-tokio = { version = "1.40", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "time"] }
-time = { version = "0.3", features = ["formatting"] }
-uuid = { version = "1.11", features = ["v4"] }
+# Thin binary wrapper around the sceneworks-worker library crate. All job
+# logic lives in crates/sceneworks-worker so it can also be embedded in-process
+# by the Rust API (sc-1342); this binary remains the Docker/server entry point.
 
-[dev-dependencies]
-axum = "0.7"
-tower = { version = "0.5", features = ["util"] }
+[dependencies]
+sceneworks-worker = { path = "../../crates/sceneworks-worker" }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
