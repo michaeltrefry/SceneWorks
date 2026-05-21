@@ -275,7 +275,7 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(container.querySelector("#training-tab-configure").getAttribute("aria-selected")).toBe("true");
-    expect(container.textContent).toContain("Training submission is disabled");
+    expect(container.textContent).toContain("Queuing a dry run validates");
   });
 
   it("creates a training dataset from selected image assets", async () => {
@@ -626,6 +626,63 @@ describe("SceneWorks app shell", () => {
       }),
     );
     expect(container.textContent).toContain("Config snapshot ready");
+  });
+
+  it("queues a dry-run training job from the configure tab", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const createTrainingJob = vi.fn(async () => ({ id: "job_dryrun_1", type: "lora_train", status: "queued" }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          createTrainingJob={createTrainingJob}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={["auto", "0"]}
+          loadDataset={loadDataset}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+    await changeField(field(container, "Trigger phrase"), "miraStyle");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+    });
+    await settle();
+
+    expect(createTrainingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetId: "z_image_turbo_lora",
+        datasetId: "dataset-a",
+        datasetVersion: 5,
+        outputName: "Portrait Set LoRA",
+        dryRun: true,
+        config: expect.objectContaining({ rank: 16, triggerWord: "miraStyle" }),
+      }),
+    );
+    expect(container.textContent).toContain("Queued dry-run job job_dryrun_1");
   });
 
   it("keeps config edits when GPU options are recomputed", async () => {

@@ -5,7 +5,7 @@ import { Icon } from "../components/Icons.jsx";
 const tabs = [
   { id: "dataset", label: "Dataset", title: "Dataset intake", status: "Rust dataset store" },
   { id: "rename-caption", label: "Rename & Caption", title: "Rename and caption pass", status: "Needs valid dataset" },
-  { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue disabled" },
+  { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
 ];
 const defaultGpuOptions = ["auto"];
 
@@ -310,6 +310,7 @@ export function TrainingStudio({
   assets = [],
   batchRenameDataset = async () => null,
   createDataset = async () => null,
+  createTrainingJob = async () => null,
   datasets = [],
   datasetsError = "",
   gpuOptions = defaultGpuOptions,
@@ -344,6 +345,7 @@ export function TrainingStudio({
   const [configMessage, setConfigMessage] = useState("");
   const [configError, setConfigError] = useState("");
   const [preparingConfig, setPreparingConfig] = useState(false);
+  const [submittingJob, setSubmittingJob] = useState(false);
   const configBasisRef = useRef("");
   const tabRefs = useRef({});
 
@@ -664,6 +666,32 @@ export function TrainingStudio({
       setConfigError(err.message);
     } finally {
       setPreparingConfig(false);
+    }
+  }
+
+  async function submitTrainingJob() {
+    if (!canPrepareConfig || submittingJob) {
+      return;
+    }
+    setSubmittingJob(true);
+    setConfigError("");
+    setConfigMessage("");
+    try {
+      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget });
+      const job = await createTrainingJob({
+        targetId: snapshot.targetId,
+        datasetId: snapshot.datasetId,
+        datasetVersion: snapshot.datasetVersion,
+        outputName: snapshot.outputName,
+        dryRun: true,
+        config: snapshot.config,
+      });
+      setConfigSnapshot(snapshot);
+      setConfigMessage(`Queued dry-run job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
+    } catch (err) {
+      setConfigError(err.message);
+    } finally {
+      setSubmittingJob(false);
     }
   }
 
@@ -1171,14 +1199,25 @@ export function TrainingStudio({
                         <button className="secondary-action" onClick={resetConfigDefaults} type="button">
                           Reset defaults
                         </button>
-                        <button className="primary-action" disabled={!canPrepareConfig} onClick={prepareConfig} type="button">
+                        <button className="secondary-action" disabled={!canPrepareConfig} onClick={prepareConfig} type="button">
                           {preparingConfig ? "Preparing" : "Prepare config"}
+                        </button>
+                        <button
+                          className="primary-action"
+                          disabled={!canPrepareConfig || submittingJob}
+                          onClick={submitTrainingJob}
+                          type="button"
+                        >
+                          {submittingJob ? "Queuing" : "Queue dry-run job"}
                         </button>
                       </div>
                       {configSnapshot ? <pre className="training-config-snapshot">{JSON.stringify(configSnapshot, null, 2)}</pre> : null}
                     </div>
                   )}
-                  <p className="inline-warning">Training submission is disabled until the dry-run plan story wires queue semantics.</p>
+                  <p className="view-copy">
+                    Queuing a dry run validates the Rust-resolved training plan and dataset on a GPU worker without training; real
+                    training execution arrives in a later story.
+                  </p>
                 </>
               ) : null}
             </section>

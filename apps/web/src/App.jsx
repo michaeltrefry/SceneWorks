@@ -849,6 +849,19 @@ export function App() {
     return result;
   }
 
+  async function createTrainingJob(request, projectId = activeProject?.id) {
+    if (!projectId) {
+      throw new Error("Select a workspace before creating a training job.");
+    }
+    const job = await apiFetch(`/api/v1/projects/${projectId}/training/jobs`, token, {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    setError("");
+    return job;
+  }
+
   function presetQuery(scope = null) {
     const params = new URLSearchParams();
     if (scope) {
@@ -1919,6 +1932,7 @@ export function App() {
             assets={assets}
             batchRenameDataset={batchRenameTrainingDataset}
             createDataset={createTrainingDataset}
+            createTrainingJob={createTrainingJob}
             datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
             datasetsError={trainingDatasetsError}
             gpuOptions={gpuOptions}
