@@ -17,7 +17,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 /// Bump to force a re-provision even if requirements.txt is unchanged.
-const SETUP_VERSION: &str = "1";
+const SETUP_VERSION: &str = "2";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Process handles + run guards shared across the app.
@@ -145,12 +145,64 @@ fn requirements_path(app: &AppHandle) -> PathBuf {
         .join("requirements.txt")
 }
 
+/// requirements-ltx.txt location (native LTX pipelines deps): the bundled
+/// resource in a packaged app, or the repo copy during development. Optional —
+/// absent in older worker checkouts, in which case LTX video is unavailable.
+fn requirements_ltx_path(app: &AppHandle) -> PathBuf {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("python-src").join("requirements-ltx.txt");
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("worker")
+        .join("requirements-ltx.txt")
+}
+
 fn data_dir() -> PathBuf {
     app_support_dir().join("data")
 }
 
 fn config_dir() -> PathBuf {
     app_support_dir().join("config")
+}
+
+/// Builtin model/LoRA/recipe-preset catalogs the rust-api reads from
+/// `config_dir/manifests`. In the server stack these ship in the repo's
+/// `config/`, but the desktop must provide them itself or Model Manager is empty
+/// and the native LTX/Wan adapters can't map model resources to files. Embedded
+/// at compile time from the canonical repo copies.
+const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
+    (
+        "builtin.models.jsonc",
+        include_str!("../../../config/manifests/builtin.models.jsonc"),
+    ),
+    (
+        "builtin.loras.jsonc",
+        include_str!("../../../config/manifests/builtin.loras.jsonc"),
+    ),
+    (
+        "builtin.recipe-presets.jsonc",
+        include_str!("../../../config/manifests/builtin.recipe-presets.jsonc"),
+    ),
+];
+
+/// Write the builtin manifests into `config_dir/manifests`, overwriting on every
+/// launch so they track the app version. User customizations live in the
+/// separate `user.*.jsonc` files, which this never touches.
+fn seed_builtin_manifests() {
+    let dir = config_dir().join("manifests");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("[desktop] seed manifests: create dir failed: {error}");
+        return;
+    }
+    for (name, contents) in BUILTIN_MANIFESTS {
+        if let Err(error) = std::fs::write(dir.join(name), contents) {
+            eprintln!("[desktop] seed manifests: write {name} failed: {error}");
+        }
+    }
 }
 
 /// Data directory: the settings override if set, otherwise the platform default.
@@ -173,6 +225,24 @@ fn worker_src_dir(app: &AppHandle) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("worker")
+}
+
+/// Directory to add to PYTHONPATH so the worker can import `sceneworks_shared`
+/// (scene_worker depends on it at startup). Bundled: it's staged into python-src
+/// alongside scene_worker. Development: it lives in the repo's packages/shared.
+/// Mirrors the Docker worker's `PYTHONPATH=...:/app/packages/shared`.
+fn shared_parent_dir(app: &AppHandle) -> PathBuf {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("python-src");
+        if bundled.join("sceneworks_shared").exists() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("packages")
+        .join("shared")
 }
 
 fn append_log(path: &Path, line: &str) {
@@ -263,6 +333,33 @@ async fn run_uv(app: &AppHandle, args: Vec<String>) -> Result<(), String> {
     }
 }
 
+/// Build `uv pip install -r <req>…` args for the given requirement files. On
+/// Windows it adds the CUDA extra index so torch/torchaudio resolve to CUDA
+/// wheels (other packages still come from PyPI); macOS torch wheels include MPS
+/// by default. All requirement files are installed in one pass so torch and its
+/// companions (e.g. torchaudio) resolve to a single, ABI-compatible version set.
+fn pip_install_args(python: &Path, requirement_files: &[PathBuf]) -> Vec<String> {
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+    let mut args = vec![
+        "pip".to_owned(),
+        "install".to_owned(),
+        "--python".to_owned(),
+        python.to_string_lossy().into_owned(),
+    ];
+    for requirements in requirement_files {
+        args.push("-r".to_owned());
+        args.push(requirements.to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let index = std::env::var("SCENEWORKS_PYTORCH_INDEX_URL")
+            .unwrap_or_else(|_| "https://download.pytorch.org/whl/cu128".to_owned());
+        args.push("--extra-index-url".to_owned());
+        args.push(index);
+    }
+    args
+}
+
 /// Provision the venv if missing or stale (requirements / setup version changed).
 async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let venv = venv_dir();
@@ -270,8 +367,12 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let requirements = requirements_path(app);
     let requirements_body = std::fs::read_to_string(&requirements)
         .map_err(|error| format!("read requirements: {error}"))?;
+    // Native LTX pipelines deps (ltx-core/ltx-pipelines + a torch-matched
+    // torchaudio). Optional: absent in older worker checkouts.
+    let requirements_ltx = requirements_ltx_path(app);
+    let requirements_ltx_body = std::fs::read_to_string(&requirements_ltx).unwrap_or_default();
     let marker = marker_path();
-    let expected = format!("v{SETUP_VERSION}\n{requirements_body}");
+    let expected = format!("v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}");
 
     if python.exists() {
         if let Ok(found) = std::fs::read_to_string(&marker) {
@@ -304,35 +405,54 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
         "Installing dependencies — this can take several minutes on first run…",
         false,
     );
-    // `args` is only mutated on Windows (CUDA index); keep `mut` for that path.
-    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-    let mut args = vec![
-        "pip".to_owned(),
-        "install".to_owned(),
-        "--python".to_owned(),
-        python.to_string_lossy().into_owned(),
-        "-r".to_owned(),
-        requirements.to_string_lossy().into_owned(),
-    ];
-    // Windows: pull CUDA-enabled torch wheels; other packages still resolve from
-    // PyPI via the default index. macOS torch wheels include MPS by default.
-    #[cfg(target_os = "windows")]
-    {
-        let index = std::env::var("SCENEWORKS_PYTORCH_INDEX_URL")
-            .unwrap_or_else(|_| "https://download.pytorch.org/whl/cu128".to_owned());
-        args.push("--extra-index-url".to_owned());
-        args.push(index);
+    // Install the base requirements together with the LTX pipelines deps (when
+    // bundled) in a single resolution pass: a separate LTX pass pulls a newer
+    // torchaudio whose native extension fails to load against the pinned torch.
+    let mut requirement_files = vec![requirements.clone()];
+    if requirements_ltx.exists() {
+        requirement_files.push(requirements_ltx.clone());
     }
-    run_uv(app, args).await?;
+    run_uv(app, pip_install_args(&python, &requirement_files)).await?;
 
     std::fs::write(&marker, &expected).map_err(|error| format!("write marker: {error}"))?;
     emit(app, "ready", "Python environment ready.", false);
     Ok(())
 }
 
+/// Resolve the ffmpeg binary bundled with the venv's imageio-ffmpeg, used by the
+/// API's in-process utility worker for timeline export / frame extraction. The
+/// desktop ships no system ffmpeg, so without this those jobs fail. Returns None
+/// if the venv or imageio-ffmpeg isn't available yet.
+fn resolve_bundled_ffmpeg() -> Option<String> {
+    let python = venv_python(&venv_dir());
+    if !python.exists() {
+        return None;
+    }
+    let mut command = std::process::Command::new(&python);
+    command.args([
+        "-c",
+        "import imageio_ffmpeg,sys; sys.stdout.write(imageio_ffmpeg.get_ffmpeg_exe())",
+    ]);
+    // Don't flash a console window when probing from the GUI app.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if path.is_empty() || !Path::new(&path).exists() {
+        return None;
+    }
+    Some(path)
+}
+
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
 fn spawn_api(app: &AppHandle) -> Result<(), String> {
-    let (mut events, child) = app
+    let mut command = app
         .shell()
         .sidecar("sceneworks-api")
         .map_err(|error| format!("locate api: {error}"))?
@@ -350,7 +470,13 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         .env(
             "SCENEWORKS_CONFIG_DIR",
             config_dir().to_string_lossy().to_string(),
-        )
+        );
+    // The in-process utility worker shells out to ffmpeg; point it at the venv's
+    // bundled binary since the desktop has no system ffmpeg on PATH.
+    if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
+        command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
+    }
+    let (mut events, child) = command
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;
     app.state::<Managed>()
@@ -438,6 +564,17 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
         let log_path = logs_dir().join("worker.log");
         let python = venv_python(&venv_dir());
         let src = worker_src_dir(&app);
+        // Ensure the worker can import sceneworks_shared (staged into python-src
+        // when bundled, or packages/shared in dev). Mirrors the Docker worker's
+        // PYTHONPATH; `-m` already adds the cwd but we set it explicitly so the
+        // dev (unbundled) path resolves too.
+        let path_sep = if cfg!(windows) { ";" } else { ":" };
+        let pythonpath = format!(
+            "{}{}{}",
+            src.to_string_lossy(),
+            path_sep,
+            shared_parent_dir(&app).to_string_lossy()
+        );
         let api_url = format!("http://127.0.0.1:{api_port}");
         let mut backoff = 1u64;
         loop {
@@ -456,6 +593,7 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .command(python.to_string_lossy().to_string())
                 .args(["-m", "scene_worker"])
                 .current_dir(&src)
+                .env("PYTHONPATH", &pythonpath)
                 .env("SCENEWORKS_API_URL", &api_url)
                 .env(
                     "SCENEWORKS_DATA_DIR",
@@ -590,6 +728,9 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
 }
 
 async fn run_startup(app: AppHandle) {
+    // Provide the builtin model catalog the rust-api/worker expect before they
+    // start, so Model Manager is populated and native video resources resolve.
+    seed_builtin_manifests();
     if let Err(error) = provision_venv(&app).await {
         emit(&app, "error", format!("Setup failed: {error}"), true);
         return;

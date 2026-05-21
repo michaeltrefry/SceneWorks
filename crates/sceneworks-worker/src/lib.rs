@@ -4132,7 +4132,15 @@ async fn run_ffmpeg(args: Vec<String>, context: Option<FfmpegContext<'_>>) -> Wo
             "FFmpeg command is empty.".to_owned(),
         ));
     };
-    let mut child = Command::new(program)
+    // Let the host override the default ffmpeg binary via SCENEWORKS_FFMPEG. The
+    // desktop app sets this to the venv's bundled imageio-ffmpeg (it ships no
+    // system ffmpeg); the server stack / Docker leave it unset and use the
+    // caller's "ffmpeg" on PATH.
+    let resolved_program = match std::env::var("SCENEWORKS_FFMPEG") {
+        Ok(path) if program.as_str() == "ffmpeg" && !path.trim().is_empty() => path,
+        _ => program.clone(),
+    };
+    let mut child = Command::new(&resolved_program)
         .args(arguments)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

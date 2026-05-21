@@ -1,4 +1,10 @@
 # Native LTX-2.3 dependencies for SCENEWORKS_VIDEO_ADAPTER=ltx_pipelines.
 # Pinned to the official Lightricks/LTX-2 HEAD inspected on 2026-05-19.
+# torchaudio is a transitive ltx-core dep; pin it to the torch range
+# (requirements.txt: torch>=2.8,<2.9) so its native extension is ABI-compatible.
+# Unconstrained, the resolver pulls the latest torchaudio (e.g. 2.11) against the
+# pinned torch 2.8 and the worker fails to load it (Windows: WinError 127). Mirrors
+# the Docker worker's PYTORCH_AUDIO_SPEC.
+torchaudio>=2.8,<2.9
 ltx-core @ git+https://github.com/Lightricks/LTX-2.git@1799988521d5e9725a4fbd4533d0cc12f07c07ed#subdirectory=packages/ltx-core
 ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@1799988521d5e9725a4fbd4533d0cc12f07c07ed#subdirectory=packages/ltx-pipelines

@@ -27,4 +27,17 @@ cpSync(join(workerDir, "scene_worker"), join(outDir, "scene_worker"), {
   filter: (src) => !src.includes("__pycache__") && !src.endsWith(".pyc"),
 });
 
+// Copy the sceneworks_shared package alongside scene_worker. scene_worker
+// imports it at startup (image_adapters/video_adapters); in Docker it's provided
+// via PYTHONPATH=/app/packages/shared. Bundling it into python-src keeps the
+// packaged worker importable (setup.rs also puts python-src on PYTHONPATH).
+cpSync(
+  join(repoRoot, "packages", "shared", "sceneworks_shared"),
+  join(outDir, "sceneworks_shared"),
+  {
+    recursive: true,
+    filter: (src) => !src.includes("__pycache__") && !src.endsWith(".pyc"),
+  },
+);
+
 console.log(`stage-python: staged worker source into ${outDir}`);

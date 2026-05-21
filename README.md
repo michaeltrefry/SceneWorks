@@ -179,3 +179,28 @@ data/
   cache/     Runtime cache
 docker/      Service Dockerfiles
 ```
+
+## Desktop App (Tauri)
+
+`apps/desktop` packages SceneWorks as a standalone desktop app (no Docker). It
+bundles the Rust API, the Python worker source (`scene_worker` +
+`sceneworks_shared`), the builtin model/LoRA manifests, and a pinned `uv`. On
+first run it provisions a CUDA-enabled Python venv under the per-user app data
+dir (`%APPDATA%\SceneWorks` on Windows), then starts the API + worker. Build the
+Windows installer (NSIS) with:
+
+```powershell
+npm --prefix apps/desktop run build -- --bundles nsis
+```
+
+First-run installs CUDA torch wheels from `cu128` by default (override with
+`SCENEWORKS_PYTORCH_INDEX_URL`). Blackwell (sm_120) requires `cu128`; older
+`cu121` wheels will not run on it.
+
+### Windows GPU support
+
+| Tier | GPU | Status | Notes |
+| --- | --- | --- | --- |
+| High-end | NVIDIA RTX PRO 6000 Blackwell (96 GB) | ✅ Validated | torch 2.8 `cu128`; Qwen image (~36 s incl. load), native LTX-2.3 text-to-video (~80 s for a 2 s clip), and timeline export verified end-to-end |
+| Other CUDA | RTX 30/40-series, etc. | ⏳ Untested | Expected to work via the `cu128` wheels with a recent driver; not yet validated |
+| CPU-only | — | ⚠️ Limited | No GPU inference; image/video generation unavailable |
