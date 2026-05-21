@@ -1432,6 +1432,42 @@ async fn create_training_job(
             .await?;
     let source_relpath = format!("loras/{lora_id}");
 
+    // Operational guardrails (story 1419): fail fast with actionable errors for
+    // the common setup problems, before a job is queued.
+    //
+    // The produced LoRA's family must be one an installed model accepts, or the
+    // output would never be selectable in Image Studio. When no model manifests
+    // are present the catalog is empty and this is a no-op.
+    let normalized_family = normalize_lora_family(&target.family);
+    let known_families = known_lora_families(&model_catalog(&state).await?);
+    if !known_families.is_empty()
+        && !known_families
+            .iter()
+            .any(|family| family == &normalized_family)
+    {
+        return Err(ApiError::bad_request(format!(
+            "Training target '{}' produces LoRA family '{}', which no installed model accepts ({}). Install a compatible base model first.",
+            target.id,
+            target.family,
+            known_families.join(", ")
+        )));
+    }
+
+    // A real run loads the base model and writes weights, so it must have the
+    // model installed and room on disk. A dry run only resolves the plan, so it
+    // is exempt — that is how you preview a plan before installing the model.
+    if !payload.dry_run {
+        if !training_base_model_installed(&data_dir, target) {
+            return Err(ApiError::bad_request(format!(
+                "Base model '{}' is not installed. Install it from the model catalog before starting a real training run (dry runs work without it).",
+                target.base_model
+            )));
+        }
+        if let Some(message) = training_disk_space_error(&output_dir) {
+            return Err(ApiError::bad_request(message));
+        }
+    }
+
     // Rust resolves and validates the normalized plan before any job is queued.
     let plan = build_training_plan(BuildTrainingPlan {
         job_id: &job_id,
@@ -1618,6 +1654,73 @@ fn validate_lora_id_component(lora_id: &str) -> Result<(), ApiError> {
         )));
     }
     Ok(())
+}
+
+/// Whether the training target's base model weights are present on disk, using
+/// the same resolution `model_catalog` reports: the shared Hugging Face hub
+/// cache for the target's repo, or a SceneWorks-managed `data/models/<id>`
+/// install marker. A real run requires this; a dry run does not.
+fn training_base_model_installed(data_dir: &FsPath, target: &TrainingTarget) -> bool {
+    if let Some(repo) = target
+        .base_model_repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+    {
+        if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            if huggingface_repo_cache_exists(&cache_path) {
+                return true;
+            }
+        }
+    }
+    let managed = data_dir
+        .join("models")
+        .join(safe_download_dir(&target.base_model));
+    model_is_installed(&managed)
+}
+
+/// Minimum free space we require at the output location before queuing a real
+/// training run: enough headroom for periodic checkpoints plus the final
+/// adapter. Conservative so it only trips when a disk is genuinely low.
+const MIN_FREE_TRAINING_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Returns an actionable error message when the output volume is too low on
+/// space for a real run, or `None` when there is room (or free space cannot be
+/// determined — we do not block on an unknowable answer).
+fn training_disk_space_error(output_dir: &FsPath) -> Option<String> {
+    // `output_dir` itself rarely exists yet; probe the nearest existing parent.
+    let probe = nearest_existing_ancestor(output_dir)?;
+    let available = fs2::available_space(&probe).ok()?;
+    insufficient_disk_space(available, MIN_FREE_TRAINING_BYTES).then(|| {
+        format!(
+            "Not enough free disk space to train: {} available on the volume holding {}, but at least {} is recommended. Free up space and try again.",
+            human_gib(available),
+            probe.display(),
+            human_gib(MIN_FREE_TRAINING_BYTES)
+        )
+    })
+}
+
+/// Pure decision split out so the threshold logic is unit-testable without
+/// touching a real filesystem.
+fn insufficient_disk_space(available: u64, required: u64) -> bool {
+    available < required
+}
+
+/// Nearest ancestor of `path` (including itself) that exists on disk.
+fn nearest_existing_ancestor(path: &FsPath) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if candidate.exists() {
+            return Some(candidate.to_path_buf());
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+fn human_gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 async fn get_project_file(
@@ -7143,10 +7246,10 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, inprocess_worker_gpu_id, lora_artifact_paths, requires_token,
-        strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
-        API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
-        TEST_MAX_LORA_UPLOAD_BYTES,
+        create_app, inprocess_worker_gpu_id, insufficient_disk_space, lora_artifact_paths,
+        requires_token, strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub,
+        EventMessage, Settings, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
+        HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -8160,7 +8263,10 @@ mod tests {
     #[tokio::test]
     async fn create_training_job_queues_real_run_when_not_dry_run() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings.clone()).expect("app creates");
+        // A real run requires the base model installed (story 1419 guardrail).
+        seed_installed_base_model(&settings.data_dir);
         let (_, project) = request(
             app.clone(),
             "POST",
@@ -8234,12 +8340,24 @@ mod tests {
         assert_eq!(queued[0]["type"], "lora_train");
     }
 
+    /// Seeds the Z-Image-Turbo base model as installed (a managed-download
+    /// marker) so a real training run clears the missing-model guardrail.
+    fn seed_installed_base_model(data_dir: &std::path::Path) {
+        let model_dir = data_dir.join("models").join("z_image_turbo");
+        std::fs::create_dir_all(&model_dir).expect("model dir creates");
+        std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+            .expect("model marker writes");
+    }
+
     /// Drives a project-scoped training job from submission to a completed result
     /// and asserts the produced adapter is registered as a normal SceneWorks LoRA.
+    /// Seeds the base model so the real-run guardrails pass.
     async fn submit_real_training_job(
         app: axum::Router,
         project_id: &str,
+        data_dir: &std::path::Path,
     ) -> (String, std::path::PathBuf, std::path::PathBuf) {
+        seed_installed_base_model(data_dir);
         let (_, asset) = request_multipart_upload(
             app.clone(),
             &format!("/api/v1/projects/{project_id}/assets"),
@@ -8315,7 +8433,7 @@ mod tests {
         let project_id = project["id"].as_str().expect("project id").to_owned();
 
         let (job_id, output_dir, adapter_path) =
-            submit_real_training_job(app.clone(), &project_id).await;
+            submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
 
         // The worker writes the adapter into the resolved output dir before it
         // reports completion. Simulate that, then report the completed result.
@@ -8402,7 +8520,8 @@ mod tests {
     #[tokio::test]
     async fn failed_or_unwritten_training_job_registers_no_lora() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings.clone()).expect("app creates");
         let (_, project) = request(
             app.clone(),
             "POST",
@@ -8414,7 +8533,7 @@ mod tests {
 
         // A failed job never registers, even though a manifest entry was staged.
         let (failed_job_id, _output_dir, _adapter_path) =
-            submit_real_training_job(app.clone(), &project_id).await;
+            submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
         let (status, _) = request(
             app.clone(),
             "POST",
@@ -8433,7 +8552,7 @@ mod tests {
         // A job that reports completed but produced no weights must not leave a
         // broken registry entry either, and the failure is surfaced in the result.
         let (completed_no_weights_id, _, _) =
-            submit_real_training_job(app.clone(), &project_id).await;
+            submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
         let (status, completed) = request(
             app.clone(),
             "POST",
@@ -8609,6 +8728,155 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(completed["result"]["loraRegistered"], false);
         assert!(completed["result"]["loraRegistrationError"].is_string());
+    }
+
+    #[tokio::test]
+    async fn real_training_job_rejected_when_base_model_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Portrait.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Aurora set",
+                "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+            }),
+        )
+        .await;
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let target_id = registry["targets"][0]["id"]
+            .as_str()
+            .expect("target id")
+            .to_owned();
+        let config = registry["targets"][0]["defaults"].clone();
+
+        // No base model is installed: a real run is rejected with an actionable
+        // message, but a dry run (plan preview) still succeeds.
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("is not installed"));
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn training_job_rejects_cpu_target() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Portrait.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Aurora set",
+                "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+            }),
+        )
+        .await;
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+        let (_, registry) =
+            request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+        let target_id = registry["targets"][0]["id"]
+            .as_str()
+            .expect("target id")
+            .to_owned();
+        let mut config = registry["targets"][0]["defaults"].clone();
+        // Targeting a CPU worker for a GPU-only job is rejected with an
+        // actionable message (a dry run is GPU-routed too, so this also holds).
+        config["advanced"]["requestedGpu"] = json!("cpu");
+
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cannot target CPU workers"));
+    }
+
+    #[test]
+    fn insufficient_disk_space_threshold_is_strict_less_than() {
+        assert!(insufficient_disk_space(100, 200));
+        assert!(!insufficient_disk_space(200, 200));
+        assert!(!insufficient_disk_space(300, 200));
     }
 
     #[tokio::test]

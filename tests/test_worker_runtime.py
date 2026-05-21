@@ -43,6 +43,7 @@ from scene_worker.runtime import (
     child_environment,
     friendly_failure,
     heartbeat,
+    is_cuda_oom,
     keep_job_alive,
     loaded_models_from_adapters,
     main,
@@ -860,6 +861,34 @@ def test_friendly_failure_identifies_missing_sentencepiece_backend():
     assert "pip install -r apps/worker/requirements.txt" in error
     assert "docker compose build worker --no-cache" in error
     assert "Technical detail" in error
+
+
+def test_friendly_failure_identifies_disk_full_by_message():
+    message, error = friendly_failure(
+        "LoRA training", RuntimeError("OSError: [Errno 28] No space left on device")
+    )
+
+    assert message == "LoRA training failed because the disk ran out of space."
+    assert "Free up disk space" in error
+    assert "Technical detail" in error
+
+
+def test_friendly_failure_identifies_disk_full_by_oserror_errno():
+    message, error = friendly_failure(
+        "LoRA training", OSError(28, "No space left on device")
+    )
+
+    assert message == "LoRA training failed because the disk ran out of space."
+    assert "Free up disk space" in error
+
+
+def test_is_cuda_oom_detects_oom_by_type_and_message():
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    assert is_cuda_oom(OutOfMemoryError("allocator failed"))
+    assert is_cuda_oom(RuntimeError("CUDA error: out of memory"))
+    assert not is_cuda_oom(RuntimeError("some other failure"))
 
 
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):

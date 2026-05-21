@@ -157,6 +157,17 @@ web app is opened from another machine.
 
 For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
 
+## LoRA Training
+
+SceneWorks can train an image LoRA for Z-Image-Turbo locally: build a captioned
+dataset, validate the plan with a dry run, train on a CUDA GPU worker, and the
+result is registered as a normal SceneWorks LoRA selectable in Image Studio.
+See [documents/TRAINING_QUICKSTART.md](documents/TRAINING_QUICKSTART.md) for a
+step-by-step first run, recommended dataset sizes and captions, VRAM/disk notes,
+where outputs live, and troubleshooting. Training contracts live in
+`crates/sceneworks-core/src/training.rs`; the execution kernel is
+`apps/worker/scene_worker/training_adapters.py`.
+
 ## Structure
 
 ```text

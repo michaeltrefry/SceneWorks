@@ -68,9 +68,12 @@ SceneWorks storage, config defaults, or the target registry directly.
   stages, and honors cancellation between steps. A real run requires the
   inference backend; the kernel reports clearly when it is missing.
 
-Registering the produced adapter as a usable SceneWorks LoRA (with provenance and
-Image Studio compatibility) is a separate step (story 1418); this kernel produces
-the weights file and a result summary.
+The kernel produces the weights file and a result summary. Registering the
+produced adapter as a usable SceneWorks LoRA (with provenance and Image Studio
+compatibility) is owned by the Rust API: on a completed real run it recomputes
+the scope's LoRA manifest path from trusted inputs and upserts the entry (story
+1418). See [documents/TRAINING_QUICKSTART.md](../../documents/TRAINING_QUICKSTART.md)
+for the end-to-end flow and troubleshooting.
 
 Training reuses the runtime dependencies in `requirements.txt` (torch, diffusers,
 transformers, peft, accelerate, safetensors). The `adamw8bit` optimizer uses

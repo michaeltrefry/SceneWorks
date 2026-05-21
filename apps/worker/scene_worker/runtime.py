@@ -201,6 +201,27 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
                 f"Technical detail: {detail}"
             ),
         )
+    disk_full_markers = (
+        "no space left on device",
+        "not enough space on the disk",
+        "there is not enough space",
+        "disk full",
+        "errno 28",
+        "enospc",
+    )
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
+        disk_full = True
+    else:
+        disk_full = any(marker in lowered for marker in disk_full_markers)
+    if disk_full:
+        return (
+            f"{job_kind} failed because the disk ran out of space.",
+            (
+                "The volume holding the model cache, dataset, or output ran out of space while writing. "
+                "Free up disk space (model weights, checkpoints, and cached latents are the largest consumers) and retry. "
+                f"Technical detail: {detail}"
+            ),
+        )
     ltx_frame_markers = (
         "num_frames",
         "frame count",
