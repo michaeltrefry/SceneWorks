@@ -87,8 +87,11 @@ Compose `worker` service is the Python inference worker and the `rust-worker`
 service is the Rust utility worker; both use the same HTTP contract.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
 LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. The Rust worker
-defaults to `SCENEWORKS_GPU_ID=cpu` so it registers one CPU utility worker and
-does not duplicate the Python inference GPU workers. Set
+defaults to `SCENEWORKS_GPU_ID=cpu` and does not duplicate the Python inference
+GPU workers. Utility jobs are I/O-bound and serialize per worker, so in cpu mode
+it supervises a small pool of CPU utility workers (`SCENEWORKS_UTILITY_WORKERS`,
+default 4) — this lets a quick upload run alongside a long download instead of
+queueing behind it. Set it to `1` to restore single-worker behavior. Set
 `SCENEWORKS_RUST_WORKER_GPU_ID=auto` in Compose, or `SCENEWORKS_GPU_ID=auto` in
 host mode, only if you want the Rust worker to supervise one child per visible
 NVIDIA GPU plus a CPU utility child; use `NVIDIA_VISIBLE_DEVICES=none` for a CPU

@@ -58,6 +58,12 @@ pub struct Settings {
     pub max_lora_url_bytes: u64,
     pub max_model_url_bytes: u64,
     pub allow_private_lora_urls: bool,
+    /// Number of CPU/utility worker processes to run when this worker is in
+    /// dedicated `cpu` mode. Utility jobs (downloads, imports, frame extraction,
+    /// timeline export, person detect/track) are I/O-bound and serialize per
+    /// worker, so a small pool lets e.g. a quick upload run alongside a long
+    /// download instead of queueing behind it.
+    pub utility_workers: usize,
 }
 
 impl Settings {
@@ -107,15 +113,8 @@ impl Settings {
             ),
             allow_private_lora_urls: std::env::var("SCENEWORKS_ALLOW_PRIVATE_LORA_URLS")
                 .is_ok_and(|value| value.trim() == "1"),
+            utility_workers: env_u64_any(&["SCENEWORKS_UTILITY_WORKERS"], 4).max(1) as usize,
         }
-    }
-
-    fn for_worker(&self, worker_id: String, gpu_id: String) -> Self {
-        let mut settings = self.clone();
-        settings.worker_id = worker_id;
-        settings.gpu_id = gpu_id;
-        settings.is_child_worker = true;
-        settings
     }
 }
 
@@ -261,13 +260,19 @@ struct SupervisedChild {
 async fn supervise_auto_workers(settings: Settings) -> WorkerResult<()> {
     let gpus = discover_gpus().await;
     if gpus.is_empty() {
-        let cpu_settings =
-            settings.for_worker(cpu_worker_id(&settings.worker_id), "cpu".to_owned());
-        return run_worker_loop(cpu_settings).await;
+        let specs = utility_worker_specs(&settings.worker_id, settings.utility_workers);
+        return supervise_children(settings, specs).await;
     }
 
+    let specs = auto_worker_specs(&settings.worker_id, &gpus);
+    supervise_children(settings, specs).await
+}
+
+/// Spawn the given child workers and keep them running, restarting any that exit
+/// (with backoff) until a shutdown signal arrives.
+async fn supervise_children(settings: Settings, specs: Vec<WorkerSpec>) -> WorkerResult<()> {
     let mut children = HashMap::new();
-    for spec in auto_worker_specs(&settings.worker_id, &gpus) {
+    for spec in specs {
         let process = start_child_worker(&settings, &spec)?;
         children.insert(
             spec.worker_id.clone(),
@@ -434,6 +439,27 @@ fn auto_worker_specs(base_worker_id: &str, gpus: &[DiscoveredGpu]) -> Vec<Worker
         gpu_id: "cpu".to_owned(),
     });
     specs
+}
+
+/// Specs for the dedicated CPU/utility worker pool. The first worker keeps the
+/// historical `<base>-cpu` id (so a single-worker setup is unchanged); each
+/// additional worker is suffixed `-1`, `-2`, ... A count of 0 still yields one.
+fn utility_worker_specs(base_worker_id: &str, count: usize) -> Vec<WorkerSpec> {
+    (0..count.max(1))
+        .map(|index| WorkerSpec {
+            worker_id: utility_worker_id(base_worker_id, index),
+            gpu_id: "cpu".to_owned(),
+        })
+        .collect()
+}
+
+fn utility_worker_id(base_worker_id: &str, index: usize) -> String {
+    let cpu_id = cpu_worker_id(base_worker_id);
+    if index == 0 {
+        cpu_id
+    } else {
+        format!("{cpu_id}-{index}")
+    }
 }
 
 async fn discover_gpu(requested_gpu_id: &str) -> DiscoveredGpu {
@@ -684,8 +710,14 @@ fn emit_json(payload: Value) {
 
 pub async fn run() -> WorkerResult<()> {
     let settings = Settings::from_env();
-    if settings.gpu_id == "auto" && !settings.is_child_worker {
-        return supervise_auto_workers(settings).await;
+    if !settings.is_child_worker {
+        if settings.gpu_id == "auto" {
+            return supervise_auto_workers(settings).await;
+        }
+        if settings.gpu_id == "cpu" && settings.utility_workers > 1 {
+            let specs = utility_worker_specs(&settings.worker_id, settings.utility_workers);
+            return supervise_children(settings, specs).await;
+        }
     }
     run_worker_loop(settings).await
 }
@@ -4501,7 +4533,8 @@ mod tests {
         download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id,
         import_lora_source_path, now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
         restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
-        value_f64, visible_gpu_ids, worker_capabilities_with_utility, write_model_install_marker,
+        utility_worker_specs, value_f64, visible_gpu_ids, worker_capabilities_with_utility,
+        write_model_install_marker,
         ApiClient, DownloadContext, HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError,
         WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
         DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
@@ -4632,6 +4665,35 @@ mod tests {
         });
         assert_eq!(cpu_env["SCENEWORKS_UTILITY_JOBS"], "1");
         assert_eq!(cpu_env["CUDA_VISIBLE_DEVICES"], "");
+    }
+
+    #[test]
+    fn utility_worker_specs_scale_to_requested_count() {
+        let single = utility_worker_specs("rust-utility-worker-0", 1);
+        assert_eq!(
+            single
+                .iter()
+                .map(|spec| spec.worker_id.as_str())
+                .collect::<Vec<_>>(),
+            ["rust-utility-worker-cpu"]
+        );
+
+        let pool = utility_worker_specs("rust-utility-worker-0", 4);
+        assert_eq!(
+            pool.iter()
+                .map(|spec| spec.worker_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "rust-utility-worker-cpu",
+                "rust-utility-worker-cpu-1",
+                "rust-utility-worker-cpu-2",
+                "rust-utility-worker-cpu-3",
+            ]
+        );
+        assert!(pool.iter().all(|spec| spec.gpu_id == "cpu"));
+
+        // A count of 0 must still yield a single worker rather than an empty pool.
+        assert_eq!(utility_worker_specs("rust-utility-worker-0", 0).len(), 1);
     }
 
     #[test]
@@ -5293,6 +5355,7 @@ mod tests {
             max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
             max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
             allow_private_lora_urls: true,
+            utility_workers: 1,
         }
     }
 

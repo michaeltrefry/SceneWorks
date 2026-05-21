@@ -82,6 +82,10 @@ services:
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
       SCENEWORKS_WORKER_ID: rust-utility-worker-0
       SCENEWORKS_GPU_ID: ${SCENEWORKS_RUST_WORKER_GPU_ID:-cpu}
+      # Utility jobs (downloads, imports, frame extract, exports) are I/O-bound and
+      # serialize per worker. Run a small pool so a quick upload isn't stuck behind
+      # a long download. Only applies in dedicated cpu mode.
+      SCENEWORKS_UTILITY_WORKERS: ${SCENEWORKS_UTILITY_WORKERS:-4}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       HF_TOKEN: ${HF_TOKEN:-}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
