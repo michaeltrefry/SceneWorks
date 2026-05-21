@@ -1,0 +1,39 @@
+# Line-ending policy: all text files are stored as LF in the repository AND
+# checked out as LF on every platform. Without this, Windows clones with
+# core.autocrlf=true get a CRLF working tree, which trips `cargo fmt --check`
+# and risks committing CRLF into fixtures/snapshots. Git auto-detects text vs.
+# binary; the explicit `binary` rules below guard assets that must never be
+# altered or diffed as text.
+* text=auto eol=lf
+
+# Images
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+
+# Documents / archives
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+
+# Model / tensor weights
+*.safetensors binary
+*.bin   binary
+*.pt    binary
+*.ckpt  binary
+*.gguf  binary
+*.onnx  binary
+
+# Audio / video
+*.mp4   binary
+*.mov   binary
+*.webm  binary
+
+# Fonts
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
