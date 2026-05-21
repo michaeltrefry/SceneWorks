@@ -38,6 +38,11 @@ use sceneworks_core::project_store::{
     CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore, ProjectStoreError,
     UploadAsset,
 };
+use sceneworks_core::training::TrainingDataset;
+use sceneworks_core::training_store::{
+    TrainingDatasetCreateInput, TrainingDatasetMutationResult, TrainingDatasetSummary,
+    TrainingDatasetUpdateInput,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -403,6 +408,16 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/status",
             patch(update_asset_status),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets",
+            get(list_training_datasets).post(create_training_dataset),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id",
+            get(get_training_dataset)
+                .patch(update_training_dataset)
+                .delete(delete_training_dataset),
         )
         .route(
             "/api/v1/projects/:project_id/files/*relative_path",
@@ -1140,6 +1155,67 @@ async fn purge_asset(
     Ok(Json(
         project_call(state, move |store| {
             store.purge_asset(&project_id, &asset_id)
+        })
+        .await?,
+    ))
+}
+
+async fn list_training_datasets(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<Vec<TrainingDatasetSummary>>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.list_training_datasets(&project_id)
+        })
+        .await?,
+    ))
+}
+
+async fn create_training_dataset(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    ApiJson(payload): ApiJson<TrainingDatasetCreateInput>,
+) -> Result<(StatusCode, Json<TrainingDataset>), ApiError> {
+    let dataset = project_call(state, move |store| {
+        store.create_training_dataset(&project_id, payload)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(dataset)))
+}
+
+async fn get_training_dataset(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+) -> Result<Json<TrainingDataset>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.get_training_dataset(&project_id, &dataset_id)
+        })
+        .await?,
+    ))
+}
+
+async fn update_training_dataset(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<TrainingDatasetUpdateInput>,
+) -> Result<Json<TrainingDataset>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.update_training_dataset(&project_id, &dataset_id, payload)
+        })
+        .await?,
+    ))
+}
+
+async fn delete_training_dataset(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+) -> Result<Json<TrainingDatasetMutationResult>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.delete_training_dataset(&project_id, &dataset_id)
         })
         .await?,
     ))
@@ -6970,6 +7046,223 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(purged, json!({ "id": asset_id, "status": "purged" }));
+    }
+
+    #[tokio::test]
+    async fn training_dataset_routes_persist_and_validate_project_assets() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings.clone()).expect("app creates");
+
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Training Project" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id").to_owned();
+        let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "Portrait.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let (status, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Mira LoRA set",
+                "items": [{
+                    "assetId": asset_id,
+                    "caption": {
+                        "text": "miraStyle portrait",
+                        "triggerWords": ["miraStyle"]
+                    }
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(dataset["projectId"], project_id);
+        assert_eq!(dataset["version"], 1);
+        assert_eq!(dataset["items"][0]["assetId"], asset_id);
+        assert_eq!(dataset["items"][0]["path"], "images/item_0001.png");
+        assert_eq!(dataset["items"][0]["caption"]["source"], "manual");
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+        assert!(project_path
+            .join("training")
+            .join("datasets")
+            .join(&dataset_id)
+            .join("images")
+            .join("item_0001.png")
+            .exists());
+
+        let (status, listed) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed[0]["id"], dataset_id);
+        assert_eq!(listed[0]["itemCount"], 1);
+
+        let reloaded_app = create_app(settings).expect("app reloads");
+        let (status, detail) = request(
+            reloaded_app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["items"][0]["caption"]["text"], "miraStyle portrait");
+
+        let (status, updated) = request(
+            reloaded_app.clone(),
+            "PATCH",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+            json!({
+                "items": [{
+                    "assetId": asset_id,
+                    "caption": { "text": "miraStyle close portrait" }
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["version"], 2);
+        assert_eq!(
+            updated["items"][0]["caption"]["text"],
+            "miraStyle close portrait"
+        );
+        let dataset_image_path = project_path
+            .join("training")
+            .join("datasets")
+            .join(&dataset_id)
+            .join("images")
+            .join("item_0001.png");
+        assert_eq!(
+            std::fs::read(&dataset_image_path).expect("dataset image remains"),
+            b"png-bytes"
+        );
+
+        let (status, error) = request(
+            reloaded_app.clone(),
+            "PATCH",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+            json!({
+                "items": [
+                    { "assetId": asset_id },
+                    { "assetId": "asset_missing" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["detail"], "Asset not found");
+        assert_eq!(
+            std::fs::read(&dataset_image_path).expect("old dataset image survives failed update"),
+            b"png-bytes"
+        );
+        let (status, detail_after_failed_update) = request(
+            reloaded_app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail_after_failed_update["version"], 2);
+
+        let (status, error) = request(
+            reloaded_app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Bad Path",
+                "items": [{ "path": "../outside.png" }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["detail"], "Invalid dataset item path");
+
+        let (status, error) = request(
+            reloaded_app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Duplicate Items",
+                "items": [
+                    { "id": "same_item", "assetId": asset_id },
+                    { "id": "same_item", "assetId": asset_id }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["detail"], "Training dataset item IDs must be unique");
+
+        let (_, other_project) = request(
+            reloaded_app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Other Training Project" }),
+        )
+        .await;
+        let other_project_id = other_project["id"].as_str().expect("project id").to_owned();
+        let (status, other_asset) = request_multipart_upload(
+            reloaded_app.clone(),
+            &format!("/api/v1/projects/{other_project_id}/assets"),
+            "Other.PNG",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let other_asset_id = other_asset["id"].as_str().expect("asset id").to_owned();
+        let (status, error) = request(
+            reloaded_app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            json!({
+                "name": "Cross Project",
+                "items": [{ "assetId": other_asset_id }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["detail"], "Asset not found");
+
+        let (status, deleted) = request(
+            reloaded_app.clone(),
+            "DELETE",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted, json!({ "id": dataset_id, "status": "deleted" }));
+        let (status, listed_after_delete) = request(
+            reloaded_app,
+            "GET",
+            &format!("/api/v1/projects/{project_id}/training/datasets"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed_after_delete, json!([]));
     }
 
     #[tokio::test]

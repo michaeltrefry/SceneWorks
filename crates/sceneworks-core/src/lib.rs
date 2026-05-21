@@ -5,6 +5,7 @@ pub mod lora_family;
 pub mod lora_url;
 pub mod project_store;
 pub mod training;
+pub mod training_store;
 
 pub const API_PREFIX: &str = "/api/v1";
 pub const HEALTH_ROUTE: &str = "/health";

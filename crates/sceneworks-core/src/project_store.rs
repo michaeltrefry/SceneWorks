@@ -16,6 +16,11 @@ pub use crate::character_store::{
     CharacterLoraUpdateInput, CharacterMutationResult, CharacterReferenceInput,
     CharacterReferenceUpdateInput, CharacterUpdateInput, CHARACTER_SIDECAR_PATTERN,
 };
+use crate::training::TrainingDataset;
+use crate::training_store::{
+    apply_training_dataset_migrations, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
+    TrainingDatasetStore, TrainingDatasetSummary, TrainingDatasetUpdateInput,
+};
 
 pub const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
 pub const PROJECT_FOLDERS: &[&str] = &[
@@ -30,6 +35,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "person-tracks",
     "recipes",
     "timelines",
+    "training/datasets",
     "trash",
     "cache",
 ];
@@ -263,6 +269,51 @@ impl ProjectStore {
     pub fn get_project(&self, project_id: &str) -> ProjectStoreResult<ProjectSummary> {
         let project_path = self.find_project_path(project_id)?;
         read_project_summary(&project_path)
+    }
+
+    pub fn list_training_datasets(
+        &self,
+        project_id: &str,
+    ) -> ProjectStoreResult<Vec<TrainingDatasetSummary>> {
+        let project_path = self.find_project_path(project_id)?;
+        TrainingDatasetStore::new(project_path).list_datasets(project_id)
+    }
+
+    pub fn create_training_dataset(
+        &self,
+        project_id: &str,
+        input: TrainingDatasetCreateInput,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let project_path = self.find_project_path(project_id)?;
+        TrainingDatasetStore::new(project_path).create_dataset(project_id, input)
+    }
+
+    pub fn get_training_dataset(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let project_path = self.find_project_path(project_id)?;
+        TrainingDatasetStore::new(project_path).get_dataset(project_id, dataset_id)
+    }
+
+    pub fn update_training_dataset(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        input: TrainingDatasetUpdateInput,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let project_path = self.find_project_path(project_id)?;
+        TrainingDatasetStore::new(project_path).update_dataset(project_id, dataset_id, input)
+    }
+
+    pub fn delete_training_dataset(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<TrainingDatasetMutationResult> {
+        let project_path = self.find_project_path(project_id)?;
+        TrainingDatasetStore::new(project_path).delete_dataset(project_id, dataset_id)
     }
 
     pub fn project_stem(&self, project_id: &str) -> ProjectStoreResult<String> {
@@ -1150,6 +1201,7 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
     )?;
     ensure_column(connection, "assets", "sidecar_path", "text")?;
     apply_character_migrations(connection)?;
+    apply_training_dataset_migrations(connection)?;
     Ok(())
 }
 
