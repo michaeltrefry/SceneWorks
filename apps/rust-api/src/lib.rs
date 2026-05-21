@@ -612,7 +612,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_worker),
         )
-        .fallback(route_not_found)
+        .fallback(app_fallback)
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
@@ -2067,6 +2067,59 @@ async fn create_video_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Embedded production web bundle (apps/web/dist), compiled in only under the
+/// `embed-web` feature so default/server/test builds need no web build.
+#[cfg(feature = "embed-web")]
+mod web_assets {
+    use axum::http::{header, StatusCode, Uri};
+    use axum::response::{IntoResponse, Response};
+    use rust_embed::RustEmbed;
+
+    #[derive(RustEmbed)]
+    #[folder = "../web/dist"]
+    struct WebAssets;
+
+    pub(super) async fn serve(uri: Uri) -> Response {
+        let requested = uri.path().trim_start_matches('/');
+        let requested = if requested.is_empty() {
+            "index.html"
+        } else {
+            requested
+        };
+        if let Some(file) = WebAssets::get(requested) {
+            let mime = mime_guess::from_path(requested).first_or_octet_stream();
+            return (
+                [(header::CONTENT_TYPE, mime.as_ref())],
+                file.data.into_owned(),
+            )
+                .into_response();
+        }
+        // Single-page app: unknown non-API paths resolve to index.html so
+        // client-side deep links (e.g. project routes) load correctly.
+        match WebAssets::get("index.html") {
+            Some(index) => (
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                index.data.into_owned(),
+            )
+                .into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+}
+
+/// Router fallback. With `embed-web`, non-API paths are served from the embedded
+/// web bundle (SPA fallback); API paths and all default-feature builds keep the
+/// existing JSON not-found behavior.
+async fn app_fallback(request: Request<axum::body::Body>) -> Response {
+    #[cfg(feature = "embed-web")]
+    {
+        if !request.uri().path().starts_with("/api/") {
+            return web_assets::serve(request.uri().clone()).await;
+        }
+    }
+    route_not_found(request).await
 }
 
 async fn route_not_found(request: Request<axum::body::Body>) -> Response {

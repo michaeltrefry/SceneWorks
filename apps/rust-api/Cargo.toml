@@ -10,7 +10,9 @@ axum = { version = "0.7", features = ["multipart"] }
 futures-util = "0.3"
 glob = "0.3"
 parking_lot = "0.12"
+mime_guess = { version = "2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rust-embed = { version = "8", features = ["debug-embed"], optional = true }
 sceneworks-core = { path = "../../crates/sceneworks-core" }
 sceneworks-worker = { path = "../../crates/sceneworks-worker" }
 serde = { version = "1.0", features = ["derive"] }
@@ -21,6 +23,12 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1.11", features = ["v4"] }
+
+# Embed the built apps/web/dist bundle into the binary and serve it with SPA
+# fallback. Off by default (server/test builds need no web build); the desktop
+# release pipeline runs `npm --prefix apps/web run build` then enables this.
+[features]
+embed-web = ["dep:rust-embed", "dep:mime_guess"]
 
 [dev-dependencies]
 tempfile = "3.13"

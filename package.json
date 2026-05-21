@@ -17,7 +17,9 @@
     "rust:build": "cargo build --workspace",
     "rust:check": "npm run rust:fmt && npm run rust:lint && npm run rust:test && npm run rust:build",
     "desktop:build": "cargo build -p sceneworks-desktop",
-    "desktop:check": "cargo check -p sceneworks-desktop"
+    "desktop:check": "cargo check -p sceneworks-desktop",
+    "web:build": "npm --prefix apps/web run build",
+    "api:build:embedded": "npm run web:build && cargo build -p sceneworks-rust-api --release --features embed-web"
   },
   "engines": {
     "node": ">=20"
