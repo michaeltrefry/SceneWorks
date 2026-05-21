@@ -546,6 +546,9 @@ def test_ltx_replace_person_active_run_marks_replacement_active(tmp_path, monkey
         gemma_root=Path("gemma"),
     )
     monkeypatch.setattr(adapter, "_load_ltx_pipeline", lambda request, resources: object())
+    # Real MP4 control-clip encoding (imageio/ffmpeg) is verified in-container; on
+    # the host stub the writer so the test stays focused on the active-flag contract.
+    monkeypatch.setattr(adapter, "_write_control_clip", lambda frames, path, fps: Path(path).write_bytes(b"clip"))
 
     def fake_encode(*, video, fps, audio, output_path, video_chunks_number):
         Path(output_path).write_bytes(b"fake-mp4")

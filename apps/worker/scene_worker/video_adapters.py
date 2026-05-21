@@ -629,7 +629,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         replacement_control: LtxReplacementControl | None = None
         replacement_status: dict[str, Any] | None = None
         if request.mode == "replace_person":
-            control_clip = media_path.with_suffix(".control.webp")
+            control_clip = media_path.with_suffix(".control.mp4")
             self._temporary_outputs.setdefault(job["id"], []).append(control_clip)
             progress("preparing", "building_control", 0.24, "Building masked control clip from person track.")
             replacement_control = self._ltx_replacement_control(project_path, request, num_frames, control_clip)
@@ -848,7 +848,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             self._apply_replacement_mask(frame, mask, masking_strength)
             for frame, mask in zip(source_frames, masks)
         ]
-        save_animated_preview(masked_frames, clip_path, request.duration)
+        self._write_control_clip(masked_frames, clip_path, request.fps)
         status = track.get("status", {}) if isinstance(track.get("status"), dict) else {}
         return LtxReplacementControl(
             track_id=str(track.get("id") or request.person_track_id),
@@ -860,6 +860,25 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             frame_count=len(masked_frames),
             character_reference_count=len(references),
         )
+
+    def _write_control_clip(self, frames: list[Image.Image], path: Path, fps: int) -> None:
+        """Write the masked control frames as a clip the native LTX video
+        conditioner can decode. LTX reads ``video_conditioning`` with PyAV/ffmpeg,
+        which cannot frame-decode an animated WebP, so real runs (``.mp4``) are
+        encoded with imageio/ffmpeg; tests pass ``.webp`` for a Pillow-only host.
+        """
+        if path.suffix.lower() in {".webp", ".gif"}:
+            save_animated_preview(frames, path, max(1.0, len(frames) / max(1, fps)))
+            return
+        import imageio
+        import numpy as np
+
+        writer = imageio.get_writer(str(path), fps=max(1, int(fps)), codec="libx264", macro_block_size=None)
+        try:
+            for frame in frames:
+                writer.append_data(np.asarray(frame.convert("RGB")))
+        finally:
+            writer.close()
 
     def _apply_replacement_mask(self, frame: Image.Image, mask: Image.Image, strength: float) -> Image.Image:
         """Blend the masked person region toward neutral gray by ``strength`` so
