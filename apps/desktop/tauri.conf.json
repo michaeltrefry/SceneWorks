@@ -38,6 +38,17 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "both",
+        "displayLanguageSelector": false,
+        "languages": ["English"]
+      }
     }
   }
 }
