@@ -25,7 +25,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import importlib
+import json
 import os
+import platform
+import sys
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -977,12 +980,337 @@ class _ZImageLoraBackend:
 
 
 # --------------------------------------------------------------------------- #
+# Native MLX LTX-2.3 LoRA backend (Apple Silicon)
+# --------------------------------------------------------------------------- #
+
+LTX_MLX_REPO = "notapalindrome/ltx23-mlx-av-q4"
+LTX_MLX_TEXT_ENCODER_REPO = "mlx-community/gemma-3-12b-it-bf16"
+# Spatial compression of the LTX VAE: latent edge = pixel edge // 32.
+LTX_SPATIAL_SCALE = 32
+
+
+def require_mlx_runtime() -> None:
+    """The LTX kernel runs a native MLX (``mlx.core``) QLoRA loop, which only
+    exists on Apple Silicon. Fail with a clear, user-facing message instead of a
+    deep import traceback when run elsewhere. The worker capability gate
+    (sc-1538) keeps such jobs off non-Mac workers; this is the in-kernel
+    backstop."""
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        raise TrainingKernelError(
+            "LTX-2.3 LoRA training requires Apple Silicon (macOS arm64); this "
+            "worker cannot run the ltx_mlx_lora kernel."
+        )
+    try:
+        importlib.import_module("mlx.core")
+        importlib.import_module("mlx_video")
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise TrainingKernelError(
+            "LTX-2.3 LoRA training requires the optional MLX worker dependencies "
+            "(apps/worker/requirements-mlx.txt). " + str(exc)
+        ) from exc
+
+
+def _build_ltx_av_config(
+    model_path: Path, config_cls: Any, model_type_cls: Any, rope_type_cls: Any
+) -> Any:
+    """Build the AudioVideo ``LTXModelConfig`` for the distilled Q4 repo.
+
+    Mirrors ``mlx_video.generate_av``'s inline config: caption projection off →
+    ``caption_channels = connector heads * head_dim``; gated attention →
+    ``adaln_embedding_coefficient = 9``. Coupled to the installed
+    mlx-video-with-audio build; revisit on dependency bumps.
+    """
+    caption_channels = 3840
+    audio_caption_channels = 3840
+    caption_proj_first = True
+    caption_proj_second = True
+    apply_gated = False
+    adaln_coeff = 6
+    embedded = model_path / "embedded_config.json"
+    if embedded.exists():
+        try:
+            transformer_cfg = json.loads(embedded.read_text()).get("transformer", {})
+        except (json.JSONDecodeError, OSError):
+            transformer_cfg = {}
+        caption_proj_first = transformer_cfg.get("caption_projection_first_linear", True)
+        caption_proj_second = transformer_cfg.get("caption_projection_second_linear", True)
+        apply_gated = bool(transformer_cfg.get("apply_gated_attention", False))
+        adaln_coeff = 9 if apply_gated else 6
+        if not caption_proj_first and not caption_proj_second:
+            caption_channels = int(transformer_cfg.get("connector_num_attention_heads", 32)) * int(
+                transformer_cfg.get("connector_attention_head_dim", 128)
+            )
+            audio_caption_channels = int(
+                transformer_cfg.get("audio_connector_num_attention_heads", 32)
+            ) * int(transformer_cfg.get("audio_connector_attention_head_dim", 64))
+        else:
+            caption_channels = transformer_cfg.get("caption_channels", caption_channels)
+            audio_caption_channels = transformer_cfg.get(
+                "audio_caption_channels", audio_caption_channels
+            )
+    return config_cls(
+        model_type=model_type_cls.AudioVideo,
+        num_attention_heads=32,
+        attention_head_dim=128,
+        in_channels=128,
+        out_channels=128,
+        num_layers=48,
+        cross_attention_dim=4096,
+        caption_channels=caption_channels,
+        caption_projection_first_linear=caption_proj_first,
+        caption_projection_second_linear=caption_proj_second,
+        adaln_embedding_coefficient=adaln_coeff,
+        apply_gated_attention=apply_gated,
+        audio_num_attention_heads=32,
+        audio_attention_head_dim=64,
+        audio_in_channels=128,
+        audio_out_channels=128,
+        audio_cross_attention_dim=2048,
+        audio_caption_channels=audio_caption_channels,
+        rope_type=rope_type_cls.SPLIT,
+        double_precision_rope=True,
+        positional_embedding_theta=10000.0,
+        positional_embedding_max_pos=[20, 2048, 2048],
+        audio_positional_embedding_max_pos=[20],
+        use_middle_indices_grid=True,
+        timestep_scale_multiplier=1000,
+    )
+
+
+def load_ltx_transformer(model_path: Path) -> tuple[Any, Any]:
+    """Build → selectively quantize → ``load_weights`` the LTX AudioVideo
+    transformer exactly as ``mlx_video.generate_av`` does for the split/quantized
+    repo. Returns ``(transformer, config)``."""
+    mx = importlib.import_module("mlx.core")
+    nn = importlib.import_module("mlx.nn")
+    generate_av = importlib.import_module("mlx_video.generate_av")
+    config_mod = importlib.import_module("mlx_video.models.ltx.config")
+    ltx_mod = importlib.import_module("mlx_video.models.ltx.ltx")
+
+    sanitized = generate_av.load_unified_weights(model_path, "transformer.")
+    config = _build_ltx_av_config(
+        model_path, config_mod.LTXModelConfig, config_mod.LTXModelType, config_mod.LTXRopeType
+    )
+    transformer = ltx_mod.LTXModel(config)
+
+    manifest_path = model_path / "split_model.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            manifest = {}
+        if manifest.get("quantized", False):
+            q_bits = int(manifest.get("quantization_bits", 4))
+            q_group = int(manifest.get("quantization_group_size", 64))
+            quantized_paths = {
+                key.rsplit(".", 1)[0] for key in sanitized if key.endswith(".scales")
+            }
+
+            def _should_quantize(path: str, module: Any) -> bool:
+                return isinstance(module, nn.Linear) and path in quantized_paths
+
+            nn.quantize(transformer, group_size=q_group, bits=q_bits, class_predicate=_should_quantize)
+
+    transformer.load_weights(list(sanitized.items()), strict=False)
+    mx.eval(transformer.parameters())
+    return transformer, config
+
+
+class _LtxMlxLoraBackend:
+    """Native MLX LoRA training backend for LTX-2.3 (Apple Silicon).
+
+    Loads the quantized AudioVideo LTX transformer plus the LTX VAE encoder and
+    gemma text encoder, then caches a still-image dataset as single-frame latents
+    and caption context embeddings. LoRA injection, the flow-matching training
+    step, and adapter saving land in sc-1536/sc-1537; this backend covers loading
+    and dataset preparation.
+    """
+
+    def __init__(self) -> None:
+        self._mx: Any | None = None
+        self._model_path: Path | None = None
+        self._transformer: Any | None = None
+        self._config: Any | None = None
+        self._vae: Any | None = None
+        self._text_encoder: Any | None = None
+        self._loaded_source: str | None = None
+        self._latents: list[Any] = []
+        self._embeds: list[Any] = []
+        self._positions: Any | None = None
+
+    def loaded_models(self) -> list[str]:
+        return [self._loaded_source] if self._loaded_source else []
+
+    def load(
+        self,
+        *,
+        settings: WorkerSettings,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+    ) -> None:
+        require_mlx_runtime()
+        mx = importlib.import_module("mlx.core")
+        utils = importlib.import_module("mlx_video.utils")
+        encoder_mod = importlib.import_module("mlx_video.models.ltx.video_vae.encoder")
+        text_mod = importlib.import_module("mlx_video.models.ltx.text_encoder")
+        self._mx = mx
+
+        target = plan.get("target") or {}
+        advanced = config.advanced if isinstance(config.advanced, dict) else {}
+        repo = str(target.get("baseModelRepo") or LTX_MLX_REPO)
+        text_repo = str(advanced.get("textEncoderRepo") or LTX_MLX_TEXT_ENCODER_REPO)
+
+        progress("loading_model", "loading_model", 0.1, "Resolving LTX-2.3 (MLX Q4) model files.")
+        model_path = Path(utils.get_model_path(repo))
+        self._model_path = model_path
+
+        emit_worker_event(
+            "training_pipeline_load_start",
+            kernel=LtxMlxLoraTrainer.kernel_id,
+            source=repo,
+            device="mps",
+        )
+        progress("loading_model", "loading_model", 0.12, "Loading LTX-2.3 transformer (quantized).")
+        transformer, ltx_config = load_ltx_transformer(model_path)
+
+        progress("loading_model", "loading_model", 0.15, "Loading LTX VAE encoder.")
+        vae = encoder_mod.load_vae_encoder(str(model_path), use_unified=True)
+        mx.eval(vae.parameters())
+
+        progress("loading_model", "loading_model", 0.17, "Loading text encoder.")
+        text_encoder = text_mod.LTX2TextEncoder()
+        text_encoder.load(
+            model_path=str(model_path),
+            text_encoder_path=str(Path(utils.get_model_path(text_repo))),
+            use_unified=True,
+        )
+        mx.eval(text_encoder.parameters())
+
+        self._transformer = transformer
+        self._config = ltx_config
+        self._vae = vae
+        self._text_encoder = text_encoder
+        self._loaded_source = repo
+        # LoRA injection into the transformer + optimizer construction land in
+        # sc-1536 (the training step); load() readies the models so the dataset
+        # can be cached here.
+        emit_worker_event(
+            "training_pipeline_load_complete",
+            kernel=LtxMlxLoraTrainer.kernel_id,
+            source=repo,
+        )
+
+    def prepare_dataset(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        mx = self._mx
+        generate_mod = importlib.import_module("mlx_video.generate")
+        encoder_mod = importlib.import_module("mlx_video.models.ltx.video_vae.encoder")
+        utils = importlib.import_module("mlx_video.utils")
+
+        resolution = bucket_resolution(config.resolution)
+        latent_edge = max(1, resolution // LTX_SPATIAL_SCALE)
+        count = len(items)
+        self._latents = []
+        self._embeds = []
+        # Single still frame → one latent frame; positions are identical across
+        # items at a fixed resolution, so compute the grid once.
+        self._positions = generate_mod.create_position_grid(1, 1, latent_edge, latent_edge)
+
+        for index, item in enumerate(items):
+            _check_cancel(cancel_requested)
+            image = utils.load_image(item["imagePath"], height=resolution, width=resolution)
+            latent = encoder_mod.encode_image(image, self._vae)  # (1, 128, 1, h, w)
+            batch, channels = latent.shape[0], latent.shape[1]
+            flat = mx.transpose(mx.reshape(latent, (batch, channels, -1)), (0, 2, 1))
+            mx.eval(flat)
+            self._latents.append(flat)
+
+            video_embeds, _ = self._text_encoder(
+                str(item.get("caption") or ""), return_audio_embeddings=False
+            )
+            mx.eval(video_embeds)
+            self._embeds.append(video_embeds)
+
+            if (index + 1) % 4 == 0 or index + 1 == count:
+                progress(
+                    "running",
+                    "caching_latents",
+                    _scaled(_CACHE_PROGRESS_START, _CACHE_PROGRESS_END, index + 1, count),
+                    f"Encoded {index + 1} of {count} dataset item(s).",
+                )
+        return {"itemCount": count, "resolution": resolution, "latentEdge": latent_edge}
+
+    def train_step(self, *, step: int, total_steps: int, config: TrainingRunConfig) -> float:
+        raise NotImplementedError(
+            "LTX MLX training step lands in sc-1536 (flow-matching loss + LoRA injection)."
+        )
+
+    def save_checkpoint(self, *, step: int, output_dir: str, file_name: str) -> str | None:
+        raise NotImplementedError("LTX MLX adapter save lands in sc-1537.")
+
+    def generate_samples(
+        self,
+        *,
+        step: int,
+        prompts: list[str],
+        output_dir: str,
+        file_name: str,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+    ) -> list[dict[str, Any]]:
+        # Live mid-training previews for LTX are video generations (heavy); not a
+        # V1 goal. Returning an empty list is handled gracefully by the trainer.
+        return []
+
+    def save_final(self, *, output_dir: str, file_name: str) -> str:
+        raise NotImplementedError("LTX MLX adapter save lands in sc-1537.")
+
+    def cleanup(self) -> None:
+        self._latents = []
+        self._embeds = []
+        self._positions = None
+        self._transformer = None
+        self._vae = None
+        self._text_encoder = None
+        self._loaded_source = None
+        mx = self._mx
+        if mx is not None:
+            try:
+                mx.clear_cache()
+            except Exception:
+                pass
+
+
+class LtxMlxLoraTrainer(ZImageLoraTrainer):
+    """LTX-2.3 video LoRA trainer (native MLX, Apple Silicon).
+
+    Reuses :class:`ZImageLoraTrainer`'s backend-agnostic staged orchestration
+    (prepare → load → cache → train → checkpoint → save) with a native MLX
+    backend. Trained from a still-image dataset; the output is an ``ltx-video``
+    family LoRA the MLX LTX adapter loads at inference.
+    """
+
+    kernel_id = "ltx_mlx_lora"
+
+    def _create_backend(self) -> _LtxMlxLoraBackend:
+        return _LtxMlxLoraBackend()
+
+
+# --------------------------------------------------------------------------- #
 # Kernel registry
 # --------------------------------------------------------------------------- #
 
 
 _TRAINING_KERNELS: dict[str, Callable[[], Any]] = {
     ZImageLoraTrainer.kernel_id: ZImageLoraTrainer,
+    LtxMlxLoraTrainer.kernel_id: LtxMlxLoraTrainer,
 }
 
 

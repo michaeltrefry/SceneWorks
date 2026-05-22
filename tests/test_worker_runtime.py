@@ -62,6 +62,7 @@ from scene_worker.runtime import (
 )
 from scene_worker.training_adapters import (
     SUPPORTED_TRAINING_PLAN_VERSION,
+    LtxMlxLoraTrainer,
     TrainingKernelError,
     ZImageLoraTrainer,
     _ZImageLoraBackend,
@@ -1696,6 +1697,47 @@ def test_z_image_trainer_cancels_and_skips_save(tmp_path):
 
     assert backend.saved is None
     assert backend.cleaned is True
+
+
+def test_create_training_kernel_resolves_ltx_mlx():
+    kernel = create_training_kernel("ltx_mlx_lora")
+    assert isinstance(kernel, LtxMlxLoraTrainer)
+    # The LTX trainer reuses the Z-Image backend-agnostic staged orchestration.
+    assert isinstance(kernel, ZImageLoraTrainer)
+
+
+def test_ltx_mlx_trainer_runs_stages_with_fake_backend(tmp_path):
+    plan = _real_train_plan(tmp_path, steps=4, save_every=2)
+    plan["target"] = {
+        "targetId": "ltx_video_lora",
+        "kernel": "ltx_mlx_lora",
+        "family": "ltx-video",
+        "baseModel": "ltx_2_3",
+        "baseModelRepo": "notapalindrome/ltx23-mlx-av-q4",
+        "baseModelPath": str(tmp_path / "model"),
+    }
+    backend = FakeTrainingBackend()
+    trainer = LtxMlxLoraTrainer(backend=backend)
+    events_log = []
+
+    result = trainer.train(
+        settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+        plan=plan,
+        progress=lambda status, stage, value, message, *extra: events_log.append((status, stage)),
+        cancel_requested=lambda: False,
+    )
+
+    stages = {stage for _status, stage in events_log}
+    statuses = {status for status, _stage in events_log}
+    assert backend.events[0] == "load"
+    assert ("step", 4) in backend.events
+    assert result["kernel"] == "ltx_mlx_lora"
+    assert result["mode"] == "train"
+    assert result["stepsCompleted"] == 4
+    assert {"loading_model", "caching_latents", "training", "saving"}.issubset(stages)
+    assert statuses <= _VALID_JOB_STATUSES
+    assert result["outputPath"] == backend.saved
+    assert result["triggerWords"] == ["miraStyle"]
 
 
 def test_run_lora_train_job_executes_real_run(monkeypatch, tmp_path):
