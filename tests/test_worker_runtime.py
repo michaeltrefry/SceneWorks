@@ -79,6 +79,7 @@ from scene_worker.video_adapters import (
     install_ltx_pipelines_multigpu_compat,
     ltx_model_manifest_entry,
     ltx_frame_count,
+    ltx_mps_gating,
     load_seekable_image_frame,
     person_track_masks,
     safe_download_dir,
@@ -250,6 +251,38 @@ def test_select_torch_device_uses_visible_cuda_default_when_child_process_is_nar
             mps = None
 
     assert select_torch_device(Torch, "1") == "cuda"
+
+
+def test_ltx_mps_gating_leaves_cuda_path_untouched():
+    gating = ltx_mps_gating(cuda_available=True, device_str="cuda")
+    assert gating == {
+        "device": None,
+        "disable_fp8": False,
+        "force_offload_none": False,
+        "fp32_audio": False,
+        "guard_cuda_sync": False,
+    }
+
+
+def test_ltx_mps_gating_steers_apple_silicon_to_mps_recipe():
+    gating = ltx_mps_gating(cuda_available=False, device_str="mps")
+    assert gating == {
+        "device": "mps",
+        "disable_fp8": True,
+        "force_offload_none": True,
+        "fp32_audio": True,
+        "guard_cuda_sync": True,
+    }
+
+
+def test_ltx_mps_gating_disables_cuda_features_on_cpu_without_forcing_mps_device():
+    # A CPU host off CUDA still must drop fp8/offload (both CUDA-only) and guard the
+    # unguarded cuda.synchronize, but it must not claim an mps device it does not have.
+    gating = ltx_mps_gating(cuda_available=False, device_str="cpu")
+    assert gating["device"] is None
+    assert gating["disable_fp8"] is True
+    assert gating["force_offload_none"] is True
+    assert gating["guard_cuda_sync"] is True
 
 
 def test_gpu_worker_fails_fast_when_torch_cuda_is_unavailable():

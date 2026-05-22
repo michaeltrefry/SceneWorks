@@ -60,6 +60,91 @@ def _ensure_pytorch_mps_fallback() -> None:
 
 _ensure_pytorch_mps_fallback()
 
+
+def ltx_mps_gating(*, cuda_available: bool, device_str: str) -> dict[str, Any]:
+    """Device-aware overrides for the native ltx-core path off CUDA.
+
+    ltx-core hard-targets CUDA: ``get_device()`` only ever returns ``cuda`` or
+    ``cpu`` (never ``mps``), fp8 quantization is CUDA-only, block-streaming offload
+    rides CUDA streams/events, and ``cleanup_memory()``/``gpu_model`` call
+    ``torch.cuda.synchronize()`` unguarded. On Apple Silicon every one of those is
+    wrong. When CUDA is present we return no overrides so the production NVIDIA path
+    is byte-for-byte unchanged; otherwise we steer the pipeline onto the proven MPS
+    recipe (explicit ``device=mps`` + bf16, no fp8, no offload, fp32 audio decode).
+    """
+    if cuda_available:
+        return {
+            "device": None,
+            "disable_fp8": False,
+            "force_offload_none": False,
+            "fp32_audio": False,
+            "guard_cuda_sync": False,
+        }
+    return {
+        "device": "mps" if device_str == "mps" else None,
+        "disable_fp8": True,
+        "force_offload_none": True,
+        "fp32_audio": True,
+        "guard_cuda_sync": True,
+    }
+
+
+_CUDA_SYNC_NEUTRALIZED = False
+
+
+def _neutralize_cuda_sync_for_mps() -> None:
+    """No-op ``torch.cuda.synchronize``/``empty_cache`` when CUDA is truly absent.
+
+    ltx-core's ``cleanup_memory()`` (between streamed components) and the
+    ``gpu_model`` teardown call ``torch.cuda.synchronize()`` unguarded; on a non-CUDA
+    macOS build that raises ``AssertionError: Torch not compiled with CUDA enabled``
+    and aborts the run. ``empty_cache()`` is already a safe no-op there but we
+    neutralize both for symmetry. Guarded on ``not is_available()`` so it can never
+    mask a real CUDA sync, and idempotent so repeated pipeline loads are cheap.
+    """
+    global _CUDA_SYNC_NEUTRALIZED
+    if _CUDA_SYNC_NEUTRALIZED:
+        return
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return
+        torch.cuda.synchronize = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+        torch.cuda.empty_cache = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+        _CUDA_SYNC_NEUTRALIZED = True
+    except Exception:
+        return
+
+
+class _Fp32AudioDecoder:
+    """Proxy that forces the LTX-2.3 audio decode path to float32 on MPS.
+
+    ``VocoderWithBWE.forward`` wraps itself in ``torch.autocast(dtype=float32)`` to
+    avoid bf16 accumulation error across its ~108 convolutions. MPS autocast only
+    supports bf16/float16, so that context silently disables and the bf16 vocoder
+    weights then meet the float32 mel input, raising
+    ``Input type (float) and bias type (BFloat16)``. Building the audio VAE decoder +
+    vocoder in float32 (via the native decoder's own ``_dtype`` field) and casting
+    the latent sidesteps autocast entirely. ``__getattr__`` keeps the proxy
+    transparent for any other attribute the pipeline reads.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        import torch
+
+        inner._dtype = torch.float32
+        self._inner = inner
+
+    def __call__(self, latent: Any) -> Any:
+        import torch
+
+        return self._inner.__call__(latent.to(torch.float32))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
 _DelegatingBuilderT = TypeVar("_DelegatingBuilderT")
@@ -770,15 +855,31 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
         install_ltx_pipelines_multigpu_compat()
         loader = importlib.import_module("ltx_core.loader")
-        quantization = self._quantization(request)
+        gating = self._ltx_device_gating()
+        if gating["guard_cuda_sync"]:
+            _neutralize_cuda_sync_for_mps()
         torch_compile = bool(request.advanced.get("compile", False))
+        # fp8 is CUDA-only, so off CUDA we drop it and let the constructors default to
+        # bf16 (the proven Apple Silicon precision). On CUDA `disable_fp8` is False, so
+        # this is exactly the prior `self._quantization(request)` call.
+        quantization = None if gating["disable_fp8"] else self._quantization(request)
         # FP8 and CPU/disk offload coexist: at the pinned ltx-core commit, layer
         # streaming explicitly requires QuantizationPolicy.fp8_cast() (DiffusionStage
         # chains it into the streaming ops) and the Gemma encoder has its own streaming
         # builder, so offloading streams the fp8 transformer and frees the ~23 GB text
         # encoder after prompt encoding instead of pinning it resident. Streaming is the
         # one thing torch.compile cannot do, so only force offload off when compile is on.
-        offload_mode = self._offload_mode(request, override="none" if torch_compile else None)
+        # Block-streaming also rides CUDA streams/events, so force NONE off CUDA too.
+        offload_override = "none" if (torch_compile or gating["force_offload_none"]) else None
+        offload_mode = self._offload_mode(request, override=offload_override)
+        # ltx-core's get_device() only ever returns cuda/cpu — never mps — so Apple
+        # Silicon needs an explicit device. device=None on CUDA/CPU is identical to the
+        # prior behavior (constructors fall back to get_device()).
+        device = None
+        if gating["device"] == "mps":
+            import torch
+
+            device = torch.device("mps")
         loras = self._ltx_loras(loader, request)
         # The native Lightricks constructors expose `loras` across distilled,
         # two-stage, and IC-LoRA pipelines; `distilled_lora` remains separate.
@@ -789,6 +890,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "quantization": quantization,
             "torch_compile": torch_compile,
             "offload_mode": offload_mode,
+            "device": device,
         }
         if self._pipeline_module(request) == "ltx_pipelines.ic_lora":
             pipeline_module = importlib.import_module("ltx_pipelines.ic_lora")
@@ -814,6 +916,8 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 distilled_lora=[lora_spec],
                 **common_kwargs,
             )
+        if gating["fp32_audio"]:
+            self._patch_ltx_audio_decoder_for_mps(pipeline)
         self._pipeline = pipeline
         self._pipeline_key_value = key
         self._loaded_models.update({request.model, self._pipeline_module(request), str(resources.checkpoint_path)})
@@ -987,6 +1091,33 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         install_ltx_pipelines_multigpu_compat()
         quant_module = importlib.import_module("ltx_core.quantization")
         return quant_module.QuantizationPolicy.fp8_cast()
+
+    def _ltx_device_gating(self) -> dict[str, Any]:
+        """Resolve the active accelerator and return native-LTX device overrides.
+
+        Off CUDA (Apple Silicon, CPU) the ltx-core defaults are wrong; see
+        :func:`ltx_mps_gating`. When torch is unavailable we return the empty-override
+        (CUDA) shape — the only callers build a real pipeline, which already requires
+        torch, so this just keeps the helper total.
+        """
+        try:
+            import torch
+        except Exception:
+            return ltx_mps_gating(cuda_available=True, device_str="")
+        settings = self._settings or WorkerSettings()
+        cuda = getattr(torch, "cuda", None)
+        cuda_available = bool(cuda is not None and cuda.is_available())
+        device_str = select_torch_device(torch, getattr(settings, "gpu_id", None))
+        return ltx_mps_gating(cuda_available=cuda_available, device_str=device_str)
+
+    def _patch_ltx_audio_decoder_for_mps(self, pipeline: Any) -> None:
+        decoder = getattr(pipeline, "audio_decoder", None)
+        if decoder is None or isinstance(decoder, _Fp32AudioDecoder):
+            return
+        # Only the native AudioDecoder exposes the bf16 `_dtype` we need to flip.
+        if getattr(decoder, "_dtype", None) is None:
+            return
+        pipeline.audio_decoder = _Fp32AudioDecoder(decoder)
 
     def _advanced_float(self, request: VideoRequest, key: str, fallback: float) -> float:
         try:
