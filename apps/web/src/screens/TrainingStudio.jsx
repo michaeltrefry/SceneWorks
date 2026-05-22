@@ -178,6 +178,18 @@ function parseTriggerWords(value) {
     .filter(Boolean);
 }
 
+function datasetTriggerWordsText(dataset) {
+  const words = [];
+  for (const item of dataset?.items ?? []) {
+    for (const word of item.caption?.triggerWords ?? item.caption?.trigger_words ?? []) {
+      if (!words.some((existing) => existing.toLowerCase() === String(word).toLowerCase())) {
+        words.push(String(word));
+      }
+    }
+  }
+  return words.join(", ");
+}
+
 function captionSeedFromName(value) {
   const name = String(value ?? "")
     .replaceAll("\\", "/")
@@ -211,12 +223,11 @@ function captionWithTriggerWords(seed, triggerWords) {
   return [...missingTriggerWords, normalizedSeed].filter(Boolean).join(", ");
 }
 
-function captionForDraftItem(item, asset) {
+function captionForDraftItem(item, asset, triggerWords) {
   const text = String(item.captionText ?? "").trim();
   if (text) {
     return { source: item.captionSource, text };
   }
-  const triggerWords = parseTriggerWords(item.triggerWords);
   return {
     source: "auto",
     text: captionWithTriggerWords(captionSeedForItem(item, asset), triggerWords),
@@ -245,7 +256,6 @@ function renameCaptionDrafts(dataset) {
     displayName: item.displayName ?? imageAssetName(item),
     captionText: item.caption?.text ?? "",
     captionSource: item.caption?.source ?? "manual",
-    triggerWords: triggerWordsText(item.caption),
     assetId: item.assetId ?? "",
     path: item.path ?? "",
   }));
@@ -562,6 +572,7 @@ export function TrainingStudio({
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [renamePrefix, setRenamePrefix] = useState("");
+  const [captionTriggerWords, setCaptionTriggerWords] = useState("");
   const [renameCaptionDraftItems, setRenameCaptionDraftItems] = useState([]);
   const [savingRenameCaption, setSavingRenameCaption] = useState(false);
   const [captionSettings, setCaptionSettings] = useState(defaultCaptionSettings);
@@ -632,6 +643,7 @@ export function TrainingStudio({
     setSelectedAssetIds([]);
     setSelectedDatasetId("");
     setRenamePrefix("");
+    setCaptionTriggerWords("");
     setRenameCaptionDraftItems([]);
     setCaptionSettings(defaultCaptionSettings);
     setConfigDraft({});
@@ -644,6 +656,7 @@ export function TrainingStudio({
   useEffect(() => {
     setRenameCaptionDraftItems(renameCaptionDrafts(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
+    setCaptionTriggerWords(datasetTriggerWordsText(activeDataset));
   }, [activeDataset]);
 
   useEffect(() => {
@@ -761,6 +774,11 @@ export function TrainingStudio({
     setRenameCaptionDraftItems((current) =>
       current.map((item) => (item.originalItemId === originalItemId ? { ...item, ...patch } : item)),
     );
+  }
+
+  function updateCaptionTriggerWords(value) {
+    setDatasetMessage("");
+    setCaptionTriggerWords(value);
   }
 
   function updateConfigDraft(field, value) {
@@ -883,17 +901,18 @@ export function TrainingStudio({
         dataset = await batchRenameDataset(activeDataset.id, { items: renameItems });
       }
       const useJoyCaption = captionSettings.captioner === "joy_caption";
+      const datasetTriggerWords = parseTriggerWords(captionTriggerWords);
       const captionItems = renameCaptionDraftItems.map((item) => {
         const asset = assetsById.get(item.assetId);
         const caption = useJoyCaption
           ? { source: item.captionSource, text: String(item.captionText ?? "") }
-          : captionForDraftItem(item, asset);
+          : captionForDraftItem(item, asset, datasetTriggerWords);
         return {
           itemId: item.itemId.trim(),
           caption: {
             text: caption.text,
             source: caption.source,
-            triggerWords: parseTriggerWords(item.triggerWords),
+            triggerWords: datasetTriggerWords,
           },
         };
       });
@@ -1233,15 +1252,6 @@ export function TrainingStudio({
                                   />
                                 </label>
                                 <label>
-                                  Trigger words
-                                  <input
-                                    onChange={(event) =>
-                                      updateRenameCaptionDraft(item.originalItemId, { triggerWords: event.target.value })
-                                    }
-                                    value={item.triggerWords}
-                                  />
-                                </label>
-                                <label>
                                   Source
                                   <select
                                     onChange={(event) =>
@@ -1269,6 +1279,10 @@ export function TrainingStudio({
                           <label>
                             Rename prefix
                             <input onChange={(event) => setRenamePrefix(event.target.value)} value={renamePrefix} />
+                          </label>
+                          <label>
+                            Trigger words
+                            <input onChange={(event) => updateCaptionTriggerWords(event.target.value)} value={captionTriggerWords} />
                           </label>
                           <button className="secondary-action" onClick={applyOrderedNames} type="button">
                             <Icon.Sliders size={14} />
