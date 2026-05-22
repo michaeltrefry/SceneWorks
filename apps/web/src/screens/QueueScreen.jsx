@@ -3,7 +3,7 @@ import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
 import { actionStatuses, terminalStatuses } from "../constants.js";
 import { formatSeconds, percent } from "../formatting.js";
 
-const nonGpuJobTypes = new Set(["model_download", "model_convert", "lora_import"]);
+const nonGpuJobTypes = new Set(["model_download", "model_import", "model_convert", "lora_import"]);
 // Keep GPU-required job types in sync with
 // crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu and
 // apps/worker/scene_worker/runtime.py (SUPPORTED_JOB_TYPES + TRAINING_JOB_TYPES).
