@@ -12,6 +12,13 @@ from PIL import Image
 import pytest
 
 from scene_worker.adapter_utils import filter_call_kwargs
+from scene_worker.caption_adapters import (
+    JOY_CAPTION_RESAMPLE,
+    JoyCaptionOptions,
+    build_joy_caption_prompt,
+    caption_with_trigger_words,
+    normalize_processor_resample,
+)
 from scene_worker.image_adapters import (
     ImageAssetWriter,
     MODEL_TARGETS,
@@ -57,6 +64,8 @@ from scene_worker.training_adapters import (
     SUPPORTED_TRAINING_PLAN_VERSION,
     TrainingKernelError,
     ZImageLoraTrainer,
+    _ZImageLoraBackend,
+    build_optimizer,
     bucket_resolution,
     create_training_kernel,
     dry_run_training_summary,
@@ -143,6 +152,7 @@ def test_gpu_worker_advertises_generation_capabilities(monkeypatch):
 
     assert "image_generate" in capabilities
     assert "video_generate" in capabilities
+    assert "training_caption" in capabilities
     assert "person_replace" in capabilities
     assert "placeholder" not in capabilities
 
@@ -154,7 +164,7 @@ def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatc
     # lora_train dry-run validation needs no inference backend, so it is
     # advertised even without torch; generation job types are not.
     assert capabilities == ["gpu", "lora_train", "nvidia"]
-    for job_type in ("image_generate", "image_edit", "video_generate"):
+    for job_type in ("image_generate", "image_edit", "video_generate", "training_caption"):
         assert job_type not in capabilities
 
 
@@ -182,6 +192,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
         "lora_train",
         "lora_train_execute",
         "person_replace",
+        "training_caption",
         "video_bridge",
         "video_extend",
         "video_generate",
@@ -1027,10 +1038,21 @@ def test_friendly_failure_identifies_missing_sentencepiece_backend():
     )
 
     assert message == "Video generation failed because the worker is missing a tokenizer backend."
-    assert "SentencePiece" in error
+    assert "tokenizer support libraries" in error
     assert "pip install -r apps/worker/requirements.txt" in error
     assert "docker compose build worker --no-cache" in error
     assert "Technical detail" in error
+
+
+def test_friendly_failure_identifies_missing_protobuf_backend():
+    message, error = friendly_failure(
+        "Training captioning",
+        RuntimeError("requires the protobuf library but it was not found in your environment"),
+    )
+
+    assert message == "Training captioning failed because the worker is missing a tokenizer backend."
+    assert "tokenizer support libraries" in error
+    assert "pip install -r apps/worker/requirements.txt" in error
 
 
 def test_friendly_failure_identifies_disk_full_by_message():
@@ -1061,6 +1083,34 @@ def test_is_cuda_oom_detects_oom_by_type_and_message():
     assert not is_cuda_oom(RuntimeError("some other failure"))
 
 
+def test_joy_caption_prompt_builder_applies_length_and_name_options():
+    options = JoyCaptionOptions(
+        caption_type="Descriptive",
+        caption_length="40",
+        extra_options=["If there is a person/character in the image you must refer to them as {name}."],
+        name_input="Mira",
+    )
+
+    prompt = build_joy_caption_prompt(options)
+
+    assert "40 words or less" in prompt
+    assert "Mira" in prompt
+
+
+def test_caption_with_trigger_words_prepends_missing_tokens():
+    caption = caption_with_trigger_words("studio portrait with soft light", ["miraStyle", "studio"])
+
+    assert caption == "miraStyle, studio portrait with soft light"
+
+
+def test_normalize_processor_resample_replaces_unsupported_lanczos():
+    processor = SimpleNamespace(image_processor=SimpleNamespace(resample="lanczos"))
+
+    normalize_processor_resample(processor)
+
+    assert processor.image_processor.resample == JOY_CAPTION_RESAMPLE
+
+
 def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
     events = []
     monkeypatch.setattr("scene_worker.runtime.emit", events.append)
@@ -1085,6 +1135,8 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "person_replace",
         "person_detect",
         "person_track",
+        "lora_train",
+        "training_caption",
     ]
     assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
 
@@ -1234,6 +1286,45 @@ def test_flow_matching_velocity_target_uses_negated_pipeline_sign():
     assert flow_matching_velocity_target(latents, noise) == -(noise - latents)
 
 
+def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
+    calls = {}
+
+    class FakeProdigy:
+        def __init__(self, params, **kwargs):
+            calls["params"] = params
+            calls["kwargs"] = kwargs
+
+    def fake_import_module(name):
+        if name == "torch":
+            return SimpleNamespace(optim=SimpleNamespace())
+        if name == "prodigyopt":
+            return SimpleNamespace(Prodigy=FakeProdigy)
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr("scene_worker.training_adapters.importlib.import_module", fake_import_module)
+    params = [object()]
+
+    optimizer = build_optimizer("prodigyopt", params, 0.0001)
+
+    assert isinstance(optimizer, FakeProdigy)
+    assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6}}
+
+
+def test_z_image_lora_backend_activates_default_adapter():
+    class FakeTransformer:
+        def __init__(self):
+            self.adapter_name = None
+
+        def set_adapter(self, name):
+            self.adapter_name = name
+
+    transformer = FakeTransformer()
+
+    _ZImageLoraBackend()._activate_lora_adapter(transformer)
+
+    assert transformer.adapter_name == "default"
+
+
 def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
     config = read_run_config(
         {
@@ -1255,6 +1346,133 @@ def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
     assert config.save_every == 100
     assert config.mixed_precision == "bf16"
     assert config.lora_target_modules == ["to_q", "to_k", "to_v", "to_out.0"]
+    assert config.sample_steps == 9
+    assert config.sample_guidance_scale == 0.0
+
+
+def test_read_run_config_parses_sample_render_settings():
+    config = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "sampleEvery": 50,
+                    "sampleSteps": 12,
+                    "sampleGuidanceScale": 1.25,
+                    "samplePrompts": ["miraStyle portrait"],
+                }
+            }
+        }
+    )
+
+    assert config.sample_every == 50
+    assert config.sample_steps == 12
+    assert config.sample_guidance_scale == 1.25
+    assert config.sample_prompts == ["miraStyle portrait"]
+
+
+def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
+    calls = []
+
+    class FakeNoGrad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeGenerator:
+        def __init__(self, device):
+            self.device = device
+            self.seed = None
+
+        def manual_seed(self, seed):
+            self.seed = seed
+            return self
+
+    class FakeTorch:
+        def no_grad(self):
+            return FakeNoGrad()
+
+        def Generator(self, device):
+            return FakeGenerator(device)
+
+    class FakeImage:
+        def convert(self, mode):
+            assert mode == "RGB"
+            return self
+
+        def save(self, path):
+            Path(path).write_bytes(b"png")
+
+    class FakePipe:
+        def __call__(
+            self,
+            *,
+            prompt,
+            height,
+            width,
+            num_inference_steps,
+            guidance_scale,
+            generator,
+        ):
+            calls.append(
+                {
+                    "prompt": prompt,
+                    "height": height,
+                    "width": width,
+                    "num_inference_steps": num_inference_steps,
+                    "guidance_scale": guidance_scale,
+                    "seed": generator.seed,
+                }
+            )
+            return SimpleNamespace(images=[FakeImage()])
+
+    class FakeTransformer:
+        training = True
+
+        def set_adapter(self, _name):
+            pass
+
+        def eval(self):
+            self.training = False
+
+        def train(self):
+            self.training = True
+
+    backend = _ZImageLoraBackend()
+    backend._torch = FakeTorch()
+    backend._pipeline = FakePipe()
+    backend._transformer = FakeTransformer()
+    backend._device = "cpu"
+    config = read_run_config(
+        {
+            "config": {
+                "seed": 7,
+                "advanced": {
+                    "sampleSteps": 11,
+                    "sampleGuidanceScale": 0.0,
+                    "samplePrompts": ["miraStyle portrait"],
+                },
+            },
+            "output": {"triggerWords": ["miraStyle"]},
+        }
+    )
+
+    samples = backend.generate_samples(
+        step=4,
+        prompts=config.sample_prompts,
+        output_dir=str(tmp_path),
+        file_name="mira.safetensors",
+        plan={"dataset": {"rootPath": str(tmp_path / "training" / "datasets" / "ds_1")}},
+        config=config,
+    )
+
+    assert calls[0]["num_inference_steps"] == 11
+    assert calls[0]["guidance_scale"] == 0.0
+    assert calls[0]["seed"] == 11
+    assert samples[0]["sampleSource"] == "live_adapter"
+    assert samples[0]["numInferenceSteps"] == 11
+    assert samples[0]["guidanceScale"] == 0.0
 
 
 def test_create_training_kernel_resolves_known_and_rejects_unknown():
@@ -1324,6 +1542,18 @@ class FakeTrainingBackend:
         self.checkpoints.append(path)
         return path
 
+    def generate_samples(self, *, step, prompts, output_dir, file_name, plan, config):
+        self.events.append(("sample", step))
+        return [
+            {
+                "step": step,
+                "prompt": prompt,
+                "path": os.path.join(output_dir, "samples", f"sample-{index}.png"),
+                "relativePath": f"loras/lora_1/samples/sample-{index}.png",
+            }
+            for index, prompt in enumerate(prompts[:4], start=1)
+        ]
+
     def save_final(self, *, output_dir, file_name):
         self.saved = os.path.join(output_dir, file_name)
         return self.saved
@@ -1332,7 +1562,7 @@ class FakeTrainingBackend:
         self.cleaned = True
 
 
-def _real_train_plan(tmp_path, *, steps=4, save_every=2, item_count=1):
+def _real_train_plan(tmp_path, *, steps=4, save_every=2, sample_every=0, item_count=1):
     items = []
     for index in range(item_count):
         image = tmp_path / "images" / f"{index:03d}.png"
@@ -1359,7 +1589,7 @@ def _real_train_plan(tmp_path, *, steps=4, save_every=2, item_count=1):
             "saveEvery": save_every,
             "seed": 42,
             "optimizer": "adamw",
-            "advanced": {},
+            "advanced": {"sampleEvery": sample_every} if sample_every else {},
         },
         "output": {
             "loraId": "lora_1",
@@ -1416,6 +1646,34 @@ def test_z_image_trainer_runs_stages_checkpoints_and_saves(tmp_path):
     # save_every=2, steps=4 -> a single mid-run checkpoint at step 2 (step 4 is final).
     assert backend.checkpoints == [os.path.join(plan["output"]["outputDir"], "ckpt-2.safetensors")]
     assert backend.cleaned is True
+
+
+def test_z_image_trainer_emits_training_samples_on_sample_cadence(tmp_path):
+    plan = _real_train_plan(tmp_path, steps=4, save_every=0, sample_every=2)
+    backend = FakeTrainingBackend()
+    trainer = ZImageLoraTrainer(backend=backend)
+    progress_results = []
+
+    result = trainer.train(
+        settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
+        plan=plan,
+        progress=lambda *args: progress_results.append(args[4]) if len(args) > 4 else None,
+        cancel_requested=lambda: False,
+    )
+
+    assert ("sample", 2) in backend.events
+    assert ("sample", 4) in backend.events
+    assert len(result["latestTrainingSamples"]) == 4
+    assert result["latestTrainingSamples"][0]["step"] == 4
+    assert result["samplePrompts"][0].startswith("miraStyle")
+    assert result["sampleSettings"] == {
+        "numInferenceSteps": 9,
+        "guidanceScale": 0.0,
+        "sampleSource": "live_adapter",
+    }
+    sample_updates = [payload for payload in progress_results if payload]
+    assert sample_updates[-1]["latestTrainingSamples"][0]["relativePath"].startswith("loras/lora_1/samples/")
+    assert sample_updates[-1]["sampleSettings"]["guidanceScale"] == 0.0
 
 
 def test_z_image_trainer_cancels_and_skips_save(tmp_path):

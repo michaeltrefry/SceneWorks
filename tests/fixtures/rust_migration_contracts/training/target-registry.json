@@ -30,6 +30,8 @@
           "repeats": 10,
           "bucketStrategy": "aspect",
           "sampleEvery": 250,
+          "sampleSteps": 9,
+          "sampleGuidanceScale": 0.0,
           "qualityPreset": "balanced",
           "outputScope": "project",
           "requestedGpu": "auto"
@@ -41,6 +43,7 @@
         "steps": [200, 6000],
         "resolutions": [512, 768, 1024],
         "batchSize": [1, 4],
+        "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
         "qualityPresets": ["speed", "balanced", "quality"],
         "outputScopes": ["project", "global"]
       },

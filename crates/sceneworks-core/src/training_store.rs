@@ -618,7 +618,13 @@ fn write_dataset_caption_sidecars(
     for item in &dataset.items {
         let image_path = dataset_item_path(project_path, dataset, item)?;
         let caption_path = image_path.with_extension("txt");
-        write_text(&caption_path, &format!("{}\n", item.caption.text))?;
+        write_text(
+            &caption_path,
+            &format!(
+                "{}\n",
+                caption_text_with_trigger_words(&item.caption.text, &item.caption.trigger_words)
+            ),
+        )?;
         sidecars.push(TrainingCaptionSidecar {
             item_id: item.id.clone(),
             image_path: item.path.clone(),
@@ -626,6 +632,21 @@ fn write_dataset_caption_sidecars(
         });
     }
     Ok(sidecars)
+}
+
+fn caption_text_with_trigger_words(caption: &str, trigger_words: &[String]) -> String {
+    let cleaned = caption.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = cleaned.to_lowercase();
+    let mut parts = trigger_words
+        .iter()
+        .map(|word| word.trim())
+        .filter(|word| !word.is_empty() && !lower.contains(&word.to_lowercase()))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !cleaned.is_empty() {
+        parts.push(cleaned);
+    }
+    parts.join(", ")
 }
 
 fn materialize_items(

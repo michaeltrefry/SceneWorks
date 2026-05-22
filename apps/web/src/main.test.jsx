@@ -96,6 +96,8 @@ const zImageTrainingTarget = {
       repeats: 10,
       bucketStrategy: "aspect",
       sampleEvery: 250,
+      sampleSteps: 9,
+      sampleGuidanceScale: 0.0,
       qualityPreset: "balanced",
       outputScope: "project",
       requestedGpu: "auto",
@@ -103,6 +105,7 @@ const zImageTrainingTarget = {
   },
   limits: {
     resolutions: [512, 768, 1024],
+    optimizers: ["adamw8bit", "adamw", "adam", "prodigyopt"],
     qualityPresets: ["speed", "balanced", "quality"],
     outputScopes: ["project", "global"],
   },
@@ -657,6 +660,7 @@ describe("SceneWorks app shell", () => {
       },
       sidecars: [{ itemId: "item_0007", captionPath: "training/datasets/dataset-a/images/mira_0007.txt" }],
     }));
+    const createCaptionJob = vi.fn(async () => ({ id: "job-caption-1", type: "training_caption" }));
 
     root = createRoot(container);
     await act(async () => {
@@ -665,6 +669,7 @@ describe("SceneWorks app shell", () => {
           activeProject={{ id: "project-a", name: "Project A" }}
           assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
           batchRenameDataset={batchRenameDataset}
+          createCaptionJob={createCaptionJob}
           datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
           loadDataset={loadDataset}
           writeCaptionSidecars={writeCaptionSidecars}
@@ -685,7 +690,7 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Caption"), "mira studio portrait");
     await changeField(field(container, "Trigger words"), "mira, studio");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Write sidecars").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
     });
     await settle();
 
@@ -707,7 +712,328 @@ describe("SceneWorks app shell", () => {
         },
       ],
     });
-    expect(container.textContent).toContain("Caption sidecars written (1)");
+    expect(createCaptionJob).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Captions created (1)");
+  });
+
+  it("queues Joy Caption for missing training captions", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "", source: "manual", triggerWords: ["miraStyle"] },
+        },
+      ],
+    }));
+    const writeCaptionSidecars = vi.fn(async (datasetId, payload) => ({
+      dataset: {
+        id: datasetId,
+        name: "Portrait Set",
+        version: 4,
+        items: [{ id: "item_0001", assetId: "asset-a", path: "images/item_0001.png", caption: payload.items[0].caption }],
+      },
+      sidecars: [{ itemId: "item_0001", captionPath: "training/datasets/dataset-a/images/item_0001.txt" }],
+    }));
+    const createCaptionJob = vi.fn(async () => ({ id: "job-caption-1", type: "training_caption" }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
+          createCaptionJob={createCaptionJob}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          writeCaptionSidecars={writeCaptionSidecars}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    expect(field(container, "Caption prompt").value).toContain("Write a long detailed description for this image.");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
+    });
+    await settle();
+
+    expect(writeCaptionSidecars).toHaveBeenCalledWith("dataset-a", {
+      items: [{ itemId: "item_0001", caption: { text: "", source: "manual", triggerWords: ["Portrait Set"] } }],
+    });
+    expect(createCaptionJob).toHaveBeenCalledWith(
+      "dataset-a",
+      expect.objectContaining({
+        captioner: "joy_caption",
+        recaption: false,
+        requestedGpu: "auto",
+        options: expect.objectContaining({
+          captionPrompt: "Write a long detailed description for this image.",
+        }),
+      }),
+    );
+    expect(container.textContent).toContain("Caption job queued (job-caption-1)");
+  });
+
+  it("uses metadata fallback for missing training captions before writing sidecars", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "", source: "manual", triggerWords: ["miraStyle"] },
+        },
+      ],
+    }));
+    const writeCaptionSidecars = vi.fn(async (datasetId, payload) => ({
+      dataset: {
+        id: datasetId,
+        name: "Portrait Set",
+        version: 4,
+        items: [
+          {
+            id: "item_0001",
+            assetId: "asset-a",
+            path: "images/item_0001.png",
+            displayName: "item_0001.png",
+            caption: payload.items[0].caption,
+          },
+        ],
+      },
+      sidecars: [{ itemId: "item_0001", captionPath: "training/datasets/dataset-a/images/item_0001.txt" }],
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[
+            {
+              id: "asset-a",
+              type: "image",
+              displayName: "Mira.png",
+              file: { path: "assets/images/Mira.png", mimeType: "image/png" },
+              recipe: { prompt: "studio portrait with soft light" },
+            },
+          ]}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          loadDataset={loadDataset}
+          writeCaptionSidecars={writeCaptionSidecars}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    await changeField(field(container, "Method"), "metadata");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
+    });
+    await settle();
+
+    expect(writeCaptionSidecars).toHaveBeenCalledWith("dataset-a", {
+      items: [
+        {
+          itemId: "item_0001",
+          caption: {
+            text: "Portrait Set, studio portrait with soft light",
+            source: "auto",
+            triggerWords: ["Portrait Set"],
+          },
+        },
+      ],
+    });
+    expect(container.textContent).toContain("Portrait Set, studio portrait with soft light");
+  });
+
+  it("prefills caption sidebar defaults from the dataset name", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "first portrait", source: "manual", triggerWords: ["oldOne"] },
+        },
+        {
+          id: "item_0002",
+          assetId: "asset-b",
+          path: "images/item_0002.png",
+          displayName: "item_0002.png",
+          caption: { text: "second portrait", source: "manual", triggerWords: ["oldTwo"] },
+        },
+      ],
+    }));
+    const writeCaptionSidecars = vi.fn(async (datasetId, payload) => ({
+      dataset: { id: datasetId, name: "Portrait Set", version: 4, items: payload.items },
+      sidecars: payload.items.map((item) => ({ itemId: item.itemId, captionPath: `training/datasets/dataset-a/images/${item.itemId}.txt` })),
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[
+            { id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } },
+            { id: "asset-b", type: "image", displayName: "Mira 2.png", file: { path: "assets/images/Mira2.png", mimeType: "image/png" } },
+          ]}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }]}
+          loadDataset={loadDataset}
+          writeCaptionSidecars={writeCaptionSidecars}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    expect(field(container, "Trigger words").value).toBe("Portrait Set");
+    expect(field(container, "Character Name").value).toBe("Portrait Set");
+    await changeField(field(container, "Trigger words"), "miraStyle, portraitSet");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
+    });
+    await settle();
+
+    expect(writeCaptionSidecars).toHaveBeenCalledWith("dataset-a", {
+      items: [
+        { itemId: "item_0001", caption: { text: "first portrait", source: "manual", triggerWords: ["miraStyle", "portraitSet"] } },
+        { itemId: "item_0002", caption: { text: "second portrait", source: "manual", triggerWords: ["miraStyle", "portraitSet"] } },
+      ],
+    });
+  });
+
+  it("defaults the training trigger phrase from sidebar trigger words until edited", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "first portrait", source: "manual", triggerWords: ["oldOne"] },
+        },
+      ],
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={["auto", "0"]}
+          loadDataset={loadDataset}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    expect(field(container, "Trigger phrase").value).toBe("Portrait Set");
+
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    await changeField(field(container, "Trigger words"), "miraStyle, portraitSet");
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    expect(field(container, "Trigger phrase").value).toBe("miraStyle, portraitSet");
+
+    await changeField(field(container, "Trigger phrase"), "manualTrigger");
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    await changeField(field(container, "Trigger words"), "otherTrigger");
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+
+    expect(field(container, "Trigger phrase").value).toBe("manualTrigger");
+  });
+
+  it("shows active training progress with live sample previews", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          jobs={[
+            {
+              id: "job-train-1",
+              type: "lora_train",
+              status: "running",
+              stage: "rendering",
+              progress: 0.42,
+              elapsedSeconds: 31,
+              projectId: "project-a",
+              requestedGpu: "0",
+              payload: { outputName: "Portrait Set LoRA" },
+              result: {
+                latestTrainingSamples: [
+                  { step: 250, prompt: "Portrait Set, studio portrait", relativePath: "loras/lora_1/samples/sample-1.png" },
+                  { step: 250, prompt: "Portrait Set, full body", relativePath: "loras/lora_1/samples/sample-2.png" },
+                  { step: 250, prompt: "Portrait Set, outdoor", relativePath: "loras/lora_1/samples/sample-3.png" },
+                  { step: 250, prompt: "Portrait Set, close-up", relativePath: "loras/lora_1/samples/sample-4.png" },
+                ],
+              },
+            },
+          ]}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Training in progress");
+    expect(container.textContent).toContain("Portrait Set LoRA");
+    expect(container.textContent).toContain("rendering");
+    expect([...container.querySelectorAll(".training-sample-tile img")].map((image) => image.src)).toEqual([
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-1.png",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-2.png",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-3.png",
+      "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-4.png",
+    ]);
   });
 
   it("builds a training config snapshot from registry defaults", async () => {
@@ -751,8 +1077,12 @@ describe("SceneWorks app shell", () => {
 
     expect(field(container, "Target").value).toBe("z_image_turbo_lora");
     expect(field(container, "Base model").value).toBe("z_image_turbo");
+    expect(field(container, "Guidance scale").value).toBe("0");
     expect(field(container, "Rank").value).toBe("16");
     expect(field(container, "Precision").value).toBe("bf16");
+    expect([...field(container, "Optimizer").options].map((option) => option.value)).toEqual(["adamw8bit", "adamw", "adam", "prodigyopt"]);
+    await changeField(field(container, "Optimizer"), "prodigyopt");
+    await changeField(field(container, "Guidance scale"), "1.2");
 
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config").click();
@@ -770,12 +1100,15 @@ describe("SceneWorks app shell", () => {
           rank: 16,
           alpha: 16,
           learningRate: 0.0001,
-          optimizer: "adamw8bit",
+          optimizer: "prodigyopt",
           triggerWord: "miraStyle",
           advanced: expect.objectContaining({
             mixedPrecision: "bf16",
             qualityPreset: "balanced",
             outputScope: "project",
+            sampleSteps: 9,
+            sampleGuidanceScale: 1.2,
+            samplePrompts: expect.arrayContaining([expect.stringContaining("miraStyle")]),
           }),
         }),
       }),
@@ -2080,6 +2413,51 @@ describe("SceneWorks app shell", () => {
           status: "completed",
           projectId: "project-1",
           payload: { loraId: "detail_lora" },
+        }),
+      });
+    });
+    await settle();
+    await settle();
+
+    const loraRequests = global.fetch.mock.calls
+      .map(([url]) => new URL(url))
+      .filter((url) => url.pathname.endsWith("/loras"));
+    expect(loraRequests.some((url) => url.search === "")).toBe(true);
+    expect(loraRequests.some((url) => url.search === "?projectId=project-1")).toBe(true);
+  });
+
+  it("refreshes the project LoRA overlay when LoRA training completes", async () => {
+    global.fetch.mockImplementation((url) => {
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    global.fetch.mockClear();
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "train-job-1",
+          type: "lora_train",
+          status: "completed",
+          projectId: "project-1",
+          payload: { dryRun: false, outputName: "Portrait Set LoRA" },
+          result: { loraRegistered: true, loraId: "lora_portrait_set" },
         }),
       });
     });

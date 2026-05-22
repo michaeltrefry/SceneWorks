@@ -1466,10 +1466,11 @@ fn normalize_requested_gpu(value: &str) -> String {
 }
 
 // Keep GPU-required job types in sync with
-// apps/worker/scene_worker/runtime.py (SUPPORTED_JOB_TYPES + TRAINING_JOB_TYPES) and
-// apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes. `lora_train` is GPU-required
-// like generation, but its worker capability is advertised separately (the dry-run plan
-// validation needs no inference backend; real execution is gated per platform in story 1417).
+// apps/worker/scene_worker/runtime.py (SUPPORTED_JOB_TYPES + TRAINING_JOB_TYPES +
+// CAPTION_JOB_TYPES) and apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
+// `lora_train` is GPU-required like generation, but its worker capability is
+// advertised separately (the dry-run plan validation needs no inference backend;
+// real execution is gated per platform in story 1417).
 fn job_requires_gpu(job_type: &JobType) -> bool {
     matches!(
         job_type,
@@ -1480,6 +1481,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::VideoBridge
             | JobType::PersonReplace
             | JobType::LoraTrain
+            | JobType::TrainingCaption
     )
 }
 
