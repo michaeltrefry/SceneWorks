@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { JobProgressCard } from "../components/JobProgress.jsx";
+import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
 
 // Models flagged "Recommended" in the wizard: the fast image target and LTX-2.3
@@ -123,7 +124,7 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
     <section className="setup-wizard">
       <div className="setup-wizard-card">
         <span className="setup-wizard-mark" aria-hidden="true">
-          <img src="/sceneworks-logo.svg" alt="" />
+          <Logo size={48} />
         </span>
         <ol className="setup-wizard-steps" aria-hidden="true">
           <li className={step === "models" ? "active" : "done"}>Models</li>

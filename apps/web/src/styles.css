@@ -44,6 +44,17 @@
   --accent-soft: oklch(0.94 0.04 178);
   --accent-fg: #ffffff;
 
+  /* Brand palette — fixed brand colors, theme-independent. */
+  --ink: #0f1622;
+  --mist: #b9babb;
+  --paper: #fbfaf6;
+  --teal: #2fa193;
+
+  /* Scene-cut mark + wordmark. Teal is fixed; ground/seam/strong flip per theme. */
+  --logo-ground: var(--ink);
+  --logo-seam: var(--paper);
+  --wordmark-strong: var(--ink);
+
   --warm: oklch(0.72 0.11 235);
   --warm-soft: oklch(0.95 0.03 235);
   --danger: oklch(0.62 0.18 25);
@@ -75,6 +86,11 @@
   --accent-strong: oklch(0.82 0.12 178);
   --accent-soft: oklch(0.3 0.06 178);
   --accent-fg: oklch(0.16 0.012 240);
+
+  /* On dark: mark ground → mist (full square reads), seam → ink, wordmark → paper. */
+  --logo-ground: var(--mist);
+  --logo-seam: var(--ink);
+  --wordmark-strong: var(--paper);
 
   --warm: oklch(0.78 0.11 235);
   --warm-soft: oklch(0.32 0.05 235);
@@ -218,16 +234,11 @@ button:focus-visible {
   width: 32px;
   height: 32px;
   flex: 0 0 auto;
-  border-radius: 8px;
   display: grid;
   place-items: center;
-  box-shadow: 0 4px 12px color-mix(in oklch, var(--accent) 40%, transparent);
-  overflow: hidden;
 }
 
-.brand-mark img {
-  width: 32px;
-  height: 32px;
+.brand-mark svg {
   display: block;
 }
 
@@ -236,7 +247,12 @@ button:focus-visible {
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 0;
-  color: var(--text);
+  color: var(--wordmark-strong);
+}
+
+.brand h1 .light {
+  font-weight: 500;
+  color: var(--mist);
 }
 
 .brand p {
@@ -5329,15 +5345,10 @@ label {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 14px;
-  background: var(--accent-soft);
 }
 
-.first-run-mark img {
-  width: 32px;
-  height: 32px;
+.first-run-mark svg {
+  display: block;
 }
 
 .first-run-card h2 {
@@ -5422,15 +5433,10 @@ label {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  background: var(--accent-soft);
 }
 
-.setup-wizard-mark img {
-  width: 30px;
-  height: 30px;
+.setup-wizard-mark svg {
+  display: block;
 }
 
 .setup-wizard-steps {

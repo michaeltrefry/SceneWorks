@@ -1,31 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="SceneWorks logo">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="SceneWorks">
+  <title>SceneWorks</title>
+  <style>
+    .ground { fill: #0f1622; }
+    .seam { stroke: #fbfaf6; }
+    @media (prefers-color-scheme: dark) {
+      .ground { fill: #b9babb; }
+      .seam { stroke: #0f1622; }
+    }
+  </style>
   <defs>
-    <linearGradient id="tile" x1="8" x2="56" y1="6" y2="58" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#202733"/>
-      <stop offset="1" stop-color="#10131a"/>
-    </linearGradient>
-    <linearGradient id="ribbon" x1="14" x2="46" y1="18" y2="48" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#5ee2d0"/>
-      <stop offset="0.58" stop-color="#6cc6ff"/>
-      <stop offset="1" stop-color="#a6a4ff"/>
-    </linearGradient>
+    <clipPath id="sw-cut">
+      <rect x="10" y="10" width="80" height="80" rx="14"></rect>
+    </clipPath>
   </defs>
-  <rect width="56" height="56" x="4" y="4" fill="url(#tile)" rx="13"/>
-  <rect width="44" height="44" x="10" y="10" fill="none" stroke="#eefbf9" stroke-opacity=".88" stroke-width="3" rx="8"/>
-  <path
-    fill="none"
-    stroke="url(#ribbon)"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-    stroke-width="8"
-    d="M43.5 18.5c-6.7-5.2-21.5-3.9-23.7 5.4-1.9 8.1 9 8.1 16 10.8 9 3.4 6.7 14.7-7.5 14.1-6.3-.3-10.6-2.9-13.8-6.5"
-  />
-  <path
-    fill="none"
-    stroke="#ffffff"
-    stroke-linecap="round"
-    stroke-width="2"
-    opacity=".5"
-    d="M41.3 18.7c-5.4-3-14.8-2.4-18.5 2.8"
-  />
+  <g clip-path="url(#sw-cut)">
+    <rect class="ground" x="10" y="10" width="80" height="80"></rect>
+    <polygon points="10,10 90,10 90,90" fill="#2fa193"></polygon>
+    <line class="seam" x1="10" y1="90" x2="90" y2="10" stroke-width="2.5" stroke-linecap="square"></line>
+  </g>
 </svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 128 128" role="img" aria-label="SceneWorks">
+  <title>SceneWorks</title>
+  <defs>
+    <clipPath id="mark-cut">
+      <rect x="27.2" y="27.2" width="73.6" height="73.6" rx="12.88"></rect>
+    </clipPath>
+  </defs>
+  <!-- Icon body: ink squircle, full bleed with transparent corners -->
+  <rect x="0" y="0" width="128" height="128" rx="28" fill="#0f1622"></rect>
+  <!-- Mark: mist ground + teal triangle + ink seam (dock variant, reads on dark) -->
+  <g clip-path="url(#mark-cut)">
+    <rect x="27.2" y="27.2" width="73.6" height="73.6" fill="#b9babb"></rect>
+    <polygon points="27.2,27.2 100.8,27.2 100.8,100.8" fill="#2fa193"></polygon>
+    <line x1="27.2" y1="100.8" x2="100.8" y2="27.2" stroke="#0f1622" stroke-width="2.3" stroke-linecap="square"></line>
+  </g>
+</svg>

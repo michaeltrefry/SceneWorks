@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, eventUrl } from "./api.js";
 import { Icon } from "./components/Icons.jsx";
+import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview } from "./components/assetPanels.jsx";
 import { fallbackModels, terminalStatuses } from "./constants.js";
@@ -308,7 +309,7 @@ function FirstRunProjectGate({ onCreate, disabled }) {
     <section className="first-run-gate">
       <div className="first-run-card">
         <span className="first-run-mark" aria-hidden="true">
-          <img src="/sceneworks-logo.svg" alt="" />
+          <Logo size={52} />
         </span>
         <h2>Create your first workspace</h2>
         <p className="first-run-lede">
@@ -1836,10 +1837,10 @@ export function App() {
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
-            <img src="/sceneworks-logo.svg" alt="" />
+            <Logo size={32} />
           </span>
           <div>
-            <h1>SceneWorks</h1>
+            <h1>Scene<span className="light">Works</span></h1>
             <p>Local creative studio</p>
           </div>
         </div>
