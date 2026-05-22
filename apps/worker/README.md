@@ -112,9 +112,14 @@ for the end-to-end flow and troubleshooting.
 
 Training reuses the runtime dependencies in `requirements.txt` (torch, diffusers,
 transformers, peft, accelerate, safetensors). The `adamw8bit` optimizer uses
-`bitsandbytes` when present and falls back to torch AdamW otherwise. Override
-PEFT target modules per job via `config.advanced.loraTargetModules` when a base
-model names its attention layers differently.
+`bitsandbytes` when present and falls back to torch AdamW otherwise. The
+`prodigyopt` optimizer uses the Prodigy package and follows the ai-toolkit
+convention of raising very small configured learning rates to `1.0`. During real
+training, `config.advanced.sampleEvery` renders up to four prompts from
+`config.advanced.samplePrompts` into the LoRA output directory and streams their
+paths through job progress. Override PEFT target modules per job via
+`config.advanced.loraTargetModules` when a base model names its attention layers
+differently.
 
 Use a local smoke check without contacting the API:
 

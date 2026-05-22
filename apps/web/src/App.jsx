@@ -60,6 +60,10 @@ function isLoraImportNotice(message) {
   return String(message ?? "").startsWith("lora import: ");
 }
 
+function isLoraTrainingNotice(message) {
+  return String(message ?? "").startsWith("lora training: ");
+}
+
 function jobFreshnessMs(job) {
   const timestamp = job?.updatedAt ?? job?.completedAt ?? job?.canceledAt ?? job?.startedAt ?? job?.createdAt;
   const parsed = Date.parse(timestamp ?? "");
@@ -636,6 +640,14 @@ export function App() {
         setError((current) => (isLoraImportNotice(current) ? "" : current));
         refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
       }
+      if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
+        if (job.result?.loraRegistered === false) {
+          setError(`lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
+        } else {
+          setError((current) => (isLoraTrainingNotice(current) ? "" : current));
+          refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
+        }
+      }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
         setError(failedJobNotice(job));
       }
@@ -890,6 +902,23 @@ export function App() {
     );
     await refreshTrainingDatasets(projectId);
     return result;
+  }
+
+  async function createTrainingDatasetCaptionJob(datasetId, payload, projectId = activeProject?.id) {
+    if (!projectId || !datasetId) {
+      throw new Error("Select a training dataset first.");
+    }
+    const job = await apiFetch(
+      `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/caption-jobs`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    setError("");
+    return job;
   }
 
   async function createTrainingJob(request, projectId = activeProject?.id) {
@@ -2040,11 +2069,13 @@ export function App() {
             assets={assets}
             batchRenameDataset={batchRenameTrainingDataset}
             createDataset={createTrainingDataset}
+            createCaptionJob={createTrainingDatasetCaptionJob}
             createTrainingJob={createTrainingJob}
             datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
             datasetsError={trainingDatasetsError}
             gpuOptions={gpuOptions}
             importAsset={(file) => importAsset(file, { throwOnError: true })}
+            jobs={jobs}
             loadDataset={loadTrainingDataset}
             loadingDatasets={loadingTrainingDatasets}
             onPreview={setPreviewAsset}

@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { API_BASE_URL } from "../api.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
+import { terminalStatuses } from "../constants.js";
+import { formatSeconds, percent } from "../formatting.js";
 
 const tabs = [
   { id: "dataset", label: "Dataset", title: "Dataset intake", status: "Rust dataset store" },
@@ -8,6 +12,144 @@ const tabs = [
   { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
 ];
 const defaultGpuOptions = ["auto"];
+const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt"];
+const optimizerLabels = {
+  adam: "Adam",
+  adamw: "AdamW",
+  adamw8bit: "AdamW 8-bit",
+  prodigy: "Prodigy",
+  prodigyopt: "Prodigy",
+};
+const joyCaptionModel = "fancyfeast/llama-joycaption-beta-one-hf-llava";
+const joyCaptionTypes = [
+  "Descriptive",
+  "Descriptive (Casual)",
+  "Straightforward",
+  "Stable Diffusion Prompt",
+  "MidJourney",
+  "Danbooru tag list",
+  "e621 tag list",
+  "Rule34 tag list",
+  "Booru-like tag list",
+  "Art Critic",
+  "Product Listing",
+  "Social Media Post",
+];
+const joyCaptionLengths = [
+  "any",
+  "very short",
+  "short",
+  "medium-length",
+  "long",
+  "very long",
+  "20",
+  "30",
+  "40",
+  "50",
+  "60",
+  "80",
+  "100",
+  "120",
+  "160",
+  "200",
+  "260",
+];
+const joyCaptionExtraOptions = [
+  { value: "If there is a person/character in the image you must refer to them as {name}.", label: "Use character name" },
+  {
+    value:
+      "Do NOT include information about people/characters that cannot be changed (like ethnicity, gender, etc), but do still include changeable attributes (like hair style).",
+    label: "Avoid fixed traits",
+  },
+  { value: "Include information about lighting.", label: "Include lighting" },
+  { value: "Include information about camera angle.", label: "Include camera angle" },
+  { value: "Do NOT include anything sexual; keep it PG.", label: "Keep it PG" },
+  { value: "Do NOT mention the image's resolution.", label: "Skip resolution" },
+  { value: "Include information on the image's composition style, such as leading lines, rule of thirds, or symmetry.", label: "Composition style" },
+  { value: "Do NOT mention any text that is in the image.", label: "Ignore text" },
+  { value: "Specify the depth of field and whether the background is in focus or blurred.", label: "Depth of field" },
+  { value: "Do NOT use any ambiguous language.", label: "No ambiguity" },
+  { value: "ONLY describe the most important elements of the image.", label: "Important elements only" },
+  { value: "Mention whether the image depicts an extreme close-up, close-up, medium close-up, medium shot, cowboy shot, medium wide shot, wide shot, or extreme wide shot.", label: "Shot size" },
+  { value: "Your response will be used by a text-to-image model, so avoid useless meta phrases like \"This image shows...\", \"You are looking at...\", etc.", label: "No meta phrases" },
+];
+const joyCaptionPromptMap = {
+  Descriptive: [
+    "Write a detailed description for this image.",
+    "Write a detailed description for this image in {word_count} words or less.",
+    "Write a {length} detailed description for this image.",
+  ],
+  "Descriptive (Casual)": [
+    "Write a descriptive caption for this image in a casual tone.",
+    "Write a descriptive caption for this image in a casual tone within {word_count} words.",
+    "Write a {length} descriptive caption for this image in a casual tone.",
+  ],
+  Straightforward: [
+    'Write a straightforward caption for this image. Begin with the main subject and medium. Mention pivotal elements-people, objects, scenery-using confident, definite language. Focus on concrete details like color, shape, texture, and spatial relationships. Show how elements interact. Omit mood and speculative wording. If text is present, quote it exactly. Never mention what is absent, resolution, watermarks, signatures, compression artifacts, or unobservable details. Vary your sentence structure and keep the description concise, without starting with "This image is..." or similar phrasing.',
+    'Write a straightforward caption for this image within {word_count} words. Begin with the main subject and medium. Mention pivotal elements-people, objects, scenery-using confident, definite language. Focus on concrete details like color, shape, texture, and spatial relationships. Show how elements interact. Omit mood and speculative wording. If text is present, quote it exactly. Never mention what is absent, resolution, watermarks, signatures, compression artifacts, or unobservable details. Vary your sentence structure and keep the description concise, without starting with "This image is..." or similar phrasing.',
+    'Write a {length} straightforward caption for this image. Begin with the main subject and medium. Mention pivotal elements-people, objects, scenery-using confident, definite language. Focus on concrete details like color, shape, texture, and spatial relationships. Show how elements interact. Omit mood and speculative wording. If text is present, quote it exactly. Never mention what is absent, resolution, watermarks, signatures, compression artifacts, or unobservable details. Vary your sentence structure and keep the description concise, without starting with "This image is..." or similar phrasing.',
+  ],
+  "Stable Diffusion Prompt": [
+    "Output a stable diffusion prompt that is indistinguishable from a real stable diffusion prompt.",
+    "Output a stable diffusion prompt that is indistinguishable from a real stable diffusion prompt. {word_count} words or less.",
+    "Output a {length} stable diffusion prompt that is indistinguishable from a real stable diffusion prompt.",
+  ],
+  MidJourney: [
+    "Write a MidJourney prompt for this image.",
+    "Write a MidJourney prompt for this image within {word_count} words.",
+    "Write a {length} MidJourney prompt for this image.",
+  ],
+  "Danbooru tag list": [
+    "Generate only comma-separated Danbooru tags (lowercase_underscores). Strict order: artist:, copyright:, character:, meta:, then general tags. Include counts (1girl), appearance, clothing, accessories, pose, expression, actions, background. Use precise Danbooru syntax. No extra text.",
+    "Generate only comma-separated Danbooru tags (lowercase_underscores). Strict order: artist:, copyright:, character:, meta:, then general tags. Include counts (1girl), appearance, clothing, accessories, pose, expression, actions, background. Use precise Danbooru syntax. No extra text. {word_count} words or less.",
+    "Generate only comma-separated Danbooru tags (lowercase_underscores). Strict order: artist:, copyright:, character:, meta:, then general tags. Include counts (1girl), appearance, clothing, accessories, pose, expression, actions, background. Use precise Danbooru syntax. No extra text. {length} length.",
+  ],
+  "e621 tag list": [
+    "Write a comma-separated list of e621 tags in alphabetical order for this image. Start with the artist, copyright, character, species, meta, and lore tags, if any, prefixed by artist:, copyright:, character:, species:, meta:, and lore:. Then all the general tags.",
+    "Write a comma-separated list of e621 tags in alphabetical order for this image. Start with the artist, copyright, character, species, meta, and lore tags, if any, prefixed by artist:, copyright:, character:, species:, meta:, and lore:. Then all the general tags. Keep it under {word_count} words.",
+    "Write a {length} comma-separated list of e621 tags in alphabetical order for this image. Start with the artist, copyright, character, species, meta, and lore tags, if any, prefixed by artist:, copyright:, character:, species:, meta:, and lore:. Then all the general tags.",
+  ],
+  "Rule34 tag list": [
+    "Write a comma-separated list of rule34 tags in alphabetical order for this image. Start with the artist, copyright, character, and meta tags, if any, prefixed by artist:, copyright:, character:, and meta:. Then all the general tags.",
+    "Write a comma-separated list of rule34 tags in alphabetical order for this image. Start with the artist, copyright, character, and meta tags, if any, prefixed by artist:, copyright:, character:, and meta:. Then all the general tags. Keep it under {word_count} words.",
+    "Write a {length} comma-separated list of rule34 tags in alphabetical order for this image. Start with the artist, copyright, character, and meta tags, if any, prefixed by artist:, copyright:, character:, and meta:. Then all the general tags.",
+  ],
+  "Booru-like tag list": [
+    "Write a list of Booru-like tags for this image.",
+    "Write a list of Booru-like tags for this image within {word_count} words.",
+    "Write a {length} list of Booru-like tags for this image.",
+  ],
+  "Art Critic": [
+    "Analyze this image like an art critic would with information about its composition, style, symbolism, the use of color, light, any artistic movement it might belong to, etc.",
+    "Analyze this image like an art critic would with information about its composition, style, symbolism, the use of color, light, any artistic movement it might belong to, etc. Keep it within {word_count} words.",
+    "Analyze this image like an art critic would with information about its composition, style, symbolism, the use of color, light, any artistic movement it might belong to, etc. Keep it {length}.",
+  ],
+  "Product Listing": [
+    "Write a caption for this image as though it were a product listing.",
+    "Write a caption for this image as though it were a product listing. Keep it under {word_count} words.",
+    "Write a {length} caption for this image as though it were a product listing.",
+  ],
+  "Social Media Post": [
+    "Write a caption for this image as if it were being used for a social media post.",
+    "Write a caption for this image as if it were being used for a social media post. Limit the caption to {word_count} words.",
+    "Write a {length} caption for this image as if it were being used for a social media post.",
+  ],
+};
+const defaultCaptionSettings = {
+  captioner: "joy_caption",
+  modelNameOrPath: joyCaptionModel,
+  recaption: false,
+  requestedGpu: "auto",
+  captionType: "Descriptive",
+  captionLength: "long",
+  extraOptions: [],
+  nameInput: "",
+  temperature: "0.6",
+  topP: "0.9",
+  maxNewTokens: "256",
+  captionPrompt: "",
+  lowVram: false,
+};
 
 function formatDatasetModality(dataset) {
   return String(dataset.modality ?? "image").replaceAll("_", " ");
@@ -48,6 +190,54 @@ function parseTriggerWords(value) {
     .filter(Boolean);
 }
 
+function triggerPhraseFromText(value) {
+  return parseTriggerWords(value).join(", ");
+}
+
+function captionSeedFromName(value) {
+  const name = String(value ?? "")
+    .replaceAll("\\", "/")
+    .split("/")
+    .pop()
+    ?.replace(/\.[a-z0-9]+$/i, "")
+    .replace(/#\s*\d+$/u, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return name || "";
+}
+
+function captionSeedForItem(item, asset) {
+  const prompt = String(asset?.recipe?.prompt ?? "").trim();
+  if (prompt) {
+    return prompt;
+  }
+  return (
+    captionSeedFromName(item.displayName) ||
+    captionSeedFromName(item.fileStem) ||
+    captionSeedFromName(item.path) ||
+    "training image"
+  );
+}
+
+function captionWithTriggerWords(seed, triggerWords) {
+  const normalizedSeed = String(seed ?? "").trim();
+  const lowerSeed = normalizedSeed.toLowerCase();
+  const missingTriggerWords = triggerWords.filter((word) => !lowerSeed.includes(word.toLowerCase()));
+  return [...missingTriggerWords, normalizedSeed].filter(Boolean).join(", ");
+}
+
+function captionForDraftItem(item, asset, triggerWords) {
+  const text = String(item.captionText ?? "").trim();
+  if (text) {
+    return { source: item.captionSource, text };
+  }
+  return {
+    source: "auto",
+    text: captionWithTriggerWords(captionSeedForItem(item, asset), triggerWords),
+  };
+}
+
 function safeSlug(value, fallback = "item") {
   const slug = String(value ?? "")
     .trim()
@@ -70,7 +260,6 @@ function renameCaptionDrafts(dataset) {
     displayName: item.displayName ?? imageAssetName(item),
     captionText: item.caption?.text ?? "",
     captionSource: item.caption?.source ?? "manual",
-    triggerWords: triggerWordsText(item.caption),
     assetId: item.assetId ?? "",
     path: item.path ?? "",
   }));
@@ -160,6 +349,18 @@ function numberFromDraft(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function boundedNumber(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, number));
+}
+
+function integerFromDraft(value, fallback, min, max) {
+  return Math.round(boundedNumber(value, fallback, min, max));
+}
+
 function compactObject(object) {
   return Object.fromEntries(
     Object.entries(object).filter(([, value]) => value !== "" && value !== null && value !== undefined),
@@ -170,7 +371,11 @@ function rangeOptions(limits, key) {
   return Array.isArray(limits?.[key]) ? limits[key] : [];
 }
 
-function configDraftFromTarget(target, dataset, gpuOptions) {
+function optimizerLabel(value) {
+  return optimizerLabels[value] ?? value;
+}
+
+function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "") {
   const defaults = target?.defaults ?? {};
   const advanced = defaults.advanced ?? {};
   const firstGpu = gpuOptions[0] ?? "";
@@ -178,7 +383,7 @@ function configDraftFromTarget(target, dataset, gpuOptions) {
   const outputLabel = outputKindLabel(target);
   return {
     outputName: dataset?.name ? `${dataset.name} ${outputLabel}` : "",
-    triggerWord: asText(defaults.triggerWord),
+    triggerWord: triggerPhrase || asText(defaults.triggerWord),
     outputScope: asText(advanced.outputScope),
     qualityPreset: asText(advanced.qualityPreset),
     requestedGpu: gpuOptions.includes(requestedGpu) ? requestedGpu : firstGpu,
@@ -195,6 +400,8 @@ function configDraftFromTarget(target, dataset, gpuOptions) {
     precision: asText(advanced.mixedPrecision),
     saveEvery: numericDraft(defaults.saveEvery),
     sampleEvery: numericDraft(advanced.sampleEvery),
+    sampleSteps: numericDraft(advanced.sampleSteps),
+    sampleGuidanceScale: numericDraft(advanced.sampleGuidanceScale),
     batchSize: numericDraft(defaults.batchSize),
     gradientAccumulation: numericDraft(defaults.gradientAccumulation),
     seed: numericDraft(defaults.seed),
@@ -241,6 +448,16 @@ function outputKindLabel(target) {
   return kind.replaceAll("_", " ");
 }
 
+function samplePromptsFromTrigger(triggerWord) {
+  const trigger = String(triggerWord ?? "").trim() || "the trained subject";
+  return [
+    `${trigger}, studio portrait, soft key light, detailed face`,
+    `${trigger}, full body fashion editorial photo, natural pose`,
+    `${trigger}, cinematic outdoor portrait, golden hour`,
+    `${trigger}, close-up character portrait, dramatic rim light`,
+  ];
+}
+
 function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dryRun = true }) {
   const defaults = selectedTarget?.defaults ?? {};
   const advanced = compactObject({
@@ -251,6 +468,9 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dr
     bucketStrategy: asText(configDraft.bucketStrategy).trim(),
     mixedPrecision: asText(configDraft.precision).trim(),
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
+    sampleSteps: numberFromDraft(configDraft.sampleSteps),
+    sampleGuidanceScale: numberFromDraft(configDraft.sampleGuidanceScale),
+    samplePrompts: samplePromptsFromTrigger(configDraft.triggerWord),
     qualityPreset: configDraft.qualityPreset,
     outputScope: configDraft.outputScope,
     requestedGpu: configDraft.requestedGpu,
@@ -281,6 +501,44 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dr
   };
 }
 
+function trainingCaptionJobPayload(settings) {
+  const captionPrompt = String(settings.captionPrompt || buildJoyCaptionPrompt(settings)).trim();
+  return {
+    captioner: "joy_caption",
+    modelNameOrPath: String(settings.modelNameOrPath ?? "").trim() || joyCaptionModel,
+    recaption: Boolean(settings.recaption),
+    requestedGpu: settings.requestedGpu || "auto",
+    options: {
+      captionType: settings.captionType,
+      captionLength: settings.captionLength,
+      extraOptions: settings.extraOptions,
+      nameInput: String(settings.nameInput ?? "").trim(),
+      temperature: boundedNumber(settings.temperature, 0.6, 0, 2),
+      topP: boundedNumber(settings.topP, 0.9, 0, 1),
+      maxNewTokens: integerFromDraft(settings.maxNewTokens, 256, 1, 1024),
+      captionPrompt,
+      lowVram: Boolean(settings.lowVram),
+    },
+  };
+}
+
+function buildJoyCaptionPrompt(settings) {
+  const captionLength = String(settings.captionLength || "long");
+  let templateIndex = 2;
+  if (captionLength === "any") {
+    templateIndex = 0;
+  } else if (/^\d+$/.test(captionLength)) {
+    templateIndex = 1;
+  }
+  const templates = joyCaptionPromptMap[settings.captionType] ?? joyCaptionPromptMap.Descriptive;
+  const extraOptions = Array.isArray(settings.extraOptions) ? settings.extraOptions : [];
+  const prompt = [templates[templateIndex], ...extraOptions].filter(Boolean).join(" ");
+  return prompt
+    .replaceAll("{name}", String(settings.nameInput || "{NAME}"))
+    .replaceAll("{length}", captionLength)
+    .replaceAll("{word_count}", captionLength);
+}
+
 function DatasetHealth({ health }) {
   return (
     <div className="training-health-grid" aria-label="Dataset health">
@@ -304,17 +562,105 @@ function DatasetHealth({ health }) {
   );
 }
 
+function latestTrainingSamples(job) {
+  const latest = Array.isArray(job.result?.latestTrainingSamples) ? job.result.latestTrainingSamples : [];
+  if (latest.length) {
+    return latest.slice(-4);
+  }
+  const samples = Array.isArray(job.result?.trainingSamples) ? job.result.trainingSamples : [];
+  return samples.slice(-4);
+}
+
+function trainingSampleUrl(projectId, sample) {
+  if (sample?.url) {
+    return sample.url.startsWith("http") ? sample.url : `${API_BASE_URL}${sample.url}`;
+  }
+  if (projectId && sample?.relativePath) {
+    return `${API_BASE_URL}/api/v1/projects/${projectId}/files/${String(sample.relativePath).replaceAll("\\", "/")}`;
+  }
+  return "";
+}
+
+function formatStage(value) {
+  return String(value ?? "queued").replaceAll("_", " ");
+}
+
+function TrainingLiveJobCard({ job, projectId }) {
+  const elapsedSeconds = useLiveJobElapsedSeconds(job);
+  const samples = latestTrainingSamples(job);
+  const progressLabel = percent(job.progress);
+  const samplePrompts = Array.isArray(job.result?.samplePrompts)
+    ? job.result.samplePrompts
+    : samplePromptsFromTrigger(job.payload?.plan?.config?.triggerWord);
+  return (
+    <article className="training-live-card">
+      <div className="training-live-head">
+        <div>
+          <p className="eyebrow">Training run</p>
+          <h3>{job.payload?.outputName ?? job.payload?.plan?.output?.loraId ?? job.id}</h3>
+        </div>
+        <span className={`status-badge ${job.status}`}>{job.status}</span>
+      </div>
+      <div className="progress-track" aria-label={`${progressLabel} complete`}>
+        <span style={{ width: progressLabel }} />
+      </div>
+      <div className="training-live-meta">
+        <span>{formatStage(job.stage ?? job.status)}</span>
+        <span>{formatSeconds(elapsedSeconds)}</span>
+        <span>GPU {job.assignedGpu ?? job.requestedGpu ?? "auto"}</span>
+      </div>
+      {job.message ? <p className="job-message">{job.message}</p> : null}
+      <div className="training-sample-grid" aria-label="Training sample images">
+        {samplePrompts.slice(0, 4).map((prompt, index) => {
+          const sample = samples[index];
+          const src = trainingSampleUrl(projectId, sample);
+          return (
+            <div className="training-sample-tile" key={`${job.id}-${index}`}>
+              {src ? <img alt="" src={src} /> : <span>{sample ? "Loading" : "Waiting"}</span>}
+              <small>{sample?.step ? `Step ${sample.step}` : prompt}</small>
+            </div>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+function TrainingLiveProgress({ jobs, projectId }) {
+  if (!jobs.length) {
+    return null;
+  }
+  return (
+    <section className="training-live-panel" aria-label="Active training progress">
+      <div className="training-live-title">
+        <div>
+          <p className="eyebrow">Live training</p>
+          <h3>Training in progress</h3>
+        </div>
+        <span>{jobs.length} active</span>
+      </div>
+      <div className="training-live-list">
+        {jobs.map((job) => (
+          <TrainingLiveJobCard job={job} key={job.id} projectId={projectId} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function TrainingStudio({
   activeProject,
   authenticated = true,
   assets = [],
   batchRenameDataset = async () => null,
+  createCaptionJob = async () => null,
   createDataset = async () => null,
   createTrainingJob = async () => null,
   datasets = [],
   datasetsError = "",
   gpuOptions = defaultGpuOptions,
   importAsset = async () => null,
+  jobs = [],
   loadDataset = async () => null,
   loadingDatasets = false,
   onPreview = () => {},
@@ -336,14 +682,17 @@ export function TrainingStudio({
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [renamePrefix, setRenamePrefix] = useState("");
+  const [captionTriggerWords, setCaptionTriggerWords] = useState("");
   const [renameCaptionDraftItems, setRenameCaptionDraftItems] = useState([]);
   const [savingRenameCaption, setSavingRenameCaption] = useState(false);
+  const [captionSettings, setCaptionSettings] = useState(defaultCaptionSettings);
   const [selectedTargetId, setSelectedTargetId] = useState("");
   const [configDraft, setConfigDraft] = useState({});
   const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
   const [configSnapshot, setConfigSnapshot] = useState(null);
   const [configMessage, setConfigMessage] = useState("");
   const [configError, setConfigError] = useState("");
+  const [configTriggerFollowsCaptions, setConfigTriggerFollowsCaptions] = useState(true);
   const [preparingConfig, setPreparingConfig] = useState(false);
   const [submittingJob, setSubmittingJob] = useState(false);
   // Dry run validates the Rust-resolved plan without training; a real run hands
@@ -381,6 +730,8 @@ export function TrainingStudio({
   const renameCaptionHasInvalidDraft = renameCaptionDraftItems.some(
     (item) => !item.itemId.trim() || !item.fileStem.trim() || !item.displayName.trim(),
   );
+  const missingDraftCaptions = renameCaptionDraftItems.filter((item) => !String(item.captionText ?? "").trim()).length;
+  const displayedCaptionPrompt = captionSettings.captionPrompt || buildJoyCaptionPrompt(captionSettings);
   const canSaveRenameCaption =
     Boolean(activeDataset?.id) && renameCaptionHasDraft && !renameCaptionHasInvalidDraft && !savingRenameCaption;
   const firstTarget = trainingTargets[0] ?? null;
@@ -391,6 +742,19 @@ export function TrainingStudio({
   const qualityPresets = rangeOptions(selectedTarget?.limits, "qualityPresets");
   const outputScopes = rangeOptions(selectedTarget?.limits, "outputScopes");
   const resolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
+  const optimizerOptions = rangeOptions(selectedTarget?.limits, "optimizers");
+  const optimizerSelectOptions = optimizerOptions.length ? optimizerOptions : defaultOptimizerOptions;
+  const visibleOptimizerOptions =
+    configDraft.optimizer && !optimizerSelectOptions.includes(configDraft.optimizer)
+      ? [...optimizerSelectOptions, configDraft.optimizer]
+      : optimizerSelectOptions;
+  const activeTrainingJobs = useMemo(
+    () =>
+      jobs
+        .filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && !terminalStatuses.has(job.status))
+        .slice(0, 3),
+    [activeProject?.id, jobs],
+  );
   const gpuOptionsKey = gpuOptions.join("\u0000");
   const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
   const canPrepareConfig = configWarnings.length === 0 && !preparingConfig;
@@ -403,17 +767,23 @@ export function TrainingStudio({
     setSelectedAssetIds([]);
     setSelectedDatasetId("");
     setRenamePrefix("");
+    setCaptionTriggerWords("");
     setRenameCaptionDraftItems([]);
+    setCaptionSettings(defaultCaptionSettings);
     setConfigDraft({});
     setConfigSnapshot(null);
     setConfigMessage("");
     setConfigError("");
+    setConfigTriggerFollowsCaptions(true);
     configBasisRef.current = "";
   }, [activeProject?.id]);
 
   useEffect(() => {
+    const datasetTriggerPhrase = triggerPhraseFromText(activeDataset?.name);
     setRenameCaptionDraftItems(renameCaptionDrafts(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
+    setCaptionTriggerWords(datasetTriggerPhrase);
+    setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
   }, [activeDataset]);
 
   useEffect(() => {
@@ -435,14 +805,35 @@ export function TrainingStudio({
       return;
     }
     configBasisRef.current = basis;
-    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions));
+    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(activeDataset?.name)));
     setConfigSnapshot(null);
     setConfigMessage("");
     setConfigError("");
+    setConfigTriggerFollowsCaptions(true);
   }, [activeDataset?.id, selectedTarget?.id]);
 
   useEffect(() => {
+    if (!configTriggerFollowsCaptions) {
+      return;
+    }
+    const nextTriggerPhrase = triggerPhraseFromText(captionTriggerWords) || asText(selectedTarget?.defaults?.triggerWord);
     setConfigDraft((current) => {
+      if ((current.triggerWord ?? "") === nextTriggerPhrase) {
+        return current;
+      }
+      return { ...current, triggerWord: nextTriggerPhrase };
+    });
+    setConfigSnapshot(null);
+  }, [captionTriggerWords, configTriggerFollowsCaptions, selectedTarget?.id]);
+
+  useEffect(() => {
+    setConfigDraft((current) => {
+      if (!current.requestedGpu || gpuOptions.includes(current.requestedGpu)) {
+        return current;
+      }
+      return { ...current, requestedGpu: gpuOptions[0] ?? "" };
+    });
+    setCaptionSettings((current) => {
       if (!current.requestedGpu || gpuOptions.includes(current.requestedGpu)) {
         return current;
       }
@@ -527,18 +918,47 @@ export function TrainingStudio({
     );
   }
 
+  function updateCaptionTriggerWords(value) {
+    setDatasetMessage("");
+    if (configTriggerFollowsCaptions) {
+      setConfigMessage("");
+      setConfigError("");
+    }
+    setCaptionTriggerWords(value);
+  }
+
   function updateConfigDraft(field, value) {
     setConfigMessage("");
     setConfigError("");
     setConfigSnapshot(null);
+    if (field === "triggerWord") {
+      setConfigTriggerFollowsCaptions(false);
+    }
     setConfigDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function updateCaptionSetting(field, value) {
+    setDatasetMessage("");
+    setDatasetError("");
+    setCaptionSettings((current) => ({ ...current, [field]: value }));
+  }
+
+  function toggleCaptionExtraOption(value) {
+    setDatasetMessage("");
+    setCaptionSettings((current) => {
+      const values = current.extraOptions.includes(value)
+        ? current.extraOptions.filter((option) => option !== value)
+        : [...current.extraOptions, value];
+      return { ...current, extraOptions: values };
+    });
   }
 
   function resetConfigDefaults() {
     if (!selectedTarget) {
       return;
     }
-    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions));
+    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(captionTriggerWords)));
+    setConfigTriggerFollowsCaptions(true);
     setConfigSnapshot(null);
     setConfigMessage("Defaults restored");
     setConfigError("");
@@ -630,22 +1050,36 @@ export function TrainingStudio({
       if (renameFieldsDirty(renameCaptionDraftItems, activeDataset)) {
         dataset = await batchRenameDataset(activeDataset.id, { items: renameItems });
       }
-      const result = await writeCaptionSidecars(activeDataset.id, {
-        items: renameCaptionDraftItems.map((item) => ({
+      const useJoyCaption = captionSettings.captioner === "joy_caption";
+      const datasetTriggerWords = parseTriggerWords(captionTriggerWords);
+      const captionItems = renameCaptionDraftItems.map((item) => {
+        const asset = assetsById.get(item.assetId);
+        const caption = useJoyCaption
+          ? { source: item.captionSource, text: String(item.captionText ?? "") }
+          : captionForDraftItem(item, asset, datasetTriggerWords);
+        return {
           itemId: item.itemId.trim(),
           caption: {
-            text: item.captionText,
-            source: item.captionSource,
-            triggerWords: parseTriggerWords(item.triggerWords),
+            text: caption.text,
+            source: caption.source,
+            triggerWords: datasetTriggerWords,
           },
-        })),
+        };
+      });
+      const result = await writeCaptionSidecars(activeDataset.id, {
+        items: captionItems,
       });
       const nextDataset = result?.dataset ?? dataset;
       setActiveDataset(nextDataset);
       setDraftName(nextDataset?.name ?? draftName);
       setSelectedAssetIds(normalizeDatasetAssetIds(nextDataset));
       setSelectedDatasetId(nextDataset?.id ?? activeDataset.id);
-      setDatasetMessage(`Caption sidecars written${result?.sidecars?.length ? ` (${result.sidecars.length})` : ""}`);
+      if (useJoyCaption && (captionSettings.recaption || missingDraftCaptions > 0)) {
+        const job = await createCaptionJob(activeDataset.id, trainingCaptionJobPayload(captionSettings));
+        setDatasetMessage(`Caption job queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue.`);
+      } else {
+        setDatasetMessage(`Captions created${result?.sidecars?.length ? ` (${result.sidecars.length})` : ""}`);
+      }
     } catch (err) {
       setDatasetError(err.message);
     } finally {
@@ -727,6 +1161,7 @@ export function TrainingStudio({
             </div>
           </div>
         </div>
+        <TrainingLiveProgress jobs={activeTrainingJobs} projectId={activeProject?.id} />
 
         {!authenticated ? (
           <div className="training-empty-state" role="status">
@@ -920,26 +1355,9 @@ export function TrainingStudio({
                   {!activeDataset ? (
                     <div className="empty-panel compact-panel">Open a saved dataset to edit captions.</div>
                   ) : (
-                    <div className="training-caption-editor">
-                      <div className="training-caption-toolbar">
-                        <label>
-                          Rename prefix
-                          <input onChange={(event) => setRenamePrefix(event.target.value)} value={renamePrefix} />
-                        </label>
-                        <button className="secondary-action" onClick={applyOrderedNames} type="button">
-                          <Icon.Sliders size={14} />
-                          Apply ordered names
-                        </button>
-                        <button
-                          className="primary-action"
-                          disabled={!canSaveRenameCaption}
-                          onClick={saveRenameCaption}
-                          type="button"
-                        >
-                          {savingRenameCaption ? "Writing" : "Write sidecars"}
-                        </button>
-                      </div>
-                      <div className="training-caption-list" aria-label="Rename and caption dataset items">
+                    <div className="training-caption-workspace">
+                      <div className="training-caption-editor">
+                        <div className="training-caption-list" aria-label="Rename and caption dataset items">
                         {renameCaptionDraftItems.map((item, index) => {
                           const asset = assetsById.get(item.assetId);
                           return (
@@ -985,15 +1403,6 @@ export function TrainingStudio({
                                   />
                                 </label>
                                 <label>
-                                  Trigger words
-                                  <input
-                                    onChange={(event) =>
-                                      updateRenameCaptionDraft(item.originalItemId, { triggerWords: event.target.value })
-                                    }
-                                    value={item.triggerWords}
-                                  />
-                                </label>
-                                <label>
                                   Source
                                   <select
                                     onChange={(event) =>
@@ -1010,8 +1419,198 @@ export function TrainingStudio({
                             </article>
                           );
                         })}
+                        </div>
                       </div>
-                    </div>
+                      <aside className="training-caption-sidebar" aria-label="Caption options">
+                        <div className="training-caption-sidebar-section">
+                          <div className="training-sidebar-heading">
+                            <span>Files</span>
+                            <strong>{renameCaptionDraftItems.length}</strong>
+                          </div>
+                          <label>
+                            Rename prefix
+                            <input onChange={(event) => setRenamePrefix(event.target.value)} value={renamePrefix} />
+                          </label>
+                          <label>
+                            Trigger words
+                            <input onChange={(event) => updateCaptionTriggerWords(event.target.value)} value={captionTriggerWords} />
+                          </label>
+                          <button className="secondary-action" onClick={applyOrderedNames} type="button">
+                            <Icon.Sliders size={14} />
+                            Apply ordered names
+                          </button>
+                        </div>
+                        <div className="training-caption-sidebar-section">
+                          <div className="training-sidebar-heading">
+                            <span>Captioner</span>
+                            <strong>{missingDraftCaptions}</strong>
+                          </div>
+                          <label>
+                            Method
+                            <select
+                              onChange={(event) => updateCaptionSetting("captioner", event.target.value)}
+                              value={captionSettings.captioner}
+                            >
+                              <option value="joy_caption">Joy Caption</option>
+                              <option value="metadata">Metadata fallback</option>
+                            </select>
+                          </label>
+                          {captionSettings.captioner === "joy_caption" ? (
+                            <>
+                              <label>
+                                Model
+                                <input
+                                  onChange={(event) => updateCaptionSetting("modelNameOrPath", event.target.value)}
+                                  value={captionSettings.modelNameOrPath}
+                                />
+                              </label>
+                              <label>
+                                GPU
+                                <select
+                                  onChange={(event) => updateCaptionSetting("requestedGpu", event.target.value)}
+                                  value={captionSettings.requestedGpu}
+                                >
+                                  {gpuOptions.map((gpu) => (
+                                    <option key={gpu} value={gpu}>
+                                      {gpu}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="training-toggle-line">
+                                <input
+                                  checked={captionSettings.recaption}
+                                  onChange={(event) => updateCaptionSetting("recaption", event.target.checked)}
+                                  type="checkbox"
+                                />
+                                <span>Recaption existing</span>
+                              </label>
+                              <label className="training-toggle-line">
+                                <input
+                                  checked={captionSettings.lowVram}
+                                  onChange={(event) => updateCaptionSetting("lowVram", event.target.checked)}
+                                  type="checkbox"
+                                />
+                                <span>Low VRAM</span>
+                              </label>
+                            </>
+                          ) : null}
+                        </div>
+                        {captionSettings.captioner === "joy_caption" ? (
+                          <>
+                            <div className="training-caption-sidebar-section">
+                              <div className="training-sidebar-heading">
+                                <span>Prompt</span>
+                              </div>
+                              <label>
+                                Type
+                                <select
+                                  onChange={(event) => updateCaptionSetting("captionType", event.target.value)}
+                                  value={captionSettings.captionType}
+                                >
+                                  {joyCaptionTypes.map((type) => (
+                                    <option key={type} value={type}>
+                                      {type}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label>
+                                Length
+                                <select
+                                  onChange={(event) => updateCaptionSetting("captionLength", event.target.value)}
+                                  value={captionSettings.captionLength}
+                                >
+                                  {joyCaptionLengths.map((length) => (
+                                    <option key={length} value={length}>
+                                      {length}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label>
+                                Character Name
+                                <input
+                                  onChange={(event) => updateCaptionSetting("nameInput", event.target.value)}
+                                  value={captionSettings.nameInput}
+                                />
+                              </label>
+                              <label>
+                                Caption prompt
+                                <textarea
+                                  onChange={(event) => updateCaptionSetting("captionPrompt", event.target.value)}
+                                  rows={8}
+                                  value={displayedCaptionPrompt}
+                                />
+                              </label>
+                            </div>
+                            <div className="training-caption-sidebar-section">
+                              <div className="training-sidebar-heading">
+                                <span>Sampling</span>
+                              </div>
+                              <label>
+                                Temperature
+                                <input
+                                  max="2"
+                                  min="0"
+                                  onChange={(event) => updateCaptionSetting("temperature", event.target.value)}
+                                  step="0.05"
+                                  type="number"
+                                  value={captionSettings.temperature}
+                                />
+                              </label>
+                              <label>
+                                Top P
+                                <input
+                                  max="1"
+                                  min="0"
+                                  onChange={(event) => updateCaptionSetting("topP", event.target.value)}
+                                  step="0.05"
+                                  type="number"
+                                  value={captionSettings.topP}
+                                />
+                              </label>
+                              <label>
+                                Max tokens
+                                <input
+                                  max="1024"
+                                  min="1"
+                                  onChange={(event) => updateCaptionSetting("maxNewTokens", event.target.value)}
+                                  step="1"
+                                  type="number"
+                                  value={captionSettings.maxNewTokens}
+                                />
+                              </label>
+                            </div>
+                            <div className="training-caption-sidebar-section">
+                              <div className="training-sidebar-heading">
+                                <span>Options</span>
+                              </div>
+                              <div className="training-caption-option-list">
+                                {joyCaptionExtraOptions.map((option) => (
+                                  <label className="training-toggle-line" key={option.value}>
+                                    <input
+                                      checked={captionSettings.extraOptions.includes(option.value)}
+                                      onChange={() => toggleCaptionExtraOption(option.value)}
+                                      type="checkbox"
+                                    />
+                                    <span>{option.label}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          </>
+                        ) : null}
+                        <button
+                          className="primary-action training-caption-submit"
+                          disabled={!canSaveRenameCaption}
+                          onClick={saveRenameCaption}
+                          type="button"
+                        >
+                          {savingRenameCaption ? "Creating" : "Create Captions"}
+                        </button>
+                      </aside>
+                      </div>
                   )}
                 </>
               ) : null}
@@ -1103,6 +1702,31 @@ export function TrainingStudio({
                             ))}
                           </select>
                         </label>
+                        <label>
+                          Sample cadence
+                          <input
+                            onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
+                            type="number"
+                            value={configDraft.sampleEvery ?? ""}
+                          />
+                        </label>
+                        <label>
+                          Sample steps
+                          <input
+                            onChange={(event) => updateConfigDraft("sampleSteps", event.target.value)}
+                            type="number"
+                            value={configDraft.sampleSteps ?? ""}
+                          />
+                        </label>
+                        <label>
+                          Guidance scale
+                          <input
+                            onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
+                            step="0.1"
+                            type="number"
+                            value={configDraft.sampleGuidanceScale ?? ""}
+                          />
+                        </label>
                       </div>
 
                       <details
@@ -1125,7 +1749,13 @@ export function TrainingStudio({
                           </label>
                           <label>
                             Optimizer
-                            <input onChange={(event) => updateConfigDraft("optimizer", event.target.value)} value={configDraft.optimizer ?? ""} />
+                            <select onChange={(event) => updateConfigDraft("optimizer", event.target.value)} value={configDraft.optimizer ?? ""}>
+                              {visibleOptimizerOptions.map((optimizer) => (
+                                <option key={optimizer} value={optimizer}>
+                                  {optimizerLabel(optimizer)}
+                                </option>
+                              ))}
+                            </select>
                           </label>
                           <label>
                             Learning rate
@@ -1180,14 +1810,6 @@ export function TrainingStudio({
                               onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
                               type="number"
                               value={configDraft.saveEvery ?? ""}
-                            />
-                          </label>
-                          <label>
-                            Sample cadence
-                            <input
-                              onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
-                              type="number"
-                              value={configDraft.sampleEvery ?? ""}
                             />
                           </label>
                         </div>

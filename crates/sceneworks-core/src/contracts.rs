@@ -198,6 +198,7 @@ string_enum! {
         ModelConvert => "model_convert",
         LoraImport => "lora_import",
         LoraTrain => "lora_train",
+        TrainingCaption => "training_caption",
     }
 }
 
@@ -281,6 +282,7 @@ string_enum! {
         ModelConvert => "model_convert",
         LoraImport => "lora_import",
         LoraTrain => "lora_train",
+        TrainingCaption => "training_caption",
         // Real (non-dry-run) LoRA training execution. Advertised separately from
         // `LoraTrain` (dry-run plan validation, which needs no inference backend)
         // so a real run only routes to a worker that can actually train. See

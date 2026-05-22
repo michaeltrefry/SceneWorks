@@ -31,6 +31,7 @@ from typing import Any, Callable, Protocol
 
 from sceneworks_shared import utc_now
 
+from .adapter_utils import filter_call_kwargs
 from .image_adapters import (
     activate_torch_device,
     emit_worker_event,
@@ -43,7 +44,7 @@ from .lora_adapters import huggingface_main_snapshot_dir, huggingface_snapshot_d
 from .settings import WorkerSettings
 
 
-ProgressCallback = Callable[[str, str, float, str], None]
+ProgressCallback = Callable[[str, str, float, str, dict[str, Any] | None], None]
 CancelCallback = Callable[[], bool]
 
 # Highest training plan version a kernel here understands. Plans are resolved in
@@ -158,6 +159,10 @@ class TrainingRunConfig:
     optimizer: str
     mixed_precision: Any
     lora_target_modules: Any
+    sample_every: int
+    sample_steps: int
+    sample_guidance_scale: float
+    sample_prompts: list[str]
     advanced: dict[str, Any] = field(default_factory=dict)
 
 
@@ -183,6 +188,9 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
     target_modules = advanced.get("loraTargetModules")
     if not target_modules:
         target_modules = list(DEFAULT_LORA_TARGET_MODULES)
+    sample_prompts = advanced.get("samplePrompts")
+    if not isinstance(sample_prompts, list):
+        sample_prompts = default_sample_prompts(trigger_words(plan))
     return TrainingRunConfig(
         rank=_as_int(config.get("rank"), 16, minimum=1),
         alpha=_as_int(config.get("alpha"), 16, minimum=1),
@@ -196,6 +204,10 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         optimizer=str(config.get("optimizer") or "adamw"),
         mixed_precision=advanced.get("mixedPrecision"),
         lora_target_modules=target_modules,
+        sample_every=_as_int(advanced.get("sampleEvery"), 0, minimum=0),
+        sample_steps=_as_int(advanced.get("sampleSteps"), 9, minimum=1),
+        sample_guidance_scale=_as_float(advanced.get("sampleGuidanceScale"), 0.0),
+        sample_prompts=[str(prompt).strip() for prompt in sample_prompts if str(prompt).strip()][:4],
         advanced=advanced,
     )
 
@@ -204,6 +216,27 @@ def trigger_words(plan: dict[str, Any]) -> list[str]:
     output = plan.get("output") or {}
     words = output.get("triggerWords") or []
     return [str(word) for word in words if str(word).strip()]
+
+
+def default_sample_prompts(words: list[str]) -> list[str]:
+    trigger = ", ".join(words).strip() or "the trained subject"
+    return [
+        f"{trigger}, studio portrait, soft key light, detailed face",
+        f"{trigger}, full body fashion editorial photo, natural pose",
+        f"{trigger}, cinematic outdoor portrait, golden hour",
+        f"{trigger}, close-up character portrait, dramatic rim light",
+    ]
+
+
+def project_relative_path(plan: dict[str, Any], path: Path) -> str | None:
+    dataset_root = Path(str((plan.get("dataset") or {}).get("rootPath") or ""))
+    try:
+        # Dataset roots are <project>/training/datasets/<dataset-id>.
+        project_root = dataset_root.parents[2]
+        relative = path.resolve().relative_to(project_root.resolve())
+    except Exception:
+        return None
+    return relative.as_posix()
 
 
 # --------------------------------------------------------------------------- #
@@ -281,6 +314,17 @@ class TrainingBackend(Protocol):
     def train_step(self, *, step: int, total_steps: int, config: TrainingRunConfig) -> float: ...
 
     def save_checkpoint(self, *, step: int, output_dir: str, file_name: str) -> str | None: ...
+
+    def generate_samples(
+        self,
+        *,
+        step: int,
+        prompts: list[str],
+        output_dir: str,
+        file_name: str,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+    ) -> list[dict[str, Any]]: ...
 
     def save_final(self, *, output_dir: str, file_name: str) -> str: ...
 
@@ -380,6 +424,7 @@ class ZImageLoraTrainer:
 
             total_steps = max(1, config.steps)
             checkpoints: list[dict[str, Any]] = []
+            training_samples: list[dict[str, Any]] = []
             for step in range(1, total_steps + 1):
                 _check_cancel(cancel_requested)
                 loss = backend.train_step(step=step, total_steps=total_steps, config=config)
@@ -403,6 +448,39 @@ class ZImageLoraTrainer:
                     )
                     if checkpoint_path:
                         checkpoints.append({"step": step, "path": checkpoint_path})
+                if config.sample_every and step % config.sample_every == 0:
+                    progress(
+                        "running",
+                        "rendering",
+                        _scaled(_TRAIN_PROGRESS_START, _TRAIN_PROGRESS_END, step, total_steps),
+                        f"Rendering training samples at step {step} of {total_steps}.",
+                    )
+                    samples = backend.generate_samples(
+                        step=step,
+                        prompts=config.sample_prompts,
+                        output_dir=output_dir,
+                        file_name=file_name,
+                        plan=plan,
+                        config=config,
+                    )
+                    if samples:
+                        training_samples.extend(samples)
+                        progress(
+                            "running",
+                            "rendering",
+                            _scaled(_TRAIN_PROGRESS_START, _TRAIN_PROGRESS_END, step, total_steps),
+                            f"Rendered {len(samples)} training sample(s) at step {step}.",
+                            {
+                                "trainingSamples": training_samples,
+                                "latestTrainingSamples": samples,
+                                "samplePrompts": config.sample_prompts,
+                                "sampleSettings": {
+                                    "numInferenceSteps": config.sample_steps,
+                                    "guidanceScale": config.sample_guidance_scale,
+                                    "sampleSource": "live_adapter",
+                                },
+                            },
+                        )
 
             _check_cancel(cancel_requested)
             progress("saving", "saving", 0.95, "Saving trained LoRA weights.")
@@ -414,6 +492,7 @@ class ZImageLoraTrainer:
                 total_steps=total_steps,
                 completed_steps=completed_steps,
                 checkpoints=checkpoints,
+                training_samples=training_samples,
                 output_path=output_path,
             )
         finally:
@@ -434,6 +513,7 @@ class ZImageLoraTrainer:
         total_steps: int,
         completed_steps: int,
         checkpoints: list[dict[str, Any]],
+        training_samples: list[dict[str, Any]],
         output_path: str,
     ) -> dict[str, Any]:
         dataset = plan.get("dataset") or {}
@@ -455,6 +535,14 @@ class ZImageLoraTrainer:
             "steps": total_steps,
             "stepsCompleted": completed_steps,
             "checkpoints": checkpoints,
+            "trainingSamples": training_samples,
+            "latestTrainingSamples": training_samples[-4:],
+            "samplePrompts": config.sample_prompts,
+            "sampleSettings": {
+                "numInferenceSteps": config.sample_steps,
+                "guidanceScale": config.sample_guidance_scale,
+                "sampleSource": "live_adapter",
+            },
             "rank": config.rank,
             "alpha": config.alpha,
             "learningRate": config.learning_rate,
@@ -479,10 +567,18 @@ def _training_message(step: int, total_steps: int, loss: float | None) -> str:
 def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
     """Build an optimizer for the LoRA parameters. ``adamw8bit`` uses
     bitsandbytes when available and falls back to torch AdamW otherwise (the
-    8-bit optimizer is an optional, CUDA-only dependency)."""
+    8-bit optimizer is an optional, CUDA-only dependency). ``prodigy`` and
+    ``prodigyopt`` use the Prodigy optimizer package."""
 
     torch = importlib.import_module("torch")
     normalized = (name or "").strip().lower().replace("-", "").replace("_", "")
+    if normalized in {"prodigy", "prodigyopt"}:
+        try:
+            prodigy_module = importlib.import_module("prodigyopt")
+        except Exception as exc:
+            raise TrainingKernelError("The Prodigy optimizer requires the prodigyopt Python package.") from exc
+        use_lr = learning_rate if learning_rate >= 0.1 else 1.0
+        return prodigy_module.Prodigy(params, lr=use_lr, eps=1e-6)
     if normalized in {"adamw8bit", "adam8bit"}:
         try:
             bnb = importlib.import_module("bitsandbytes")
@@ -633,6 +729,7 @@ class _ZImageLoraBackend:
             else config.lora_target_modules,
         )
         transformer.add_adapter(lora_config)
+        self._activate_lora_adapter(transformer)
         transformer.train()
         trainable = [param for param in transformer.parameters() if param.requires_grad]
         if not trainable:
@@ -763,6 +860,88 @@ class _ZImageLoraBackend:
         stem = Path(file_name).stem or "lora"
         checkpoint_name = f"{stem}-step{step:06d}.safetensors"
         return self._save_lora(output_dir=output_dir, file_name=checkpoint_name)
+
+    def generate_samples(
+        self,
+        *,
+        step: int,
+        prompts: list[str],
+        output_dir: str,
+        file_name: str,
+        plan: dict[str, Any],
+        config: TrainingRunConfig,
+    ) -> list[dict[str, Any]]:
+        torch = self._torch
+        pipe = self._pipeline
+        transformer = self._transformer
+        if torch is None or pipe is None or transformer is None or not prompts:
+            return []
+
+        sample_dir = Path(output_dir) / "samples" / f"step-{step:06d}"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(file_name).stem or "lora"
+        was_training = bool(getattr(transformer, "training", False))
+        self._activate_lora_adapter(transformer)
+        transformer.eval()
+        samples: list[dict[str, Any]] = []
+        try:
+            with torch.no_grad():
+                for index, prompt in enumerate(prompts[:4]):
+                    generator_device = self._device if str(self._device).startswith("cuda") else "cpu"
+                    generator = torch.Generator(generator_device).manual_seed(int(config.seed) + step + index)
+                    kwargs = {
+                        "prompt": prompt,
+                        "height": min(768, bucket_resolution(config.resolution)),
+                        "width": min(768, bucket_resolution(config.resolution)),
+                        "num_inference_steps": config.sample_steps,
+                        "guidance_scale": config.sample_guidance_scale,
+                        "generator": generator,
+                    }
+                    output = pipe(**filter_call_kwargs(pipe, kwargs))
+                    image = output.images[0].convert("RGB")
+                    sample_name = f"{stem}-step{step:06d}-{index + 1}.png"
+                    sample_path = sample_dir / sample_name
+                    image.save(sample_path)
+                    samples.append(
+                        {
+                            "step": step,
+                            "prompt": prompt,
+                            "path": str(sample_path),
+                            "relativePath": project_relative_path(plan, sample_path),
+                            "sampleSource": "live_adapter",
+                            "numInferenceSteps": config.sample_steps,
+                            "guidanceScale": config.sample_guidance_scale,
+                            "createdAt": now(),
+                        }
+                    )
+        finally:
+            if was_training:
+                transformer.train()
+        return samples
+
+    def _activate_lora_adapter(self, transformer: Any) -> None:
+        for method_name in ("set_adapter", "enable_adapters"):
+            method = getattr(transformer, method_name, None)
+            if method is None:
+                continue
+            try:
+                if method_name == "set_adapter":
+                    method("default")
+                else:
+                    method()
+                emit_worker_event(
+                    "training_lora_adapter_active",
+                    kernel=ZImageLoraTrainer.kernel_id,
+                    method=method_name,
+                )
+                return
+            except Exception as exc:
+                emit_worker_event(
+                    "training_lora_adapter_activation_failed",
+                    kernel=ZImageLoraTrainer.kernel_id,
+                    method=method_name,
+                    error=str(exc),
+                )
 
     def save_final(self, *, output_dir: str, file_name: str) -> str:
         return self._save_lora(output_dir=output_dir, file_name=file_name)

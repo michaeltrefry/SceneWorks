@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 import httpx
 
+from .caption_adapters import run_training_caption_job
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_utilization, gpu_worker_id
 from .image_adapters import ProceduralImageAdapter, QwenImageAdapter, ZImageDiffusersAdapter, create_image_adapter
 from .person_adapters import (
@@ -55,6 +56,7 @@ SUPPORTED_JOB_TYPES = IMAGE_JOB_TYPES + VIDEO_JOB_TYPES
 # jobs_store::worker_supports_job.
 TRAINING_JOB_TYPES = ("lora_train",)
 TRAINING_EXECUTE_CAPABILITIES = ("lora_train_execute",)
+CAPTION_JOB_TYPES = ("training_caption",)
 
 
 def now() -> str:
@@ -93,6 +95,7 @@ def worker_capabilities(gpu: dict) -> list[str]:
         capabilities |= set(TRAINING_JOB_TYPES)
         if torch_inference_backend_available():
             capabilities |= set(SUPPORTED_JOB_TYPES)
+            capabilities |= set(CAPTION_JOB_TYPES)
             # Only a backend-capable worker advertises real training execution, so
             # the queue won't route a dryRun:false job to a worker that can't train.
             capabilities |= set(TRAINING_EXECUTE_CAPABILITIES)
@@ -281,6 +284,9 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
             ),
         )
     tokenizer_backend_markers = (
+        "protobuf",
+        "protocolbuffers",
+        "requires the protobuf library",
         "sentencepiece",
         "tokenization_t5",
         "t5.tokenization",
@@ -290,7 +296,7 @@ def friendly_failure(job_kind: str, exc: Exception) -> tuple[str, str]:
         return (
             f"{job_kind} failed because the worker is missing a tokenizer backend.",
             (
-                "The selected video model needs the SentencePiece tokenizer runtime. "
+                "The selected model needs the tokenizer support libraries from the worker requirements. "
                 "For bare-metal workers, run `pip install -r apps/worker/requirements.txt`; "
                 "for Docker Compose, run `docker compose build worker --no-cache`, then restart the worker and retry. "
                 f"Technical detail: {detail}"
@@ -740,13 +746,12 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
         trainer = trainer_holder["trainer"]
         return trainer.loaded_models() if trainer is not None else []
 
-    def progress(status: str, stage: str, value: float, message: str) -> None:
+    def progress(status: str, stage: str, value: float, message: str, result: dict | None = None) -> None:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, trainer_loaded_models)
-        update_job(
-            api,
-            job_id,
-            {"status": status, "stage": stage, "progress": value, "message": message},
-        )
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        if result is not None:
+            payload["result"] = result
+        update_job(api, job_id, payload)
 
     try:
         plan = payload.get("plan")
@@ -812,6 +817,57 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
             restart_worker_after_oom(settings, job_id)
 
 
+def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+    needs_oom_restart = False
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(api, job_id, {"status": status, "stage": stage, "progress": value, "message": message})
+
+    try:
+        progress("preparing", "preparing", 0.04, "Preparing training caption job.")
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: run_training_caption_job(
+                api=api,
+                settings=settings,
+                job=job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
+            loaded_models=lambda: [],
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": f"Created captions for {result.get('captionedItemCount', 0)} training item(s).",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
+    except Exception as exc:
+        needs_oom_restart = is_cuda_oom(exc)
+        message, error = friendly_failure("Training captioning", exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+        if needs_oom_restart:
+            restart_worker_after_oom(settings, job_id)
+
+
 def run_worker_loop(settings: WorkerSettings) -> None:
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
@@ -863,6 +919,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_person_job(api, settings, job)
             elif job["type"] in TRAINING_JOB_TYPES:
                 run_lora_train_job(api, settings, job)
+            elif job["type"] in CAPTION_JOB_TYPES:
+                run_training_caption_worker_job(api, settings, job)
             else:
                 update_job(
                     api,
@@ -964,8 +1022,12 @@ def run_check(settings: WorkerSettings) -> None:
             "workerId": settings.worker_id,
             "gpu": gpu,
             "capabilities": capabilities,
-            "jobTypes": [job_type for job_type in SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES if job_type in capabilities],
-            "supportedJobTypes": list(SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES),
+            "jobTypes": [
+                job_type
+                for job_type in SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES + TRAINING_JOB_TYPES + CAPTION_JOB_TYPES
+                if job_type in capabilities
+            ],
+            "supportedJobTypes": list(SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES + TRAINING_JOB_TYPES + CAPTION_JOB_TYPES),
             "reportedAt": now(),
         }
     )

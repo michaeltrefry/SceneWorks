@@ -534,6 +534,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             post(write_training_dataset_caption_sidecars),
         )
         .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-jobs",
+            post(create_training_dataset_caption_job),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/jobs",
             post(create_training_job),
         )
@@ -960,6 +964,60 @@ struct PersonTrackCorrectionsRequest {
     /// schema-flexible `corrections` array can evolve without an API change.
     #[serde(default)]
     corrections: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrainingCaptionJobRequest {
+    #[serde(default = "default_training_captioner")]
+    captioner: String,
+    #[serde(default = "default_training_caption_model")]
+    model_name_or_path: String,
+    #[serde(default)]
+    recaption: bool,
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+    #[serde(default)]
+    options: TrainingCaptionOptions,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrainingCaptionOptions {
+    #[serde(default = "default_training_caption_type")]
+    caption_type: String,
+    #[serde(default = "default_training_caption_length")]
+    caption_length: String,
+    #[serde(default)]
+    extra_options: Vec<String>,
+    #[serde(default)]
+    name_input: String,
+    #[serde(default = "default_training_caption_temperature")]
+    temperature: f64,
+    #[serde(default = "default_training_caption_top_p")]
+    top_p: f64,
+    #[serde(default = "default_training_caption_max_new_tokens")]
+    max_new_tokens: u32,
+    #[serde(default)]
+    caption_prompt: String,
+    #[serde(default)]
+    low_vram: bool,
+}
+
+impl Default for TrainingCaptionOptions {
+    fn default() -> Self {
+        Self {
+            caption_type: default_training_caption_type(),
+            caption_length: default_training_caption_length(),
+            extra_options: Vec::new(),
+            name_input: String::new(),
+            temperature: default_training_caption_temperature(),
+            top_p: default_training_caption_top_p(),
+            max_new_tokens: default_training_caption_max_new_tokens(),
+            caption_prompt: String::new(),
+            low_vram: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1393,6 +1451,136 @@ async fn write_training_dataset_caption_sidecars(
         })
         .await?,
     ))
+}
+
+async fn create_training_dataset_caption_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<TrainingCaptionJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_training_caption_job_request(&payload)?;
+    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+    if dataset.items.is_empty() {
+        return Err(ApiError::bad_request(
+            "Training dataset has no items to caption.",
+        ));
+    }
+    let items = dataset
+        .items
+        .iter()
+        .filter(|item| payload.recaption || item.caption.text.trim().is_empty())
+        .map(|item| {
+            json!({
+                "itemId": item.id.clone(),
+                "imagePath": dataset_root.join(&item.path).display().to_string(),
+                "existingCaption": item.caption.text.clone(),
+                "triggerWords": item.caption.trigger_words.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Err(ApiError::bad_request(
+            "No dataset items need captions. Enable recaption to overwrite existing captions.",
+        ));
+    }
+    let options = serde_json::to_value(payload.options)
+        .map_err(|error| ApiError::internal(format!("caption options serialize: {error}")))?;
+    let captioner = payload.captioner;
+    let model_name_or_path = payload.model_name_or_path;
+    let requested_gpu = payload.requested_gpu;
+    let job_payload = match json!({
+        "provider": "training",
+        "kind": "training_caption",
+        "captioner": captioner,
+        "modelNameOrPath": model_name_or_path,
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetVersion": dataset.version,
+        "datasetRoot": dataset_root.display().to_string(),
+        "recaption": payload.recaption,
+        "options": options,
+        "items": items,
+    }) {
+        Value::Object(map) => map,
+        _ => return Err(ApiError::internal("caption job payload must be an object")),
+    };
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::TrainingCaption,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+fn validate_training_caption_job_request(
+    payload: &TrainingCaptionJobRequest,
+) -> Result<(), ApiError> {
+    if payload.captioner.trim() != "joy_caption" {
+        return Err(ApiError::bad_request(
+            "Unsupported training captioner. Use joy_caption.",
+        ));
+    }
+    if payload.model_name_or_path.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "Joy Caption model name or path is required.",
+        ));
+    }
+    let options = &payload.options;
+    if !(0.0..=2.0).contains(&options.temperature) {
+        return Err(ApiError::bad_request(
+            "Caption temperature must be between 0 and 2.",
+        ));
+    }
+    if !(0.0..=1.0).contains(&options.top_p) {
+        return Err(ApiError::bad_request(
+            "Caption topP must be between 0 and 1.",
+        ));
+    }
+    if options.max_new_tokens == 0 || options.max_new_tokens > 1024 {
+        return Err(ApiError::bad_request(
+            "Caption maxNewTokens must be between 1 and 1024.",
+        ));
+    }
+    if options.caption_prompt.chars().count() > 4000 {
+        return Err(ApiError::bad_request(
+            "Caption prompt must be at most 4000 characters.",
+        ));
+    }
+    if options.name_input.chars().count() > 120 {
+        return Err(ApiError::bad_request(
+            "Caption name must be at most 120 characters.",
+        ));
+    }
+    if options.extra_options.len() > 16 {
+        return Err(ApiError::bad_request(
+            "Choose at most 16 caption extra options.",
+        ));
+    }
+    if options
+        .extra_options
+        .iter()
+        .any(|option| option.chars().count() > 500)
+    {
+        return Err(ApiError::bad_request(
+            "Caption extra options must be at most 500 characters.",
+        ));
+    }
+    Ok(())
 }
 
 async fn delete_training_dataset(
@@ -7476,6 +7664,34 @@ fn default_requested_gpu() -> String {
     "auto".to_owned()
 }
 
+fn default_training_captioner() -> String {
+    "joy_caption".to_owned()
+}
+
+fn default_training_caption_model() -> String {
+    "fancyfeast/llama-joycaption-beta-one-hf-llava".to_owned()
+}
+
+fn default_training_caption_type() -> String {
+    "Descriptive".to_owned()
+}
+
+fn default_training_caption_length() -> String {
+    "long".to_owned()
+}
+
+fn default_training_caption_temperature() -> f64 {
+    0.6
+}
+
+fn default_training_caption_top_p() -> f64 {
+    0.9
+}
+
+fn default_training_caption_max_new_tokens() -> u32 {
+    256
+}
+
 fn default_lora_scope() -> String {
     "global".to_owned()
 }
@@ -8457,7 +8673,7 @@ mod tests {
                 "items": [{
                     "itemId": "item_0001",
                     "caption": {
-                        "text": "miraStyle studio portrait",
+                        "text": "studio portrait",
                         "triggerWords": ["miraStyle"]
                     }
                 }]
@@ -8480,8 +8696,45 @@ mod tests {
                     .join("item_0001.txt")
             )
             .expect("caption sidecar writes"),
-            "miraStyle studio portrait\n"
+            "miraStyle, studio portrait\n"
         );
+
+        let (status, caption_job) = request(
+            reloaded_app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/caption-jobs"),
+            json!({
+                "recaption": true,
+                "requestedGpu": "auto",
+                "options": {
+                    "captionType": "Straightforward",
+                    "captionLength": "40",
+                    "extraOptions": ["Include information about lighting."],
+                    "nameInput": "Mira",
+                    "temperature": 0.5,
+                    "topP": 0.8,
+                    "maxNewTokens": 128
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(caption_job["type"], "training_caption");
+        assert_eq!(caption_job["payload"]["captioner"], "joy_caption");
+        assert_eq!(
+            caption_job["payload"]["modelNameOrPath"],
+            "fancyfeast/llama-joycaption-beta-one-hf-llava"
+        );
+        assert_eq!(caption_job["payload"]["items"][0]["itemId"], "item_0001");
+        assert_eq!(
+            caption_job["payload"]["items"][0]["triggerWords"],
+            json!(["miraStyle"])
+        );
+        let caption_image_path = caption_job["payload"]["items"][0]["imagePath"]
+            .as_str()
+            .expect("caption image path");
+        assert!(caption_image_path.contains(&dataset_id));
+        assert!(caption_image_path.ends_with("item_0001.png"));
 
         let (status, renamed) = request(
             reloaded_app.clone(),
@@ -8516,7 +8769,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(renamed_image_path.with_extension("txt"))
                 .expect("caption sidecar follows rename"),
-            "miraStyle studio portrait\n"
+            "miraStyle, studio portrait\n"
         );
 
         let (status, error) = request(

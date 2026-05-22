@@ -381,6 +381,8 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
                 "repeats": 10,
                 "bucketStrategy": "aspect",
                 "sampleEvery": 250,
+                "sampleSteps": 9,
+                "sampleGuidanceScale": 0.0,
                 "qualityPreset": "balanced",
                 "outputScope": "project",
                 "requestedGpu": "auto"
@@ -393,6 +395,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "steps": [200, 6000],
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
@@ -476,23 +479,26 @@ pub fn build_training_plan(
         return Err(TrainingPlanError::EmptyDataset);
     }
 
+    let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {
+        Some(word) if !word.is_empty() => vec![word.to_owned()],
+        _ => Vec::new(),
+    };
+
     let items = input
         .dataset
         .items
         .iter()
         .map(|item| TrainingPlanItem {
             image_path: resolve_item_path(input.dataset_root, &item.path),
-            caption: item.caption.text.clone(),
+            caption: caption_with_trigger_words(
+                &item.caption.text,
+                &combined_trigger_words(&item.caption.trigger_words, &trigger_words),
+            ),
             width: item.width,
             height: item.height,
             extra: ExtraFields::new(),
         })
         .collect::<Vec<_>>();
-
-    let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {
-        Some(word) if !word.is_empty() => vec![word.to_owned()],
-        _ => Vec::new(),
-    };
 
     let config_snapshot = match serde_json::to_value(&input.config) {
         Ok(Value::Object(map)) => map,
@@ -543,6 +549,36 @@ pub fn build_training_plan(
         },
         extra: ExtraFields::new(),
     })
+}
+
+fn combined_trigger_words(item_words: &[String], output_words: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    for word in output_words.iter().chain(item_words.iter()) {
+        let trimmed = word.trim();
+        if !trimmed.is_empty()
+            && !words
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+        {
+            words.push(trimmed.to_owned());
+        }
+    }
+    words
+}
+
+fn caption_with_trigger_words(caption: &str, trigger_words: &[String]) -> String {
+    let cleaned = caption.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = cleaned.to_lowercase();
+    let mut parts = trigger_words
+        .iter()
+        .map(|word| word.trim())
+        .filter(|word| !word.is_empty() && !lower.contains(&word.to_lowercase()))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !cleaned.is_empty() {
+        parts.push(cleaned);
+    }
+    parts.join(", ")
 }
 
 /// Joins a dataset item's forward-slash relative path onto the absolute root

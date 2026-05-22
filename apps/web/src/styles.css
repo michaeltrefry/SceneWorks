@@ -1395,6 +1395,8 @@ label {
 .training-metrics > div,
 .training-empty-state,
 .training-panel,
+.training-live-panel,
+.training-live-card,
 .training-dataset-row,
 .training-step-block,
 .training-dataset-list-panel,
@@ -1475,6 +1477,88 @@ label {
 
 .training-tabs span {
   font-weight: 700;
+}
+
+.training-live-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.training-live-title,
+.training-live-head,
+.training-live-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.training-live-title h3,
+.training-live-head h3 {
+  margin: 2px 0 0;
+  font-size: 16px;
+}
+
+.training-live-title > span,
+.training-live-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.training-live-list {
+  display: grid;
+  gap: 10px;
+}
+
+.training-live-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  background: var(--surface);
+}
+
+.training-sample-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.training-sample-tile {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.training-sample-tile img,
+.training-sample-tile > span {
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.training-sample-tile img {
+  object-fit: cover;
+  display: block;
+}
+
+.training-sample-tile > span {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.training-sample-tile small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 .training-panel {
@@ -1851,6 +1935,51 @@ label {
   align-items: end;
 }
 
+.training-caption-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 320px);
+  gap: 14px;
+  align-items: start;
+}
+
+.training-caption-sidebar {
+  display: grid;
+  gap: 10px;
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  align-self: start;
+  min-width: 0;
+  padding-right: 2px;
+}
+
+.training-caption-sidebar-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.training-sidebar-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.training-sidebar-heading strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.training-caption-sidebar label,
 .training-caption-toolbar label,
 .training-caption-fields label {
   display: grid;
@@ -1859,6 +1988,35 @@ label {
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.training-toggle-line {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.training-toggle-line input {
+  width: auto;
+}
+
+.training-caption-option-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.training-caption-sidebar textarea {
+  resize: vertical;
+  min-height: 168px;
+}
+
+.training-caption-submit {
+  width: 100%;
+  justify-content: center;
 }
 
 .training-caption-row {
@@ -5270,6 +5428,8 @@ label {
   .training-config-preview,
   .training-config-grid,
   .training-advanced-grid,
+  .training-sample-grid,
+  .training-caption-workspace,
   .training-caption-toolbar,
   .training-caption-row,
   .training-caption-fields,

@@ -16,7 +16,8 @@
     "model_import",
     "model_convert",
     "lora_import",
-    "lora_train"
+    "lora_train",
+    "training_caption"
   ],
   "statuses": [
     "queued",
@@ -56,7 +57,7 @@
   "sseEvents": ["ready", "heartbeat", "job.updated", "queue.updated", "worker.updated"],
   "workerCapabilityProfiles": {
     "cpu": ["cpu"],
-    "gpuChild": ["gpu", "image_edit", "image_generate", "person_replace", "video_bridge", "video_extend", "video_generate"]
+    "gpuChild": ["gpu", "image_edit", "image_generate", "person_replace", "training_caption", "video_bridge", "video_extend", "video_generate"]
   },
   "requests": {
     "createJob": {

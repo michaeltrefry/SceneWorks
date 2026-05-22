@@ -140,7 +140,8 @@ fn dataset_fixture() -> TrainingDataset {
 
 #[test]
 fn build_training_plan_resolves_paths_ids_and_provenance() {
-    let dataset = dataset_fixture();
+    let mut dataset = dataset_fixture();
+    dataset.items[0].caption.text = "a portrait of woman, soft light".to_owned();
     let registry = builtin_training_targets();
     let target = registry.targets.first().expect("a builtin target exists");
     let dataset_root = Path::new("/data/training/ds_abc123");
@@ -175,6 +176,10 @@ fn build_training_plan_resolves_paths_ids_and_provenance() {
     assert_eq!(plan.dataset.dataset_id, "ds_abc123");
     assert_eq!(plan.dataset.dataset_version, 3);
     assert_eq!(plan.dataset.items.len(), 2);
+    assert_eq!(
+        plan.dataset.items[0].caption,
+        "auroraStyle, a portrait of woman, soft light"
+    );
     // Item paths resolve under the dataset root with the host separator.
     let mut expected_image = dataset_root.to_path_buf();
     for component in Path::new("images/001.png").components() {
