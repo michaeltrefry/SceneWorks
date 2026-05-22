@@ -32,7 +32,12 @@ pub const JOB_STATUSES: &[&str] = &[
     "canceled",
     "interrupted",
 ];
-pub const NON_GPU_JOB_TYPES: &[&str] = &["model_download", "model_import", "lora_import"];
+pub const NON_GPU_JOB_TYPES: &[&str] = &[
+    "model_download",
+    "model_import",
+    "model_convert",
+    "lora_import",
+];
 pub const MAX_JOB_ATTEMPTS: u32 = 5;
 const DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB: f64 = 512.0;
 const DISPATCH_MEMORY_RELIEF_THRESHOLD_MB: f64 = 1024.0;

@@ -632,6 +632,7 @@ fn worker_capabilities_with_utility(
             WorkerCapability::TimelineExport,
             WorkerCapability::ModelDownload,
             WorkerCapability::ModelImport,
+            WorkerCapability::ModelConvert,
             WorkerCapability::LoraImport,
             // Procedural detection/tracking is a preview only. Real, model-backed
             // PersonDetect/PersonTrack run on the Python GPU worker; advertising the
@@ -855,6 +856,9 @@ async fn run_utility_job(
         JobType::ModelImport => run_model_import_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model import failed.", error)),
+        JobType::ModelConvert => run_model_convert_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Model conversion failed.", error)),
         JobType::FrameExtract => run_frame_extract_job(api, settings, &job)
             .await
             .map_err(|error| ("Frame extraction failed.", error)),
@@ -1132,6 +1136,226 @@ async fn run_model_download_job(
         ),
     )
     .await?;
+    Ok(())
+}
+
+/// Convert a model's native (diffusers) checkpoint into the local MLX format on
+/// macOS/Apple Silicon. The native checkpoint must already be downloaded into the
+/// Hugging Face cache (via a model_download job); this shells out to the venv's
+/// Python `mlx_video.convert_wan` tool, which is where MLX/torch live. The desktop
+/// shell points `SCENEWORKS_PYTHON` at the bundled interpreter (mirrors
+/// `SCENEWORKS_FFMPEG`); dev/server fall back to `python3` on PATH.
+///
+/// Real conversion is exercised on Mac hardware in sc-1509; this wires the tracked
+/// job, progress, cancellation, and failure surfacing.
+async fn run_model_convert_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let model_id = required_payload_string(&job.payload, "modelId")?.to_owned();
+    let source_repo = required_payload_string(&job.payload, "sourceRepo")?.to_owned();
+    let output_dir = required_payload_string(&job.payload, "outputDir")?.to_owned();
+    let dtype = optional_payload_string(&job.payload, "dtype")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("bfloat16")
+        .to_owned();
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.05,
+            &format!("Preparing MLX conversion for {model_id}."),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(api, &job.id, "MLX conversion canceled before it started.").await?;
+
+    let Some(checkpoint_dir) = huggingface_snapshot_dir(&settings.data_dir, &source_repo) else {
+        fail_job(
+            api,
+            &job.id,
+            "Native checkpoint is not downloaded.",
+            Some(format!(
+                "Download {source_repo} before converting it to MLX."
+            )),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let python = std::env::var("SCENEWORKS_PYTHON")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "python3".to_owned());
+
+    // Convert into a unique temp sibling and only promote it on success, so a
+    // canceled/failed conversion never leaves a partial directory that the catalog
+    // and adapter would treat as a ready model (convert tools write config.json
+    // before all weight shards).
+    let final_dir = PathBuf::from(&output_dir);
+    let parent = final_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    tokio::fs::create_dir_all(&parent).await?;
+    let temp_dir = parent.join(format!(
+        ".{}.converting-{}",
+        final_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("mlx"),
+        job.id
+    ));
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.2,
+            &format!("Converting {model_id} to MLX ({dtype}). This can take several minutes."),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+
+    let mut child = Command::new(&python)
+        .arg("-m")
+        .arg("mlx_video.convert_wan")
+        .arg("--checkpoint-dir")
+        .arg(&checkpoint_dir)
+        .arg("--output-dir")
+        .arg(&temp_dir)
+        .arg("--dtype")
+        .arg(&dtype)
+        .arg("--model-version")
+        .arg("auto")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Failed to start MLX conversion ({python}). Ensure the worker venv has \
+                 mlx-video-with-audio installed: {error}"
+            ))
+        })?;
+
+    let mut stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.read_to_end(&mut bytes).await;
+        }
+        bytes
+    });
+
+    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status?,
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                if let Err(error) =
+                    check_cancel(api, &job.id, "MLX conversion canceled by user.").await
+                {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                    return Err(error);
+                }
+            }
+        }
+    };
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
+
+    if !status.success() {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        let stderr_text = String::from_utf8_lossy(&stderr_bytes);
+        // Keep the tail (char-safe) so the job error surfaces the real failure.
+        let tail: String = stderr_text.trim().chars().rev().take(1200).collect();
+        let detail: String = tail.chars().rev().collect();
+        return Err(WorkerError::InvalidPayload(format!(
+            "MLX conversion failed (exit {}). {detail}",
+            status.code().unwrap_or(-1),
+        )));
+    }
+
+    // Promote the completed conversion atomically; on any rename failure the partial
+    // temp dir is removed so it can't be picked up later.
+    if let Err(error) = finalize_converted_dir(&temp_dir, &final_dir).await {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        return Err(error);
+    }
+
+    let mut result = JsonObject::new();
+    result.insert("modelId".to_owned(), Value::String(model_id));
+    result.insert("sourceRepo".to_owned(), Value::String(source_repo));
+    result.insert("path".to_owned(), Value::String(output_dir));
+    result.insert("storage".to_owned(), Value::String("mlx_local".to_owned()));
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "MLX conversion completed.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Resolve the local Hugging Face snapshot directory for a cached repo (the dir that
+/// actually holds the checkpoint files). Prefers the commit referenced by
+/// `refs/main`, else the first snapshot directory. Returns `None` when the repo is
+/// not present in the cache.
+fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
+    let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+    let snapshots = repo_dir.join("snapshots");
+    if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
+        let candidate = snapshots.join(rev.trim());
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    std::fs::read_dir(&snapshots)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+}
+
+/// Atomically promote a freshly converted temp directory to its final location,
+/// replacing any stale directory there. On error the final location is left
+/// untouched (the caller removes the temp dir), so a complete `final_dir` only ever
+/// appears after a fully successful conversion.
+async fn finalize_converted_dir(temp_dir: &Path, final_dir: &Path) -> WorkerResult<()> {
+    if final_dir.exists() {
+        tokio::fs::remove_dir_all(final_dir).await?;
+    }
+    if let Some(parent) = final_dir.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::rename(temp_dir, final_dir).await?;
     Ok(())
 }
 
@@ -4545,14 +4769,51 @@ mod tests {
         allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
         child_environment, cleanup_uploaded_import_source, concat_file_contents, copy_lora_source,
         cpu_gpu, cpu_worker_id, crossfade_duration, download_lora_source_url,
-        download_progress_payload, fallback_gpu, fresh_asset_id, gpu_worker_id,
-        import_lora_source_path, now_rfc3339, output_dimensions, parse_nvidia_smi_gpus,
-        restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
-        utility_worker_specs, value_f64, visible_gpu_ids, worker_capabilities_with_utility,
-        write_model_install_marker, ApiClient, DownloadContext, HuggingFaceSnapshot, Settings,
-        SupervisedChild, WorkerError, WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES,
-        DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        download_progress_payload, fallback_gpu, finalize_converted_dir, fresh_asset_id,
+        gpu_worker_id, import_lora_source_path, now_rfc3339, output_dimensions,
+        parse_nvidia_smi_gpus, restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir,
+        safe_project_path, utility_worker_specs, value_f64, visible_gpu_ids,
+        worker_capabilities_with_utility, write_model_install_marker, ApiClient, DownloadContext,
+        HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError, WorkerSpec,
+        DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
+
+    #[tokio::test]
+    async fn finalize_converted_dir_promotes_atomically_and_replaces_stale() {
+        let temp = tempdir().expect("tempdir creates");
+        let root = temp.path();
+        let final_dir = root.join("mlx").join("wan_2_2");
+
+        // A completed temp conversion sitting in its sibling staging dir.
+        let temp_dir = root.join("mlx").join(".wan_2_2.converting-job1");
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        std::fs::write(temp_dir.join("config.json"), "{}").expect("config");
+        std::fs::write(temp_dir.join("model.safetensors"), b"weights").expect("weights");
+
+        // The canonical dir only appears after finalize, so a partial conversion can
+        // never be picked up as a ready model.
+        assert!(!final_dir.exists());
+        finalize_converted_dir(&temp_dir, &final_dir)
+            .await
+            .expect("finalize");
+        assert!(final_dir.join("config.json").is_file());
+        assert!(final_dir.join("model.safetensors").is_file());
+        assert!(!temp_dir.exists());
+
+        // A re-conversion replaces a stale final dir wholesale.
+        let stale_marker = final_dir.join("stale.txt");
+        std::fs::write(&stale_marker, "old").expect("stale");
+        let temp_dir2 = root.join("mlx").join(".wan_2_2.converting-job2");
+        std::fs::create_dir_all(&temp_dir2).expect("temp dir 2");
+        std::fs::write(temp_dir2.join("config.json"), "{}").expect("config 2");
+        finalize_converted_dir(&temp_dir2, &final_dir)
+            .await
+            .expect("finalize 2");
+        assert!(final_dir.join("config.json").is_file());
+        assert!(!stale_marker.exists());
+        assert!(!temp_dir2.exists());
+    }
 
     #[test]
     fn download_progress_payload_matches_python_shape() {

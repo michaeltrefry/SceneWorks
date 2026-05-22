@@ -68,7 +68,9 @@ from scene_worker.training_adapters import (
 from scene_worker.video_adapters import (
     DiffusersVideoAdapter,
     LtxPipelinesVideoAdapter,
+    MlxVideoAdapter,
     VIDEO_MODEL_TARGETS,
+    _PENDING_LTX_LORAS,
     build_video_asset_sidecar,
     character_reference_images,
     create_video_adapter,
@@ -77,6 +79,7 @@ from scene_worker.video_adapters import (
     install_ltx_pipelines_multigpu_compat,
     ltx_model_manifest_entry,
     ltx_frame_count,
+    ltx_mps_gating,
     load_seekable_image_frame,
     person_track_masks,
     safe_download_dir,
@@ -276,6 +279,38 @@ def test_select_torch_device_uses_visible_cuda_default_when_child_process_is_nar
             mps = None
 
     assert select_torch_device(Torch, "1") == "cuda"
+
+
+def test_ltx_mps_gating_leaves_cuda_path_untouched():
+    gating = ltx_mps_gating(cuda_available=True, device_str="cuda")
+    assert gating == {
+        "device": None,
+        "disable_fp8": False,
+        "force_offload_none": False,
+        "fp32_audio": False,
+        "guard_cuda_sync": False,
+    }
+
+
+def test_ltx_mps_gating_steers_apple_silicon_to_mps_recipe():
+    gating = ltx_mps_gating(cuda_available=False, device_str="mps")
+    assert gating == {
+        "device": "mps",
+        "disable_fp8": True,
+        "force_offload_none": True,
+        "fp32_audio": True,
+        "guard_cuda_sync": True,
+    }
+
+
+def test_ltx_mps_gating_disables_cuda_features_on_cpu_without_forcing_mps_device():
+    # A CPU host off CUDA still must drop fp8/offload (both CUDA-only) and guard the
+    # unguarded cuda.synchronize, but it must not claim an mps device it does not have.
+    gating = ltx_mps_gating(cuda_available=False, device_str="cpu")
+    assert gating["device"] is None
+    assert gating["disable_fp8"] is True
+    assert gating["force_offload_none"] is True
+    assert gating["guard_cuda_sync"] is True
 
 
 def test_gpu_worker_fails_fast_when_torch_cuda_is_unavailable():
@@ -511,6 +546,66 @@ def test_unsupported_adapter_guard_rejects_loras(tmp_path):
 
     with pytest.raises(RuntimeError, match="does not support LoRA application"):
         reject_loras_if_unsupported([{"id": "style", "installedPath": str(first)}], "procedural_preview")
+
+
+def _mlx_video_job(model, mode, loras):
+    return {"id": "job", "payload": {"projectId": "proj", "model": model, "mode": mode, "loras": loras}}
+
+
+def test_mlx_adapter_rejects_incompatible_lora_family(tmp_path):
+    lora_file = tmp_path / "wan_style.safetensors"
+    lora_file.write_bytes(b"lora")
+    request = video_request_from_job(
+        _mlx_video_job("ltx_2_3", "text_to_video", [{"id": "wan_style", "installedPath": str(lora_file), "family": "wan-video"}])
+    )
+    with pytest.raises(RuntimeError, match="not compatible with model family ltx-video"):
+        MlxVideoAdapter().ensure_models(request)
+
+
+def test_mlx_wan_user_loras_resolved_to_path_strength_tuples(tmp_path):
+    lora_file = tmp_path / "wan_motion.safetensors"
+    lora_file.write_bytes(b"lora")
+    request = video_request_from_job(
+        _mlx_video_job(
+            "wan_2_2",
+            "text_to_video",
+            [{"id": "wan_motion", "installedPath": str(lora_file), "weight": 0.7, "family": "wan-video"}],
+        )
+    )
+    assert MlxVideoAdapter()._wan_user_loras(request) == [(str(lora_file), 0.7)]
+
+
+def test_mlx_ltx_stages_loras_in_contextvar_only_when_present(tmp_path, monkeypatch):
+    lora_file = tmp_path / "ltx_style.safetensors"
+    lora_file.write_bytes(b"lora")
+    adapter = MlxVideoAdapter()
+    monkeypatch.setattr("scene_worker.video_adapters._install_ltx_lora_patch", lambda: None)
+    monkeypatch.setattr(adapter, "_ltx_lora_module_map", lambda specs: {"transformer_blocks.0.attn": [("w", specs[0].weight)]})
+    progress_calls: list[tuple] = []
+
+    def progress(*args, **kwargs):
+        progress_calls.append(args)
+
+    no_lora_request = video_request_from_job(_mlx_video_job("ltx_2_3", "text_to_video", []))
+    assert adapter._apply_ltx_loras(no_lora_request, progress) is None
+    assert _PENDING_LTX_LORAS.get() is None
+    assert progress_calls == []
+
+    lora_request = video_request_from_job(
+        _mlx_video_job(
+            "ltx_2_3",
+            "text_to_video",
+            [{"id": "ltx_style", "installedPath": str(lora_file), "weight": 0.6, "family": "ltx-video"}],
+        )
+    )
+    token = adapter._apply_ltx_loras(lora_request, progress)
+    try:
+        assert token is not None
+        assert _PENDING_LTX_LORAS.get() == {"transformer_blocks.0.attn": [("w", 0.6)]}
+        assert progress_calls  # merge progress emitted
+    finally:
+        _PENDING_LTX_LORAS.reset(token)
+    assert _PENDING_LTX_LORAS.get() is None
 
 
 def test_lora_compatibility_guard_rejects_mismatched_family_before_load(tmp_path):
@@ -1800,6 +1895,28 @@ def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
         assert "Unsupported SCENEWORKS_VIDEO_ADAPTER" in str(exc)
     else:
         raise AssertionError("Unknown video adapter override should fail loudly.")
+
+
+def test_mlx_routing_is_mode_aware_on_mps(monkeypatch):
+    # On an MPS host the MLX adapter only handles text_to_video / image_to_video;
+    # every other mode must stay on the PyTorch path or it fails in ensure_models.
+    monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
+    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: True)
+
+    def adapter(model, mode):
+        return create_video_adapter({"payload": {"model": model, "mode": mode}}).__class__.__name__
+
+    # Supported MLX modes route to MLX.
+    assert adapter("ltx_2_3", "text_to_video") == "MlxVideoAdapter"
+    assert adapter("ltx_2_3", "image_to_video") == "MlxVideoAdapter"
+    assert adapter("wan_2_2", "image_to_video") == "MlxVideoAdapter"
+
+    # Unsupported modes fall through to the PyTorch adapters, not MLX.
+    assert adapter("ltx_2_3", "first_last_frame") == "LtxPipelinesVideoAdapter"
+    assert adapter("ltx_2_3", "extend_clip") == "LtxPipelinesVideoAdapter"
+    assert adapter("ltx_2_3", "video_bridge") == "LtxPipelinesVideoAdapter"
+    assert adapter("wan_2_2", "video_bridge") == "DiffusersVideoAdapter"
+    assert adapter("wan_2_2", "replace_person") == "DiffusersVideoAdapter"
 
 
 def test_video_pipeline_evicts_previous_pipeline_and_loaded_models():

@@ -65,6 +65,26 @@ function downloadSizeText(model) {
   return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
 }
 
+// MLX status text, keyed off the macOS catalog's mlxConversionState. Turnkey
+// ("ready") models fetch their MLX weights automatically on first generation;
+// convert-required models need the native checkpoint downloaded, then converted.
+function mlxStatusText(model) {
+  switch (model.mlxConversionState) {
+    case "ready":
+      return model.mlxInstallState === "installed"
+        ? "MLX weights installed."
+        : "MLX weights download automatically on first generation.";
+    case "needs_source":
+      return "Download the model first, then convert it to MLX.";
+    case "needs_conversion":
+      return "Native checkpoint downloaded — ready to convert to MLX.";
+    case "converted":
+      return "Converted to MLX and ready.";
+    default:
+      return "";
+  }
+}
+
 const MODEL_TYPE_OPTIONS = [
   { value: "image", label: "Image" },
   { value: "video", label: "Video" },
@@ -111,6 +131,7 @@ export function ModelManagerScreen({
   jobs,
   loras,
   models,
+  onConvertModel,
   onDeleteLora,
   onDeleteModel,
   onDownloadModel,
@@ -146,6 +167,10 @@ export function ModelManagerScreen({
   const [modelFileInputKey, setModelFileInputKey] = useState(0);
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
+  // Desktop only: read the host's unified memory so MLX models can be gated against
+  // their memory tier. Browser/Docker builds have no Tauri bridge and skip this.
+  const isDesktop = typeof window !== "undefined" && Boolean(window.__TAURI__);
+  const [unifiedMemoryGb, setUnifiedMemoryGb] = useState(null);
   const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
 
   useEffect(() => {
@@ -158,8 +183,30 @@ export function ModelManagerScreen({
     setImportForm((current) => (current.family && !families.includes(current.family) ? { ...current, family: "" } : current));
   }, [familiesKey]);
 
+  useEffect(() => {
+    if (!isDesktop) {
+      return undefined;
+    }
+    let cancelled = false;
+    window.__TAURI__.core
+      .invoke("get_gpu_info")
+      .then((info) => {
+        if (!cancelled && info && typeof info.unifiedMemoryMb === "number") {
+          setUnifiedMemoryGb(info.unifiedMemoryMb / 1024);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isDesktop]);
+
   function downloadJobsFor(model) {
     return jobs.filter((job) => job.type === "model_download" && job.payload?.modelId === model.id);
+  }
+
+  function convertJobsFor(model) {
+    return jobs.filter((job) => job.type === "model_convert" && job.payload?.modelId === model.id);
   }
 
   async function importLora(event) {
@@ -331,6 +378,17 @@ export function ModelManagerScreen({
           const unassociated = !model.family;
           const deleteKey = `model:${model.id}`;
           const canDelete = Boolean(onDeleteModel) && model.removable !== false;
+          // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
+          const mlxState = model.mlxConversionState;
+          const mlxMinGb = model.mlx?.minMemoryGb ?? null;
+          const mlxEnoughMemory =
+            unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
+          const convertJobs = convertJobsFor(model);
+          const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
+          const failedConvert = convertJobs.find(
+            (job) => terminalStatuses.has(job.status) && job.status !== "completed",
+          );
+          const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
           return (
             <article className="model-card" key={model.id}>
               <div>
@@ -360,6 +418,42 @@ export function ModelManagerScreen({
               </dl>
               {localDownloadJob ? (
                 <JobProgressCard job={localDownloadJob} label="Model download" onOpenQueue={onOpenQueue} />
+              ) : null}
+              {mlxState ? (
+                <div className="mlx-status">
+                  <div className="mlx-status-badges">
+                    <span className="status-badge">MLX</span>
+                    {mlxMinGb != null ? (
+                      <span className={mlxEnoughMemory ? "status-badge" : "status-badge warning"}>
+                        needs ≥ {mlxMinGb} GB
+                      </span>
+                    ) : null}
+                  </div>
+                  <p>{mlxStatusText(model)}</p>
+                  {!mlxEnoughMemory ? (
+                    <p className="inline-warning">
+                      Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
+                    </p>
+                  ) : null}
+                  {convertJob ? (
+                    <JobProgressCard job={convertJob} label="MLX conversion" onOpenQueue={onOpenQueue} />
+                  ) : null}
+                  {showConvertButton ? (
+                    <button
+                      disabled={mlxState === "converted" || Boolean(convertJob) || !mlxEnoughMemory}
+                      onClick={() => onConvertModel?.(model)}
+                      type="button"
+                    >
+                      {convertJob
+                        ? convertJob.status
+                        : mlxState === "converted"
+                          ? "MLX ready"
+                          : failedConvert
+                            ? "Retry MLX Conversion"
+                            : "Convert to MLX"}
+                    </button>
+                  ) : null}
+                </div>
               ) : null}
               <div className="model-card-actions">
                 <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">

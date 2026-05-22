@@ -222,6 +222,15 @@
         "families": ["ltx-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
+      "mlx": {
+        // macOS/Apple-Silicon MLX variant (desktop only). Surfaced by the Model
+        // Manager; the inference repos live in apps/worker MlxVideoAdapter and these
+        // mirror them for catalog display + memory-tier gating. minMemoryGb mirrors
+        // MlxVideoAdapter.estimate_requirements peak_gb.
+        "minMemoryGb": 31,
+        "repo": "notapalindrome/ltx23-mlx-av-q4",
+        "textEncoderRepo": "mlx-community/gemma-3-12b-it-bf16"
+      },
       "ui": {
         "label": "LTX-2.3",
         "description": "First-class short-shot video target for image-to-video and text-to-video.",
@@ -263,6 +272,13 @@
       "loraCompatibility": {
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
+      },
+      "mlx": {
+        // TI2V-5B has no published MLX repo; the native diffusers checkpoint is
+        // converted locally (tracked model_convert job) into <data>/models/mlx/wan_2_2.
+        "minMemoryGb": 45,
+        "requiresConversion": true,
+        "convertSourceRepo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
       },
       "ui": {
         "label": "Wan2.2",
@@ -309,6 +325,12 @@
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
+      "mlx": {
+        // Turnkey: pre-converted MLX repo + the lightx2v 4-step Lightning LoRA
+        // (downloaded on demand by MlxVideoAdapter at generation time).
+        "minMemoryGb": 133,
+        "repo": "AITRADER/Wan2.2-T2V-A14B-mlx-bf16"
+      },
       "ui": {
         "label": "Wan2.2 14B (T2V)",
         "description": "Wan2.2 A14B text-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
@@ -350,6 +372,14 @@
       "loraCompatibility": {
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
+      },
+      "mlx": {
+        // I2V-A14B has no published MLX repo; the native diffusers checkpoint is
+        // converted locally (tracked model_convert job) into
+        // <data>/models/mlx/wan_2_2_i2v_14b. Its distill LoRA is applied at run time.
+        "minMemoryGb": 133,
+        "requiresConversion": true,
+        "convertSourceRepo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
       },
       "ui": {
         "label": "Wan2.2 14B (I2V)",

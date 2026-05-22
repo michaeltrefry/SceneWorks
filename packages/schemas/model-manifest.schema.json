@@ -11,6 +11,33 @@
       "items": {
         "type": "object",
         "properties": {
+          "mlx": {
+            "type": "object",
+            "description": "macOS/Apple-Silicon MLX variant metadata (desktop only). Surfaced by the Model Manager to show MLX availability, conversion status, and the minimum unified-memory tier. Inference repos/paths are owned by the Python MlxVideoAdapter; these mirror them for catalog display.",
+            "properties": {
+              "minMemoryGb": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
+              },
+              "repo": {
+                "type": "string",
+                "description": "Turnkey MLX repo downloaded as-is (no conversion). Omitted when requiresConversion is true."
+              },
+              "textEncoderRepo": {
+                "type": "string",
+                "description": "Companion text-encoder repo (LTX)."
+              },
+              "requiresConversion": {
+                "type": "boolean",
+                "description": "When true, the native checkpoint must be converted to MLX locally via a tracked model_convert job."
+              },
+              "convertSourceRepo": {
+                "type": "string",
+                "description": "Native checkpoint repo used as the conversion source when requiresConversion is true."
+              }
+            }
+          },
           "downloads": {
             "type": "array",
             "description": "Download entries list alternate sources for the same model; at most one may be marked default: true. If none is marked, the first supported entry is used.",

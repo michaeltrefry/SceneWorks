@@ -631,6 +631,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             post(create_model_download_job),
         )
         .route(
+            "/api/v1/models/:model_id/convert",
+            post(create_model_convert_job),
+        )
+        .route(
             "/api/v1/models/import",
             post(create_model_import_job)
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
@@ -1050,6 +1054,13 @@ struct VideoJobRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelDownloadRequest {
+    #[serde(default = "default_requested_gpu")]
+    requested_gpu: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelConvertRequest {
     #[serde(default = "default_requested_gpu")]
     requested_gpu: String,
 }
@@ -2809,6 +2820,80 @@ async fn create_model_download_job(
     let job = create_generation_job(
         state,
         JobType::ModelDownload,
+        None,
+        None,
+        job_payload,
+        requested_gpu_or_auto(payload.requested_gpu),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Convert a model's native checkpoint into the local MLX format (macOS/Apple
+/// Silicon). Only valid for models whose manifest declares `mlx.requiresConversion`
+/// (Wan TI2V-5B, Wan I2V-A14B); turnkey MLX models need no conversion. The native
+/// source checkpoint must already be downloaded; the Rust utility worker shells out
+/// to the Python/MLX `mlx_video.convert_wan` tool.
+async fn create_model_convert_job(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    ApiJson(payload): ApiJson<ModelConvertRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let model = model_catalog(&state)
+        .await?
+        .into_iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "Model not found".to_owned(),
+        })?;
+    let mlx = model
+        .get("mlx")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ApiError::bad_request("Model has no MLX variant to convert"))?;
+    if !mlx
+        .get("requiresConversion")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(ApiError::bad_request(
+            "Model does not require MLX conversion",
+        ));
+    }
+    let source_repo = mlx
+        .get("convertSourceRepo")
+        .and_then(Value::as_str)
+        .filter(|repo| !repo.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("MLX conversion source repo is not configured"))?
+        .to_owned();
+    let output_dir = state
+        .settings
+        .data_dir
+        .join("models")
+        .join("mlx")
+        .join(&model_id);
+    let mut job_payload = JsonObject::new();
+    job_payload.insert("modelId".to_owned(), Value::String(model_id.clone()));
+    job_payload.insert(
+        "modelName".to_owned(),
+        Value::String(
+            model
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&model_id)
+                .to_owned(),
+        ),
+    );
+    job_payload.insert("sourceRepo".to_owned(), Value::String(source_repo));
+    job_payload.insert(
+        "outputDir".to_owned(),
+        Value::String(output_dir.display().to_string()),
+    );
+    job_payload.insert("dtype".to_owned(), Value::String("bfloat16".to_owned()));
+
+    let job = create_generation_job(
+        state,
+        JobType::ModelConvert,
         None,
         None,
         job_payload,
@@ -4640,6 +4725,32 @@ async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
             "removable".to_owned(),
             Value::Bool(user_managed || installed),
         );
+        // macOS Model Manager: MLX availability + conversion status for models that
+        // declare an `mlx` variant. Additive fields the web/Docker build ignores; the
+        // probes are cheap and portable, so a const `cfg!` check gates them rather
+        // than per-OS compilation. minMemoryGb passes through from the raw manifest.
+        let mlx_status = if cfg!(target_os = "macos") {
+            mlx_catalog_status(object, &state.settings.data_dir)
+        } else {
+            None
+        };
+        if let Some(status) = mlx_status {
+            object.insert(
+                "mlxInstallState".to_owned(),
+                Value::String(status.install_state.to_owned()),
+            );
+            object.insert(
+                "mlxConversionState".to_owned(),
+                Value::String(status.conversion_state.to_owned()),
+            );
+            object.insert(
+                "mlxConvertedPath".to_owned(),
+                status
+                    .converted_path
+                    .map(|path| Value::String(path.display().to_string()))
+                    .unwrap_or(Value::Null),
+            );
+        }
     }
     models.sort_by(|left, right| {
         let left_key = (
@@ -6663,6 +6774,72 @@ fn huggingface_repo_cache_exists(path: &FsPath) -> bool {
     path.join("snapshots").is_dir() || path.join("blobs").is_dir()
 }
 
+struct MlxCatalogStatus {
+    install_state: &'static str,
+    conversion_state: &'static str,
+    converted_path: Option<PathBuf>,
+}
+
+/// macOS Model Manager status for a model's `mlx` variant. Returns `None` when the
+/// model declares no `mlx` block.
+///
+/// `conversion_state`:
+/// - `ready`            turnkey MLX repo (no conversion needed)
+/// - `converted`        requiresConversion and the local MLX dir exists
+/// - `needs_conversion` source checkpoint present, MLX dir absent
+/// - `needs_source`     source checkpoint not downloaded yet
+///
+/// `install_state` is `installed` when the usable MLX artifact exists.
+fn mlx_catalog_status(
+    model: &serde_json::Map<String, Value>,
+    data_dir: &FsPath,
+) -> Option<MlxCatalogStatus> {
+    let mlx = model.get("mlx").and_then(Value::as_object)?;
+    let repo_cached = |repo: &str| {
+        huggingface_repo_cache_path(data_dir, repo)
+            .as_deref()
+            .is_some_and(huggingface_repo_cache_exists)
+    };
+    if mlx
+        .get("requiresConversion")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let converted_dir = data_dir.join("models").join("mlx").join(model_id);
+        if converted_dir.join("config.json").is_file() {
+            return Some(MlxCatalogStatus {
+                install_state: "installed",
+                conversion_state: "converted",
+                converted_path: Some(converted_dir),
+            });
+        }
+        let source_present = mlx
+            .get("convertSourceRepo")
+            .and_then(Value::as_str)
+            .is_some_and(repo_cached);
+        Some(MlxCatalogStatus {
+            install_state: "missing",
+            conversion_state: if source_present {
+                "needs_conversion"
+            } else {
+                "needs_source"
+            },
+            converted_path: None,
+        })
+    } else {
+        let installed = mlx
+            .get("repo")
+            .and_then(Value::as_str)
+            .is_some_and(repo_cached);
+        Some(MlxCatalogStatus {
+            install_state: if installed { "installed" } else { "missing" },
+            conversion_state: "ready",
+            converted_path: None,
+        })
+    }
+}
+
 fn lora_is_installed(path: &FsPath) -> bool {
     first_safetensors_path(path).is_some()
 }
@@ -7398,11 +7575,11 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_app, inprocess_worker_gpu_id, insufficient_disk_space, lora_artifact_paths,
-        person_readiness_from_workers, requires_token, strip_jsonc_comments,
-        sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings, WorkerCapability,
-        WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
-        HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+        create_app, huggingface_repo_cache_path, inprocess_worker_gpu_id, insufficient_disk_space,
+        lora_artifact_paths, mlx_catalog_status, person_readiness_from_workers, requires_token,
+        strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
+        WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
+        EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -7484,6 +7661,62 @@ mod tests {
             jobs_db_path: temp_dir.path().join("jobs.db"),
             run_utility_inprocess: false,
         }
+    }
+
+    #[test]
+    fn mlx_catalog_status_reports_turnkey_and_conversion_states() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("data");
+
+        // No `mlx` block -> None.
+        let plain = json!({ "id": "z_image_turbo" });
+        assert!(mlx_catalog_status(plain.as_object().unwrap(), &data_dir).is_none());
+
+        // Turnkey model, repo not cached -> missing / ready.
+        let ltx = json!({
+            "id": "ltx_2_3",
+            "mlx": { "minMemoryGb": 31, "repo": "notapalindrome/ltx23-mlx-av-q4" }
+        });
+        let status = mlx_catalog_status(ltx.as_object().unwrap(), &data_dir).expect("ltx status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "ready");
+
+        // Turnkey model with the repo cached -> installed / ready.
+        let repo_dir = huggingface_repo_cache_path(&data_dir, "notapalindrome/ltx23-mlx-av-q4")
+            .expect("repo cache path");
+        std::fs::create_dir_all(repo_dir.join("snapshots")).expect("create snapshots");
+        let status = mlx_catalog_status(ltx.as_object().unwrap(), &data_dir).expect("ltx status");
+        assert_eq!(status.install_state, "installed");
+        assert_eq!(status.conversion_state, "ready");
+
+        // Conversion model, native source missing -> missing / needs_source.
+        let wan5b = json!({
+            "id": "wan_2_2",
+            "mlx": {
+                "minMemoryGb": 45,
+                "requiresConversion": true,
+                "convertSourceRepo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+            }
+        });
+        let status = mlx_catalog_status(wan5b.as_object().unwrap(), &data_dir).expect("wan status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "needs_source");
+
+        // Native source cached -> missing / needs_conversion.
+        let source_dir = huggingface_repo_cache_path(&data_dir, "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
+            .expect("source cache path");
+        std::fs::create_dir_all(source_dir.join("snapshots")).expect("create source snapshots");
+        let status = mlx_catalog_status(wan5b.as_object().unwrap(), &data_dir).expect("wan status");
+        assert_eq!(status.conversion_state, "needs_conversion");
+
+        // Converted MLX dir present -> installed / converted.
+        let converted = data_dir.join("models").join("mlx").join("wan_2_2");
+        std::fs::create_dir_all(&converted).expect("create converted dir");
+        std::fs::write(converted.join("config.json"), "{}").expect("write config");
+        let status = mlx_catalog_status(wan5b.as_object().unwrap(), &data_dir).expect("wan status");
+        assert_eq!(status.install_state, "installed");
+        assert_eq!(status.conversion_state, "converted");
+        assert_eq!(status.converted_path.unwrap(), converted);
     }
 
     fn write_test_safetensors(path: &std::path::Path) {

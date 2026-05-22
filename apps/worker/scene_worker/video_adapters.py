@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from dataclasses import dataclass
 import gc
 import hashlib
@@ -46,6 +47,103 @@ from .settings import WorkerSettings
 
 Image.MAX_IMAGE_PIXELS = 64_000_000
 warnings.simplefilter("error", Image.DecompressionBombWarning)
+
+
+def _ensure_pytorch_mps_fallback() -> None:
+    try:
+        import torch
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    except ImportError:
+        pass
+
+
+_ensure_pytorch_mps_fallback()
+
+
+def ltx_mps_gating(*, cuda_available: bool, device_str: str) -> dict[str, Any]:
+    """Device-aware overrides for the native ltx-core path off CUDA.
+
+    ltx-core hard-targets CUDA: ``get_device()`` only ever returns ``cuda`` or
+    ``cpu`` (never ``mps``), fp8 quantization is CUDA-only, block-streaming offload
+    rides CUDA streams/events, and ``cleanup_memory()``/``gpu_model`` call
+    ``torch.cuda.synchronize()`` unguarded. On Apple Silicon every one of those is
+    wrong. When CUDA is present we return no overrides so the production NVIDIA path
+    is byte-for-byte unchanged; otherwise we steer the pipeline onto the proven MPS
+    recipe (explicit ``device=mps`` + bf16, no fp8, no offload, fp32 audio decode).
+    """
+    if cuda_available:
+        return {
+            "device": None,
+            "disable_fp8": False,
+            "force_offload_none": False,
+            "fp32_audio": False,
+            "guard_cuda_sync": False,
+        }
+    return {
+        "device": "mps" if device_str == "mps" else None,
+        "disable_fp8": True,
+        "force_offload_none": True,
+        "fp32_audio": True,
+        "guard_cuda_sync": True,
+    }
+
+
+_CUDA_SYNC_NEUTRALIZED = False
+
+
+def _neutralize_cuda_sync_for_mps() -> None:
+    """No-op ``torch.cuda.synchronize``/``empty_cache`` when CUDA is truly absent.
+
+    ltx-core's ``cleanup_memory()`` (between streamed components) and the
+    ``gpu_model`` teardown call ``torch.cuda.synchronize()`` unguarded; on a non-CUDA
+    macOS build that raises ``AssertionError: Torch not compiled with CUDA enabled``
+    and aborts the run. ``empty_cache()`` is already a safe no-op there but we
+    neutralize both for symmetry. Guarded on ``not is_available()`` so it can never
+    mask a real CUDA sync, and idempotent so repeated pipeline loads are cheap.
+    """
+    global _CUDA_SYNC_NEUTRALIZED
+    if _CUDA_SYNC_NEUTRALIZED:
+        return
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return
+        torch.cuda.synchronize = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+        torch.cuda.empty_cache = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+        _CUDA_SYNC_NEUTRALIZED = True
+    except Exception:
+        return
+
+
+class _Fp32AudioDecoder:
+    """Proxy that forces the LTX-2.3 audio decode path to float32 on MPS.
+
+    ``VocoderWithBWE.forward`` wraps itself in ``torch.autocast(dtype=float32)`` to
+    avoid bf16 accumulation error across its ~108 convolutions. MPS autocast only
+    supports bf16/float16, so that context silently disables and the bf16 vocoder
+    weights then meet the float32 mel input, raising
+    ``Input type (float) and bias type (BFloat16)``. Building the audio VAE decoder +
+    vocoder in float32 (via the native decoder's own ``_dtype`` field) and casting
+    the latent sidesteps autocast entirely. ``__getattr__`` keeps the proxy
+    transparent for any other attribute the pipeline reads.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        import torch
+
+        inner._dtype = torch.float32
+        self._inner = inner
+
+    def __call__(self, latent: Any) -> Any:
+        import torch
+
+        return self._inner.__call__(latent.to(torch.float32))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
 
 ProgressCallback = Callable[[str, str, float, str], None]
 CancelCallback = Callable[[], bool]
@@ -905,15 +1003,31 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
         install_ltx_pipelines_multigpu_compat()
         loader = importlib.import_module("ltx_core.loader")
-        quantization = self._quantization(request)
+        gating = self._ltx_device_gating()
+        if gating["guard_cuda_sync"]:
+            _neutralize_cuda_sync_for_mps()
         torch_compile = bool(request.advanced.get("compile", False))
+        # fp8 is CUDA-only, so off CUDA we drop it and let the constructors default to
+        # bf16 (the proven Apple Silicon precision). On CUDA `disable_fp8` is False, so
+        # this is exactly the prior `self._quantization(request)` call.
+        quantization = None if gating["disable_fp8"] else self._quantization(request)
         # FP8 and CPU/disk offload coexist: at the pinned ltx-core commit, layer
         # streaming explicitly requires QuantizationPolicy.fp8_cast() (DiffusionStage
         # chains it into the streaming ops) and the Gemma encoder has its own streaming
         # builder, so offloading streams the fp8 transformer and frees the ~23 GB text
         # encoder after prompt encoding instead of pinning it resident. Streaming is the
         # one thing torch.compile cannot do, so only force offload off when compile is on.
-        offload_mode = self._offload_mode(request, override="none" if torch_compile else None)
+        # Block-streaming also rides CUDA streams/events, so force NONE off CUDA too.
+        offload_override = "none" if (torch_compile or gating["force_offload_none"]) else None
+        offload_mode = self._offload_mode(request, override=offload_override)
+        # ltx-core's get_device() only ever returns cuda/cpu — never mps — so Apple
+        # Silicon needs an explicit device. device=None on CUDA/CPU is identical to the
+        # prior behavior (constructors fall back to get_device()).
+        device = None
+        if gating["device"] == "mps":
+            import torch
+
+            device = torch.device("mps")
         loras = self._ltx_loras(loader, request)
         # The native Lightricks constructors expose `loras` across distilled,
         # two-stage, and IC-LoRA pipelines; `distilled_lora` remains separate.
@@ -924,6 +1038,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "quantization": quantization,
             "torch_compile": torch_compile,
             "offload_mode": offload_mode,
+            "device": device,
         }
         if self._pipeline_module(request) == "ltx_pipelines.ic_lora":
             pipeline_module = importlib.import_module("ltx_pipelines.ic_lora")
@@ -949,6 +1064,8 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 distilled_lora=[lora_spec],
                 **common_kwargs,
             )
+        if gating["fp32_audio"]:
+            self._patch_ltx_audio_decoder_for_mps(pipeline)
         self._pipeline = pipeline
         self._pipeline_key_value = key
         self._loaded_models.update({request.model, self._pipeline_module(request), str(resources.checkpoint_path)})
@@ -1124,6 +1241,33 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         install_ltx_pipelines_multigpu_compat()
         quant_module = importlib.import_module("ltx_core.quantization")
         return quant_module.QuantizationPolicy.fp8_cast()
+
+    def _ltx_device_gating(self) -> dict[str, Any]:
+        """Resolve the active accelerator and return native-LTX device overrides.
+
+        Off CUDA (Apple Silicon, CPU) the ltx-core defaults are wrong; see
+        :func:`ltx_mps_gating`. When torch is unavailable we return the empty-override
+        (CUDA) shape — the only callers build a real pipeline, which already requires
+        torch, so this just keeps the helper total.
+        """
+        try:
+            import torch
+        except Exception:
+            return ltx_mps_gating(cuda_available=True, device_str="")
+        settings = self._settings or WorkerSettings()
+        cuda = getattr(torch, "cuda", None)
+        cuda_available = bool(cuda is not None and cuda.is_available())
+        device_str = select_torch_device(torch, getattr(settings, "gpu_id", None))
+        return ltx_mps_gating(cuda_available=cuda_available, device_str=device_str)
+
+    def _patch_ltx_audio_decoder_for_mps(self, pipeline: Any) -> None:
+        decoder = getattr(pipeline, "audio_decoder", None)
+        if decoder is None or isinstance(decoder, _Fp32AudioDecoder):
+            return
+        # Only the native AudioDecoder exposes the bf16 `_dtype` we need to flip.
+        if getattr(decoder, "_dtype", None) is None:
+            return
+        pipeline.audio_decoder = _Fp32AudioDecoder(decoder)
 
     def _advanced_float(self, request: VideoRequest, key: str, fallback: float) -> float:
         try:
@@ -1318,6 +1462,557 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             return True
         except (ImportError, ValueError):
             return False
+
+
+def _mlx_available() -> bool:
+    try:
+        import mlx.core as mx
+        return True
+    except ImportError:
+        return False
+
+
+def _mps_available() -> bool:
+    try:
+        import torch
+        return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    except ImportError:
+        return False
+
+
+def _ensure_ffmpeg_on_path() -> None:
+    """mlx-video-with-audio muxes audio by invoking ``ffmpeg`` from PATH. The
+    desktop ships no system ffmpeg, so expose the bundled one (SCENEWORKS_FFMPEG
+    or imageio-ffmpeg) under the name ``ffmpeg`` via a symlink dir on PATH."""
+    import shutil
+    import tempfile
+
+    if shutil.which("ffmpeg"):
+        return
+    exe = os.environ.get("SCENEWORKS_FFMPEG", "").strip()
+    if not exe:
+        try:
+            import imageio_ffmpeg
+
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return
+    if not exe or not Path(exe).exists():
+        return
+    link_dir = Path(tempfile.gettempdir()) / "sceneworks-ffmpeg-shim"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "ffmpeg"
+    try:
+        if not link.exists():
+            link.symlink_to(exe)
+    except OSError:
+        return
+    os.environ["PATH"] = f"{link_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
+# LTX user-LoRA injection. mlx-video-with-audio's turnkey generate_video_with_audio
+# builds the LTX transformer (LTXModel) internally and exposes no loras kwarg, so we
+# wrap LTXModel.load_weights to merge the pending LoRAs (apply_loras_to_model: dequant
+# only the LoRA'd layers to bf16, no requant precision loss, no per-step overhead) right
+# after the quantized weights load — the same primitive the package uses for quantized
+# Wan. The per-generation module map is passed through this ContextVar.
+_PENDING_LTX_LORAS: ContextVar[dict[str, Any] | None] = ContextVar("sceneworks_ltx_loras", default=None)
+_ltx_lora_patch_installed = False
+
+
+def _install_ltx_lora_patch() -> None:
+    """Idempotently wrap LTXModel.load_weights to apply the LoRAs in _PENDING_LTX_LORAS
+    after each load. Targets only LTXModel (the text encoder, VAEs, and vocoder are
+    distinct classes), and fires after nn.quantize so the LoRA'd layers are quantized."""
+    global _ltx_lora_patch_installed
+    if _ltx_lora_patch_installed:
+        return
+    from mlx_video.lora import apply_loras_to_model
+    from mlx_video.models.ltx.ltx import LTXModel
+
+    original_load_weights = LTXModel.load_weights
+    if getattr(original_load_weights, "_sw_lora_wrapped", False):  # guard against double-wrap
+        _ltx_lora_patch_installed = True
+        return
+
+    def _load_weights_with_loras(self, *args, **kwargs):
+        result = original_load_weights(self, *args, **kwargs)
+        pending = _PENDING_LTX_LORAS.get()
+        if pending and apply_loras_to_model(self, pending) == 0:
+            raise RuntimeError(
+                "Selected LoRA(s) matched no LTX-2.3 transformer layers — confirm the file is an LTX-video adapter."
+            )
+        return result
+
+    _load_weights_with_loras._sw_lora_wrapped = True
+    LTXModel.load_weights = _load_weights_with_loras
+    _ltx_lora_patch_installed = True
+
+
+class MlxVideoAdapter(VideoGenerationAdapter):
+    id = "mlx_video"
+    _ltx_repo = "notapalindrome/ltx23-mlx-av-q4"
+    _ltx_text_encoder = "mlx-community/gemma-3-12b-it-bf16"
+
+    _supported_models = {"ltx_2_3", "wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}
+    # The mlx-video-with-audio high-level API exposes only text-to-video and
+    # single-image image-to-video. first/last-frame, bridge, extend, and
+    # replace_person stay on the PyTorch path (no spatial mask / multi-cond).
+    _supported_modes = {"text_to_video", "image_to_video"}
+
+    def __init__(self) -> None:
+        self._pipeline: Any | None = None
+        self._pipeline_key_value: str | None = None
+        self._loaded_models: set[str] = set()
+        self._settings: WorkerSettings | None = None
+
+    def loaded_models(self) -> list[str]:
+        return sorted(self._loaded_models)
+
+    def prepare(self, *, settings: WorkerSettings, job: dict[str, Any]) -> VideoRequest:
+        self._settings = settings
+        return video_request_from_job(job)
+
+    def ensure_models(self, request: VideoRequest) -> None:
+        if request.model not in self._supported_models:
+            raise RuntimeError(
+                f"MLX adapter does not support {model_target(request.model)['label']}. "
+                f"Supported models: {', '.join(model_target(m)['label'] for m in sorted(self._supported_models))}."
+            )
+        target = model_target(request.model)
+        if request.mode not in self._supported_modes:
+            supported = ", ".join(sorted(m.replace("_", " ") for m in self._supported_modes))
+            raise RuntimeError(f"{target['label']} MLX adapter currently supports {supported}.")
+        if request.duration > target["hardMaxDuration"]:
+            raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
+        validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
+        if not _mlx_available():
+            raise RuntimeError(
+                "MLX video generation requires optional worker dependencies. "
+                "Install apps/worker/requirements-mlx.txt in this worker environment."
+            )
+
+    def estimate_requirements(self, request: VideoRequest) -> dict[str, Any]:
+        target = model_target(request.model)
+        raw_frames = max(1, int(round(request.duration * request.fps)))
+
+        # peak_gb mirrors mlx.minMemoryGb in config/manifests/builtin.models.jsonc
+        # (the Model Manager gates on the manifest value); keep the two in sync.
+        memory_estimates = {
+            "ltx_2_3": {"peak_gb": 31, "description": "Q4 quantized, ~31 GB peak"},
+            "wan_2_2": {"peak_gb": 45, "description": "bf16, 40 steps, ~45 GB peak"},
+            "wan_2_2_t2v_14b": {"peak_gb": 133, "description": "bf16 + Lightning LoRA, 4 steps, ~133 GB peak"},
+            "wan_2_2_i2v_14b": {"peak_gb": 133, "description": "bf16 + Lightning LoRA, 4 steps, ~133 GB peak"},
+        }
+        mem_info = memory_estimates.get(request.model, {"peak_gb": 0, "description": "Unknown"})
+
+        return {
+            "estimatedFrames": raw_frames,
+            "requestedFrames": raw_frames,
+            "pixelCount": request.width * request.height,
+            "recommendedMaxDuration": target["recommendedMaxDuration"],
+            "gpuPreference": request.advanced.get("gpuPreference", "auto"),
+            "adapter": self.id,
+            "model": request.model,
+            "peakMemoryGb": mem_info["peak_gb"],
+            "memoryDescription": mem_info["description"],
+        }
+
+    def run(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: VideoRequest,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        target = model_target(request.model)
+        if request.model == "ltx_2_3":
+            return self._run_ltx_mlx(settings, job, request, progress, cancel_requested)
+        if request.model in {"wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"}:
+            return self._run_wan_mlx(settings, job, request, progress, cancel_requested)
+        raise RuntimeError(f"MLX adapter does not support {target['label']}.")
+
+    def cancel(self, _job_id: str) -> None:
+        return
+
+    def cleanup(self, _job_id: str) -> None:
+        self._loaded_models.clear()
+        self._pipeline = None
+        self._pipeline_key_value = None
+
+    def map_settings(self, request: VideoRequest, target: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **request.advanced,
+            "adapterFamily": target["family"],
+            "targetAdapter": self.id,
+            "model": request.model,
+            "recommendedMaxDuration": target["recommendedMaxDuration"],
+            "realModelInference": True,
+        }
+
+    def _run_ltx_mlx(
+        self,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: VideoRequest,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+        for folder in ("assets/videos", "generation-sets", "recipes"):
+            (project_path / folder).mkdir(parents=True, exist_ok=True)
+
+        target = model_target(request.model)
+        progress("loading_model", "loading_model", 0.1, "Loading LTX-2.3 (MLX Q4).")
+        try:
+            from mlx_video.generate_av import generate_video_with_audio
+        except ImportError as e:
+            raise RuntimeError(
+                "MLX LTX generation requires mlx-video-with-audio "
+                "(apps/worker/requirements-mlx.txt). " + str(e)
+            )
+
+        _ensure_ffmpeg_on_path()  # generate_av muxes audio via `ffmpeg` on PATH
+
+        num_frames = ltx_frame_count(max(1, int(round(request.duration * request.fps))))
+        seed = resolve_seed(request.seed, request.prompt)
+
+        # Optional single-image conditioning (image-to-video). generate_av takes a
+        # file path, so persist the resized source frame to a temp PNG.
+        first_image = self._first_condition_image(project_path, request)
+        self._validate_inputs(project_path, request, first_image, None)
+        tmp_image: Path | None = None
+        image_path: str | None = None
+        if first_image is not None:
+            tmp_image = project_path / "assets" / "videos" / f".ltx_src_{uuid4().hex}.png"
+            first_image.resize((request.width, request.height)).save(tmp_image)
+            image_path = str(tmp_image)
+
+        if cancel_requested():
+            if tmp_image is not None:
+                tmp_image.unlink(missing_ok=True)
+            raise InterruptedError("Video generation canceled before inference.")
+
+        generation_set_id = f"genset_{uuid4().hex}"
+        asset_id = f"asset_{uuid4().hex}"
+        created_at = utc_now()
+        raw_settings = self.map_settings(request, target)
+        filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
+        media_rel = f"assets/videos/{filename_base}.mp4"
+        media_path = project_path / media_rel
+        temp_path = media_path.with_suffix(".tmp.mp4")
+
+        lora_token = self._apply_ltx_loras(request, progress)
+        progress("running", "generating", 0.3, f"Generating {num_frames} frames with LTX-2.3 (MLX).")
+        self._loaded_models.update({request.model, self._ltx_repo})
+        try:
+            generate_video_with_audio(
+                model_repo=self._ltx_repo,
+                text_encoder_repo=self._ltx_text_encoder,
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt or None,
+                height=request.height,
+                width=request.width,
+                num_frames=num_frames,
+                seed=seed,
+                fps=request.fps,
+                output_path=str(temp_path),
+                cfg_scale=safe_float(request.advanced.get("guidanceScale"), 3.0, 0.0, 30.0),
+                image=image_path,
+                image_strength=safe_float(request.advanced.get("imageConditioningStrength"), 1.0, 0.0, 1.0),
+                no_audio=False,
+            )
+        except Exception as e:
+            raise RuntimeError(f"MLX LTX-2.3 generation failed: {e}")
+        finally:
+            if lora_token is not None:
+                _PENDING_LTX_LORAS.reset(lora_token)
+            if tmp_image is not None:
+                tmp_image.unlink(missing_ok=True)
+
+        if not temp_path.exists():
+            raise RuntimeError("LTX-2.3 MLX generation produced no output file.")
+        if cancel_requested():
+            temp_path.unlink(missing_ok=True)
+            raise InterruptedError("Video generation canceled before saving.")
+        temp_path.replace(media_path)
+
+        generation_set = {
+            "schemaVersion": 1,
+            "id": generation_set_id,
+            "projectId": request.project_id,
+            "jobId": job["id"],
+            "mode": request.mode,
+            "model": request.model,
+            "prompt": request.prompt,
+            "negativePrompt": request.negative_prompt,
+            "count": 1,
+            "createdAt": created_at,
+        }
+        asset = build_video_asset_sidecar(
+            asset_id=asset_id,
+            project_id=request.project_id,
+            generation_set_id=generation_set_id,
+            request=request,
+            job_id=job["id"],
+            media_rel=media_rel,
+            created_at=created_at,
+            seed=seed,
+            target=target,
+            adapter_id=self.id,
+            mime_type="video/mp4",
+            raw_settings=raw_settings,
+        )
+
+        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
+        write_json(media_path.with_suffix(".sceneworks.json"), asset)
+        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
+        index_asset(project_path, asset)
+
+        progress("saving", "saved", 0.95, "Asset saved.")
+        return {
+            "generationSetId": generation_set_id,
+            "assetIds": [asset_id],
+            "assets": [asset],
+            "adapter": self.id,
+            "model": request.model,
+            "requirements": self.estimate_requirements(request),
+        }
+
+    def _apply_ltx_loras(self, request: VideoRequest, progress: ProgressCallback):
+        """Stage user LoRAs for the next LTX generation. Returns a ContextVar token
+        (reset in the caller's finally) or None when there are no LoRAs. The patched
+        LTXModel.load_weights merges the staged map into the transformer."""
+        specs = normalize_lora_specs(request.loras)
+        if not specs:
+            return None
+        progress("loading_model", "loading_model", 0.25, "Applying LoRA to LTX-2.3 transformer.")
+        _install_ltx_lora_patch()
+        return _PENDING_LTX_LORAS.set(self._ltx_lora_module_map(specs))
+
+    def _ltx_lora_module_map(self, specs: list[LoraSpec]) -> dict[str, Any]:
+        from mlx_video.lora import LoRAConfig, load_multiple_loras
+
+        module_to_loras = load_multiple_loras([LoRAConfig(path=spec.path, strength=spec.weight) for spec in specs])
+        if not module_to_loras:
+            raise RuntimeError(
+                "Selected LoRA(s) matched no LTX-2.3 transformer layers — confirm the file is an LTX-video adapter."
+            )
+        return module_to_loras
+
+    def _first_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
+        if request.source_asset_id:
+            asset_path = find_asset_sidecar_path(project_path, request.source_asset_id)
+            if asset_path and asset_path.exists():
+                sidecar = read_json(asset_path)
+                if sidecar and "mediaPath" in sidecar:
+                    image_path = (project_path / sidecar["mediaPath"]).resolve()
+                    if image_path.exists():
+                        try:
+                            from PIL import Image
+                            return Image.open(image_path).convert("RGB")
+                        except Exception:
+                            pass
+        return None
+
+    def _last_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
+        if request.last_frame_asset_id:
+            asset_path = find_asset_sidecar_path(project_path, request.last_frame_asset_id)
+            if asset_path and asset_path.exists():
+                sidecar = read_json(asset_path)
+                if sidecar and "mediaPath" in sidecar:
+                    image_path = (project_path / sidecar["mediaPath"]).resolve()
+                    if image_path.exists():
+                        try:
+                            from PIL import Image
+                            return Image.open(image_path).convert("RGB")
+                        except Exception:
+                            pass
+        return None
+
+    def _validate_inputs(
+        self, project_path: Path, request: VideoRequest, first_image: Any, last_image: Any
+    ) -> None:
+        if request.mode == "image_to_video" and not first_image:
+            raise RuntimeError("Image-to-video mode requires a source image asset.")
+        if request.mode == "first_last_frame" and not first_image:
+            raise RuntimeError("First-last-frame mode requires a source image asset.")
+
+    def _resolve_wan_mlx(self, model: str) -> dict[str, Any]:
+        """Resolve the MLX Wan model dir, distill LoRA, and sampler params.
+
+        - wan_2_2_t2v_14b: turnkey — pre-converted MLX repo + the lightx2v
+          4-step Lightning LoRA, downloaded on demand.
+        - wan_2_2 (TI2V-5B) / wan_2_2_i2v_14b: no published MLX repo, so resolve
+          a locally-converted dir (sc-1504/sc-1506) and fail clearly if absent.
+        """
+        from huggingface_hub import hf_hub_download, snapshot_download
+
+        if model == "wan_2_2_t2v_14b":
+            model_dir = snapshot_download("AITRADER/Wan2.2-T2V-A14B-mlx-bf16")
+            base = "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"
+            hi = hf_hub_download("lightx2v/Wan2.2-Lightning", f"{base}/high_noise_model.safetensors")
+            lo = hf_hub_download("lightx2v/Wan2.2-Lightning", f"{base}/low_noise_model.safetensors")
+            # Lightning distill: 4 steps, CFG baked in (guide_scale=1.0).
+            return {"model_dir": model_dir, "loras_high": [(hi, 1.0)], "loras_low": [(lo, 1.0)], "steps": 4, "guide_scale": 1.0}
+
+        # Conversion-dependent tiers: resolve a locally-converted MLX dir.
+        env = {"wan_2_2": "SCENEWORKS_MLX_WAN5B_DIR", "wan_2_2_i2v_14b": "SCENEWORKS_MLX_WAN14B_I2V_DIR"}.get(model)
+        candidates: list[Path] = []
+        override = os.environ.get(env, "").strip() if env else ""
+        if override:
+            candidates.append(Path(override))
+        if self._settings is not None:
+            candidates.append(Path(self._settings.data_dir) / "models" / "mlx" / model)
+        for path in candidates:
+            if (path / "config.json").exists():
+                # 5B runs full steps (config default); I2V-14B uses its distill LoRA.
+                return {"model_dir": str(path), "loras_high": None, "loras_low": None, "steps": None, "guide_scale": None}
+        target_dir = candidates[-1] if candidates else Path("<data>/models/mlx") / model
+        raise RuntimeError(
+            f"{model_target(model)['label']} has no pre-converted MLX weights. Convert the native "
+            f"checkpoint with `python -m mlx_video.convert_wan` into {target_dir}"
+            + (f" (or set ${env})" if env else "")
+            + ". Tracked by sc-1504 / sc-1506."
+        )
+
+    def _wan_user_loras(self, request: VideoRequest) -> list[tuple[str, float]]:
+        """User-supplied LoRAs as (path, strength) tuples for the Wan MLX generator.
+        Passed via `loras` (applied to all experts); the distill LoRA stays in
+        loras_high/loras_low so the two never collide."""
+        return [(spec.path, spec.weight) for spec in normalize_lora_specs(request.loras)]
+
+    def _run_wan_mlx(
+        self,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: VideoRequest,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+        for folder in ("assets/videos", "generation-sets", "recipes"):
+            (project_path / folder).mkdir(parents=True, exist_ok=True)
+
+        target = model_target(request.model)
+        progress("loading_model", "loading_model", 0.1, f"Loading {target['label']} (MLX).")
+        try:
+            from mlx_video.generate_wan import generate_video as wan_generate_video
+        except ImportError as e:
+            raise RuntimeError(
+                "MLX Wan generation requires mlx-video-with-audio "
+                "(apps/worker/requirements-mlx.txt). " + str(e)
+            )
+
+        _ensure_ffmpeg_on_path()
+        spec = self._resolve_wan_mlx(request.model)
+
+        # Wan latents require frame counts of 4n+1.
+        raw_frames = max(1, int(round(request.duration * request.fps)))
+        num_frames = max(5, raw_frames - ((raw_frames - 1) % 4))
+        seed = resolve_seed(request.seed, request.prompt)
+
+        first_image = self._first_condition_image(project_path, request)
+        self._validate_inputs(project_path, request, first_image, None)
+        tmp_image: Path | None = None
+        image_path: str | None = None
+        if first_image is not None:
+            tmp_image = project_path / "assets" / "videos" / f".wan_src_{uuid4().hex}.png"
+            first_image.resize((request.width, request.height)).save(tmp_image)
+            image_path = str(tmp_image)
+
+        if cancel_requested():
+            if tmp_image is not None:
+                tmp_image.unlink(missing_ok=True)
+            raise InterruptedError("Video generation canceled before inference.")
+
+        generation_set_id = f"genset_{uuid4().hex}"
+        asset_id = f"asset_{uuid4().hex}"
+        created_at = utc_now()
+        raw_settings = self.map_settings(request, target)
+        filename_base = f"{created_at[:10]}_{request.model}_{slugify(request.prompt, fallback='video', max_length=42)}"
+        media_rel = f"assets/videos/{filename_base}.mp4"
+        media_path = project_path / media_rel
+        temp_path = media_path.with_suffix(".tmp.mp4")
+
+        progress("running", "generating", 0.3, f"Generating {num_frames} frames with {target['label']} (MLX).")
+        self._loaded_models.update({request.model, str(spec["model_dir"])})
+        kwargs: dict[str, Any] = {
+            "model_dir": str(spec["model_dir"]),
+            "prompt": request.prompt,
+            "negative_prompt": request.negative_prompt or None,
+            "image": image_path,
+            "width": request.width,
+            "height": request.height,
+            "num_frames": num_frames,
+            "seed": seed,
+            "output_path": str(temp_path),
+            "loras_high": spec["loras_high"],
+            "loras_low": spec["loras_low"],
+        }
+        user_loras = self._wan_user_loras(request)
+        if user_loras:
+            kwargs["loras"] = user_loras
+        if spec["steps"] is not None:
+            kwargs["steps"] = spec["steps"]
+        if spec["guide_scale"] is not None:
+            kwargs["guide_scale"] = spec["guide_scale"]
+        try:
+            wan_generate_video(**kwargs)
+        except Exception as e:
+            raise RuntimeError(f"{target['label']} MLX generation failed: {e}")
+        finally:
+            if tmp_image is not None:
+                tmp_image.unlink(missing_ok=True)
+
+        if not temp_path.exists():
+            raise RuntimeError(f"{target['label']} MLX generation produced no output file.")
+        if cancel_requested():
+            temp_path.unlink(missing_ok=True)
+            raise InterruptedError("Video generation canceled before saving.")
+        temp_path.replace(media_path)
+
+        progress("saving", "saving", 0.9, "Saving video asset and recipe.")
+        generation_set = {
+            "schemaVersion": 1,
+            "id": generation_set_id,
+            "projectId": request.project_id,
+            "jobId": job["id"],
+            "mode": request.mode,
+            "model": request.model,
+            "prompt": request.prompt,
+            "negativePrompt": request.negative_prompt,
+            "count": 1,
+            "createdAt": created_at,
+        }
+        asset = build_video_asset_sidecar(
+            asset_id=asset_id,
+            project_id=request.project_id,
+            generation_set_id=generation_set_id,
+            request=request,
+            job_id=job["id"],
+            media_rel=media_rel,
+            created_at=created_at,
+            seed=seed,
+            target=target,
+            adapter_id=self.id,
+            mime_type="video/mp4",
+            raw_settings=raw_settings,
+        )
+        write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
+        write_json(media_path.with_suffix(".sceneworks.json"), asset)
+        write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
+        index_asset(project_path, asset)
+        return {
+            "generationSetId": generation_set_id,
+            "assetIds": [asset_id],
+            "assets": [asset],
+            "adapter": self.id,
+            "model": request.model,
+            "requirements": self.estimate_requirements(request),
+        }
 
 
 class DiffusersVideoAdapter(VideoGenerationAdapter):
@@ -1720,9 +2415,27 @@ def create_video_adapter(job: dict[str, Any] | None = None) -> VideoGenerationAd
         return DiffusersVideoAdapter()
     if requested in {"procedural", "procedural_video"}:
         return ProceduralVideoAdapter()
+    if requested == "mlx_video":
+        return MlxVideoAdapter()
     if not requested:
-        model = str((job or {}).get("payload", {}).get("model", "ltx_2_3"))
+        payload = (job or {}).get("payload", {})
+        model = str(payload.get("model", "ltx_2_3"))
+        # Mirror video_request_from_job's default so a mode-less job routes the way
+        # the adapter will interpret it.
+        mode = str(payload.get("mode", "image_to_video"))
         target = model_target(model)
+
+        # MLX only covers text_to_video / image_to_video. Other modes
+        # (first_last_frame, extend_clip, video_bridge, replace_person) stay on the
+        # PyTorch path even on MPS hosts, where the native LTX / Diffusers adapters
+        # support them — routing them to MLX would fail in ensure_models.
+        mlx_eligible = (
+            _mps_available()
+            and model in MlxVideoAdapter._supported_models
+            and mode in MlxVideoAdapter._supported_modes
+        )
+        if mlx_eligible:
+            return MlxVideoAdapter()
         if target["adapter"] == "ltx_video":
             return LtxPipelinesVideoAdapter()
         return DiffusersVideoAdapter()

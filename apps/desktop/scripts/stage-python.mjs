@@ -16,7 +16,7 @@ const outDir = join(desktopDir, "python-src");
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-for (const file of ["requirements.txt", "requirements-ltx.txt"]) {
+for (const file of ["requirements.txt", "requirements-ltx.txt", "requirements-mlx.txt"]) {
   const src = join(workerDir, file);
   if (existsSync(src)) cpSync(src, join(outDir, file));
 }

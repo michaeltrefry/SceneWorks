@@ -2612,6 +2612,24 @@ label {
   gap: 8px;
 }
 
+.mlx-status {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.mlx-status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mlx-status p {
+  margin: 0;
+  font-size: 12px;
+}
+
 .local-job-stack {
   display: grid;
   gap: 10px;
