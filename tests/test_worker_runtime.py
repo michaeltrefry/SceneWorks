@@ -1346,6 +1346,133 @@ def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
     assert config.save_every == 100
     assert config.mixed_precision == "bf16"
     assert config.lora_target_modules == ["to_q", "to_k", "to_v", "to_out.0"]
+    assert config.sample_steps == 9
+    assert config.sample_guidance_scale == 0.0
+
+
+def test_read_run_config_parses_sample_render_settings():
+    config = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "sampleEvery": 50,
+                    "sampleSteps": 12,
+                    "sampleGuidanceScale": 1.25,
+                    "samplePrompts": ["miraStyle portrait"],
+                }
+            }
+        }
+    )
+
+    assert config.sample_every == 50
+    assert config.sample_steps == 12
+    assert config.sample_guidance_scale == 1.25
+    assert config.sample_prompts == ["miraStyle portrait"]
+
+
+def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
+    calls = []
+
+    class FakeNoGrad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeGenerator:
+        def __init__(self, device):
+            self.device = device
+            self.seed = None
+
+        def manual_seed(self, seed):
+            self.seed = seed
+            return self
+
+    class FakeTorch:
+        def no_grad(self):
+            return FakeNoGrad()
+
+        def Generator(self, device):
+            return FakeGenerator(device)
+
+    class FakeImage:
+        def convert(self, mode):
+            assert mode == "RGB"
+            return self
+
+        def save(self, path):
+            Path(path).write_bytes(b"png")
+
+    class FakePipe:
+        def __call__(
+            self,
+            *,
+            prompt,
+            height,
+            width,
+            num_inference_steps,
+            guidance_scale,
+            generator,
+        ):
+            calls.append(
+                {
+                    "prompt": prompt,
+                    "height": height,
+                    "width": width,
+                    "num_inference_steps": num_inference_steps,
+                    "guidance_scale": guidance_scale,
+                    "seed": generator.seed,
+                }
+            )
+            return SimpleNamespace(images=[FakeImage()])
+
+    class FakeTransformer:
+        training = True
+
+        def set_adapter(self, _name):
+            pass
+
+        def eval(self):
+            self.training = False
+
+        def train(self):
+            self.training = True
+
+    backend = _ZImageLoraBackend()
+    backend._torch = FakeTorch()
+    backend._pipeline = FakePipe()
+    backend._transformer = FakeTransformer()
+    backend._device = "cpu"
+    config = read_run_config(
+        {
+            "config": {
+                "seed": 7,
+                "advanced": {
+                    "sampleSteps": 11,
+                    "sampleGuidanceScale": 0.0,
+                    "samplePrompts": ["miraStyle portrait"],
+                },
+            },
+            "output": {"triggerWords": ["miraStyle"]},
+        }
+    )
+
+    samples = backend.generate_samples(
+        step=4,
+        prompts=config.sample_prompts,
+        output_dir=str(tmp_path),
+        file_name="mira.safetensors",
+        plan={"dataset": {"rootPath": str(tmp_path / "training" / "datasets" / "ds_1")}},
+        config=config,
+    )
+
+    assert calls[0]["num_inference_steps"] == 11
+    assert calls[0]["guidance_scale"] == 0.0
+    assert calls[0]["seed"] == 11
+    assert samples[0]["sampleSource"] == "live_adapter"
+    assert samples[0]["numInferenceSteps"] == 11
+    assert samples[0]["guidanceScale"] == 0.0
 
 
 def test_create_training_kernel_resolves_known_and_rejects_unknown():
@@ -1539,8 +1666,14 @@ def test_z_image_trainer_emits_training_samples_on_sample_cadence(tmp_path):
     assert len(result["latestTrainingSamples"]) == 4
     assert result["latestTrainingSamples"][0]["step"] == 4
     assert result["samplePrompts"][0].startswith("miraStyle")
+    assert result["sampleSettings"] == {
+        "numInferenceSteps": 9,
+        "guidanceScale": 0.0,
+        "sampleSource": "live_adapter",
+    }
     sample_updates = [payload for payload in progress_results if payload]
     assert sample_updates[-1]["latestTrainingSamples"][0]["relativePath"].startswith("loras/lora_1/samples/")
+    assert sample_updates[-1]["sampleSettings"]["guidanceScale"] == 0.0
 
 
 def test_z_image_trainer_cancels_and_skips_save(tmp_path):

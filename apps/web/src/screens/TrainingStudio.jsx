@@ -400,6 +400,8 @@ function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "") 
     precision: asText(advanced.mixedPrecision),
     saveEvery: numericDraft(defaults.saveEvery),
     sampleEvery: numericDraft(advanced.sampleEvery),
+    sampleSteps: numericDraft(advanced.sampleSteps),
+    sampleGuidanceScale: numericDraft(advanced.sampleGuidanceScale),
     batchSize: numericDraft(defaults.batchSize),
     gradientAccumulation: numericDraft(defaults.gradientAccumulation),
     seed: numericDraft(defaults.seed),
@@ -466,6 +468,8 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dr
     bucketStrategy: asText(configDraft.bucketStrategy).trim(),
     mixedPrecision: asText(configDraft.precision).trim(),
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
+    sampleSteps: numberFromDraft(configDraft.sampleSteps),
+    sampleGuidanceScale: numberFromDraft(configDraft.sampleGuidanceScale),
     samplePrompts: samplePromptsFromTrigger(configDraft.triggerWord),
     qualityPreset: configDraft.qualityPreset,
     outputScope: configDraft.outputScope,
@@ -1789,6 +1793,23 @@ export function TrainingStudio({
                               onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
                               type="number"
                               value={configDraft.sampleEvery ?? ""}
+                            />
+                          </label>
+                          <label>
+                            Sample steps
+                            <input
+                              onChange={(event) => updateConfigDraft("sampleSteps", event.target.value)}
+                              type="number"
+                              value={configDraft.sampleSteps ?? ""}
+                            />
+                          </label>
+                          <label>
+                            Sample guidance
+                            <input
+                              onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
+                              step="0.1"
+                              type="number"
+                              value={configDraft.sampleGuidanceScale ?? ""}
                             />
                           </label>
                         </div>

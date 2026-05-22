@@ -381,6 +381,8 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
                 "repeats": 10,
                 "bucketStrategy": "aspect",
                 "sampleEvery": 250,
+                "sampleSteps": 9,
+                "sampleGuidanceScale": 0.0,
                 "qualityPreset": "balanced",
                 "outputScope": "project",
                 "requestedGpu": "auto"

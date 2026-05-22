@@ -160,6 +160,8 @@ class TrainingRunConfig:
     mixed_precision: Any
     lora_target_modules: Any
     sample_every: int
+    sample_steps: int
+    sample_guidance_scale: float
     sample_prompts: list[str]
     advanced: dict[str, Any] = field(default_factory=dict)
 
@@ -203,6 +205,8 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         mixed_precision=advanced.get("mixedPrecision"),
         lora_target_modules=target_modules,
         sample_every=_as_int(advanced.get("sampleEvery"), 0, minimum=0),
+        sample_steps=_as_int(advanced.get("sampleSteps"), 9, minimum=1),
+        sample_guidance_scale=_as_float(advanced.get("sampleGuidanceScale"), 0.0),
         sample_prompts=[str(prompt).strip() for prompt in sample_prompts if str(prompt).strip()][:4],
         advanced=advanced,
     )
@@ -470,6 +474,11 @@ class ZImageLoraTrainer:
                                 "trainingSamples": training_samples,
                                 "latestTrainingSamples": samples,
                                 "samplePrompts": config.sample_prompts,
+                                "sampleSettings": {
+                                    "numInferenceSteps": config.sample_steps,
+                                    "guidanceScale": config.sample_guidance_scale,
+                                    "sampleSource": "live_adapter",
+                                },
                             },
                         )
 
@@ -529,6 +538,11 @@ class ZImageLoraTrainer:
             "trainingSamples": training_samples,
             "latestTrainingSamples": training_samples[-4:],
             "samplePrompts": config.sample_prompts,
+            "sampleSettings": {
+                "numInferenceSteps": config.sample_steps,
+                "guidanceScale": config.sample_guidance_scale,
+                "sampleSource": "live_adapter",
+            },
             "rank": config.rank,
             "alpha": config.alpha,
             "learningRate": config.learning_rate,
@@ -879,7 +893,8 @@ class _ZImageLoraBackend:
                         "prompt": prompt,
                         "height": min(768, bucket_resolution(config.resolution)),
                         "width": min(768, bucket_resolution(config.resolution)),
-                        "num_inference_steps": 12,
+                        "num_inference_steps": config.sample_steps,
+                        "guidance_scale": config.sample_guidance_scale,
                         "generator": generator,
                     }
                     output = pipe(**filter_call_kwargs(pipe, kwargs))
@@ -893,6 +908,9 @@ class _ZImageLoraBackend:
                             "prompt": prompt,
                             "path": str(sample_path),
                             "relativePath": project_relative_path(plan, sample_path),
+                            "sampleSource": "live_adapter",
+                            "numInferenceSteps": config.sample_steps,
+                            "guidanceScale": config.sample_guidance_scale,
                             "createdAt": now(),
                         }
                     )
