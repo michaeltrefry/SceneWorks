@@ -101,6 +101,14 @@ under-fit; 1500–2500 steps is a reasonable first range.
 > directly on it can work, but may need extra care for quality on some subjects.
 > Treat the first result as a baseline and iterate on dataset and steps.
 
+> **Apple Silicon — LTX-2.3 video LoRA:** the `ltx_mlx_lora` kernel
+> (`target.kernel`, gated to Apple Silicon) trains an LTX-2.3 *video* LoRA
+> natively in MLX from the same still-image dataset, registered under the
+> `ltx-video` family. Validated recipe: rank 32 / alpha 32 / lr 1e-4 / res 512
+> with short trigger-focused captions (`"a photo of <trigger>"`), ~1500 steps
+> (~1.35 s/step). It peaks ~59 GB during training, so use a **64 GB+ Mac**
+> (96 GB+ comfortable); generation peaks ~34 GB.
+
 ## 4. Where the output goes
 
 On a successful real run the adapter is registered as a normal SceneWorks LoRA:

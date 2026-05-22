@@ -102,6 +102,24 @@ SceneWorks storage, config defaults, or the target registry directly.
   loading, caching, training, checkpointing (every `saveEvery` steps), and saving
   stages, and honors cancellation between steps. A real run requires the
   inference backend; the kernel reports clearly when it is missing.
+- **Native MLX video LoRA** (`ltx_mlx_lora`, :class:`LtxMlxLoraTrainer`, Apple
+  Silicon only — gated by `target.requiresAppleSilicon`) trains an LTX-2.3 video
+  LoRA from a still-image dataset entirely in MLX. It loads the quantized
+  AudioVideo transformer (`notapalindrome/ltx23-mlx-av-q4`) plus the LTX VAE
+  encoder and gemma text encoder, freezes the base, injects rank-r LoRA into the
+  `attn1`/`attn2` projections, caches each still as a single-frame latent
+  (`encode_image`, already per-channel normalized) and a caption context embed,
+  then runs a rectified-flow loop. The raw transformer output is regressed to
+  `noise - clean` at timestep `sigma` (no sign flip — unlike the diffusers
+  Z-Image path above, the LTX `to_denoised` consumes the output directly). The
+  adapter is saved keyed by the real module paths (`{module}.lora_A.weight` /
+  `.lora_B.weight` + scalar `.alpha`) so `mlx_video.lora` round-trips at
+  inference with no key remap. Validated end-to-end: a rank-32 / 1500-step run on
+  ~76 stills (res 512, trigger-focused captions) produces a clearly attributable
+  identity effect through the real `MlxVideoAdapter` generation path. Practical
+  footprint: ~1.35 s/step, **peak ~59 GB during training (needs a 64 GB+ Mac)**
+  and ~34 GB during generation; the gemma text encoder stays resident through the
+  loop, which dominates the training peak.
 
 The kernel produces the weights file and a result summary. Registering the
 produced adapter as a usable SceneWorks LoRA (with provenance and Image Studio

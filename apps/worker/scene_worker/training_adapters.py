@@ -397,7 +397,7 @@ class ZImageLoraTrainer:
         if not output_dir:
             raise TrainingKernelError("Training plan output is missing an output directory.")
 
-        progress("preparing", "preparing", 0.04, "Preparing Z-Image LoRA training run.")
+        progress("preparing", "preparing", 0.04, "Preparing LoRA training run.")
         backend = self._backend or self._create_backend()
         self._active_backend = backend
         completed_steps = 0
