@@ -931,6 +931,65 @@ describe("SceneWorks app shell", () => {
     });
   });
 
+  it("defaults the training trigger phrase from sidebar trigger words until edited", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "first portrait", source: "manual", triggerWords: ["oldOne"] },
+        },
+      ],
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={["auto", "0"]}
+          loadDataset={loadDataset}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+    });
+    await settle();
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    expect(field(container, "Trigger phrase").value).toBe("Portrait Set");
+
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    await changeField(field(container, "Trigger words"), "miraStyle, portraitSet");
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    expect(field(container, "Trigger phrase").value).toBe("miraStyle, portraitSet");
+
+    await changeField(field(container, "Trigger phrase"), "manualTrigger");
+    await act(async () => {
+      container.querySelector("#training-tab-rename-caption").click();
+    });
+    await changeField(field(container, "Trigger words"), "otherTrigger");
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+
+    expect(field(container, "Trigger phrase").value).toBe("manualTrigger");
+  });
+
   it("builds a training config snapshot from registry defaults", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",

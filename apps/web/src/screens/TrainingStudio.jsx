@@ -178,6 +178,10 @@ function parseTriggerWords(value) {
     .filter(Boolean);
 }
 
+function triggerPhraseFromText(value) {
+  return parseTriggerWords(value).join(", ");
+}
+
 function captionSeedFromName(value) {
   const name = String(value ?? "")
     .replaceAll("\\", "/")
@@ -355,7 +359,7 @@ function rangeOptions(limits, key) {
   return Array.isArray(limits?.[key]) ? limits[key] : [];
 }
 
-function configDraftFromTarget(target, dataset, gpuOptions) {
+function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "") {
   const defaults = target?.defaults ?? {};
   const advanced = defaults.advanced ?? {};
   const firstGpu = gpuOptions[0] ?? "";
@@ -363,7 +367,7 @@ function configDraftFromTarget(target, dataset, gpuOptions) {
   const outputLabel = outputKindLabel(target);
   return {
     outputName: dataset?.name ? `${dataset.name} ${outputLabel}` : "",
-    triggerWord: asText(defaults.triggerWord),
+    triggerWord: triggerPhrase || asText(defaults.triggerWord),
     outputScope: asText(advanced.outputScope),
     qualityPreset: asText(advanced.qualityPreset),
     requestedGpu: gpuOptions.includes(requestedGpu) ? requestedGpu : firstGpu,
@@ -570,6 +574,7 @@ export function TrainingStudio({
   const [configSnapshot, setConfigSnapshot] = useState(null);
   const [configMessage, setConfigMessage] = useState("");
   const [configError, setConfigError] = useState("");
+  const [configTriggerFollowsCaptions, setConfigTriggerFollowsCaptions] = useState(true);
   const [preparingConfig, setPreparingConfig] = useState(false);
   const [submittingJob, setSubmittingJob] = useState(false);
   // Dry run validates the Rust-resolved plan without training; a real run hands
@@ -638,14 +643,16 @@ export function TrainingStudio({
     setConfigSnapshot(null);
     setConfigMessage("");
     setConfigError("");
+    setConfigTriggerFollowsCaptions(true);
     configBasisRef.current = "";
   }, [activeProject?.id]);
 
   useEffect(() => {
+    const datasetTriggerPhrase = triggerPhraseFromText(activeDataset?.name);
     setRenameCaptionDraftItems(renameCaptionDrafts(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
-    setCaptionTriggerWords(String(activeDataset?.name ?? "").trim());
-    setCaptionSettings((current) => ({ ...current, nameInput: String(activeDataset?.name ?? "").trim() }));
+    setCaptionTriggerWords(datasetTriggerPhrase);
+    setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
   }, [activeDataset]);
 
   useEffect(() => {
@@ -667,11 +674,26 @@ export function TrainingStudio({
       return;
     }
     configBasisRef.current = basis;
-    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions));
+    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(activeDataset?.name)));
     setConfigSnapshot(null);
     setConfigMessage("");
     setConfigError("");
+    setConfigTriggerFollowsCaptions(true);
   }, [activeDataset?.id, selectedTarget?.id]);
+
+  useEffect(() => {
+    if (!configTriggerFollowsCaptions) {
+      return;
+    }
+    const nextTriggerPhrase = triggerPhraseFromText(captionTriggerWords) || asText(selectedTarget?.defaults?.triggerWord);
+    setConfigDraft((current) => {
+      if ((current.triggerWord ?? "") === nextTriggerPhrase) {
+        return current;
+      }
+      return { ...current, triggerWord: nextTriggerPhrase };
+    });
+    setConfigSnapshot(null);
+  }, [captionTriggerWords, configTriggerFollowsCaptions, selectedTarget?.id]);
 
   useEffect(() => {
     setConfigDraft((current) => {
@@ -767,6 +789,10 @@ export function TrainingStudio({
 
   function updateCaptionTriggerWords(value) {
     setDatasetMessage("");
+    if (configTriggerFollowsCaptions) {
+      setConfigMessage("");
+      setConfigError("");
+    }
     setCaptionTriggerWords(value);
   }
 
@@ -774,6 +800,9 @@ export function TrainingStudio({
     setConfigMessage("");
     setConfigError("");
     setConfigSnapshot(null);
+    if (field === "triggerWord") {
+      setConfigTriggerFollowsCaptions(false);
+    }
     setConfigDraft((current) => ({ ...current, [field]: value }));
   }
 
@@ -797,7 +826,8 @@ export function TrainingStudio({
     if (!selectedTarget) {
       return;
     }
-    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions));
+    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(captionTriggerWords)));
+    setConfigTriggerFollowsCaptions(true);
     setConfigSnapshot(null);
     setConfigMessage("Defaults restored");
     setConfigError("");
