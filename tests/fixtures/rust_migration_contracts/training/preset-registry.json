@@ -1,0 +1,272 @@
+{
+  "schemaVersion": 1,
+  "presets": [
+    {
+      "id": "z_image_turbo_lora.character.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "z_image_turbo_lora",
+      "name": "Character balanced",
+      "recommendedFor": ["character"],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "sampleEvery": 250,
+          "sampleSteps": 8,
+          "sampleGuidanceScale": 0.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+          "trainingAdapterVersion": "v2-default"
+        }
+      },
+      "ui": {
+        "description": "Research-backed first run for 12-25 clean character images.",
+        "default": true,
+        "order": 10
+      }
+    },
+    {
+      "id": "z_image_turbo_lora.character.adamw8bit.conservative",
+      "version": 1,
+      "targetId": "z_image_turbo_lora",
+      "name": "Character conservative",
+      "recommendedFor": ["character"],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "conservative",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.00005,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "sampleEvery": 250,
+          "sampleSteps": 8,
+          "sampleGuidanceScale": 0.0,
+          "qualityPreset": "conservative",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+          "trainingAdapterVersion": "v2-default"
+        }
+      },
+      "ui": {
+        "description": "Lower-rank, lower-LR character preset for noisy early samples or tight identity datasets.",
+        "order": 20
+      }
+    },
+    {
+      "id": "z_image_turbo_lora.character.adamw.balanced",
+      "version": 1,
+      "targetId": "z_image_turbo_lora",
+      "name": "Character balanced (AdamW)",
+      "recommendedFor": ["character"],
+      "optimizer": "adamw",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "sampleEvery": 250,
+          "sampleSteps": 8,
+          "sampleGuidanceScale": 0.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+          "trainingAdapterVersion": "v2-default"
+        }
+      },
+      "ui": {
+        "description": "Balanced character LoRA defaults for full AdamW.",
+        "order": 30
+      }
+    },
+    {
+      "id": "z_image_turbo_lora.character.prodigyopt.balanced",
+      "version": 1,
+      "targetId": "z_image_turbo_lora",
+      "name": "Prodigy character (experimental)",
+      "recommendedFor": ["character"],
+      "optimizer": "prodigyopt",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 1.0,
+        "steps": 1600,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 200,
+        "seed": 42,
+        "optimizer": "prodigyopt",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "sampleEvery": 200,
+          "sampleSteps": 8,
+          "sampleGuidanceScale": 0.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "optimizerDCoef": 1.0,
+          "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+          "trainingAdapterVersion": "v2-default"
+        }
+      },
+      "ui": {
+        "description": "Experimental Prodigy optimizer variant; prefer AdamW8bit for first runs.",
+        "experimental": true,
+        "order": 40
+      }
+    },
+    {
+      "id": "z_image_turbo_lora.style.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "z_image_turbo_lora",
+      "name": "Style balanced",
+      "recommendedFor": ["style"],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "sampleEvery": 250,
+          "sampleSteps": 8,
+          "sampleGuidanceScale": 0.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+          "trainingAdapterVersion": "v2-default"
+        }
+      },
+      "ui": {
+        "description": "Higher-capacity style LoRA defaults for texture and visual-language transfer.",
+        "order": 50
+      }
+    },
+    {
+      "id": "z_image_turbo_lora.character.adamw8bit.low_vram",
+      "version": 1,
+      "targetId": "z_image_turbo_lora",
+      "name": "Low VRAM character",
+      "recommendedFor": ["character"],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "low_vram",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 768,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "sampleEvery": 250,
+          "sampleSteps": 8,
+          "sampleGuidanceScale": 0.0,
+          "qualityPreset": "low_vram",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+          "trainingAdapterVersion": "v2-default"
+        }
+      },
+      "ui": {
+        "description": "12GB-friendly 768px preset based on public Z-Image Turbo training reports.",
+        "order": 60
+      }
+    }
+  ]
+}

@@ -40,8 +40,9 @@ use sceneworks_core::project_store::{
     UploadAsset,
 };
 use sceneworks_core::training::{
-    build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
-    TrainingDataset, TrainingTarget, TrainingTargetRegistry,
+    build_training_plan, builtin_training_presets, builtin_training_targets, BuildTrainingPlan,
+    LoraTrainingRequest, TrainingDataset, TrainingPresetProvenance, TrainingTarget,
+    TrainingTargetRegistry,
 };
 use sceneworks_core::training_store::{
     TrainingCaptionSidecarsResult, TrainingDatasetBatchRenameInput,
@@ -493,6 +494,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/access", get(access))
         .route("/api/v1/auth/verify", post(verify_access))
         .route("/api/v1/training/targets", get(list_training_targets))
+        .route("/api/v1/training/presets", get(list_training_presets))
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route("/api/v1/projects/:project_id", get(get_project))
         .route(
@@ -1378,6 +1380,10 @@ async fn list_training_targets() -> Json<TrainingTargetRegistry> {
     Json(builtin_training_targets())
 }
 
+async fn list_training_presets() -> Json<sceneworks_core::training::TrainingPresetRegistry> {
+    Json(builtin_training_presets())
+}
+
 async fn list_training_datasets(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -1613,6 +1619,53 @@ async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
+    let preset_metadata = match payload.preset_id.as_deref() {
+        Some(preset_id) => {
+            let preset_registry = builtin_training_presets();
+            let preset = preset_registry
+                .presets
+                .iter()
+                .find(|preset| preset.id == preset_id)
+                .ok_or_else(|| {
+                    ApiError::bad_request(format!("Unknown training preset: {preset_id}"))
+                })?;
+            if preset.target_id != target.id {
+                return Err(ApiError::bad_request(format!(
+                    "Training preset '{}' targets '{}', but the request targets '{}'.",
+                    preset.id, preset.target_id, target.id
+                )));
+            }
+            if let Some(requested_version) = payload.preset_version {
+                if requested_version != preset.version {
+                    return Err(ApiError::bad_request(format!(
+                        "Training preset '{}' is version {}, but the request pinned version {requested_version}.",
+                        preset.id, preset.version
+                    )));
+                }
+            }
+            let preset_config_snapshot = serde_json::to_value(&preset.config)
+                .ok()
+                .and_then(|value| match value {
+                    Value::Object(map) => Some(map),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Some(TrainingPresetProvenance {
+                preset_id: preset.id.clone(),
+                preset_version: preset.version,
+                preset_name: preset.name.clone(),
+                preset_config_snapshot,
+            })
+        }
+        None => {
+            if payload.preset_version.is_some() {
+                return Err(ApiError::bad_request(
+                    "presetVersion requires a matching presetId.",
+                ));
+            }
+            None
+        }
+    };
 
     let output_name = payload.output_name.trim().to_owned();
     if output_name.is_empty() {
@@ -1703,6 +1756,7 @@ async fn create_training_job(
         target,
         dataset: &dataset,
         config: payload.config,
+        preset: preset_metadata,
         lora_id: &lora_id,
         base_model_path,
         dataset_root: &dataset_root,
@@ -1719,7 +1773,7 @@ async fn create_training_job(
     // entry is upserted on completion (story 1418), so this stays purely
     // informational. Dry runs never register.
     let timestamp = now_rfc3339();
-    let manifest_entry = json!({
+    let mut manifest_entry = json!({
         "id": lora_id.clone(),
         "name": output_name.clone(),
         "scope": output_scope,
@@ -1738,12 +1792,22 @@ async fn create_training_job(
             "datasetId": plan.provenance.dataset_id.clone(),
             "datasetVersion": plan.provenance.dataset_version,
             "baseModel": plan.provenance.base_model.clone(),
+            "presetId": plan.provenance.preset_id.clone(),
+            "presetVersion": plan.provenance.preset_version,
+            "presetName": plan.provenance.preset_name.clone(),
+            "presetConfigSnapshot": plan.provenance.preset_config_snapshot.clone(),
             "configSnapshot": plan.provenance.config_snapshot.clone(),
             "createdAt": timestamp.clone(),
         },
         "createdAt": timestamp.clone(),
         "updatedAt": timestamp,
     });
+    if let Some(provenance) = manifest_entry
+        .get_mut("provenance")
+        .and_then(Value::as_object_mut)
+    {
+        provenance.retain(|_, value| !value.is_null());
+    }
 
     let plan_value =
         serde_json::to_value(&plan).map_err(|error| ApiError::internal(error.to_string()))?;
@@ -8528,6 +8592,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn training_presets_route_returns_builtin_registry() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let app = create_app(settings).expect("app creates");
+
+        let (status, registry) = request(app, "GET", "/api/v1/training/presets", Value::Null).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(registry["schemaVersion"], 1);
+        assert_eq!(
+            registry["presets"][0]["id"],
+            "z_image_turbo_lora.character.adamw8bit.balanced"
+        );
+        assert_eq!(registry["presets"][0]["config"]["steps"], 3000);
+        assert_eq!(
+            registry["presets"][0]["config"]["advanced"]["sampleSteps"],
+            8
+        );
+        let prodigy = registry["presets"]
+            .as_array()
+            .expect("preset array")
+            .iter()
+            .find(|preset| preset["id"] == "z_image_turbo_lora.character.prodigyopt.balanced")
+            .expect("prodigy preset");
+        assert_eq!(prodigy["config"]["optimizer"], "prodigyopt");
+        assert_eq!(prodigy["config"]["learningRate"], 1.0);
+    }
+
+    #[tokio::test]
     async fn training_dataset_routes_persist_and_validate_project_assets() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let settings = test_settings(&temp_dir);
@@ -8985,6 +9078,69 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queued[0]["id"], job_id);
         assert_eq!(queued[0]["type"], "lora_train");
+
+        let (_, preset_registry) =
+            request(app.clone(), "GET", "/api/v1/training/presets", Value::Null).await;
+        let prodigy_preset = preset_registry["presets"]
+            .as_array()
+            .expect("preset array")
+            .iter()
+            .find(|preset| preset["id"] == "z_image_turbo_lora.character.prodigyopt.balanced")
+            .expect("prodigy preset")
+            .clone();
+        let (status, preset_job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "presetId": prodigy_preset["id"],
+                "presetVersion": prodigy_preset["version"],
+                "config": prodigy_preset["config"],
+                "outputName": "Aurora Prodigy",
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            preset_job["payload"]["plan"]["provenance"]["presetId"],
+            "z_image_turbo_lora.character.prodigyopt.balanced"
+        );
+        assert_eq!(
+            preset_job["payload"]["plan"]["provenance"]["presetName"],
+            "Prodigy character (experimental)"
+        );
+        assert_eq!(
+            preset_job["payload"]["plan"]["provenance"]["presetConfigSnapshot"]["learningRate"],
+            1.0
+        );
+        assert_eq!(
+            preset_job["payload"]["manifestEntry"]["provenance"]["presetId"],
+            "z_image_turbo_lora.character.prodigyopt.balanced"
+        );
+
+        let (status, error) = request(
+            app,
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": dataset_id,
+                "presetId": "z_image_turbo_lora.character.prodigyopt.balanced",
+                "presetVersion": 99,
+                "config": prodigy_preset["config"],
+                "outputName": "Aurora Prodigy",
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["detail"],
+            "Training preset 'z_image_turbo_lora.character.prodigyopt.balanced' is version 1, but the request pinned version 99."
+        );
     }
 
     #[tokio::test]

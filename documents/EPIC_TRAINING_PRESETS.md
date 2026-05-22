@@ -1,12 +1,12 @@
 # Epic: Training Presets And Model Defaults
 
-Shortcut epic: `TBD`
+Shortcut epic: `1546`
 
 ## Goal
 
 Make LoRA training configuration model-aware and preset-driven so users start from known-good defaults instead of hand-tuning every field.
 
-When a user selects a training model, SceneWorks should load recommended configuration values for that model. When a user selects an optimizer, SceneWorks should adjust optimizer-sensitive defaults such as learning rate, scheduler, steps, and sample cadence. Advanced users can still override individual values, but the default path should feel opinionated and reliable.
+When a user selects a training model, SceneWorks should load recommended configuration values for that model. When a user selects an optimizer, SceneWorks should adjust optimizer-sensitive defaults such as learning rate, steps, and sample cadence. Advanced users can still override individual values, but the default path should feel opinionated and reliable.
 
 ## Problem Statement
 
@@ -64,7 +64,7 @@ Recommended shape:
         "rank": 16,
         "alpha": 16,
         "learningRate": 0.0001,
-        "steps": 2000,
+        "steps": 3000,
         "batchSize": 1,
         "gradientAccumulation": 1,
         "resolution": 1024,
@@ -73,9 +73,14 @@ Recommended shape:
         "optimizer": "adamw8bit",
         "advanced": {
           "mixedPrecision": "bf16",
-          "scheduler": "constant",
+          "weightDecay": 0.0001,
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "gradientCheckpointing": true,
+          "cacheTextEmbeddings": true,
           "sampleEvery": 250,
-          "sampleSteps": 9,
+          "sampleSteps": 8,
           "sampleGuidanceScale": 0.0,
           "outputScope": "project"
         }
@@ -141,8 +146,9 @@ If a preset is missing or incompatible with the selected target, the API should 
 Start with Z-Image-Turbo LoRA presets:
 
 - `Character balanced / adamw8bit`
+- `Character conservative / adamw8bit`
 - `Character balanced / adamw`
-- `Character balanced / prodigyopt`
+- `Prodigy character (experimental) / prodigyopt`
 - `Style balanced / adamw8bit`
 - `Low VRAM character / adamw8bit`
 

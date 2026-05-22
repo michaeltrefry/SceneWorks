@@ -1879,10 +1879,36 @@ label {
   margin-top: 12px;
 }
 
+.training-advanced-grid .training-checkbox-field {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 58px;
+  color: var(--text);
+}
+
 .training-config-warnings {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+}
+
+.training-preset-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.training-preset-summary span {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .training-config-warnings span {

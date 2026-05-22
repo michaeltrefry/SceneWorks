@@ -82,7 +82,7 @@ const zImageTrainingTarget = {
     rank: 16,
     alpha: 16,
     learningRate: 0.0001,
-    steps: 2000,
+    steps: 3000,
     batchSize: 1,
     gradientAccumulation: 1,
     resolution: 1024,
@@ -91,12 +91,14 @@ const zImageTrainingTarget = {
     optimizer: "adamw8bit",
     advanced: {
       mixedPrecision: "bf16",
-      scheduler: "constant",
-      epochs: 1,
-      repeats: 10,
-      bucketStrategy: "aspect",
+      cacheTextEmbeddings: true,
+      gradientCheckpointing: true,
+      timestepType: "sigmoid",
+      timestepBias: "high_noise",
+      lossType: "mse",
+      weightDecay: 0.0001,
       sampleEvery: 250,
-      sampleSteps: 9,
+      sampleSteps: 8,
       sampleGuidanceScale: 0.0,
       qualityPreset: "balanced",
       outputScope: "project",
@@ -111,6 +113,72 @@ const zImageTrainingTarget = {
   },
   ui: { label: "Z-Image-Turbo LoRA" },
 };
+
+const zImageTrainingPresets = [
+  {
+    id: "z_image_turbo_lora.character.adamw8bit.balanced",
+    version: 1,
+    targetId: "z_image_turbo_lora",
+    name: "Character balanced",
+    recommendedFor: ["character"],
+    optimizer: "adamw8bit",
+    qualityPreset: "balanced",
+    config: {
+      ...zImageTrainingTarget.defaults,
+      advanced: {
+        ...zImageTrainingTarget.defaults.advanced,
+        trainingAdapterRepo: "ostris/zimage_turbo_training_adapter",
+        trainingAdapterVersion: "v2-default",
+      },
+    },
+    ui: { default: true, order: 10 },
+  },
+  {
+    id: "z_image_turbo_lora.character.adamw8bit.conservative",
+    version: 1,
+    targetId: "z_image_turbo_lora",
+    name: "Character conservative",
+    recommendedFor: ["character"],
+    optimizer: "adamw8bit",
+    qualityPreset: "conservative",
+    config: {
+      ...zImageTrainingTarget.defaults,
+      rank: 8,
+      alpha: 8,
+      learningRate: 0.00005,
+      advanced: {
+        ...zImageTrainingTarget.defaults.advanced,
+        qualityPreset: "conservative",
+        trainingAdapterRepo: "ostris/zimage_turbo_training_adapter",
+        trainingAdapterVersion: "v2-default",
+      },
+    },
+    ui: { order: 20 },
+  },
+  {
+    id: "z_image_turbo_lora.character.prodigyopt.balanced",
+    version: 1,
+    targetId: "z_image_turbo_lora",
+    name: "Prodigy character (experimental)",
+    recommendedFor: ["character"],
+    optimizer: "prodigyopt",
+    qualityPreset: "balanced",
+    config: {
+      ...zImageTrainingTarget.defaults,
+      optimizer: "prodigyopt",
+      learningRate: 1.0,
+      steps: 1600,
+      saveEvery: 200,
+      advanced: {
+        ...zImageTrainingTarget.defaults.advanced,
+        sampleEvery: 200,
+        trainingAdapterRepo: "ostris/zimage_turbo_training_adapter",
+        trainingAdapterVersion: "v2-default",
+      },
+    },
+    ui: { experimental: true, order: 40 },
+  },
+];
 
 async function changeField(input, value) {
   await act(async () => {
@@ -1106,7 +1174,7 @@ describe("SceneWorks app shell", () => {
             mixedPrecision: "bf16",
             qualityPreset: "balanced",
             outputScope: "project",
-            sampleSteps: 9,
+            sampleSteps: 8,
             sampleGuidanceScale: 1.2,
             samplePrompts: expect.arrayContaining([expect.stringContaining("miraStyle")]),
           }),
@@ -1114,6 +1182,159 @@ describe("SceneWorks app shell", () => {
       }),
     );
     expect(container.textContent).toContain("Config snapshot ready");
+  });
+
+  it("applies training presets and includes selected preset metadata", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const createTrainingJob = vi.fn(async () => ({ id: "job_dryrun_1", type: "lora_train", status: "queued" }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          createTrainingJob={createTrainingJob}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={["auto", "0"]}
+          loadDataset={loadDataset}
+          trainingPresets={zImageTrainingPresets}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+
+    expect(field(container, "Preset").value).toBe("z_image_turbo_lora.character.adamw8bit.balanced");
+    expect(container.textContent).toContain("Character balanced");
+    await changeField(field(container, "Optimizer"), "prodigyopt");
+    expect(field(container, "Preset").value).toBe("z_image_turbo_lora.character.prodigyopt.balanced");
+    expect(field(container, "Learning rate").value).toBe("1");
+    expect(field(container, "Sample cadence").value).toBe("200");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+    });
+    await settle();
+
+    expect(createTrainingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        presetId: "z_image_turbo_lora.character.prodigyopt.balanced",
+        presetVersion: 1,
+        config: expect.objectContaining({
+          learningRate: 1,
+          optimizer: "prodigyopt",
+          steps: 1600,
+          advanced: expect.objectContaining({ sampleEvery: 200 }),
+        }),
+      }),
+    );
+  });
+
+  it("submits the selected de-distill adapter version for Z-Image-Turbo", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const createTrainingJob = vi.fn(async () => ({ id: "job_dryrun_1", type: "lora_train", status: "queued" }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          createTrainingJob={createTrainingJob}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          gpuOptions={["auto", "0"]}
+          loadDataset={loadDataset}
+          trainingPresets={zImageTrainingPresets}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+
+    // The selector appears for Z-Image-Turbo and normalizes the preset's legacy
+    // "v2-default" value to "v2".
+    const adapterSelect = field(container, "De-distill adapter");
+    expect(adapterSelect).toBeTruthy();
+    expect(adapterSelect.value).toBe("v2");
+
+    await changeField(adapterSelect, "v1");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+    });
+    await settle();
+
+    // The repo + chosen version must reach config.advanced — the worker only fuses
+    // the de-distill adapter when trainingAdapterRepo is present.
+    expect(createTrainingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          advanced: expect.objectContaining({
+            trainingAdapterRepo: "ostris/zimage_turbo_training_adapter",
+            trainingAdapterVersion: "v1",
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("marks manual training preset edits as customizations", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
+          trainingPresets={zImageTrainingPresets}
+          trainingTargets={[zImageTrainingTarget]}
+        />,
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector("#training-tab-configure").click();
+    });
+    await changeField(field(container, "Rank"), "24");
+
+    expect(container.textContent).toContain("Customized: Rank");
   });
 
   it("queues a dry-run training job from the configure tab", async () => {

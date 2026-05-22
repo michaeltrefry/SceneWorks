@@ -168,6 +168,38 @@ pub struct TrainingTargetRegistry {
     pub extra: ExtraFields,
 }
 
+/// A named, model-aware training preset. Presets are complete configs for the
+/// initial built-in set so callers always submit concrete worker values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingPreset {
+    /// Stable preset id, e.g. `z_image_turbo_lora.character.adamw8bit.balanced`.
+    pub id: String,
+    /// Monotonic preset version. Training provenance pins this value.
+    pub version: u32,
+    pub target_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended_for: Vec<String>,
+    pub optimizer: String,
+    pub quality_preset: String,
+    pub config: TrainingConfig,
+    /// Presentation hints (short descriptions, ordering, default flags).
+    pub ui: JsonObject,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// The registry of available built-in training presets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingPresetRegistry {
+    pub schema_version: u32,
+    pub presets: Vec<TrainingPreset>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
 /// Generic LoRA training hyperparameters.
 ///
 /// The visible fields back the simple config panel; engine-specific knobs live
@@ -215,6 +247,11 @@ pub struct LoraTrainingRequest {
     /// Pin a dataset version; `None` means "use the dataset's current version".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_version: Option<u32>,
+    /// Optional built-in preset used as the starting point for this config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_version: Option<u32>,
     pub config: TrainingConfig,
     /// Human-facing name for the resulting LoRA.
     pub output_name: String,
@@ -326,6 +363,14 @@ pub struct TrainingProvenance {
     pub dataset_version: u32,
     pub target_id: String,
     pub base_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_config_snapshot: Option<JsonObject>,
     /// Full config snapshot captured at submit time for reproducibility.
     pub config_snapshot: JsonObject,
     /// SceneWorks LoRA id the run produced (or will produce).
@@ -350,6 +395,196 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
     }
 }
 
+/// The built-in training presets Rust owns out of the box.
+pub fn builtin_training_presets() -> TrainingPresetRegistry {
+    let target = z_image_turbo_lora_target();
+    TrainingPresetRegistry {
+        schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
+        presets: vec![
+            z_image_preset(
+                &target,
+                "z_image_turbo_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Research-backed first run for 12-25 clean character images.",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            z_image_preset(
+                &target,
+                "z_image_turbo_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR character preset for noisy early samples or tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            z_image_preset(
+                &target,
+                "z_image_turbo_lora.character.adamw.balanced",
+                "Character balanced (AdamW)",
+                &["character"],
+                ("adamw", "balanced"),
+                |mut config| {
+                    config.optimizer = "adamw".to_owned();
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Balanced character LoRA defaults for full AdamW.",
+                    "order": 30
+                })),
+            ),
+            z_image_preset(
+                &target,
+                "z_image_turbo_lora.character.prodigyopt.balanced",
+                "Prodigy character (experimental)",
+                &["character"],
+                ("prodigyopt", "balanced"),
+                |mut config| {
+                    config.optimizer = "prodigyopt".to_owned();
+                    config.learning_rate = number(1.0);
+                    config.steps = 1600;
+                    config.save_every = 200;
+                    config.advanced.insert("sampleEvery".to_owned(), json!(200));
+                    config
+                        .advanced
+                        .insert("optimizerDCoef".to_owned(), json!(1.0));
+                    config
+                },
+                object(json!({
+                    "description": "Experimental Prodigy optimizer variant; prefer AdamW8bit for first runs.",
+                    "experimental": true,
+                    "order": 40
+                })),
+            ),
+            z_image_preset(
+                &target,
+                "z_image_turbo_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config.steps = 3000;
+                    config.advanced.insert("sampleEvery".to_owned(), json!(250));
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity style LoRA defaults for texture and visual-language transfer.",
+                    "order": 50
+                })),
+            ),
+            z_image_preset(
+                &target,
+                "z_image_turbo_lora.character.adamw8bit.low_vram",
+                "Low VRAM character",
+                &["character"],
+                ("adamw8bit", "low_vram"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.resolution = 768;
+                    config.steps = 2000;
+                    config.save_every = 250;
+                    config
+                        .advanced
+                        .insert("qualityPreset".to_owned(), json!("low_vram"));
+                    config.advanced.insert("sampleEvery".to_owned(), json!(250));
+                    config
+                        .advanced
+                        .insert("cacheLatents".to_owned(), json!(true));
+                    config
+                },
+                object(json!({
+                    "description": "12GB-friendly 768px preset based on public Z-Image Turbo training reports.",
+                    "order": 60
+                })),
+            ),
+        ],
+        extra: ExtraFields::new(),
+    }
+}
+
+fn z_image_preset<F>(
+    target: &TrainingTarget,
+    id: &str,
+    name: &str,
+    recommended_for: &[&str],
+    optimizer_quality: (&str, &str),
+    mutate: F,
+    ui: JsonObject,
+) -> TrainingPreset
+where
+    F: FnOnce(TrainingConfig) -> TrainingConfig,
+{
+    let (optimizer, quality_preset) = optimizer_quality;
+    let mut config = mutate(target.defaults.clone());
+    config.optimizer = optimizer.to_owned();
+    config
+        .advanced
+        .insert("qualityPreset".to_owned(), json!(quality_preset));
+    config.advanced.insert("sampleSteps".to_owned(), json!(8));
+    config
+        .advanced
+        .insert("sampleGuidanceScale".to_owned(), json!(0.0));
+    config.advanced.insert(
+        "trainingAdapterRepo".to_owned(),
+        json!("ostris/zimage_turbo_training_adapter"),
+    );
+    config
+        .advanced
+        .insert("trainingAdapterVersion".to_owned(), json!("v2-default"));
+    config
+        .advanced
+        .insert("timestepType".to_owned(), json!("sigmoid"));
+    config
+        .advanced
+        .insert("timestepBias".to_owned(), json!("high_noise"));
+    config.advanced.insert("lossType".to_owned(), json!("mse"));
+    config
+        .advanced
+        .insert("gradientCheckpointing".to_owned(), json!(true));
+    config
+        .advanced
+        .insert("cacheTextEmbeddings".to_owned(), json!(true));
+    config
+        .advanced
+        .insert("weightDecay".to_owned(), json!(0.0001));
+    TrainingPreset {
+        id: id.to_owned(),
+        version: 1,
+        target_id: target.id.clone(),
+        name: name.to_owned(),
+        recommended_for: recommended_for
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        optimizer: optimizer.to_owned(),
+        quality_preset: quality_preset.to_owned(),
+        config,
+        ui,
+        extra: ExtraFields::new(),
+    }
+}
+
 fn z_image_turbo_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "z_image_turbo_lora".to_owned(),
@@ -364,7 +599,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             rank: 16,
             alpha: 16,
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
-            steps: 2000,
+            steps: 3000,
             batch_size: 1,
             gradient_accumulation: 1,
             resolution: 1024,
@@ -375,13 +610,15 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             advanced: object(json!({
                 "mixedPrecision": "bf16",
                 "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
                 "networkType": "lora",
-                "scheduler": "constant",
-                "epochs": 1,
-                "repeats": 10,
-                "bucketStrategy": "aspect",
+                "timestepType": "sigmoid",
+                "timestepBias": "high_noise",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
                 "sampleEvery": 250,
-                "sampleSteps": 9,
+                "sampleSteps": 8,
                 "sampleGuidanceScale": 0.0,
                 "qualityPreset": "balanced",
                 "outputScope": "project",
@@ -480,6 +717,10 @@ fn ltx_video_lora_target() -> TrainingTarget {
     }
 }
 
+fn number(value: f64) -> ContractNumber {
+    ContractNumber::from_f64(value).expect("builtin preset number is finite")
+}
+
 /// Converts a JSON value known to be an object literal into a [`JsonObject`].
 /// Non-object inputs yield an empty map; all call sites here pass object
 /// literals.
@@ -503,6 +744,8 @@ pub struct BuildTrainingPlan<'a> {
     pub dataset: &'a TrainingDataset,
     /// Resolved config (target defaults already merged with user overrides).
     pub config: TrainingConfig,
+    /// Selected preset metadata, when the user started from a named preset.
+    pub preset: Option<TrainingPresetProvenance>,
     /// Pre-allocated SceneWorks LoRA id the output registers under.
     pub lora_id: &'a str,
     /// Absolute path to the base model weights on the worker host.
@@ -514,6 +757,14 @@ pub struct BuildTrainingPlan<'a> {
     /// Adapter file name, e.g. `aurora_style.safetensors`.
     pub file_name: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainingPresetProvenance {
+    pub preset_id: String,
+    pub preset_version: u32,
+    pub preset_name: String,
+    pub preset_config_snapshot: JsonObject,
 }
 
 /// Error produced when a [`LoraTrainingRequest`] cannot be resolved into a valid
@@ -613,6 +864,16 @@ pub fn build_training_plan(
             dataset_version: input.dataset.version,
             target_id: input.target.id.clone(),
             base_model: input.target.base_model.clone(),
+            preset_id: input.preset.as_ref().map(|preset| preset.preset_id.clone()),
+            preset_version: input.preset.as_ref().map(|preset| preset.preset_version),
+            preset_name: input
+                .preset
+                .as_ref()
+                .map(|preset| preset.preset_name.clone()),
+            preset_config_snapshot: input
+                .preset
+                .as_ref()
+                .map(|preset| preset.preset_config_snapshot.clone()),
             config_snapshot,
             output_lora_id: input.lora_id.to_owned(),
             source_job_id: input.job_id.to_owned(),

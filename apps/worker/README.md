@@ -98,7 +98,9 @@ SceneWorks storage, config defaults, or the target registry directly.
   latents and prompt embeddings, runs a flow-matching loop (the raw transformer-output
   target is `latents - noise` — the negated velocity, since the pipeline negates the
   output before the scheduler — at timestep `(1000 - t) / 1000`), and writes a `.safetensors`
-  adapter with `ZImagePipeline.save_lora_weights`. It reports preparing,
+  adapter with `ZImagePipeline.save_lora_weights`. The loop honors
+  `config.advanced.weightDecay`, `timestepType`, `timestepBias`, `lossType`, and
+  `gradientCheckpointing`. It reports preparing,
   loading, caching, training, checkpointing (every `saveEvery` steps), and saving
   stages, and honors cancellation between steps. A real run requires the
   inference backend; the kernel reports clearly when it is missing.

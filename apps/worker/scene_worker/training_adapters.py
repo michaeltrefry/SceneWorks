@@ -43,7 +43,11 @@ from .image_adapters import (
     select_torch_device,
     select_torch_dtype,
 )
-from .lora_adapters import huggingface_main_snapshot_dir, huggingface_snapshot_dirs
+from .lora_adapters import (
+    huggingface_main_snapshot_dir,
+    huggingface_repo_cache_path,
+    huggingface_snapshot_dirs,
+)
 from .settings import WorkerSettings
 
 
@@ -160,12 +164,19 @@ class TrainingRunConfig:
     save_every: int
     seed: int
     optimizer: str
+    weight_decay: float
+    timestep_type: str
+    timestep_bias: str
+    loss_type: str
+    gradient_checkpointing: bool
     mixed_precision: Any
     lora_target_modules: Any
     sample_every: int
     sample_steps: int
     sample_guidance_scale: float
     sample_prompts: list[str]
+    training_adapter_repo: str | None = None
+    training_adapter_version: str | None = None
     advanced: dict[str, Any] = field(default_factory=dict)
 
 
@@ -183,6 +194,27 @@ def _as_float(value: Any, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed
+
+
+def _as_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
 
 
 def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
@@ -205,12 +237,19 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         save_every=_as_int(config.get("saveEvery"), 0, minimum=0),
         seed=_as_int(config.get("seed"), 42),
         optimizer=str(config.get("optimizer") or "adamw"),
+        weight_decay=_as_float(advanced.get("weightDecay"), 0.0),
+        timestep_type=str(advanced.get("timestepType") or "sigmoid"),
+        timestep_bias=str(advanced.get("timestepBias") or "balanced"),
+        loss_type=str(advanced.get("lossType") or "mse"),
+        gradient_checkpointing=_as_bool(advanced.get("gradientCheckpointing"), True),
         mixed_precision=advanced.get("mixedPrecision"),
         lora_target_modules=target_modules,
         sample_every=_as_int(advanced.get("sampleEvery"), 0, minimum=0),
         sample_steps=_as_int(advanced.get("sampleSteps"), 9, minimum=1),
         sample_guidance_scale=_as_float(advanced.get("sampleGuidanceScale"), 0.0),
         sample_prompts=[str(prompt).strip() for prompt in sample_prompts if str(prompt).strip()][:4],
+        training_adapter_repo=_as_optional_str(advanced.get("trainingAdapterRepo")),
+        training_adapter_version=_as_optional_str(advanced.get("trainingAdapterVersion")),
         advanced=advanced,
     )
 
@@ -283,6 +322,51 @@ def _snapshot_with_model_index(repo_root: Path) -> Path | None:
         if (snapshot / "model_index.json").is_file():
             return snapshot
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Z-Image-Turbo de-distill training adapter
+# --------------------------------------------------------------------------- #
+
+# Z-Image-Turbo is a step-distilled model. Training a LoRA directly on it makes
+# the distillation break down unpredictably (blurry, off-identity output even as
+# the loss optimizes), so ostris ships a "de-distill" training adapter: it is
+# fused into the transformer for training only, the new LoRA is learned on top,
+# and the adapter is dropped at inference (left on the plain distilled model).
+# See https://huggingface.co/ostris/zimage_turbo_training_adapter. The repo holds
+# exactly the two weight files below; presets pick one via ``trainingAdapterVersion``.
+TRAINING_ADAPTER_WEIGHT_FILES = {
+    "v1": "zimage_turbo_training_adapter_v1.safetensors",
+    "v2": "zimage_turbo_training_adapter_v2.safetensors",
+}
+
+
+def training_adapter_weight_name(version: str | None) -> str:
+    """Map a ``trainingAdapterVersion`` (e.g. ``v1``, ``v2-default``) to the repo's
+    weight file. Defaults to v2, the SceneWorks preset default."""
+
+    token = (version or "").strip().lower()
+    if "v1" in token:
+        return TRAINING_ADAPTER_WEIGHT_FILES["v1"]
+    return TRAINING_ADAPTER_WEIGHT_FILES["v2"]
+
+
+def resolve_training_adapter_source(repo: str, version: str | None) -> tuple[str, str]:
+    """Resolve ``(load_target, weight_name)`` for the de-distill adapter.
+
+    Prefers a locally cached weight file under the HF hub cache (returned as an
+    absolute path so ``load_lora_weights`` needs no network); otherwise returns the
+    repo id so diffusers can use its own cache or download it, matching how the base
+    model source is resolved."""
+
+    weight_name = training_adapter_weight_name(version)
+    root = huggingface_repo_cache_path(repo)
+    if root is not None and root.exists():
+        for snapshot in huggingface_snapshot_dirs(root):
+            candidate = snapshot / weight_name
+            if candidate.is_file():
+                return str(candidate), weight_name
+    return repo, weight_name
 
 
 # --------------------------------------------------------------------------- #
@@ -567,7 +651,7 @@ def _training_message(step: int, total_steps: int, loss: float | None) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
+def build_optimizer(name: str, params: list[Any], learning_rate: float, weight_decay: float = 0.0) -> Any:
     """Build an optimizer for the LoRA parameters. ``adamw8bit`` uses
     bitsandbytes when available and falls back to torch AdamW otherwise (the
     8-bit optimizer is an optional, CUDA-only dependency). ``prodigy`` and
@@ -581,11 +665,11 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
         except Exception as exc:
             raise TrainingKernelError("The Prodigy optimizer requires the prodigyopt Python package.") from exc
         use_lr = learning_rate if learning_rate >= 0.1 else 1.0
-        return prodigy_module.Prodigy(params, lr=use_lr, eps=1e-6)
+        return prodigy_module.Prodigy(params, lr=use_lr, eps=1e-6, weight_decay=weight_decay)
     if normalized in {"adamw8bit", "adam8bit"}:
         try:
             bnb = importlib.import_module("bitsandbytes")
-            return bnb.optim.AdamW8bit(params, lr=learning_rate)
+            return bnb.optim.AdamW8bit(params, lr=learning_rate, weight_decay=weight_decay)
         except Exception:
             emit_worker_event(
                 "training_optimizer_fallback",
@@ -593,10 +677,52 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float) -> Any:
                 using="adamw",
                 reason="bitsandbytes unavailable",
             )
-            return torch.optim.AdamW(params, lr=learning_rate)
+            return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
     if normalized == "adam":
-        return torch.optim.Adam(params, lr=learning_rate)
-    return torch.optim.AdamW(params, lr=learning_rate)
+        return torch.optim.Adam(params, lr=learning_rate, weight_decay=weight_decay)
+    return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
+
+
+def sample_training_timestep(
+    torch: Any,
+    *,
+    generator: Any,
+    device: str,
+    dtype: Any,
+    timestep_type: str,
+    timestep_bias: str,
+) -> Any:
+    """Sample a normalized flow-matching timestep in [0, 1].
+
+    The `sigmoid` shape follows ai-toolkit's flowmatch scheduler: random normal
+    values are passed through sigmoid so most samples land near the middle of the
+    denoising range. Bias then nudges the normalized value toward high or low
+    noise while keeping the same single-sample training loop.
+    """
+
+    normalized_type = (timestep_type or "sigmoid").strip().lower().replace("-", "_")
+    if normalized_type in {"linear", "uniform"}:
+        t = torch.rand(1, generator=generator, device=device, dtype=dtype)
+    elif normalized_type == "weighted":
+        base = torch.rand(1, generator=generator, device=device, dtype=dtype)
+        center = torch.sigmoid(torch.randn(1, generator=generator, device=device, dtype=dtype))
+        t = (base + center) / 2.0
+    else:
+        t = torch.sigmoid(torch.randn(1, generator=generator, device=device, dtype=dtype))
+
+    normalized_bias = (timestep_bias or "balanced").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized_bias in {"high", "high_noise", "favor_high_noise"}:
+        t = torch.sqrt(t)
+    elif normalized_bias in {"low", "low_noise", "favor_low_noise"}:
+        t = t * t
+    return t.clamp(1e-3, 1.0 - 1e-3)
+
+
+def training_loss(torch: Any, prediction: Any, target: Any, loss_type: str) -> Any:
+    normalized = (loss_type or "mse").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"mae", "l1", "mean_absolute_error"}:
+        return torch.nn.functional.l1_loss(prediction.float(), target.float())
+    return torch.nn.functional.mse_loss(prediction.float(), target.float())
 
 
 def flow_matching_velocity_target(latents: Any, noise: Any) -> Any:
@@ -715,6 +841,12 @@ class _ZImageLoraBackend:
         pipe = pipeline_class.from_pretrained(source, torch_dtype=dtype)
         pipe.to(device)
 
+        # Z-Image-Turbo is step-distilled; fuse the de-distill training adapter into
+        # the base before attaching the trainable LoRA. This learns on a de-distilled
+        # model and ships only the new LoRA, which inference applies to the plain
+        # distilled model (the adapter is intentionally not saved).
+        self._apply_training_adapter(pipe, config, progress)
+
         transformer = pipe.transformer
         transformer.requires_grad_(False)
         pipe.vae.requires_grad_(False)
@@ -733,6 +865,26 @@ class _ZImageLoraBackend:
         )
         transformer.add_adapter(lora_config)
         self._activate_lora_adapter(transformer)
+        if config.gradient_checkpointing:
+            # With a frozen base + LoRA, reentrant gradient checkpointing can drop
+            # gradients to the adapter (its inputs don't require grad). Force the
+            # inputs to require grad so the LoRA actually trains regardless of the
+            # transformer's checkpoint implementation.
+            if hasattr(transformer, "enable_input_require_grads"):
+                try:
+                    transformer.enable_input_require_grads()
+                except Exception:
+                    pass
+            if hasattr(transformer, "enable_gradient_checkpointing"):
+                transformer.enable_gradient_checkpointing()
+            elif hasattr(transformer, "gradient_checkpointing_enable"):
+                transformer.gradient_checkpointing_enable()
+            else:
+                emit_worker_event(
+                    "training_gradient_checkpointing_unavailable",
+                    kernel=ZImageLoraTrainer.kernel_id,
+                    transformer=type(transformer).__name__,
+                )
         transformer.train()
         trainable = [param for param in transformer.parameters() if param.requires_grad]
         if not trainable:
@@ -742,7 +894,9 @@ class _ZImageLoraBackend:
                 "advanced.loraTargetModules for this base model."
             )
 
-        self._optimizer = build_optimizer(config.optimizer, trainable, config.learning_rate)
+        self._optimizer = build_optimizer(
+            config.optimizer, trainable, config.learning_rate, config.weight_decay
+        )
         self._optimizer.zero_grad()
         vae_config = getattr(pipe.vae, "config", None)
         self._vae_scaling = float(getattr(vae_config, "scaling_factor", 1.0) or 1.0)
@@ -755,13 +909,109 @@ class _ZImageLoraBackend:
         self._loaded_source = source
         generator_device = device if str(device).startswith("cuda") else "cpu"
         self._generator = torch.Generator(generator_device).manual_seed(int(config.seed))
+        lora_a_norm, lora_b_norm = self._lora_param_norms()
         emit_worker_event(
             "training_pipeline_load_complete",
             kernel=ZImageLoraTrainer.kernel_id,
             source=source,
             trainableTensors=len(trainable),
+            # Baseline LoRA norms: lora_B starts ~0 (zero-init), so a growing
+            # ``loraBNorm`` between here and save proves the adapter is learning.
+            loraANorm=lora_a_norm,
+            loraBNorm=lora_b_norm,
             gpuMemory=gpu_memory_snapshot(torch, device),
         )
+
+    def _apply_training_adapter(
+        self, pipe: Any, config: TrainingRunConfig, progress: ProgressCallback
+    ) -> str | None:
+        """Fuse the Z-Image-Turbo de-distill adapter into the base transformer.
+
+        Loads the adapter as a LoRA, fuses it into the weights, then unloads the
+        (now-redundant) LoRA modules so the de-distill delta lives in the frozen
+        base. The trainable LoRA attached afterwards therefore learns on top of a
+        de-distilled model, and ``get_peft_model_state_dict`` at save time captures
+        only that trainable LoRA — never the fused adapter."""
+
+        repo = (config.training_adapter_repo or "").strip()
+        if not repo:
+            emit_worker_event(
+                "training_dedistill_adapter_skipped",
+                kernel=ZImageLoraTrainer.kernel_id,
+                reason="no trainingAdapterRepo configured",
+            )
+            return None
+        if not hasattr(pipe, "load_lora_weights") or not hasattr(pipe, "fuse_lora"):
+            raise TrainingKernelError(
+                "The installed diffusers build cannot load/fuse the Z-Image-Turbo "
+                "de-distill training adapter (load_lora_weights/fuse_lora missing)."
+            )
+
+        load_target, weight_name = resolve_training_adapter_source(
+            repo, config.training_adapter_version
+        )
+        progress(
+            "loading_model",
+            "loading_model",
+            0.14,
+            f"Applying Z-Image-Turbo de-distill adapter ({weight_name}).",
+        )
+        emit_worker_event(
+            "training_dedistill_adapter_load_start",
+            kernel=ZImageLoraTrainer.kernel_id,
+            repo=repo,
+            version=config.training_adapter_version,
+            weightName=weight_name,
+            source=load_target,
+        )
+        try:
+            if os.path.exists(load_target):
+                pipe.load_lora_weights(load_target, adapter_name="dedistill")
+            else:
+                pipe.load_lora_weights(
+                    load_target, weight_name=weight_name, adapter_name="dedistill"
+                )
+            pipe.fuse_lora()
+            if hasattr(pipe, "unload_lora_weights"):
+                pipe.unload_lora_weights()
+        except Exception as exc:
+            raise TrainingKernelError(
+                "Failed to apply the Z-Image-Turbo de-distill training adapter "
+                f"({repo}/{weight_name}). Z-Image-Turbo is step-distilled, and "
+                "training without this adapter produces unusable LoRAs. "
+                f"Underlying error: {exc}"
+            ) from exc
+        emit_worker_event(
+            "training_dedistill_adapter_applied",
+            kernel=ZImageLoraTrainer.kernel_id,
+            repo=repo,
+            weightName=weight_name,
+        )
+        return weight_name
+
+    def _lora_param_norms(self) -> tuple[float, float]:
+        """Return ``(lora_A_norm, lora_B_norm)`` over the trainable adapter params.
+
+        Cheap diagnostic so a flat vs growing ``lora_B`` norm (it starts ~0) is
+        visible in worker events without hand-parsing the saved safetensors."""
+
+        transformer = self._transformer
+        if transformer is None or not hasattr(transformer, "named_parameters"):
+            return 0.0, 0.0
+        a_sq = 0.0
+        b_sq = 0.0
+        for name, param in transformer.named_parameters():
+            if not getattr(param, "requires_grad", False):
+                continue
+            try:
+                value = float(param.detach().float().pow(2).sum().to("cpu"))
+            except Exception:
+                continue
+            if "lora_B" in name or "lora_b" in name:
+                b_sq += value
+            elif "lora_A" in name or "lora_a" in name:
+                a_sq += value
+        return round(a_sq**0.5, 6), round(b_sq**0.5, 6)
 
     def prepare_dataset(
         self,
@@ -822,8 +1072,14 @@ class _ZImageLoraBackend:
         noise = torch.randn(
             latents.shape, generator=self._generator, device=device, dtype=latents.dtype
         )
-        t = torch.rand(1, generator=self._generator, device=device, dtype=latents.dtype)
-        t = t.clamp(1e-3, 1.0 - 1e-3)
+        t = sample_training_timestep(
+            torch,
+            generator=self._generator,
+            device=device,
+            dtype=latents.dtype,
+            timestep_type=config.timestep_type,
+            timestep_bias=config.timestep_bias,
+        )
         noisy = (1.0 - t) * latents + t * noise
         target = flow_matching_velocity_target(latents, noise)
         timestep = t * 1000.0
@@ -846,7 +1102,7 @@ class _ZImageLoraBackend:
             )
             self._diagnosed_forward = True
 
-        loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+        loss = training_loss(torch, prediction, target, config.loss_type)
         accum = max(1, config.gradient_accumulation)
         (loss / accum).backward()
         if step % accum == 0 or step == total_steps:
@@ -959,6 +1215,15 @@ class _ZImageLoraBackend:
             transformer_lora_layers=lora_state_dict,
             weight_name=file_name,
             safe_serialization=True,
+        )
+        lora_a_norm, lora_b_norm = self._lora_param_norms()
+        emit_worker_event(
+            "training_lora_weight_norm",
+            kernel=ZImageLoraTrainer.kernel_id,
+            fileName=file_name,
+            tensors=len(lora_state_dict),
+            loraANorm=lora_a_norm,
+            loraBNorm=lora_b_norm,
         )
         return os.path.join(output_dir, file_name)
 

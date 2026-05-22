@@ -3024,6 +3024,7 @@ async fn download_snapshot(
                 }
             }
         }
+        output.flush().await?;
     }
     Ok(())
 }
@@ -3166,6 +3167,7 @@ async fn download_source_url(
             }
         }
     }
+    output.flush().await?;
     if expected_bytes.is_some_and(|expected| progress.downloaded_bytes() != expected) {
         return Err(WorkerError::InvalidPayload(format!(
             "LoRA sourceUrl download ended at {} but expected {}",

@@ -74,6 +74,9 @@ from scene_worker.training_adapters import (
     read_run_config,
     require_mlx_runtime,
     resolve_pretrained_source,
+    resolve_training_adapter_source,
+    sample_training_timestep,
+    training_adapter_weight_name,
     validate_training_plan,
 )
 from scene_worker.video_adapters import (
@@ -1288,6 +1291,24 @@ def test_flow_matching_velocity_target_uses_negated_pipeline_sign():
     assert flow_matching_velocity_target(latents, noise) == -(noise - latents)
 
 
+def test_sample_training_timestep_accepts_ai_toolkit_shape_and_bias():
+    torch = pytest.importorskip("torch")
+    generator = torch.Generator("cpu").manual_seed(7)
+
+    timestep = sample_training_timestep(
+        torch,
+        generator=generator,
+        device="cpu",
+        dtype=torch.float32,
+        timestep_type="sigmoid",
+        timestep_bias="high_noise",
+    )
+
+    assert timestep.shape == (1,)
+    assert float(timestep.item()) > 0.001
+    assert float(timestep.item()) < 0.999
+
+
 def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
     calls = {}
 
@@ -1306,10 +1327,10 @@ def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
     monkeypatch.setattr("scene_worker.training_adapters.importlib.import_module", fake_import_module)
     params = [object()]
 
-    optimizer = build_optimizer("prodigyopt", params, 0.0001)
+    optimizer = build_optimizer("prodigyopt", params, 0.0001, 0.0001)
 
     assert isinstance(optimizer, FakeProdigy)
-    assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6}}
+    assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6, "weight_decay": 0.0001}}
 
 
 def test_z_image_lora_backend_activates_default_adapter():
@@ -1327,6 +1348,152 @@ def test_z_image_lora_backend_activates_default_adapter():
     assert transformer.adapter_name == "default"
 
 
+def test_read_run_config_parses_training_adapter():
+    config = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+                    "trainingAdapterVersion": "v2-default",
+                }
+            }
+        }
+    )
+
+    assert config.training_adapter_repo == "ostris/zimage_turbo_training_adapter"
+    assert config.training_adapter_version == "v2-default"
+
+
+def test_read_run_config_training_adapter_absent_is_none():
+    config = read_run_config({"config": {"advanced": {}}})
+
+    assert config.training_adapter_repo is None
+    assert config.training_adapter_version is None
+
+
+def test_training_adapter_weight_name_maps_versions():
+    assert training_adapter_weight_name("v1") == "zimage_turbo_training_adapter_v1.safetensors"
+    assert training_adapter_weight_name("v1-default") == "zimage_turbo_training_adapter_v1.safetensors"
+    assert training_adapter_weight_name("v2-default") == "zimage_turbo_training_adapter_v2.safetensors"
+    # Unknown / empty defaults to v2 (the SceneWorks preset default).
+    assert training_adapter_weight_name(None) == "zimage_turbo_training_adapter_v2.safetensors"
+    assert training_adapter_weight_name("") == "zimage_turbo_training_adapter_v2.safetensors"
+
+
+def test_resolve_training_adapter_source_prefers_cached_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    repo = "ostris/zimage_turbo_training_adapter"
+    repo_root = tmp_path / "hub" / "models--ostris--zimage_turbo_training_adapter"
+    snapshot = repo_root / "snapshots" / "deadbeef"
+    snapshot.mkdir(parents=True)
+    (repo_root / "refs").mkdir(parents=True)
+    (repo_root / "refs" / "main").write_text("deadbeef", encoding="utf-8")
+    weight_file = snapshot / "zimage_turbo_training_adapter_v2.safetensors"
+    weight_file.write_bytes(b"weights")
+
+    load_target, weight_name = resolve_training_adapter_source(repo, "v2-default")
+
+    assert load_target == str(weight_file)
+    assert weight_name == "zimage_turbo_training_adapter_v2.safetensors"
+
+
+def test_resolve_training_adapter_source_falls_back_to_repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty"))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    repo = "ostris/zimage_turbo_training_adapter"
+
+    load_target, weight_name = resolve_training_adapter_source(repo, "v1")
+
+    assert load_target == repo
+    assert weight_name == "zimage_turbo_training_adapter_v1.safetensors"
+
+
+def test_apply_training_adapter_fuses_and_unloads(monkeypatch):
+    monkeypatch.setenv("HF_HUB_CACHE", "/nonexistent-cache")
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    calls = []
+
+    class FakePipe:
+        def load_lora_weights(self, target, *, weight_name=None, adapter_name=None):
+            calls.append(("load", target, weight_name, adapter_name))
+
+        def fuse_lora(self):
+            calls.append(("fuse",))
+
+        def unload_lora_weights(self):
+            calls.append(("unload",))
+
+    config = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+                    "trainingAdapterVersion": "v2-default",
+                }
+            }
+        }
+    )
+
+    weight_name = _ZImageLoraBackend()._apply_training_adapter(
+        FakePipe(), config, lambda *args, **kwargs: None
+    )
+
+    assert weight_name == "zimage_turbo_training_adapter_v2.safetensors"
+    assert [call[0] for call in calls] == ["load", "fuse", "unload"]
+    load_call = calls[0]
+    assert load_call[1] == "ostris/zimage_turbo_training_adapter"
+    assert load_call[2] == "zimage_turbo_training_adapter_v2.safetensors"
+    assert load_call[3] == "dedistill"
+
+
+def test_apply_training_adapter_noop_without_repo():
+    calls = []
+
+    class FakePipe:
+        def load_lora_weights(self, *args, **kwargs):
+            calls.append("load")
+
+        def fuse_lora(self):
+            calls.append("fuse")
+
+    config = read_run_config({"config": {"advanced": {}}})
+
+    result = _ZImageLoraBackend()._apply_training_adapter(
+        FakePipe(), config, lambda *args, **kwargs: None
+    )
+
+    assert result is None
+    assert calls == []
+
+
+def test_apply_training_adapter_raises_on_failure(monkeypatch):
+    monkeypatch.setenv("HF_HUB_CACHE", "/nonexistent-cache")
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+
+    class FakePipe:
+        def load_lora_weights(self, *args, **kwargs):
+            raise RuntimeError("no such adapter")
+
+        def fuse_lora(self):
+            pass
+
+    config = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
+                }
+            }
+        }
+    )
+
+    with pytest.raises(TrainingKernelError, match="de-distill"):
+        _ZImageLoraBackend()._apply_training_adapter(
+            FakePipe(), config, lambda *args, **kwargs: None
+        )
+
+
 def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
     config = read_run_config(
         {
@@ -1337,7 +1504,14 @@ def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
                 "steps": 500,
                 "saveEvery": 100,
                 "optimizer": "adamw8bit",
-                "advanced": {"mixedPrecision": "bf16"},
+                "advanced": {
+                    "mixedPrecision": "bf16",
+                    "weightDecay": 0.0001,
+                    "timestepType": "sigmoid",
+                    "timestepBias": "high_noise",
+                    "lossType": "mse",
+                    "gradientCheckpointing": True,
+                },
             }
         }
     )
@@ -1347,6 +1521,11 @@ def test_read_run_config_defaults_lora_target_modules_and_parses_advanced():
     assert config.steps == 500
     assert config.save_every == 100
     assert config.mixed_precision == "bf16"
+    assert config.weight_decay == 0.0001
+    assert config.timestep_type == "sigmoid"
+    assert config.timestep_bias == "high_noise"
+    assert config.loss_type == "mse"
+    assert config.gradient_checkpointing is True
     assert config.lora_target_modules == ["to_q", "to_k", "to_v", "to_out.0"]
     assert config.sample_steps == 9
     assert config.sample_guidance_scale == 0.0

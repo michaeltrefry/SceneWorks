@@ -362,7 +362,9 @@ export function App() {
   const [loras, setLoras] = useState([]);
   const [presets, setPresets] = useState([]);
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
+  const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
+  const [trainingPresetsError, setTrainingPresetsError] = useState("");
   const [trainingDatasets, setTrainingDatasets] = useState([]);
   const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useState(null);
   const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
@@ -725,7 +727,16 @@ export function App() {
         return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
       }
     };
-    const [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult] =
+    const [
+      projectsResult,
+      jobsResult,
+      workersResult,
+      modelsResult,
+      lorasResult,
+      presetsResult,
+      trainingTargetsResult,
+      trainingPresetsResult,
+    ] =
       await Promise.all([
         fetchInitial("Projects", "/api/v1/projects", []),
         fetchInitial("Jobs", "/api/v1/jobs", []),
@@ -734,6 +745,7 @@ export function App() {
         fetchInitial("LoRAs", "/api/v1/loras", []),
         fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
         fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
+        fetchInitial("Training presets", "/api/v1/training/presets", { schemaVersion: 1, presets: [] }),
       ]);
     const projectItems = projectsResult.value;
     setProjects(projectItems);
@@ -747,8 +759,19 @@ export function App() {
     setPresets(presetsResult.value);
     setTrainingTargets(trainingTargetsResult.value);
     setTrainingTargetsError(trainingTargetsResult.error);
+    setTrainingPresets(trainingPresetsResult.value);
+    setTrainingPresetsError(trainingPresetsResult.error);
     setError(
-      [projectsResult, jobsResult, workersResult, modelsResult, lorasResult, presetsResult, trainingTargetsResult]
+      [
+        projectsResult,
+        jobsResult,
+        workersResult,
+        modelsResult,
+        lorasResult,
+        presetsResult,
+        trainingTargetsResult,
+        trainingPresetsResult,
+      ]
         .map((result) => result.error)
         .filter(Boolean)
         .join("; "),
@@ -2080,6 +2103,8 @@ export function App() {
             loadingDatasets={loadingTrainingDatasets}
             onPreview={setPreviewAsset}
             onRefreshDatasets={() => refreshTrainingDatasets(activeProject?.id)}
+            trainingPresets={trainingPresets.presets ?? []}
+            trainingPresetsError={trainingPresetsError}
             trainingTargets={trainingTargets.targets ?? []}
             trainingTargetsError={trainingTargetsError}
             updateDataset={updateTrainingDataset}

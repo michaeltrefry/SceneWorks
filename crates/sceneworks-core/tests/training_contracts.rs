@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use sceneworks_core::training::{
     build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
     TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
-    TrainingPlanError, TrainingProvenance, TrainingTargetRegistry,
+    TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetRegistry,
     TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
 };
 use serde::de::DeserializeOwned;
@@ -77,6 +77,11 @@ fn training_target_registry_round_trips() {
 }
 
 #[test]
+fn training_preset_registry_round_trips() {
+    assert_round_trip::<TrainingPresetRegistry>("preset-registry.json");
+}
+
+#[test]
 fn builtin_registry_matches_committed_snapshot() {
     let expected = load_fixture("target-registry.json");
     let encoded =
@@ -86,6 +91,51 @@ fn builtin_registry_matches_committed_snapshot() {
         encoded, expected,
         "builtin target registry drifted from committed snapshot"
     );
+}
+
+#[test]
+fn builtin_preset_registry_matches_committed_snapshot() {
+    let expected = load_fixture("preset-registry.json");
+    let encoded = serde_json::to_value(sceneworks_core::training::builtin_training_presets())
+        .expect("builtin preset registry serializes");
+
+    assert_eq!(
+        encoded, expected,
+        "builtin preset registry drifted from committed snapshot"
+    );
+}
+
+#[test]
+fn builtin_preset_registry_exposes_optimizer_sensitive_defaults() {
+    let registry = sceneworks_core::training::builtin_training_presets();
+    let prodigy = registry
+        .presets
+        .iter()
+        .find(|preset| preset.id == "z_image_turbo_lora.character.prodigyopt.balanced")
+        .expect("prodigy preset present");
+
+    assert_eq!(prodigy.target_id, "z_image_turbo_lora");
+    assert_eq!(prodigy.optimizer, "prodigyopt");
+    assert_eq!(prodigy.config.optimizer, "prodigyopt");
+    assert_eq!(prodigy.config.learning_rate.as_f64(), Some(1.0));
+    assert_eq!(prodigy.config.steps, 1600);
+    assert_eq!(prodigy.config.advanced["sampleEvery"], 200);
+    assert_eq!(prodigy.config.advanced["sampleSteps"], 8);
+    assert_eq!(prodigy.ui["experimental"], true);
+
+    let balanced = registry
+        .presets
+        .iter()
+        .find(|preset| preset.id == "z_image_turbo_lora.character.adamw8bit.balanced")
+        .expect("balanced character preset present");
+    assert_eq!(balanced.config.steps, 3000);
+    assert_eq!(
+        balanced.config.advanced["trainingAdapterRepo"],
+        "ostris/zimage_turbo_training_adapter"
+    );
+    assert_eq!(balanced.config.advanced["timestepType"], "sigmoid");
+    assert_eq!(balanced.config.advanced["timestepBias"], "high_noise");
+    assert_eq!(balanced.config.advanced["gradientCheckpointing"], true);
 }
 
 #[test]
@@ -151,6 +201,7 @@ fn ltx_video_target_resolves_image_dataset_into_plan() {
         target,
         dataset: &dataset,
         config: target.defaults.clone(),
+        preset: None,
         lora_id: "lora_ltx_new",
         base_model_path: "/models/ltx".to_owned(),
         dataset_root: Path::new("/data/training/ds_abc123"),
@@ -212,6 +263,7 @@ fn build_training_plan_resolves_paths_ids_and_provenance() {
         target,
         dataset: &dataset,
         config,
+        preset: None,
         lora_id: "lora_new",
         base_model_path: "/data/cache/huggingface/Tongyi-MAI/Z-Image-Turbo".to_owned(),
         dataset_root,
@@ -265,6 +317,7 @@ fn build_training_plan_omits_trigger_words_when_unset() {
         target,
         dataset: &dataset,
         config: target.defaults.clone(),
+        preset: None,
         lora_id: "lora_new",
         base_model_path: "/data/models/z_image_turbo".to_owned(),
         dataset_root: Path::new("/data/training/ds_abc123"),
@@ -289,6 +342,7 @@ fn build_training_plan_rejects_empty_dataset() {
         target,
         dataset: &dataset,
         config: target.defaults.clone(),
+        preset: None,
         lora_id: "lora_new",
         base_model_path: "/data/models/z_image_turbo".to_owned(),
         dataset_root: Path::new("/data/training/ds_abc123"),
@@ -314,6 +368,7 @@ fn build_training_plan_rejects_invalid_config() {
         target,
         dataset: &dataset,
         config,
+        preset: None,
         lora_id: "lora_new",
         base_model_path: "/data/models/z_image_turbo".to_owned(),
         dataset_root: Path::new("/data/training/ds_abc123"),

@@ -13,12 +13,49 @@ const tabs = [
 ];
 const defaultGpuOptions = ["auto"];
 const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt"];
+const timestepTypeOptions = ["sigmoid", "linear", "weighted"];
+const timestepBiasOptions = ["balanced", "high_noise", "low_noise"];
+const lossTypeOptions = ["mse", "mae"];
 const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
   adamw8bit: "AdamW 8-bit",
   prodigy: "Prodigy",
   prodigyopt: "Prodigy",
+};
+// Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
+// worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.
+const trainingAdapterVersionOptions = ["v1", "v2"];
+const trainingAdapterVersionLabels = {
+  v1: "v1 — stable (smaller)",
+  v2: "v2 — experimental (heavier de-distill)",
+};
+const configFieldLabels = {
+  outputName: "LoRA name",
+  triggerWord: "Trigger phrase",
+  outputScope: "Output scope",
+  qualityPreset: "Quality preset",
+  requestedGpu: "Requested GPU",
+  rank: "Rank",
+  alpha: "Alpha",
+  optimizer: "Optimizer",
+  learningRate: "Learning rate",
+  weightDecay: "Weight decay",
+  steps: "Steps",
+  timestepType: "Timestep type",
+  timestepBias: "Timestep bias",
+  lossType: "Loss type",
+  trainingAdapterVersion: "De-distill adapter",
+  gradientCheckpointing: "Gradient checkpointing",
+  resolution: "Resolution",
+  precision: "Precision",
+  saveEvery: "Checkpoint cadence",
+  sampleEvery: "Sample cadence",
+  sampleSteps: "Sample steps",
+  sampleGuidanceScale: "Guidance scale",
+  batchSize: "Batch size",
+  gradientAccumulation: "Gradient accumulation",
+  seed: "Seed",
 };
 const joyCaptionModel = "fancyfeast/llama-joycaption-beta-one-hf-llava";
 const joyCaptionTypes = [
@@ -336,6 +373,16 @@ function asText(value) {
   return value === null || value === undefined ? "" : String(value);
 }
 
+// Normalize a training-adapter version to the worker's canonical token. Mirrors
+// the worker's substring match so legacy "v2-default" shows as "v2" in the select.
+function normalizeTrainingAdapterVersion(value) {
+  const token = asText(value).trim();
+  const lower = token.toLowerCase();
+  if (lower.includes("v1")) return "v1";
+  if (lower.includes("v2")) return "v2";
+  return token;
+}
+
 function numericDraft(value) {
   return value === null || value === undefined ? "" : String(value);
 }
@@ -375,14 +422,39 @@ function optimizerLabel(value) {
   return optimizerLabels[value] ?? value;
 }
 
-function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "") {
-  const defaults = target?.defaults ?? {};
+function optionLabel(value) {
+  return String(value ?? "")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function presetSortValue(preset) {
+  const order = Number(preset?.ui?.order);
+  return Number.isFinite(order) ? order : 999;
+}
+
+function presetsForTarget(presets, targetId) {
+  return (presets ?? [])
+    .filter((preset) => preset.targetId === targetId)
+    .slice()
+    .sort((left, right) => presetSortValue(left) - presetSortValue(right) || left.name.localeCompare(right.name));
+}
+
+function defaultPresetForTarget(presets, targetId) {
+  const targetPresets = presetsForTarget(presets, targetId);
+  return targetPresets.find((preset) => preset.ui?.default) ?? targetPresets[0] ?? null;
+}
+
+function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "", preset = null, previousDraft = {}) {
+  const defaults = preset?.config ?? target?.defaults ?? {};
   const advanced = defaults.advanced ?? {};
   const firstGpu = gpuOptions[0] ?? "";
   const requestedGpu = asText(advanced.requestedGpu || firstGpu);
   const outputLabel = outputKindLabel(target);
   return {
-    outputName: dataset?.name ? `${dataset.name} ${outputLabel}` : "",
+    outputName: previousDraft.outputName ?? (dataset?.name ? `${dataset.name} ${outputLabel}` : ""),
     triggerWord: triggerPhrase || asText(defaults.triggerWord),
     outputScope: asText(advanced.outputScope),
     qualityPreset: asText(advanced.qualityPreset),
@@ -391,12 +463,15 @@ function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "") 
     alpha: numericDraft(defaults.alpha),
     optimizer: asText(defaults.optimizer),
     learningRate: numericDraft(defaults.learningRate),
-    scheduler: asText(advanced.scheduler),
+    weightDecay: numericDraft(advanced.weightDecay),
     steps: numericDraft(defaults.steps),
-    epochs: numericDraft(advanced.epochs),
-    repeats: numericDraft(advanced.repeats),
+    timestepType: asText(advanced.timestepType || "sigmoid"),
+    timestepBias: asText(advanced.timestepBias || "balanced"),
+    lossType: asText(advanced.lossType || "mse"),
+    trainingAdapterRepo: asText(advanced.trainingAdapterRepo),
+    trainingAdapterVersion: normalizeTrainingAdapterVersion(advanced.trainingAdapterVersion),
+    gradientCheckpointing: advanced.gradientCheckpointing !== false,
     resolution: numericDraft(defaults.resolution),
-    bucketStrategy: asText(advanced.bucketStrategy),
     precision: asText(advanced.mixedPrecision),
     saveEvery: numericDraft(defaults.saveEvery),
     sampleEvery: numericDraft(advanced.sampleEvery),
@@ -458,14 +533,20 @@ function samplePromptsFromTrigger(triggerWord) {
   ];
 }
 
-function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dryRun = true }) {
+function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true }) {
   const defaults = selectedTarget?.defaults ?? {};
   const advanced = compactObject({
     ...(defaults.advanced ?? {}),
-    scheduler: asText(configDraft.scheduler).trim(),
-    epochs: numberFromDraft(configDraft.epochs),
-    repeats: numberFromDraft(configDraft.repeats),
-    bucketStrategy: asText(configDraft.bucketStrategy).trim(),
+    weightDecay: numberFromDraft(configDraft.weightDecay),
+    timestepType: asText(configDraft.timestepType).trim(),
+    timestepBias: asText(configDraft.timestepBias).trim(),
+    lossType: asText(configDraft.lossType).trim(),
+    // Preset-only advanced keys (the submit spreads target defaults, not the
+    // preset), so carry the de-distill adapter through explicitly — the worker
+    // only fuses it when config.advanced.trainingAdapterRepo is present.
+    trainingAdapterRepo: asText(configDraft.trainingAdapterRepo).trim(),
+    trainingAdapterVersion: asText(configDraft.trainingAdapterVersion).trim(),
+    gradientCheckpointing: Boolean(configDraft.gradientCheckpointing),
     mixedPrecision: asText(configDraft.precision).trim(),
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
     sampleSteps: numberFromDraft(configDraft.sampleSteps),
@@ -484,6 +565,8 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dr
     outputScope: configDraft.outputScope,
     qualityPreset: configDraft.qualityPreset,
     requestedGpu: configDraft.requestedGpu,
+    presetId: selectedPreset?.id,
+    presetVersion: selectedPreset?.version,
     config: {
       rank: numberFromDraft(configDraft.rank),
       alpha: numberFromDraft(configDraft.alpha),
@@ -666,6 +749,8 @@ export function TrainingStudio({
   onPreview = () => {},
   onRefreshDatasets = () => {},
   prepareTrainingConfig = async (snapshot) => snapshot,
+  trainingPresets = [],
+  trainingPresetsError = "",
   trainingTargets = [],
   trainingTargetsError = "",
   updateDataset = async () => null,
@@ -687,6 +772,8 @@ export function TrainingStudio({
   const [savingRenameCaption, setSavingRenameCaption] = useState(false);
   const [captionSettings, setCaptionSettings] = useState(defaultCaptionSettings);
   const [selectedTargetId, setSelectedTargetId] = useState("");
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [customizedConfigFields, setCustomizedConfigFields] = useState(new Set());
   const [configDraft, setConfigDraft] = useState({});
   const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
   const [configSnapshot, setConfigSnapshot] = useState(null);
@@ -739,15 +826,38 @@ export function TrainingStudio({
     () => trainingTargets.find((target) => target.id === selectedTargetId) ?? firstTarget,
     [firstTarget, selectedTargetId, trainingTargets],
   );
+  const targetPresets = useMemo(
+    () => presetsForTarget(trainingPresets, selectedTarget?.id),
+    [selectedTarget?.id, trainingPresets],
+  );
+  const selectedPreset = useMemo(
+    () => targetPresets.find((preset) => preset.id === selectedPresetId) ?? defaultPresetForTarget(targetPresets, selectedTarget?.id),
+    [selectedPresetId, selectedTarget?.id, targetPresets],
+  );
   const qualityPresets = rangeOptions(selectedTarget?.limits, "qualityPresets");
+  const visibleQualityPresets =
+    configDraft.qualityPreset && !qualityPresets.includes(configDraft.qualityPreset)
+      ? [...qualityPresets, configDraft.qualityPreset]
+      : qualityPresets;
   const outputScopes = rangeOptions(selectedTarget?.limits, "outputScopes");
   const resolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
+  const visibleResolutionOptions =
+    configDraft.resolution && !resolutionOptions.map(String).includes(String(configDraft.resolution))
+      ? [...resolutionOptions, configDraft.resolution]
+      : resolutionOptions;
   const optimizerOptions = rangeOptions(selectedTarget?.limits, "optimizers");
   const optimizerSelectOptions = optimizerOptions.length ? optimizerOptions : defaultOptimizerOptions;
   const visibleOptimizerOptions =
     configDraft.optimizer && !optimizerSelectOptions.includes(configDraft.optimizer)
       ? [...optimizerSelectOptions, configDraft.optimizer]
       : optimizerSelectOptions;
+  // De-distill training adapter is Z-Image-Turbo-only: show the version selector
+  // only when the resolved config declares a trainingAdapterRepo.
+  const showTrainingAdapter = Boolean(asText(configDraft.trainingAdapterRepo).trim());
+  const visibleTrainingAdapterVersions =
+    configDraft.trainingAdapterVersion && !trainingAdapterVersionOptions.includes(configDraft.trainingAdapterVersion)
+      ? [...trainingAdapterVersionOptions, configDraft.trainingAdapterVersion]
+      : trainingAdapterVersionOptions;
   const activeTrainingJobs = useMemo(
     () =>
       jobs
@@ -758,6 +868,7 @@ export function TrainingStudio({
   const gpuOptionsKey = gpuOptions.join("\u0000");
   const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
   const canPrepareConfig = configWarnings.length === 0 && !preparingConfig;
+  const customizedConfigLabels = [...customizedConfigFields].map((field) => configFieldLabels[field] ?? field);
 
   useEffect(() => {
     setActiveDataset(null);
@@ -770,6 +881,8 @@ export function TrainingStudio({
     setCaptionTriggerWords("");
     setRenameCaptionDraftItems([]);
     setCaptionSettings(defaultCaptionSettings);
+    setSelectedPresetId("");
+    setCustomizedConfigFields(new Set());
     setConfigDraft({});
     setConfigSnapshot(null);
     setConfigMessage("");
@@ -800,17 +913,20 @@ export function TrainingStudio({
       }
       return;
     }
-    const basis = `${selectedTarget.id}\u0000${activeDataset?.id ?? ""}`;
+    const defaultPreset = defaultPresetForTarget(trainingPresets, selectedTarget.id);
+    const basis = `${selectedTarget.id}\u0000${activeDataset?.id ?? ""}\u0000${defaultPreset?.id ?? ""}`;
     if (configBasisRef.current === basis) {
       return;
     }
     configBasisRef.current = basis;
-    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(activeDataset?.name)));
+    setSelectedPresetId(defaultPreset?.id ?? "");
+    setCustomizedConfigFields(new Set());
+    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(activeDataset?.name), defaultPreset));
     setConfigSnapshot(null);
     setConfigMessage("");
     setConfigError("");
     setConfigTriggerFollowsCaptions(true);
-  }, [activeDataset?.id, selectedTarget?.id]);
+  }, [activeDataset?.id, selectedTarget?.id, trainingPresets]);
 
   useEffect(() => {
     if (!configTriggerFollowsCaptions) {
@@ -934,7 +1050,44 @@ export function TrainingStudio({
     if (field === "triggerWord") {
       setConfigTriggerFollowsCaptions(false);
     }
+    if (field === "optimizer" && customizedConfigFields.size === 0) {
+      const matchingPreset = targetPresets.find((preset) => preset.optimizer === value);
+      if (matchingPreset && matchingPreset.id !== selectedPreset?.id) {
+        applyTrainingPreset(matchingPreset, { message: `${matchingPreset.name} applied` });
+        return;
+      }
+    }
+    setCustomizedConfigFields((current) => new Set([...current, field]));
     setConfigDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function applyTrainingPreset(preset, { message = "Preset applied" } = {}) {
+    if (!selectedTarget || !preset) {
+      return;
+    }
+    setSelectedPresetId(preset.id);
+    setCustomizedConfigFields(new Set());
+    setConfigDraft((current) =>
+      configDraftFromTarget(
+        selectedTarget,
+        activeDataset,
+        gpuOptions,
+        current.triggerWord || triggerPhraseFromText(captionTriggerWords),
+        preset,
+        { outputName: current.outputName },
+      ),
+    );
+    setConfigTriggerFollowsCaptions(false);
+    setConfigSnapshot(null);
+    setConfigMessage(message);
+    setConfigError("");
+  }
+
+  function updateSelectedPreset(presetId) {
+    const preset = targetPresets.find((item) => item.id === presetId);
+    if (preset) {
+      applyTrainingPreset(preset);
+    }
   }
 
   function updateCaptionSetting(field, value) {
@@ -957,7 +1110,10 @@ export function TrainingStudio({
     if (!selectedTarget) {
       return;
     }
-    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(captionTriggerWords)));
+    const defaultPreset = defaultPresetForTarget(trainingPresets, selectedTarget.id);
+    setSelectedPresetId(defaultPreset?.id ?? "");
+    setCustomizedConfigFields(new Set());
+    setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(captionTriggerWords), defaultPreset));
     setConfigTriggerFollowsCaptions(true);
     setConfigSnapshot(null);
     setConfigMessage("Defaults restored");
@@ -1096,7 +1252,7 @@ export function TrainingStudio({
     setConfigMessage("");
     try {
       const dryRun = trainingRunMode === "dry_run";
-      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dryRun });
+      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun });
       const result = await prepareTrainingConfig(snapshot);
       setConfigSnapshot(result ?? snapshot);
       setConfigMessage("Config snapshot ready");
@@ -1116,11 +1272,13 @@ export function TrainingStudio({
     setConfigMessage("");
     try {
       const dryRun = trainingRunMode === "dry_run";
-      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedTarget, dryRun });
+      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun });
       const job = await createTrainingJob({
         targetId: snapshot.targetId,
         datasetId: snapshot.datasetId,
         datasetVersion: snapshot.datasetVersion,
+        presetId: snapshot.presetId,
+        presetVersion: snapshot.presetVersion,
         outputName: snapshot.outputName,
         dryRun,
         config: snapshot.config,
@@ -1625,6 +1783,7 @@ export function TrainingStudio({
                     <span className="training-status-pill">{canPrepareConfig ? "Ready" : "Needs input"}</span>
                   </div>
                   {trainingTargetsError ? <p className="inline-warning">{trainingTargetsError}</p> : null}
+                  {trainingPresetsError ? <p className="inline-warning">{trainingPresetsError}</p> : null}
                   {configError ? <p className="inline-warning">{configError}</p> : null}
                   {configMessage ? <p className="inline-success">{configMessage}</p> : null}
                   {!selectedTarget ? (
@@ -1638,6 +1797,17 @@ export function TrainingStudio({
                             {trainingTargets.map((target) => (
                               <option key={target.id} value={target.id}>
                                 {target.ui?.label ?? target.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Preset
+                          <select onChange={(event) => updateSelectedPreset(event.target.value)} value={selectedPreset?.id ?? ""}>
+                            {targetPresets.length ? null : <option value="">Target defaults</option>}
+                            {targetPresets.map((preset) => (
+                              <option key={preset.id} value={preset.id}>
+                                {preset.name}
                               </option>
                             ))}
                           </select>
@@ -1682,10 +1852,10 @@ export function TrainingStudio({
                             onChange={(event) => updateConfigDraft("qualityPreset", event.target.value)}
                             value={configDraft.qualityPreset ?? ""}
                           >
-                            {qualityPresets.length ? null : (
+                            {visibleQualityPresets.length ? null : (
                               <option value={configDraft.qualityPreset ?? ""}>{configDraft.qualityPreset || "Default"}</option>
                             )}
-                            {qualityPresets.map((preset) => (
+                            {visibleQualityPresets.map((preset) => (
                               <option key={preset} value={preset}>
                                 {preset}
                               </option>
@@ -1729,6 +1899,20 @@ export function TrainingStudio({
                         </label>
                       </div>
 
+                      {selectedPreset ? (
+                        <div className="training-preset-summary" aria-label="Preset values">
+                          <span>{selectedPreset.name}</span>
+                          <span>Rank {configDraft.rank || "-"}</span>
+                          <span>LR {configDraft.learningRate || "-"}</span>
+                          <span>{optimizerLabel(configDraft.optimizer)}</span>
+                          <span>{configDraft.steps || "-"} steps</span>
+                          <span>{configDraft.resolution || "-"}px</span>
+                          {customizedConfigLabels.length ? (
+                            <span>Customized: {customizedConfigLabels.join(", ")}</span>
+                          ) : null}
+                        </div>
+                      ) : null}
+
                       <details
                         className="training-advanced-panel"
                         onToggle={(event) => setShowAdvancedConfig(event.currentTarget.open)}
@@ -1767,26 +1951,68 @@ export function TrainingStudio({
                             />
                           </label>
                           <label>
-                            Scheduler
-                            <input onChange={(event) => updateConfigDraft("scheduler", event.target.value)} value={configDraft.scheduler ?? ""} />
+                            Weight decay
+                            <input
+                              onChange={(event) => updateConfigDraft("weightDecay", event.target.value)}
+                              step="0.00001"
+                              type="number"
+                              value={configDraft.weightDecay ?? ""}
+                            />
                           </label>
                           <label>
                             Steps
                             <input onChange={(event) => updateConfigDraft("steps", event.target.value)} type="number" value={configDraft.steps ?? ""} />
                           </label>
                           <label>
-                            Epochs
-                            <input onChange={(event) => updateConfigDraft("epochs", event.target.value)} type="number" value={configDraft.epochs ?? ""} />
+                            Timestep type
+                            <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
+                              {timestepTypeOptions.map((option) => (
+                                <option key={option} value={option}>
+                                  {optionLabel(option)}
+                                </option>
+                              ))}
+                            </select>
                           </label>
                           <label>
-                            Repeats
-                            <input onChange={(event) => updateConfigDraft("repeats", event.target.value)} type="number" value={configDraft.repeats ?? ""} />
+                            Timestep bias
+                            <select onChange={(event) => updateConfigDraft("timestepBias", event.target.value)} value={configDraft.timestepBias ?? ""}>
+                              {timestepBiasOptions.map((option) => (
+                                <option key={option} value={option}>
+                                  {optionLabel(option)}
+                                </option>
+                              ))}
+                            </select>
                           </label>
+                          <label>
+                            Loss type
+                            <select onChange={(event) => updateConfigDraft("lossType", event.target.value)} value={configDraft.lossType ?? ""}>
+                              {lossTypeOptions.map((option) => (
+                                <option key={option} value={option}>
+                                  {option === "mse" ? "Mean Squared Error" : optionLabel(option)}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          {showTrainingAdapter ? (
+                            <label title="ostris de-distill adapter for the step-distilled Z-Image-Turbo base. Fused in for training, removed at inference. v1 is stable; v2 is a heavier, experimental de-distill.">
+                              De-distill adapter
+                              <select
+                                onChange={(event) => updateConfigDraft("trainingAdapterVersion", event.target.value)}
+                                value={configDraft.trainingAdapterVersion ?? ""}
+                              >
+                                {visibleTrainingAdapterVersions.map((version) => (
+                                  <option key={version} value={version}>
+                                    {trainingAdapterVersionLabels[version] ?? version}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : null}
                           <label>
                             Resolution
                             <select onChange={(event) => updateConfigDraft("resolution", event.target.value)} value={configDraft.resolution ?? ""}>
-                              {resolutionOptions.length ? null : <option value={configDraft.resolution ?? ""}>{configDraft.resolution ?? ""}</option>}
-                              {resolutionOptions.map((resolution) => (
+                              {visibleResolutionOptions.length ? null : <option value={configDraft.resolution ?? ""}>{configDraft.resolution ?? ""}</option>}
+                              {visibleResolutionOptions.map((resolution) => (
                                 <option key={resolution} value={resolution}>
                                   {resolution}
                                 </option>
@@ -1794,15 +2020,16 @@ export function TrainingStudio({
                             </select>
                           </label>
                           <label>
-                            Buckets
-                            <input
-                              onChange={(event) => updateConfigDraft("bucketStrategy", event.target.value)}
-                              value={configDraft.bucketStrategy ?? ""}
-                            />
-                          </label>
-                          <label>
                             Precision
                             <input onChange={(event) => updateConfigDraft("precision", event.target.value)} value={configDraft.precision ?? ""} />
+                          </label>
+                          <label className="training-checkbox-field">
+                            <input
+                              checked={Boolean(configDraft.gradientCheckpointing)}
+                              onChange={(event) => updateConfigDraft("gradientCheckpointing", event.target.checked)}
+                              type="checkbox"
+                            />
+                            Gradient checkpointing
                           </label>
                           <label>
                             Checkpoint cadence
