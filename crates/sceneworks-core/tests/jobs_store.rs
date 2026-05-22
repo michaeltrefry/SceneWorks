@@ -546,8 +546,57 @@ fn cpu_utility_worker_does_not_claim_gpu_generation_job() {
 }
 
 #[test]
-fn idle_heartbeat_interrupts_previous_active_job() {
+fn idle_heartbeat_interrupts_previous_heartbeated_job() {
     let store = store("idle-heartbeat");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+
+    assert_eq!(claimed.id, created.id);
+
+    // The owning worker reports at least one heartbeat for the job (records
+    // last_heartbeat_at), so a later idle heartbeat is a genuine restart and
+    // must reclaim the now-orphaned active job.
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("busy heartbeat succeeds");
+
+    let worker = store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Idle,
+            current_job_id: None,
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("heartbeat succeeds");
+    let job = store.get_job(&created.id).expect("job loads");
+
+    assert_eq!(worker.status, WorkerStatus::Idle);
+    assert_eq!(worker.current_job_id, None);
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert_eq!(job.worker_id, None);
+}
+
+#[test]
+fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
+    // A job claimed by one worker incarnation must survive an idle heartbeat
+    // (currentJobId=null) that races the claim — e.g. from another process
+    // sharing the same worker_id, or a restart firing its first idle heartbeat
+    // before any progress is reported. Without a recorded heartbeat there is no
+    // evidence the job was abandoned, so it must not be interrupted here.
+    let store = store("idle-heartbeat-race");
     register_image_worker(&store);
     let created = store
         .create_job(image_job(Map::new()))
@@ -571,9 +620,12 @@ fn idle_heartbeat_interrupts_previous_active_job() {
     let job = store.get_job(&created.id).expect("job loads");
 
     assert_eq!(worker.status, WorkerStatus::Idle);
-    assert_eq!(worker.current_job_id, None);
-    assert_eq!(job.status, JobStatus::Interrupted);
-    assert_eq!(job.worker_id, None);
+    assert!(
+        matches!(job.status, JobStatus::Preparing),
+        "just-claimed job should stay active, got {:?}",
+        job.status
+    );
+    assert_eq!(job.worker_id.as_deref(), Some("worker-1"));
 }
 
 #[test]

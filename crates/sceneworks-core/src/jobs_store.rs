@@ -486,7 +486,15 @@ impl JobsStore {
         if request.current_job_id.is_none() {
             if let Some(previous_job_id) = worker.current_job_id {
                 let previous_job = self.get_job_on_connection(&transaction, &previous_job_id)?;
-                if is_active_status(previous_job.status.as_str()) {
+                // Only interrupt a worker's previous active job on an idle heartbeat
+                // if that job has already heartbeated at least once. A job that was
+                // *just* claimed (no heartbeat yet) may be one another incarnation of
+                // the same worker_id claimed microseconds ago — an idle heartbeat
+                // racing the claim must not kill it. The time-based stale sweep still
+                // reclaims a job abandoned before its first heartbeat.
+                if is_active_status(previous_job.status.as_str())
+                    && previous_job.last_heartbeat_at.is_some()
+                {
                     transaction.execute(
                         "
                         update jobs

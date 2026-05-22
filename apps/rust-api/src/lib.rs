@@ -12576,6 +12576,18 @@ mod tests {
         )
         .await;
 
+        let job_id = created["id"].as_str().expect("job id is string");
+        // The owning worker reports at least one heartbeat for the job, so a
+        // later idle heartbeat is a genuine restart (not a claim race) and must
+        // reclaim the now-orphaned active job.
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/worker-1/heartbeat",
+            json!({ "status": "busy", "currentJobId": job_id, "loadedModels": [] }),
+        )
+        .await;
+
         let (status, worker) = request(
             app.clone(),
             "POST",
@@ -12586,7 +12598,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(worker["currentJobId"], Value::Null);
 
-        let job_id = created["id"].as_str().expect("job id is string");
         let (status, job) =
             request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
         assert_eq!(status, StatusCode::OK);

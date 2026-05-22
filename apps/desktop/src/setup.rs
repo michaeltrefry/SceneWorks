@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -27,8 +27,19 @@ pub struct Managed {
     pub worker: Mutex<Option<CommandChild>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
+    /// PIDs of the spawned sidecars, persisted to disk so an unclean exit
+    /// (crash/force-quit) doesn't leave them orphaned — the next launch reaps
+    /// any survivors before spawning fresh ones.
+    pids: Mutex<SidecarPids>,
     running: AtomicBool,
     pub shutting_down: AtomicBool,
+}
+
+/// PIDs of the API + Python worker sidecars owned by this launch.
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct SidecarPids {
+    api: Option<u32>,
+    worker: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -579,6 +590,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     let (mut events, child) = command
         .spawn()
         .map_err(|error| format!("spawn api: {error}"))?;
+    record_api_pid(app, child.pid());
     app.state::<Managed>()
         .api
         .lock()
@@ -679,6 +691,18 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
         // Match the API sidecar's HF cache root so downloaded weights land where
         // the catalog looks for them (and reuse anything already cached there).
         let hf_home = huggingface_home().to_string_lossy().to_string();
+        // Unique per app launch (stable across in-launch respawns) so a worker
+        // from a prior/overlapping session can't impersonate this one in the
+        // shared jobs.db. A fixed "worker-local-0" let two incarnations collide:
+        // one claims a job, the other's idle heartbeat instantly interrupts it.
+        let worker_id = format!(
+            "worker-local-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or_default()
+        );
         let mut backoff = 1u64;
         loop {
             if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
@@ -697,6 +721,7 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .args(["-m", "scene_worker"])
                 .current_dir(&src)
                 .env("PYTHONPATH", &pythonpath)
+                .env("SCENEWORKS_WORKER_ID", &worker_id)
                 .env("SCENEWORKS_API_URL", &api_url)
                 .env("HF_HOME", &hf_home)
                 .env(
@@ -723,6 +748,7 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                     continue;
                 }
             };
+            record_worker_pid(&app, Some(child.pid()));
             app.state::<Managed>()
                 .worker
                 .lock()
@@ -758,6 +784,7 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .lock()
                 .expect("worker lock")
                 .take();
+            record_worker_pid(&app, None);
             if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
                 return;
             }
@@ -779,6 +806,112 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+}
+
+/// File holding this launch's sidecar PIDs, used to reap orphans left by a prior
+/// unclean exit. Lives alongside the app's data so it survives across launches.
+fn sidecar_pidfile() -> PathBuf {
+    app_support_dir().join("desktop-sidecars.json")
+}
+
+/// Persist the current sidecar PIDs (best effort, atomic via temp+rename).
+fn write_sidecar_pidfile(pids: &SidecarPids) {
+    let path = sidecar_pidfile();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(json) = serde_json::to_vec_pretty(pids) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+fn record_api_pid(app: &AppHandle, pid: u32) {
+    let state = app.state::<Managed>();
+    let mut pids = state.pids.lock().expect("pids lock");
+    pids.api = Some(pid);
+    write_sidecar_pidfile(&pids);
+}
+
+fn record_worker_pid(app: &AppHandle, pid: Option<u32>) {
+    let state = app.state::<Managed>();
+    let mut pids = state.pids.lock().expect("pids lock");
+    pids.worker = pid;
+    write_sidecar_pidfile(&pids);
+}
+
+/// True when `pid` is one of our sidecars (not a recycled, unrelated PID). The
+/// command line must reference the API binary or the Python worker module.
+#[cfg(unix)]
+fn is_our_sidecar(pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+    command.contains("sceneworks-api") || command.contains("scene_worker")
+}
+
+#[cfg(windows)]
+fn is_our_sidecar(pid: u32) -> bool {
+    // tasklist exposes the image name (sceneworks-api.exe) but not arguments, so
+    // the Python worker (python.exe -m scene_worker) can't be matched here; the
+    // worker exits on its own when its parent/API is gone, so only the API needs
+    // reaping on Windows.
+    let Ok(output) = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout).contains("sceneworks-api")
+}
+
+/// SIGTERM then SIGKILL a confirmed-stale sidecar.
+#[cfg(unix)]
+fn kill_pid(pid: u32) {
+    let target = nix::unistd::Pid::from_raw(pid as i32);
+    let _ = nix::sys::signal::kill(target, nix::sys::signal::Signal::SIGTERM);
+    for _ in 0..20 {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = nix::sys::signal::kill(target, nix::sys::signal::Signal::SIGKILL);
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output();
+}
+
+/// Kill sidecars left running by a prior unclean exit before spawning fresh
+/// ones. Without this, a crash/force-quit (which skips `begin_shutdown`) leaves
+/// orphaned API processes that accumulate, hold ports, and contend on jobs.db.
+/// Each recorded PID is identity-checked so a recycled PID is never killed.
+pub fn reap_stale_sidecars() {
+    let path = sidecar_pidfile();
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let pids: SidecarPids = serde_json::from_slice(&bytes).unwrap_or_default();
+    for pid in [pids.api, pids.worker].into_iter().flatten() {
+        if is_our_sidecar(pid) {
+            kill_pid(pid);
+        }
+    }
+    let _ = std::fs::remove_file(&path);
 }
 
 /// Begin graceful shutdown: stop the Python worker then the API sidecar. On Unix
@@ -826,6 +959,9 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         if let Some(child) = api_child {
             let _ = child.kill();
         }
+        // Clean exit: drop the pidfile so the next launch doesn't try to reap
+        // PIDs we already terminated.
+        let _ = std::fs::remove_file(sidecar_pidfile());
         handle.exit(0);
     });
     true

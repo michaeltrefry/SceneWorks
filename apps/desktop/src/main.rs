@@ -7,6 +7,10 @@ mod setup;
 use tauri::RunEvent;
 
 fn main() {
+    // Kill any sidecars orphaned by a prior crash/force-quit before spawning
+    // fresh ones, so API processes don't accumulate and contend on jobs.db.
+    setup::reap_stale_sidecars();
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
