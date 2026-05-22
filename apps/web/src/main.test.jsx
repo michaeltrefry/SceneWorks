@@ -9,6 +9,7 @@ import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
+import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { TrainingStudio } from "./screens/TrainingStudio.jsx";
 
@@ -4230,5 +4231,103 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Weight").disabled).toBe(true);
     expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").disabled).toBe(true);
     expect(updatePreset).not.toHaveBeenCalled();
+  });
+
+  function replacePanelProps(overrides = {}) {
+    const track = {
+      id: "track_1",
+      projectId: "project-1",
+      name: "Hero",
+      sourceAssetId: "clip-1",
+      frames: [
+        { timestamp: 0, box: { x: 0.1, y: 0.1, width: 0.2, height: 0.5 }, confidence: 0.92, detected: true, mask: "person-tracks/track_1/masks/frame_000001.png", flags: [] },
+        { timestamp: 0.5, box: { x: 0.3, y: 0.1, width: 0.2, height: 0.5 }, confidence: 0.3, detected: true, mask: null, flags: ["low_confidence"] },
+      ],
+      corrections: [],
+      status: { maskState: "active", averageConfidence: 0.6, correctionState: "ready_for_box_corrections" },
+    };
+    const props = {
+      createPersonDetectionJob: () => {},
+      createPersonTrackJob: () => {},
+      detectionResult: null,
+      matchingTracks: [track],
+      representativeFrame: null,
+      selectedDetection: null,
+      selectedTrack: track,
+      setPersonTrackId: () => {},
+      setReplacementMode: () => {},
+      setSelectedDetectionId: () => {},
+      setSourceClipAssetId: () => {},
+      setTrackName: () => {},
+      sourceClipAssetId: "clip-1",
+      trackName: "Hero",
+      personTrackId: "track_1",
+      replacementMode: "full_person_keep_outfit",
+      videoAssets: [{ id: "clip-1", type: "video", projectId: "project-1", file: { path: "clip.mp4", mimeType: "video/mp4" } }],
+      personReadiness: {},
+      ...overrides,
+    };
+    return { track, props };
+  }
+
+  it("scrubs tracked frames and persists a corrected box", async () => {
+    const saveTrackCorrections = vi.fn(() => Promise.resolve(null));
+    const { props } = replacePanelProps({ saveTrackCorrections });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<ReplacePersonPanel {...props} />);
+    });
+
+    expect(container.textContent).toContain("Review & correct track");
+    expect(container.textContent).toContain("Frame 1 / 2");
+
+    // Scrub to the second (low-confidence) frame and confirm the quality flag shows.
+    const scrubber = container.querySelector('input[type="range"]');
+    await changeField(scrubber, "1");
+    expect(container.textContent).toContain("Frame 2 / 2");
+    expect(container.textContent).toContain("low confidence");
+
+    // Scrub back and nudge the box X, then save the correction set.
+    await changeField(scrubber, "0");
+    await changeField(container.querySelector('input[aria-label="Box x"]'), "0.5");
+
+    const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save corrections");
+    expect(save.disabled).toBe(false);
+    await act(async () => {
+      save.click();
+    });
+
+    expect(saveTrackCorrections).toHaveBeenCalledWith("track_1", [
+      { frameIndex: 0, rejected: false, author: "ui", source: "manual", box: { x: 0.5, y: 0.1, width: 0.2, height: 0.5 } },
+    ]);
+  });
+
+  it("rejects a low-quality frame and records it as a correction", async () => {
+    const saveTrackCorrections = vi.fn(() => Promise.resolve(null));
+    const { props } = replacePanelProps({ saveTrackCorrections });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<ReplacePersonPanel {...props} />);
+    });
+
+    const scrubber = container.querySelector('input[type="range"]');
+    await changeField(scrubber, "1");
+
+    const reject = container.querySelector('.person-correction-reject input[type="checkbox"]');
+    await act(async () => {
+      reject.click();
+    });
+
+    // Rejecting a frame disables its box inputs — replacement borrows a neighbor box.
+    expect(container.querySelector('input[aria-label="Box x"]').disabled).toBe(true);
+
+    const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save corrections");
+    await act(async () => {
+      save.click();
+    });
+
+    expect(saveTrackCorrections).toHaveBeenCalledWith("track_1", [
+      { frameIndex: 1, rejected: true, author: "ui", source: "manual" },
+    ]);
   });
 });

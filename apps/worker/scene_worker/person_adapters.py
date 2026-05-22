@@ -1001,6 +1001,60 @@ def _require_source_media(project_path: Path, asset_id: str) -> Path:
     return media_path
 
 
+def apply_track_corrections(track: dict[str, Any]) -> list[dict[str, Any]]:
+    """Apply persisted box/reject corrections to a track's frames (sc-1485).
+
+    Returns copies of the track frames with corrections applied so replacement
+    consumes corrected geometry without mutating the sidecar:
+
+    * A corrected box overrides the tracked box and clears that frame's stored
+      segmentation mask — the old mask no longer matches the new box, so the
+      mask loader regenerates a box mask from the corrected box (corrected-box-
+      driven mask regeneration, which the story accepts in lieu of mask paint).
+    * A rejected frame is excluded: its box/mask is replaced by the nearest
+      accepted frame's box (mask cleared), so the masked control clip never
+      neutralizes a region using geometry the user flagged as wrong.
+
+    Corrections are keyed by ``frameIndex``; out-of-range or malformed entries are
+    ignored so a stale sidecar never breaks replacement.
+    """
+    frames = [dict(frame) for frame in (track.get("frames") or [])]
+    if not frames:
+        return frames
+    by_index: dict[int, dict[str, Any]] = {}
+    for correction in track.get("corrections") or []:
+        if not isinstance(correction, dict):
+            continue
+        index = correction.get("frameIndex")
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if 0 <= index < len(frames):
+            by_index[index] = correction
+
+    rejected = [False] * len(frames)
+    for index, correction in by_index.items():
+        frame = frames[index]
+        box = correction.get("box")
+        if isinstance(box, dict):
+            frame["box"] = box
+            frame["mask"] = None
+            frame["corrected"] = True
+        if correction.get("rejected"):
+            rejected[index] = True
+            frame["rejected"] = True
+
+    accepted = [index for index, flag in enumerate(rejected) if not flag]
+    if accepted and len(accepted) < len(frames):
+        accepted_boxes = {index: frames[index].get("box") for index in accepted}
+        for index, flag in enumerate(rejected):
+            if not flag:
+                continue
+            nearest = min(accepted, key=lambda candidate: (abs(candidate - index), candidate))
+            frames[index]["box"] = accepted_boxes[nearest]
+            frames[index]["mask"] = None
+    return frames
+
+
 def load_track_masks(
     project_path: Path,
     track: dict[str, Any],
@@ -1010,20 +1064,37 @@ def load_track_masks(
 ) -> tuple[list[Image.Image], str]:
     """Load per-frame masks for replacement, resampled to ``count`` frames.
 
-    Returns ``(masks, mode)`` where mode is ``"segmentation"`` when stored masks
-    were loaded or ``"degraded_box"`` when falling back to rectangular box masks
-    derived from the track frames. Box fallback is the explicit degraded path.
+    Persisted corrections are applied first (corrected boxes override tracked
+    boxes; rejected frames borrow the nearest accepted box). Masks are then
+    chosen per frame: a frame keeps its stored segmentation mask only when the
+    file still exists and the box was not corrected, otherwise it falls back to a
+    rectangular box mask from the (possibly corrected) box.
+
+    Returns ``(masks, mode)`` where mode is ``"segmentation"`` (all stored masks),
+    ``"degraded_box"`` (all box-derived), or ``"mixed"`` (some of each, e.g. a
+    corrected frame regenerated as a box mask alongside untouched seg masks).
     """
-    frames = track.get("frames") or []
+    frames = apply_track_corrections(track)
     if not frames:
         raise RuntimeError("Person track has no frames; cannot build replacement masks.")
     indices = _resample_indices(len(frames), count)
-    stored = [frames[index].get("mask") for index in indices]
-    if all(isinstance(ref, str) and (project_path / ref).exists() for ref in stored):
-        masks = [Image.open(project_path / ref).convert("L").resize((width, height)) for ref in stored]
-        return masks, "segmentation"
-    masks = [_box_mask(frames[index].get("box") or {}, width, height) for index in indices]
-    return masks, "degraded_box"
+    masks: list[Image.Image] = []
+    segmentation = 0
+    for index in indices:
+        frame = frames[index]
+        ref = frame.get("mask")
+        if isinstance(ref, str) and (project_path / ref).exists():
+            masks.append(Image.open(project_path / ref).convert("L").resize((width, height)))
+            segmentation += 1
+        else:
+            masks.append(_box_mask(frame.get("box") or {}, width, height))
+    if segmentation == len(indices):
+        mode = "segmentation"
+    elif segmentation == 0:
+        mode = "degraded_box"
+    else:
+        mode = "mixed"
+    return masks, mode
 
 
 def _resample_indices(total: int, count: int) -> list[int]:

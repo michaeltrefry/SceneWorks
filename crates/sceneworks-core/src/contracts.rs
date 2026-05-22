@@ -158,7 +158,11 @@ string_enum! {
 
 string_enum! {
     pub enum PersonTrackCorrectionState {
+        // A freshly tracked sidecar advertises that it accepts box corrections.
         ReadyForBoxCorrections => "ready_for_box_corrections",
+        // Set once the correction UI has persisted at least one box adjustment or
+        // frame rejection into the sidecar's `corrections` array (sc-1485).
+        BoxCorrectionsApplied => "box_corrections_applied",
     }
 }
 

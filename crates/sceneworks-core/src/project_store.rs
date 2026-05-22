@@ -862,6 +862,81 @@ impl ProjectStore {
         normalize_person_track(&project_path, &track_path)
     }
 
+    /// Replace the correction set on a person track (sc-1485). Each incoming
+    /// correction targets a frame by index and either adjusts its box or rejects
+    /// the frame; the server stamps author/createdAt/source so the sidecar always
+    /// records who corrected it and when. The corrections array is the UI's full
+    /// view, so it is written wholesale (a frame omitted from the set is treated
+    /// as having no correction). Returns the normalized, updated track.
+    pub fn set_person_track_corrections(
+        &self,
+        project_id: &str,
+        track_id: &str,
+        corrections: Vec<Value>,
+    ) -> ProjectStoreResult<Value> {
+        if !is_safe_track_id(track_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid person track ID".to_owned(),
+            ));
+        }
+        let project_path = self.find_project_path(project_id)?;
+        let tracks_dir = project_path.join("person-tracks");
+        let track_path = tracks_dir.join(format!("{track_id}.sceneworks.person-track.json"));
+        if !track_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Person track not found".to_owned(),
+            ));
+        }
+        let tracks_root = fs::canonicalize(&tracks_dir)?;
+        let resolved_path = fs::canonicalize(&track_path)?;
+        if !resolved_path.starts_with(&tracks_root) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid person track ID".to_owned(),
+            ));
+        }
+
+        let mut track = read_json(&track_path)?;
+        let frame_count = track
+            .get("frames")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let mut normalized = normalize_person_track_corrections(corrections, frame_count)?;
+        let has_corrections = !normalized.is_empty();
+        normalized.sort_by_key(|correction| {
+            correction
+                .get("frameIndex")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        });
+
+        let object = track.as_object_mut().ok_or_else(|| {
+            ProjectStoreError::BadRequest("Person track sidecar must be an object".to_owned())
+        })?;
+        object.insert("corrections".to_owned(), Value::Array(normalized));
+        let status = object
+            .entry("status")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest("Person track status must be an object".to_owned())
+            })?;
+        status.insert(
+            "correctionState".to_owned(),
+            Value::String(
+                if has_corrections {
+                    "box_corrections_applied"
+                } else {
+                    "ready_for_box_corrections"
+                }
+                .to_owned(),
+            ),
+        );
+
+        write_json(&track_path, &track)?;
+        normalize_person_track(&project_path, &track_path)
+    }
+
     pub fn import_asset(&self, project_id: &str, upload: UploadAsset) -> ProjectStoreResult<Value> {
         if fs::metadata(&upload.source_path)?.len() == 0 {
             return Err(ProjectStoreError::BadRequest(
@@ -2096,6 +2171,109 @@ fn normalize_person_track(project_path: &Path, track_path: &Path) -> ProjectStor
     Ok(track)
 }
 
+/// Validate and canonicalize the incoming correction set for a person track.
+/// Each entry targets an in-range frame and carries a box adjustment, a
+/// rejection, or both; the server stamps author/createdAt/source. Entries that
+/// neither adjust a box nor reject the frame are dropped (a reset frame).
+/// Duplicate frame indices keep the last occurrence so the set is one entry per
+/// frame.
+fn normalize_person_track_corrections(
+    corrections: Vec<Value>,
+    frame_count: usize,
+) -> ProjectStoreResult<Vec<Value>> {
+    let created_at = utc_now();
+    let mut normalized: Vec<(u64, Value)> = Vec::with_capacity(corrections.len());
+    for correction in corrections {
+        let object = correction.as_object().ok_or_else(|| {
+            ProjectStoreError::BadRequest("Each correction must be an object".to_owned())
+        })?;
+        let frame_index = object
+            .get("frameIndex")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest(
+                    "Correction frameIndex must be a non-negative integer".to_owned(),
+                )
+            })?;
+        if frame_count == 0 || frame_index as usize >= frame_count {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Correction frameIndex {frame_index} is outside the track's {frame_count} frames"
+            )));
+        }
+        let rejected = object
+            .get("rejected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let box_value = match object.get("box") {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(validate_normalized_box(value)?),
+        };
+        if box_value.is_none() && !rejected {
+            continue;
+        }
+        let author = object
+            .get("author")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("ui")
+            .to_owned();
+        let source = object
+            .get("source")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("manual")
+            .to_owned();
+        let mut entry = serde_json::Map::new();
+        entry.insert("frameIndex".to_owned(), json!(frame_index));
+        if let Some(box_value) = box_value {
+            entry.insert("box".to_owned(), box_value);
+        }
+        entry.insert("rejected".to_owned(), Value::Bool(rejected));
+        entry.insert("author".to_owned(), Value::String(author));
+        entry.insert("source".to_owned(), Value::String(source));
+        entry.insert("createdAt".to_owned(), Value::String(created_at.clone()));
+        if let Some(slot) = normalized
+            .iter_mut()
+            .find(|(index, _)| *index == frame_index)
+        {
+            slot.1 = Value::Object(entry);
+        } else {
+            normalized.push((frame_index, Value::Object(entry)));
+        }
+    }
+    Ok(normalized.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Validate a normalized 0..1 bounding box and return a canonical copy holding
+/// only x/y/width/height as finite numbers in range with positive extent.
+fn validate_normalized_box(value: &Value) -> ProjectStoreResult<Value> {
+    let object = value.as_object().ok_or_else(|| {
+        ProjectStoreError::BadRequest("Correction box must be an object".to_owned())
+    })?;
+    let mut box_out = serde_json::Map::new();
+    for key in ["x", "y", "width", "height"] {
+        let component = object.get(key).and_then(Value::as_f64).ok_or_else(|| {
+            ProjectStoreError::BadRequest(format!("Correction box.{key} must be a number"))
+        })?;
+        if !component.is_finite() || !(0.0..=1.0).contains(&component) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Correction box.{key} must be between 0 and 1"
+            )));
+        }
+        box_out.insert(key.to_owned(), json!(component));
+    }
+    let width = box_out.get("width").and_then(Value::as_f64).unwrap_or(0.0);
+    let height = box_out.get("height").and_then(Value::as_f64).unwrap_or(0.0);
+    if width <= 0.0 || height <= 0.0 {
+        return Err(ProjectStoreError::BadRequest(
+            "Correction box must have positive width and height".to_owned(),
+        ));
+    }
+    Ok(Value::Object(box_out))
+}
+
 fn read_json(path: &Path) -> ProjectStoreResult<Value> {
     let payload = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&payload)?)
@@ -2431,6 +2609,89 @@ mod tests {
         assert_eq!(track["name"], "Hero");
         assert!(store.get_person_track(&project.id, "../track_1").is_err());
         assert!(store.get_person_track(&project.id, "track~1").is_err());
+    }
+
+    #[test]
+    fn person_track_corrections_persist_validate_and_clear() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Fixture").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        std::fs::write(
+            project_path.join("person-tracks/track_1.sceneworks.person-track.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "track_1",
+                "projectId": project.id,
+                "name": "Hero",
+                "createdAt": "2026-05-17T00:00:00Z",
+                "sourceAssetId": "asset-video",
+                "representativeFrameAssetId": "asset-frame",
+                "frames": [
+                    {"timestamp": 0.0, "box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.5}},
+                    {"timestamp": 0.5, "box": {"x": 0.3, "y": 0.1, "width": 0.2, "height": 0.5}}
+                ],
+                "corrections": [],
+                "status": {"correctionState": "ready_for_box_corrections"}
+            }))
+            .expect("json"),
+        )
+        .expect("track sidecar writes");
+
+        // A box adjustment and a rejection persist; the server stamps metadata and
+        // drops the trailing no-op entry (no box, not rejected) for frame 0.
+        let updated = store
+            .set_person_track_corrections(
+                &project.id,
+                "track_1",
+                vec![
+                    json!({"frameIndex": 0, "box": {"x": 0.5, "y": 0.2, "width": 0.25, "height": 0.4}, "author": "editor"}),
+                    json!({"frameIndex": 1, "rejected": true}),
+                    json!({"frameIndex": 0, "rejected": false}),
+                ],
+            )
+            .expect("corrections persist");
+        let corrections = updated["corrections"]
+            .as_array()
+            .expect("corrections array");
+        assert_eq!(corrections.len(), 2);
+        assert_eq!(corrections[0]["frameIndex"], 0);
+        assert_eq!(corrections[0]["box"]["x"], 0.5);
+        assert_eq!(corrections[0]["author"], "editor");
+        assert_eq!(corrections[0]["source"], "manual");
+        assert!(corrections[0]["createdAt"].is_string());
+        assert_eq!(corrections[1]["frameIndex"], 1);
+        assert_eq!(corrections[1]["rejected"], true);
+        assert_eq!(
+            updated["status"]["correctionState"],
+            "box_corrections_applied"
+        );
+
+        // Out-of-range frame indices and out-of-bounds boxes are rejected.
+        assert!(store
+            .set_person_track_corrections(
+                &project.id,
+                "track_1",
+                vec![json!({"frameIndex": 9, "rejected": true})]
+            )
+            .is_err());
+        assert!(store
+            .set_person_track_corrections(
+                &project.id,
+                "track_1",
+                vec![json!({"frameIndex": 0, "box": {"x": 1.5, "y": 0.0, "width": 0.2, "height": 0.2}})]
+            )
+            .is_err());
+
+        // Clearing corrections returns the track to the ready state.
+        let cleared = store
+            .set_person_track_corrections(&project.id, "track_1", vec![])
+            .expect("corrections clear");
+        assert!(cleared["corrections"].as_array().expect("array").is_empty());
+        assert_eq!(
+            cleared["status"]["correctionState"],
+            "ready_for_box_corrections"
+        );
     }
 
     #[test]

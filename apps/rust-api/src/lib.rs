@@ -618,6 +618,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             "/api/v1/projects/:project_id/person-tracks/:track_id",
             get(get_person_track),
         )
+        .route(
+            "/api/v1/projects/:project_id/person-tracks/:track_id/corrections",
+            post(save_person_track_corrections),
+        )
         .route("/api/v1/image/jobs", post(create_image_job))
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/models", get(list_models))
@@ -940,6 +944,17 @@ struct PersonTrackJobRequest {
     preview: bool,
     #[serde(default = "default_requested_gpu")]
     requested_gpu: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersonTrackCorrectionsRequest {
+    /// The UI's full correction set for the track. Each entry targets a frame by
+    /// index and adjusts its box and/or rejects the frame; the store validates
+    /// ranges and stamps author/createdAt/source. Kept as raw values so the
+    /// schema-flexible `corrections` array can evolve without an API change.
+    #[serde(default)]
+    corrections: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2318,6 +2333,19 @@ async fn get_person_track(
     Ok(Json(
         project_call(state, move |store| {
             store.get_person_track(&project_id, &track_id)
+        })
+        .await?,
+    ))
+}
+
+async fn save_person_track_corrections(
+    State(state): State<AppState>,
+    Path((project_id, track_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<PersonTrackCorrectionsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.set_person_track_corrections(&project_id, &track_id, payload.corrections)
         })
         .await?,
     ))

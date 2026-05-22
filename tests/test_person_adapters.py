@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageDraw
 
-from sceneworks_shared import index_asset, write_json
+from sceneworks_shared import index_asset, read_json, write_json
 from scene_worker import person_adapters as pa
 from scene_worker.person_adapters import (
     NormalizedBox,
@@ -394,6 +394,104 @@ def test_load_track_masks_prefers_segmentation_then_degrades(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Correction application (sc-1485): corrected boxes / rejected frames drive masks
+# ---------------------------------------------------------------------------
+
+
+def test_apply_track_corrections_overrides_box_and_clears_mask():
+    track = {
+        "frames": [
+            {"box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.3}, "mask": "person-tracks/t/masks/frame_000001.png", "detected": True},
+        ],
+        "corrections": [
+            {"frameIndex": 0, "box": {"x": 0.5, "y": 0.4, "width": 0.25, "height": 0.35}, "rejected": False, "author": "ui", "source": "manual"},
+        ],
+    }
+    frames = pa.apply_track_corrections(track)
+    assert frames[0]["box"] == {"x": 0.5, "y": 0.4, "width": 0.25, "height": 0.35}
+    # The corrected box no longer matches the stored segmentation mask, so it is
+    # cleared and regenerated as a box mask downstream.
+    assert frames[0]["mask"] is None
+    assert frames[0]["corrected"] is True
+
+
+def test_apply_track_corrections_replaces_rejected_frame_with_neighbor():
+    track = {
+        "frames": [
+            {"box": {"x": 0.10, "y": 0.1, "width": 0.2, "height": 0.5}, "mask": "m0", "detected": True},
+            {"box": {"x": 0.50, "y": 0.1, "width": 0.2, "height": 0.5}, "mask": "m1", "detected": True},
+            {"box": {"x": 0.80, "y": 0.1, "width": 0.2, "height": 0.5}, "mask": "m2", "detected": True},
+        ],
+        "corrections": [{"frameIndex": 1, "rejected": True, "author": "ui", "source": "manual"}],
+    }
+    frames = pa.apply_track_corrections(track)
+    # The rejected middle frame borrows the nearest accepted box and drops its
+    # stale mask; accepted neighbors keep their own geometry.
+    assert frames[1]["rejected"] is True
+    assert frames[1]["mask"] is None
+    assert frames[1]["box"] == {"x": 0.10, "y": 0.1, "width": 0.2, "height": 0.5}
+    assert frames[0]["box"]["x"] == 0.10
+    assert frames[2]["box"]["x"] == 0.80
+
+
+def test_apply_track_corrections_ignores_out_of_range_entries():
+    track = {
+        "frames": [{"box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.5}, "mask": None}],
+        "corrections": [
+            {"frameIndex": 7, "box": {"x": 0.3, "y": 0.3, "width": 0.2, "height": 0.2}},
+            {"frameIndex": "bad"},
+        ],
+    }
+    frames = pa.apply_track_corrections(track)
+    assert frames[0]["box"] == {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.5}
+    assert "corrected" not in frames[0]
+
+
+def test_load_track_masks_regenerates_box_mask_for_corrected_frame(tmp_path):
+    project_path = tmp_path / "project"
+    masks_dir = project_path / "person-tracks" / "track_c" / "masks"
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    rel = "person-tracks/track_c/masks/frame_000001.png"
+    Image.new("L", (64, 64), 255).save(project_path / rel)  # full-frame stored mask
+    track = {
+        "frames": [{"box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.5}, "mask": rel}],
+        "corrections": [{"frameIndex": 0, "box": {"x": 0.5, "y": 0.4, "width": 0.25, "height": 0.35}}],
+    }
+    masks, mode = pa.load_track_masks(project_path, track, 100, 100, 1)
+    # The only frame's box was corrected, invalidating its stored mask, so the
+    # whole set falls back to box masks regenerated from corrected geometry.
+    assert mode == "degraded_box"
+    bbox = masks[0].getbbox()
+    assert bbox is not None
+    left, top, right, bottom = bbox
+    # The box mask is anchored at the corrected box (~3% padding), not full-frame.
+    assert 40 < left and 30 < top
+    assert right < 80 and bottom < 80
+
+
+def test_load_track_masks_mixes_segmentation_and_corrected_box(tmp_path):
+    project_path = tmp_path / "project"
+    masks_dir = project_path / "person-tracks" / "track_m" / "masks"
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    rels = []
+    for index in range(2):
+        rel = f"person-tracks/track_m/masks/frame_{index + 1:06d}.png"
+        Image.new("L", (64, 64), 255).save(project_path / rel)
+        rels.append(rel)
+    track = {
+        "frames": [
+            {"box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.5}, "mask": rels[0]},
+            {"box": {"x": 0.6, "y": 0.1, "width": 0.2, "height": 0.5}, "mask": rels[1]},
+        ],
+        "corrections": [{"frameIndex": 0, "box": {"x": 0.4, "y": 0.4, "width": 0.2, "height": 0.2}}],
+    }
+    masks, mode = pa.load_track_masks(project_path, track, 64, 64, 2)
+    # Frame 0 regenerates a box mask; frame 1 keeps its stored segmentation mask.
+    assert mode == "mixed"
+    assert len(masks) == 2
+
+
+# ---------------------------------------------------------------------------
 # Active LTX masked-control replacement tests (sc-1483 / sc-1486)
 # ---------------------------------------------------------------------------
 
@@ -532,6 +630,47 @@ def test_ltx_replacement_control_builds_segmentation_package(tmp_path):
     assert control.character_reference_count == 1
     assert control.person_tracking_active is True
     assert clip_path.exists()
+    # A track with no corrections must not claim it used any.
+    assert control.used_corrections is False
+    assert control.correction_count == 0
+
+
+def _add_track_corrections(project_path: Path, track_id: str, corrections: list[dict]) -> None:
+    track_path = project_path / "person-tracks" / f"{track_id}.sceneworks.person-track.json"
+    track = read_json(track_path)
+    track["corrections"] = corrections
+    write_json(track_path, track)
+
+
+def test_ltx_replacement_records_used_corrections(tmp_path):
+    settings = _seed_replacement_project(tmp_path, with_masks=True)
+    project_path = Path(settings.data_dir) / "project"
+    _add_track_corrections(
+        project_path,
+        "track_repl",
+        [
+            {
+                "frameIndex": 0,
+                "box": {"x": 0.25, "y": 0.2, "width": 0.2, "height": 0.55},
+                "rejected": False,
+                "author": "ui",
+                "source": "manual",
+                "createdAt": "2026-05-21T00:00:00Z",
+            }
+        ],
+    )
+    adapter = LtxPipelinesVideoAdapter()
+    adapter._settings = settings
+    request = video_request_from_job(_replacement_job(settings))
+    clip_path = project_path / "cache" / "control.webp"
+    clip_path.parent.mkdir(parents=True, exist_ok=True)
+    control = adapter._ltx_replacement_control(project_path, request, 9, clip_path)
+    # The replacement package records that corrected geometry drove it (sc-1485).
+    assert control.used_corrections is True
+    assert control.correction_count == 1
+    # Frame 0's corrected box regenerates a box mask while the rest keep stored
+    # segmentation masks, so the package mixes both sources.
+    assert control.mask_mode == "mixed"
 
 
 def test_ltx_replace_person_active_run_marks_replacement_active(tmp_path, monkeypatch):

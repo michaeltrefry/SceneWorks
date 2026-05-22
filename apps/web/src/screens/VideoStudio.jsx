@@ -77,6 +77,7 @@ export function VideoStudio({
   personReadiness = {},
   presets = [],
   requestedGpu,
+  saveTrackCorrections,
   selectedAsset,
   setRequestedGpu,
   updateAssetStatus,
@@ -562,6 +563,7 @@ export function VideoStudio({
                 personTrackId={personTrackId}
                 replacementMode={replacementMode}
                 representativeFrame={representativeFrame}
+                saveTrackCorrections={saveTrackCorrections}
                 selectedDetection={selectedDetection}
                 selectedTrack={selectedTrack}
                 setPersonTrackId={setPersonTrackId}

@@ -2097,9 +2097,59 @@
     "updatedAt": "<timestamp>",
     "workerId": null
   },
-  "person track detail response": {
+  "person track corrections response": {
+    "corrections": [
+      {
+        "author": "ui",
+        "box": {
+          "height": 0.62,
+          "width": 0.21,
+          "x": 0.32,
+          "y": 0.18
+        },
+        "createdAt": "<timestamp>",
+        "frameIndex": 0,
+        "rejected": false,
+        "source": "manual"
+      },
+      {
+        "author": "ui",
+        "createdAt": "<timestamp>",
+        "frameIndex": 1,
+        "rejected": true,
+        "source": "manual"
+      }
+    ],
     "createdAt": "<timestamp>",
-    "frames": [],
+    "frames": [
+      {
+        "box": {
+          "height": 0.6,
+          "width": 0.2,
+          "x": 0.3,
+          "y": 0.2
+        },
+        "confidence": 0.91,
+        "detected": true,
+        "mask": null,
+        "timestamp": 0.0
+      },
+      {
+        "box": {
+          "height": 0.6,
+          "width": 0.2,
+          "x": 0.34,
+          "y": 0.2
+        },
+        "confidence": 0.42,
+        "detected": true,
+        "flags": [
+          "low_confidence"
+        ],
+        "mask": null,
+        "timestamp": 0.5
+      }
+    ],
     "id": "track_fixture",
     "name": "Hero",
     "path": "person-tracks/track_fixture.sceneworks.person-track.json",
@@ -2107,7 +2157,52 @@
     "representativeFrameAssetId": "asset-frame",
     "schemaVersion": 1,
     "sourceAssetId": "asset-video",
-    "status": {}
+    "status": {
+      "correctionState": "box_corrections_applied"
+    }
+  },
+  "person track detail response": {
+    "corrections": [],
+    "createdAt": "<timestamp>",
+    "frames": [
+      {
+        "box": {
+          "height": 0.6,
+          "width": 0.2,
+          "x": 0.3,
+          "y": 0.2
+        },
+        "confidence": 0.91,
+        "detected": true,
+        "mask": null,
+        "timestamp": 0.0
+      },
+      {
+        "box": {
+          "height": 0.6,
+          "width": 0.2,
+          "x": 0.34,
+          "y": 0.2
+        },
+        "confidence": 0.42,
+        "detected": true,
+        "flags": [
+          "low_confidence"
+        ],
+        "mask": null,
+        "timestamp": 0.5
+      }
+    ],
+    "id": "track_fixture",
+    "name": "Hero",
+    "path": "person-tracks/track_fixture.sceneworks.person-track.json",
+    "projectId": "project_fixture",
+    "representativeFrameAssetId": "asset-frame",
+    "schemaVersion": 1,
+    "sourceAssetId": "asset-video",
+    "status": {
+      "correctionState": "ready_for_box_corrections"
+    }
   },
   "person track job response": {
     "assignedGpu": null,
@@ -2153,8 +2248,37 @@
   },
   "person track list response": [
     {
+      "corrections": [],
       "createdAt": "<timestamp>",
-      "frames": [],
+      "frames": [
+        {
+          "box": {
+            "height": 0.6,
+            "width": 0.2,
+            "x": 0.3,
+            "y": 0.2
+          },
+          "confidence": 0.91,
+          "detected": true,
+          "mask": null,
+          "timestamp": 0.0
+        },
+        {
+          "box": {
+            "height": 0.6,
+            "width": 0.2,
+            "x": 0.34,
+            "y": 0.2
+          },
+          "confidence": 0.42,
+          "detected": true,
+          "flags": [
+            "low_confidence"
+          ],
+          "mask": null,
+          "timestamp": 0.5
+        }
+      ],
       "id": "track_fixture",
       "name": "Hero",
       "path": "person-tracks/track_fixture.sceneworks.person-track.json",
@@ -2162,7 +2286,9 @@
       "representativeFrameAssetId": "asset-frame",
       "schemaVersion": 1,
       "sourceAssetId": "asset-video",
-      "status": {}
+      "status": {
+        "correctionState": "ready_for_box_corrections"
+      }
     }
   ],
   "project create response": {

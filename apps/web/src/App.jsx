@@ -1495,6 +1495,29 @@ export function App() {
     }
   }
 
+  async function saveTrackCorrections(trackId, corrections) {
+    if (!activeProject) {
+      setError("Create or open a project first.");
+      return null;
+    }
+    try {
+      const track = await apiFetch(
+        `/api/v1/projects/${activeProject.id}/person-tracks/${trackId}/corrections`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({ corrections }),
+        },
+      );
+      setPersonTracks((items) => items.map((item) => (item.id === track.id ? track : item)));
+      setError("");
+      return track;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
   function sendCharacterToImage(character, lookId = null) {
     if (!character) {
       return;
@@ -1940,6 +1963,7 @@ export function App() {
             personReadiness={personReadiness}
             presets={presets}
             requestedGpu={requestedGpu}
+            saveTrackCorrections={saveTrackCorrections}
             selectedAsset={selectedAsset}
             setRequestedGpu={setRequestedGpu}
             updateAssetStatus={updateAssetStatus}

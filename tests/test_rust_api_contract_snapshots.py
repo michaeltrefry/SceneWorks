@@ -482,8 +482,25 @@ def write_person_track_sidecar(runtime: ContractRuntime) -> None:
                 "createdAt": "2026-05-17T00:00:00Z",
                 "sourceAssetId": "asset-video",
                 "representativeFrameAssetId": "asset-frame",
-                "frames": [],
-                "status": {},
+                "frames": [
+                    {
+                        "timestamp": 0.0,
+                        "box": {"x": 0.3, "y": 0.2, "width": 0.2, "height": 0.6},
+                        "confidence": 0.91,
+                        "detected": True,
+                        "mask": None,
+                    },
+                    {
+                        "timestamp": 0.5,
+                        "box": {"x": 0.34, "y": 0.2, "width": 0.2, "height": 0.6},
+                        "confidence": 0.42,
+                        "detected": True,
+                        "mask": None,
+                        "flags": ["low_confidence"],
+                    },
+                ],
+                "corrections": [],
+                "status": {"correctionState": "ready_for_box_corrections"},
             },
             indent=2,
         )
@@ -1310,6 +1327,26 @@ def test_person_tracking_and_replace_person_contracts(contract_runtimes):
         for runtime in contract_runtimes
     ]
     assert_response_contract("person track detail response", baseline_runtime, candidate_runtime, track_details[0], track_details[1], expected_status=200, snapshot=True)
+
+    correction_responses = [
+        runtime.request(
+            "POST",
+            f"/api/v1/projects/{runtime.project_id}/person-tracks/track_fixture/corrections",
+            json_payload={
+                "corrections": [
+                    {
+                        "frameIndex": 0,
+                        "box": {"x": 0.32, "y": 0.18, "width": 0.21, "height": 0.62},
+                        "author": "ui",
+                        "source": "manual",
+                    },
+                    {"frameIndex": 1, "rejected": True},
+                ]
+            },
+        )
+        for runtime in contract_runtimes
+    ]
+    assert_response_contract("person track corrections response", baseline_runtime, candidate_runtime, correction_responses[0], correction_responses[1], expected_status=200, snapshot=True)
 
     detection_jobs = [
         runtime.request(

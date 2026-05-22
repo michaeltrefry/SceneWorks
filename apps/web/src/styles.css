@@ -4163,6 +4163,89 @@ label {
   color: var(--text);
 }
 
+.person-box.rejected {
+  border-color: var(--danger, #d4534e);
+  border-style: dashed;
+  background: color-mix(in oklch, var(--danger, #d4534e) 20%, transparent);
+}
+
+.person-track-corrections {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+
+.person-correction-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.person-correction-header span {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.person-track-mask-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.4;
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+
+.person-correction-scrubber {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.person-correction-scrubber input[type="range"] {
+  flex: 1;
+}
+
+.person-correction-scrubber button {
+  min-width: 34px;
+}
+
+.person-correction-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.person-correction-flag {
+  padding: 2px 8px;
+  border-radius: var(--r-xs);
+  font-size: 0.72rem;
+  background: color-mix(in oklch, var(--warm) 22%, transparent);
+  color: var(--text);
+}
+
+.person-correction-box {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.person-correction-reject {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.person-correction-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .comparison-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

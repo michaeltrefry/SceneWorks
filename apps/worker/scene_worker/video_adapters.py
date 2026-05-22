@@ -180,6 +180,8 @@ class LtxReplacementControl:
     masking_strength: float
     frame_count: int
     character_reference_count: int
+    used_corrections: bool = False
+    correction_count: int = 0
 
 
 def install_ltx_pipelines_multigpu_compat() -> None:
@@ -697,6 +699,10 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 "personTrackId": replacement_control.track_id,
                 "characterReferenceCount": replacement_control.character_reference_count,
                 "controlFrameCount": replacement_control.frame_count,
+                # Record that corrected boxes/masks drove this replacement so the
+                # asset sidecar proves the correction UI fed the render (sc-1485).
+                "usedCorrections": replacement_control.used_corrections,
+                "correctionCount": replacement_control.correction_count,
             }
 
         generation_set = {
@@ -850,6 +856,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         ]
         self._write_control_clip(masked_frames, clip_path, request.fps)
         status = track.get("status", {}) if isinstance(track.get("status"), dict) else {}
+        corrections = track.get("corrections") or []
         return LtxReplacementControl(
             track_id=str(track.get("id") or request.person_track_id),
             masked_clip_path=clip_path,
@@ -859,6 +866,8 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             masking_strength=masking_strength,
             frame_count=len(masked_frames),
             character_reference_count=len(references),
+            used_corrections=bool(corrections),
+            correction_count=len(corrections) if isinstance(corrections, list) else 0,
         )
 
     def _write_control_clip(self, frames: list[Image.Image], path: Path, fps: int) -> None:
