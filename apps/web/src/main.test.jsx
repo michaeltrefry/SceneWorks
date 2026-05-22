@@ -2420,6 +2420,51 @@ describe("SceneWorks app shell", () => {
     expect(loraRequests.some((url) => url.search === "?projectId=project-1")).toBe(true);
   });
 
+  it("refreshes the project LoRA overlay when LoRA training completes", async () => {
+    global.fetch.mockImplementation((url) => {
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    global.fetch.mockClear();
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "train-job-1",
+          type: "lora_train",
+          status: "completed",
+          projectId: "project-1",
+          payload: { dryRun: false, outputName: "Portrait Set LoRA" },
+          result: { loraRegistered: true, loraId: "lora_portrait_set" },
+        }),
+      });
+    });
+    await settle();
+    await settle();
+
+    const loraRequests = global.fetch.mock.calls
+      .map(([url]) => new URL(url))
+      .filter((url) => url.pathname.endsWith("/loras"));
+    expect(loraRequests.some((url) => url.search === "")).toBe(true);
+    expect(loraRequests.some((url) => url.search === "?projectId=project-1")).toBe(true);
+  });
+
   it("shows the global banner for failed LoRA imports on the Models page", async () => {
     global.fetch.mockImplementation((url) => {
       const path = new URL(url).pathname;

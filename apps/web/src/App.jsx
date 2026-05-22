@@ -60,6 +60,10 @@ function isLoraImportNotice(message) {
   return String(message ?? "").startsWith("lora import: ");
 }
 
+function isLoraTrainingNotice(message) {
+  return String(message ?? "").startsWith("lora training: ");
+}
+
 function jobFreshnessMs(job) {
   const timestamp = job?.updatedAt ?? job?.completedAt ?? job?.canceledAt ?? job?.startedAt ?? job?.createdAt;
   const parsed = Date.parse(timestamp ?? "");
@@ -635,6 +639,14 @@ export function App() {
       if (job.status === "completed" && job.type === "lora_import") {
         setError((current) => (isLoraImportNotice(current) ? "" : current));
         refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
+      }
+      if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
+        if (job.result?.loraRegistered === false) {
+          setError(`lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
+        } else {
+          setError((current) => (isLoraTrainingNotice(current) ? "" : current));
+          refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
+        }
       }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
         setError(failedJobNotice(job));
