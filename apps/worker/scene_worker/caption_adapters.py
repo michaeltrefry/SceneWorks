@@ -165,7 +165,9 @@ class JoyCaptioner:
         self.torch = torch
         self.device = select_torch_device(torch, self.gpu_id)
         self.torch_dtype = select_torch_dtype(torch, self.device, None)
-        self.processor = AutoProcessor.from_pretrained(self.model_name_or_path, use_fast=False)
+        # JoyCaption's tokenizer expects the fast processor path; the slow
+        # conversion can route tokenizer config booleans into text encoders.
+        self.processor = AutoProcessor.from_pretrained(self.model_name_or_path, use_fast=True)
         normalize_processor_resample(self.processor)
         self.tokenizer = self.processor.tokenizer
         self.model = LlavaForConditionalGeneration.from_pretrained(
