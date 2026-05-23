@@ -166,6 +166,13 @@ export function ImageStudio({
       installedPath: lora.installedPath ?? null,
       sourcePath: lora.sourcePath ?? null,
       source: lora.source ?? null,
+      // `installedPath` points at the LoRA directory; for trained LoRAs that
+      // directory also holds step checkpoints, so the worker must be told the
+      // exact adapter file. Forward the manifest's declared `files`/`file` —
+      // without them the worker falls back to the first .safetensors on disk and
+      // can load an early checkpoint instead of the final adapter.
+      files: lora.files ?? null,
+      file: lora.file ?? null,
       presetManaged: Boolean(lora.presetManaged),
     };
   }

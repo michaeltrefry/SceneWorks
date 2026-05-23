@@ -315,12 +315,30 @@ def path_stem(path: Path | None) -> str | None:
     return path.stem if path else None
 
 
+# SceneWorks training writes per-step checkpoints (`<stem>-step000250.safetensors`)
+# next to the final adapter. Recognize them so the fallback never auto-selects a
+# checkpoint over the final weights.
+_LORA_CHECKPOINT_RE = re.compile(r"-step\d{6}\.safetensors$", re.IGNORECASE)
+
+
 def first_safetensors_path(path: Path) -> Path | None:
     if path.is_file() and path.suffix.lower() == ".safetensors":
         return path
     if not path.is_dir():
         return None
-    return next((candidate for candidate in path.rglob("*.safetensors") if candidate.is_file()), None)
+    candidates = sorted(
+        (candidate for candidate in path.rglob("*.safetensors") if candidate.is_file()),
+        key=lambda candidate: candidate.as_posix(),
+    )
+    if not candidates:
+        return None
+    # Prefer a non-checkpoint adapter; the name-sorted first file is the *earliest*
+    # (least-trained) checkpoint, which is exactly the wrong one to load. If only
+    # checkpoints exist, fall back to the highest step (most-trained).
+    finals = [candidate for candidate in candidates if not _LORA_CHECKPOINT_RE.search(candidate.name)]
+    if finals:
+        return finals[0]
+    return max(candidates, key=lambda candidate: candidate.name)
 
 
 def lora_weight(lora: dict[str, Any]) -> float:

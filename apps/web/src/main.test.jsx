@@ -4122,7 +4122,7 @@ describe("SceneWorks app shell", () => {
           loras={[
             { id: "built_in", name: "Built In", family: "z-image", scope: "builtin", defaultWeight: 0.6 },
             { id: "global_style", name: "Global Style", family: "z-image", scope: "global" },
-            { id: "project_mira", name: "Project Mira", family: "z-image", scope: "project" },
+            { id: "project_mira", name: "Project Mira", family: "z-image", scope: "project", files: ["mira.safetensors"] },
             { id: "third_user", name: "Third User", family: "z-image", scope: "global" },
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
             { id: "missing_lora", name: "Missing LoRA", family: "z-image", scope: "global", installState: "missing" },
@@ -4171,7 +4171,7 @@ describe("SceneWorks app shell", () => {
         loras: [
           expect.objectContaining({ id: "built_in", scope: "builtin", weight: 0.6 }),
           expect.objectContaining({ id: "global_style", scope: "global" }),
-          expect.objectContaining({ id: "project_mira", scope: "project" }),
+          expect.objectContaining({ id: "project_mira", scope: "project", files: ["mira.safetensors"] }),
         ],
       }),
     );

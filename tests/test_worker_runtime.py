@@ -40,10 +40,12 @@ from scene_worker.image_adapters import (
 )
 from scene_worker.lora_adapters import (
     apply_loras_to_pipeline,
+    first_safetensors_path,
     lora_cache_key,
     lora_weight,
     normalize_lora_specs,
     reject_loras_if_unsupported,
+    resolve_lora_file,
     validate_lora_compatibility,
 )
 from scene_worker.runtime import (
@@ -504,6 +506,33 @@ def test_lora_cache_key_is_stable_for_reordered_loras(tmp_path):
     key = lora_cache_key(left)
     assert key == lora_cache_key(right)
     assert len(key) == 64
+
+
+def test_first_safetensors_path_prefers_final_over_step_checkpoints(tmp_path):
+    # A trained-LoRA directory holds the final adapter plus per-step checkpoints.
+    for step in (250, 500, 3000):
+        (tmp_path / f"kelsie_lora-step{step:06d}.safetensors").write_bytes(b"ckpt")
+    final = tmp_path / "kelsie_lora.safetensors"
+    final.write_bytes(b"final")
+
+    assert first_safetensors_path(tmp_path) == final
+
+
+def test_first_safetensors_path_picks_latest_checkpoint_when_no_final(tmp_path):
+    for step in (250, 500, 3000):
+        (tmp_path / f"kelsie_lora-step{step:06d}.safetensors").write_bytes(b"ckpt")
+
+    assert first_safetensors_path(tmp_path) == tmp_path / "kelsie_lora-step003000.safetensors"
+
+
+def test_resolve_lora_file_uses_declared_files_over_checkpoints(tmp_path):
+    (tmp_path / "kelsie_lora-step000250.safetensors").write_bytes(b"ckpt")
+    final = tmp_path / "kelsie_lora.safetensors"
+    final.write_bytes(b"final")
+
+    resolved = resolve_lora_file(tmp_path, {"files": ["kelsie_lora.safetensors"]})
+
+    assert resolved == final
 
 
 def test_lora_loader_allows_single_implicit_weight_without_set_adapters(tmp_path):
