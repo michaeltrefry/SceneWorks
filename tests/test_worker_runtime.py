@@ -961,30 +961,9 @@ def test_sensenova_u1_model_target_defaults():
 
 
 def test_sensenova_u1_edit_support():
-    # The base unified model edits; the distill (fast) variant is text-to-image only.
+    # Both the base unified model and the distilled fast variant support editing.
     assert model_supports_edit("sensenova_u1_8b") is True
-    assert model_supports_edit("sensenova_u1_8b_fast") is False
-
-
-def test_sensenova_u1_fast_rejects_image_edit():
-    # The worker guard backstops the capability list: the fast variant must reject
-    # edit jobs before any model load (it doesn't advertise edit_image).
-    job = {
-        "id": "job_sensenova_fast_edit",
-        "payload": {
-            "projectId": "project_x",
-            "mode": "edit_image",
-            "model": "sensenova_u1_8b_fast",
-            "prompt": "a cat",
-        },
-    }
-    noop = lambda *args, **kwargs: None  # noqa: E731
-    try:
-        SenseNovaU1Adapter().generate(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
-    except RuntimeError as exc:
-        assert "does not support image editing" in str(exc)
-    else:
-        raise AssertionError("The SenseNova-U1 fast variant must reject edit_image.")
+    assert model_supports_edit("sensenova_u1_8b_fast") is True
 
 
 def test_sensenova_resolution_for_snaps_to_buckets():
@@ -1026,6 +1005,8 @@ def test_sensenova_u1_fast_model_target_defaults():
     # 8-step distill LoRA: shares the base weights, cfg 1.0 / 8 steps.
     assert target["steps"] == 8
     assert target["guidanceScale"] == 1.0
+    # Distilled editing (it2i) reuses the same variant + distill LoRA.
+    assert target["supportsEdit"] is True
     assert target["repo"] == "sensenova/SenseNova-U1-8B-MoT"
     assert target["distillLora"] == {
         "repo": "sensenova/SenseNova-U1-8B-MoT-LoRAs",

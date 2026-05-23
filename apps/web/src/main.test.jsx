@@ -4683,6 +4683,14 @@ describe("SceneWorks app shell", () => {
               capabilities: ["text_to_image", "edit_image"],
               limits: { resolutions: ["2048x2048"] },
             },
+            {
+              id: "sensenova_u1_8b_fast",
+              name: "SenseNova-U1 8B Fast",
+              type: "image",
+              family: "sensenova-u1",
+              capabilities: ["text_to_image", "edit_image"],
+              limits: { resolutions: ["2048x2048"] },
+            },
           ]}
           latestAssets={[]}
           loras={[]}
@@ -4705,6 +4713,8 @@ describe("SceneWorks app shell", () => {
 
     const modelValues = [...field(container, "Model").querySelectorAll("option")].map((option) => option.value);
     expect(modelValues).toContain("sensenova_u1_8b");
+    // The distilled fast variant also edits, so it appears in the edit picker.
+    expect(modelValues).toContain("sensenova_u1_8b_fast");
     // The text-to-image-only model is filtered out of the edit-mode picker.
     expect(modelValues).not.toContain("z_image_turbo");
     // The selected model resets to an edit-capable one, so Generate doesn't submit

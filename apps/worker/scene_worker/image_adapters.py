@@ -254,7 +254,8 @@ MODEL_TARGETS = {
     "sensenova_u1_8b_fast": {
         "label": "SenseNova-U1 8B Fast",
         "family": "sensenova-u1",
-        "supportsEdit": False,
+        # Distilled editing (it2i) at 8 steps; the it2i path merges the same LoRA.
+        "supportsEdit": True,
         # 8-step distill LoRA (cfg 1.0): shares the base weights, ~5-6x faster.
         "steps": 8,
         "guidanceScale": 1.0,

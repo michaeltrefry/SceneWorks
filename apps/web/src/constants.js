@@ -49,9 +49,9 @@ export const fallbackModels = [
     id: "sensenova_u1_8b_fast",
     name: "SenseNova-U1 8B Fast",
     type: "image",
-    capabilities: ["text_to_image"],
+    capabilities: ["text_to_image", "edit_image"],
     limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
-    ui: { description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image (~50s/image on MPS) at a small quality trade-off. Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically." },
+    ui: { description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image and editing (~50s/image on MPS) at a small quality trade-off. Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality edits." },
   },
   {
     id: "ltx_2_3",
