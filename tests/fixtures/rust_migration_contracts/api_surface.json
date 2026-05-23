@@ -24,6 +24,7 @@
     { "family": "system", "path": "/api/v1/auth/verify", "methods": ["POST"], "usedBy": ["web"] },
     { "family": "system", "path": "/api/v1/health", "methods": ["GET"], "usedBy": ["web"] },
     { "family": "image", "path": "/api/v1/image/jobs", "methods": ["POST"], "usedBy": ["web"] },
+    { "family": "image", "path": "/api/v1/image/vqa/jobs", "methods": ["POST"], "usedBy": ["web"] },
     { "family": "jobs", "path": "/api/v1/jobs", "methods": ["GET", "POST"], "usedBy": ["web", "worker"] },
     { "family": "jobs", "path": "/api/v1/jobs/claim", "methods": ["POST"], "usedBy": ["worker"] },
     { "family": "jobs", "path": "/api/v1/jobs/events", "methods": ["GET"], "usedBy": ["web"] },

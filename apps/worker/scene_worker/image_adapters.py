@@ -1629,6 +1629,114 @@ class SenseNovaU1Adapter:
             )
         return self._to_pil(torch, tensor)[0]
 
+    def answer_question(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        """Visual question answering (VQA): a text answer about a source image.
+
+        Reuses the cached base model (the understanding side) via the model's
+        ``chat`` path. Output is text, not an image asset, so this does not go
+        through ImageAssetWriter — the answer is returned in the job result.
+        """
+        payload = job["payload"]
+        project_id = payload["projectId"]
+        source_asset_id = payload.get("sourceAssetId")
+        question = str(payload.get("question") or "").strip()
+        if not question:
+            raise RuntimeError("Visual question answering requires a question.")
+        model_id = payload.get("model", "sensenova_u1_8b")
+        model_target = MODEL_TARGETS.get(model_id, MODEL_TARGETS["sensenova_u1_8b"])
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{model_id} is not a SenseNova-U1 target.")
+        advanced = payload.get("advanced", {}) if isinstance(payload.get("advanced"), dict) else {}
+        max_new_tokens = safe_int(payload.get("maxNewTokens"), 512, 16, 2048)
+
+        torch = importlib.import_module("torch")
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, advanced.get("dtype"))
+        repo = advanced.get("modelRepo") or model_target["repo"]
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
+        # VQA uses the base understanding path — never the distilled generation LoRA.
+        model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=None, job_id=job["id"])
+        self._loaded_model = model_id
+
+        source_path = self._resolve_source_path(settings, project_id, source_asset_id, advanced.get("sourceImagePath"))
+        try:
+            image = Image.open(source_path).convert("RGB")
+        except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+            raise RuntimeError(f"Source image could not be loaded safely: {source_path}") from exc
+
+        if cancel_requested():
+            raise InterruptedError("Visual question answering canceled by user.")
+        progress("running", "generating", 0.6, "Analyzing image.")
+        emit_worker_event(
+            "image_vqa_start",
+            jobId=job["id"],
+            adapter=self.id,
+            model=model_id,
+            sourceAssetId=source_asset_id,
+            device=device,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+        answer = self._run_vqa(torch, model, tokenizer, image, question, device, max_new_tokens)
+        emit_worker_event(
+            "image_vqa_complete",
+            jobId=job["id"],
+            adapter=self.id,
+            answerChars=len(answer),
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+        return {
+            "answer": answer,
+            "question": question,
+            "sourceAssetId": source_asset_id,
+            "model": model_id,
+            "realModelInference": True,
+        }
+
+    def _resolve_source_path(
+        self,
+        settings: WorkerSettings,
+        project_id: str,
+        source_asset_id: str | None,
+        source_image_path: str | None,
+    ) -> str:
+        if source_image_path:
+            return str(source_image_path)
+        if not source_asset_id:
+            raise RuntimeError("Visual question answering requires a source image asset.")
+        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        return str(find_asset_media_path(project_path, source_asset_id))
+
+    def _run_vqa(
+        self,
+        torch: Any,
+        model: Any,
+        tokenizer: Any,
+        image: Image.Image,
+        question: str,
+        device: str,
+        max_new_tokens: int,
+    ) -> str:
+        self._ensure_vendor_on_path()
+        from sensenova_u1.models.neo_unify.utils import load_image_native
+
+        pixel_values, grid_hw = load_image_native(image)
+        pixel_values = pixel_values.to(device, dtype=model.dtype)
+        grid_hw = grid_hw.to(device)
+        generation_config = {"max_new_tokens": int(max_new_tokens), "do_sample": False}
+        with torch.inference_mode():
+            response = model.chat(tokenizer, pixel_values, question, generation_config, grid_hw=grid_hw)
+        return str(response).strip()
+
     def _to_pil(self, torch: Any, batch: Any) -> list[Image.Image]:
         import numpy as np
 

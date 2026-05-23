@@ -231,7 +231,7 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         ("image", "z-image") => vec!["text_to_image", "character_image", "style_variations"],
         ("image", "qwen-image") => vec!["text_to_image", "style_variations"],
         ("image", "lens") => vec!["text_to_image", "style_variations"],
-        ("image", "sensenova-u1") => vec!["text_to_image", "edit_image"],
+        ("image", "sensenova-u1") => vec!["text_to_image", "edit_image", "vqa"],
         ("video", "ltx-video") => vec![
             "image_to_video",
             "text_to_video",

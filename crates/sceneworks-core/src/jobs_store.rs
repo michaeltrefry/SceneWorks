@@ -1476,6 +1476,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
         job_type,
         JobType::ImageGenerate
             | JobType::ImageEdit
+            | JobType::ImageVqa
             | JobType::VideoGenerate
             | JobType::VideoExtend
             | JobType::VideoBridge

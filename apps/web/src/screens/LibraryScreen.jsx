@@ -1,9 +1,13 @@
 import React, { useState } from "react";
 import { AssetDetail, AssetGrid } from "../components/assetPanels.jsx";
+import { terminalStatuses } from "../constants.js";
 
 export function LibraryScreen({
   activeProject,
   assets,
+  jobs = [],
+  imageModels = [],
+  createVqaJob,
   deleteAsset,
   purgeAsset,
   importAsset,
@@ -15,6 +19,18 @@ export function LibraryScreen({
   setSelectedAssetId,
   updateAssetStatus,
 }) {
+  const vqaEnabled = Boolean(createVqaJob) && imageModels.some((model) => (model.capabilities ?? []).includes("vqa"));
+  const assetVqaJobs = selectedAsset
+    ? jobs.filter((job) => job.type === "image_vqa" && job.payload?.sourceAssetId === selectedAsset.id)
+    : [];
+  const vqaEntries = assetVqaJobs
+    .filter((job) => job.status === "completed" && job.result?.answer)
+    .map((job) => ({
+      jobId: job.id,
+      question: job.result?.question ?? job.payload?.question ?? "",
+      answer: job.result.answer,
+    }));
+  const vqaPending = assetVqaJobs.some((job) => !terminalStatuses.has(job.status));
   const [typeFilter, setTypeFilter] = useState("all");
   const [showRejected, setShowRejected] = useState(false);
   const [showTrashed, setShowTrashed] = useState(false);
@@ -114,6 +130,10 @@ export function LibraryScreen({
           onSendVideo={onSendVideo}
           onSendEditor={onSendEditor}
           updateAssetStatus={updateAssetStatus}
+          vqaEnabled={vqaEnabled}
+          vqaEntries={vqaEntries}
+          vqaPending={vqaPending}
+          createVqaJob={createVqaJob}
         />
       </div>
     </section>

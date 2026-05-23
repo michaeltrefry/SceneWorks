@@ -64,6 +64,10 @@ SUPPORTED_JOB_TYPES = IMAGE_JOB_TYPES + VIDEO_JOB_TYPES
 TRAINING_JOB_TYPES = ("lora_train",)
 TRAINING_EXECUTE_CAPABILITIES = ("lora_train_execute",)
 CAPTION_JOB_TYPES = ("training_caption",)
+# Visual question answering: text output (not an image asset), GPU-required like
+# generation. Keep in sync with crates/sceneworks-core/src/contracts.rs::JobType /
+# WorkerCapability, jobs_store::job_requires_gpu, and QueueScreen gpuRequiredJobTypes.
+VQA_JOB_TYPES = ("image_vqa",)
 
 
 def now() -> str:
@@ -103,6 +107,7 @@ def worker_capabilities(gpu: dict) -> list[str]:
         if torch_inference_backend_available():
             capabilities |= set(SUPPORTED_JOB_TYPES)
             capabilities |= set(CAPTION_JOB_TYPES)
+            capabilities |= set(VQA_JOB_TYPES)
             # Only a backend-capable worker advertises real training execution, so
             # the queue won't route a dryRun:false job to a worker that can't train.
             capabilities |= set(TRAINING_EXECUTE_CAPABILITIES)
@@ -500,6 +505,63 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
                 "message": message,
                 "error": error,
             },
+        )
+    finally:
+        heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
+        if needs_oom_restart:
+            restart_worker_after_oom(settings, job_id)
+
+
+def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict[str, object]) -> None:
+    job_id = job["id"]
+    adapter = image_adapters["sensenova_u1"]
+    needs_oom_restart = False
+
+    def adapter_loaded_models() -> list[str]:
+        return loaded_models_from_adapter(adapter, job_id=job_id)
+
+    def progress(status: str, stage: str, value: float, message: str, result: dict[str, Any] | None = None) -> None:
+        heartbeat_with_loaded_models(api, settings, "busy", job_id, adapter_loaded_models)
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        if result is not None:
+            payload["result"] = result
+        update_job(api, job_id, payload)
+
+    try:
+        progress("preparing", "preparing", 0.08, "Preparing visual question.")
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda: adapter.answer_question(
+                settings=settings,
+                job=job,
+                progress=progress,
+                cancel_requested=lambda: job_cancel_requested(api, job_id),
+            ),
+            loaded_models=adapter_loaded_models,
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Answer ready.",
+                "result": result,
+            },
+        )
+    except InterruptedError as exc:
+        update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
+    except Exception as exc:
+        needs_oom_restart = is_cuda_oom(exc)
+        message, error = friendly_failure("Visual question answering", exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
         )
     finally:
         heartbeat(api, settings, "idle", loaded_models=loaded_models_from_adapters(image_adapters))
@@ -922,6 +984,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
             emit({"event": "claimed", "jobId": job["id"], "gpuId": job["assignedGpu"], "reportedAt": now()})
             if job["type"] in IMAGE_JOB_TYPES:
                 run_image_job(api, settings, job, image_adapters)
+            elif job["type"] in VQA_JOB_TYPES:
+                run_vqa_job(api, settings, job, image_adapters)
             elif job["type"] in VIDEO_JOB_TYPES:
                 run_video_job(api, settings, job)
             elif job["type"] in PERSON_JOB_TYPES:

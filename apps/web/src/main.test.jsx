@@ -6,6 +6,7 @@ import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
+import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
@@ -5250,5 +5251,54 @@ describe("SceneWorks app shell", () => {
     expect(saveTrackCorrections).toHaveBeenCalledWith("track_1", [
       { frameIndex: 1, rejected: true, author: "ui", source: "manual" },
     ]);
+  });
+
+  it("shows VQA history and asks a question from the asset detail panel", async () => {
+    const createVqaJob = vi.fn();
+    const asset = { id: "asset-1", type: "image", displayName: "Frame One", recipe: { prompt: "neon street" } };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <LibraryScreen
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[asset]}
+          jobs={[
+            {
+              id: "job-vqa-1",
+              type: "image_vqa",
+              status: "completed",
+              payload: { sourceAssetId: "asset-1", question: "What time of day is it?" },
+              result: { question: "What time of day is it?", answer: "It appears to be nighttime." },
+            },
+          ]}
+          imageModels={[{ id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "vqa"] }]}
+          createVqaJob={createVqaJob}
+          deleteAsset={() => {}}
+          purgeAsset={() => {}}
+          importAsset={() => {}}
+          onPreview={() => {}}
+          onSendImage={() => {}}
+          onSendVideo={() => {}}
+          onSendEditor={() => {}}
+          selectedAsset={asset}
+          setSelectedAssetId={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    // The prior answer is surfaced on the asset.
+    expect(container.textContent).toContain("It appears to be nighttime.");
+
+    // Asking a new question dispatches a VQA job for this asset.
+    const input = container.querySelector('textarea[aria-label="Ask about this image"]');
+    expect(input).not.toBeNull();
+    await changeField(input, "What is the person wearing?");
+    const askButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Ask");
+    await act(async () => {
+      askButton.click();
+    });
+    expect(createVqaJob).toHaveBeenCalledWith(asset, "What is the person wearing?");
   });
 });

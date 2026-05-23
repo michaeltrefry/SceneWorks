@@ -10,6 +10,7 @@ const nonGpuJobTypes = new Set(["model_download", "model_import", "model_convert
 const gpuRequiredJobTypes = new Set([
   "image_generate",
   "image_edit",
+  "image_vqa",
   "video_generate",
   "video_extend",
   "video_bridge",

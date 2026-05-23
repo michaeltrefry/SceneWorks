@@ -171,6 +171,7 @@ def test_gpu_worker_advertises_generation_capabilities(monkeypatch):
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu"]})
 
     assert "image_generate" in capabilities
+    assert "image_vqa" in capabilities
     assert "video_generate" in capabilities
     assert "training_caption" in capabilities
     assert "person_replace" in capabilities
@@ -184,7 +185,7 @@ def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatc
     # lora_train dry-run validation needs no inference backend, so it is
     # advertised even without torch; generation job types are not.
     assert capabilities == ["gpu", "lora_train", "nvidia"]
-    for job_type in ("image_generate", "image_edit", "video_generate", "training_caption"):
+    for job_type in ("image_generate", "image_edit", "image_vqa", "video_generate", "training_caption"):
         assert job_type not in capabilities
 
 
@@ -209,6 +210,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
     assert job_capabilities == [
         "image_edit",
         "image_generate",
+        "image_vqa",
         "lora_train",
         "lora_train_execute",
         "person_replace",
@@ -964,6 +966,21 @@ def test_sensenova_u1_edit_support():
     # Both the base unified model and the distilled fast variant support editing.
     assert model_supports_edit("sensenova_u1_8b") is True
     assert model_supports_edit("sensenova_u1_8b_fast") is True
+
+
+def test_sensenova_u1_vqa_requires_question():
+    # The VQA entry point validates the question before any model load (no torch).
+    job = {
+        "id": "job_vqa",
+        "payload": {"projectId": "p", "sourceAssetId": "asset_1", "question": "   ", "model": "sensenova_u1_8b"},
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        SenseNovaU1Adapter().answer_question(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+    except RuntimeError as exc:
+        assert "requires a question" in str(exc)
+    else:
+        raise AssertionError("VQA must reject an empty question.")
 
 
 def test_sensenova_resolution_for_snaps_to_buckets():
