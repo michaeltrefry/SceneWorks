@@ -1743,8 +1743,23 @@ class SenseNovaU1Adapter:
         grid_hw = grid_hw.to(device)
         generation_config = {"max_new_tokens": int(max_new_tokens), "do_sample": False}
         with torch.inference_mode():
-            response = model.chat(tokenizer, pixel_values, question, generation_config, grid_hw=grid_hw)
-        return str(response).strip()
+            # think=False skips the model's chain-of-thought so the budget goes to
+            # the answer (otherwise reasoning fills the output and can truncate it).
+            response = model.chat(tokenizer, pixel_values, question, generation_config, grid_hw=grid_hw, think=False)
+        return self._strip_reasoning(str(response))
+
+    @staticmethod
+    def _strip_reasoning(text: str) -> str:
+        """Drop any ``<think>…</think>`` reasoning so only the answer is returned.
+
+        Defensive backstop for the no-think prime: removes complete think blocks
+        and any dangling/unclosed one (e.g. reasoning truncated by max_new_tokens).
+        """
+        import re
+
+        cleaned = re.sub(r"(?s)<think>.*?</think>", "", text)
+        cleaned = re.sub(r"(?s)<think>.*$", "", cleaned)
+        return cleaned.strip()
 
     def _to_pil(self, torch: Any, batch: Any) -> list[Image.Image]:
         import numpy as np

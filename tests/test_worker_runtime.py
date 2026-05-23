@@ -968,6 +968,16 @@ def test_sensenova_u1_edit_support():
     assert model_supports_edit("sensenova_u1_8b_fast") is True
 
 
+def test_sensenova_u1_vqa_strips_reasoning():
+    strip = SenseNovaU1Adapter._strip_reasoning
+    # A complete think block is removed, leaving only the answer.
+    assert strip("<think>\nweigh the options\n</think>\n\nIt's nighttime in Paris.") == "It's nighttime in Paris."
+    # A dangling/unclosed think block (reasoning truncated by the token cap) yields no leak.
+    assert strip("<think>\nreasoning that got cut off mid-thought") == ""
+    # A plain answer (no reasoning) is returned unchanged.
+    assert strip("A woman holds a yellow umbrella.") == "A woman holds a yellow umbrella."
+
+
 def test_sensenova_u1_vqa_requires_question():
     # The VQA entry point validates the question before any model load (no torch).
     job = {

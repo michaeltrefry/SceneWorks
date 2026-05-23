@@ -1839,7 +1839,7 @@ class NEOChatModel(PreTrainedModel):
         return image_prediction
 
     def chat(self, tokenizer, pixel_values, question, generation_config, history=None, return_history=False, grid_hw=None, 
-             IMG_START_TOKEN='<img>', IMG_END_TOKEN='</img>', IMG_CONTEXT_TOKEN='<IMG_CONTEXT>', verbose=False):
+             IMG_START_TOKEN='<img>', IMG_END_TOKEN='</img>', IMG_CONTEXT_TOKEN='<IMG_CONTEXT>', think=True, verbose=False):
 
         if history is None and pixel_values is not None and '<image>' not in question:
             question = '<image>\n' + question
@@ -1867,6 +1867,12 @@ class NEOChatModel(PreTrainedModel):
             num_patch_token = int(grid_hw[i, 0] * grid_hw[i, 1] * self.downsample_ratio**2)
             image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * num_patch_token + IMG_END_TOKEN
             query = query.replace('<image>', image_tokens, 1)
+
+        # SceneWorks-local: prime an empty think block to skip the model's
+        # chain-of-thought (mirrors the no-think path in generate/t2i_generate/
+        # it2i_generate), so the token budget goes to the answer rather than reasoning.
+        if not think:
+            query = query + '<think>\n\n</think>\n\n'
 
         model_inputs = tokenizer(query, return_tensors='pt')
         input_ids = model_inputs['input_ids'].to(self.device)
