@@ -8,6 +8,7 @@ import { fallbackModels, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
+import { DocumentStudio } from "./screens/DocumentStudio.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { TrainingStudio } from "./screens/TrainingStudio.jsx";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
@@ -105,6 +106,7 @@ const navSections = [
       { id: "Library", icon: Icon.Library },
       { id: "Image", icon: Icon.Image },
       { id: "Video", icon: Icon.Video },
+      { id: "Document", icon: Icon.Wand },
       { id: "Train", icon: Icon.Train },
       { id: "Editor", icon: Icon.Editor },
     ],
@@ -130,6 +132,7 @@ const viewTitles = {
   Library: { title: "Library", blurb: "Browse stills and clips across all your projects." },
   Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
   Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
+  Document: { title: "Document Studio", blurb: "Generate interleaved text-image documents — guides, storyboards, tutorials." },
   Train: { title: "Training Studio", blurb: "Build datasets and prepare LoRA training plans." },
   Editor: { title: "Editor", blurb: "Cut, sequence and export your timeline." },
   Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
@@ -1333,6 +1336,31 @@ export function App() {
     }
   }
 
+  async function createInterleaveJob(payload) {
+    if (!activeProject) {
+      setError("Create or open a project first.");
+      return null;
+    }
+    try {
+      const job = await apiFetch("/api/v1/image/interleave/jobs", token, {
+        method: "POST",
+        body: JSON.stringify({
+          ...payload,
+          projectId: activeProject.id,
+          projectName: activeProject.name,
+          requestedGpu,
+        }),
+      });
+      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setError("");
+      refreshData();
+      return job;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
   function rememberLocalGenerationJob(kind, job) {
     if (!job?.id) {
       return;
@@ -2112,6 +2140,20 @@ export function App() {
             setRequestedGpu={setRequestedGpu}
             updateAssetStatus={updateAssetStatus}
             videoModels={videoModels}
+          />
+        ) : null}
+
+        {activeView === "Document" ? (
+          <DocumentStudio
+            activeProject={activeProject}
+            assets={assets}
+            createInterleaveJob={createInterleaveJob}
+            gpuOptions={gpuOptions}
+            imageModels={imageModels}
+            jobs={jobs}
+            onOpenQueue={() => setActiveView("Queue")}
+            requestedGpu={requestedGpu}
+            setRequestedGpu={setRequestedGpu}
           />
         ) : null}
 

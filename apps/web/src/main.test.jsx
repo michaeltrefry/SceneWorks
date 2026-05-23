@@ -6,6 +6,7 @@ import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
+import { DocumentStudio } from "./screens/DocumentStudio.jsx";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
@@ -5309,5 +5310,77 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Ask").click();
     });
     expect(createVqaJob).toHaveBeenLastCalledWith(asset, "Write a detailed critique of this image.", 512);
+  });
+
+  it("DocumentStudio renders an interleaved document and submits a compose job", async () => {
+    const createInterleaveJob = vi.fn(() =>
+      Promise.resolve({ id: "job-il-new", type: "image_interleave", status: "queued" }),
+    );
+    const imageAsset = {
+      id: "img-1",
+      type: "image",
+      projectId: "project-1",
+      file: { path: "assets/images/a.png" },
+      url: "/api/v1/projects/project-1/files/assets/images/a.png",
+    };
+    const completedJob = {
+      id: "job-il-done",
+      type: "image_interleave",
+      status: "completed",
+      payload: { prompt: "tea guide" },
+      result: {
+        segments: [
+          { type: "text", text: "Boil the water." },
+          { type: "image", assetId: "img-1", path: "assets/images/a.png" },
+          { type: "text", text: "Steep three minutes." },
+        ],
+      },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DocumentStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[imageAsset]}
+          createInterleaveJob={createInterleaveJob}
+          gpuOptions={["auto"]}
+          imageModels={[
+            { id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "interleave"] },
+            { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", capabilities: ["text_to_image"] },
+          ]}
+          jobs={[completedJob]}
+          onOpenQueue={() => {}}
+          requestedGpu="auto"
+          setRequestedGpu={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    // The completed document renders text segments in order + the image segment.
+    expect(container.textContent).toContain("Boil the water.");
+    expect(container.textContent).toContain("Steep three minutes.");
+    const image = container.querySelector("img.document-image");
+    expect(image).not.toBeNull();
+    expect(image.getAttribute("src")).toContain("assets/images/a.png");
+
+    // Only interleave-capable models are offered (Z-Image filtered out).
+    const modelOptions = [...container.querySelectorAll("select option")].map((option) => option.value);
+    expect(modelOptions).toContain("sensenova_u1_8b");
+    expect(modelOptions).not.toContain("z_image_turbo");
+
+    // Submitting composes an interleave job with the prompt, model, and max images.
+    await changeField(container.querySelector("textarea"), "An illustrated guide to brewing tea");
+    const submit = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Compose document"),
+    );
+    await act(async () => {
+      submit.click();
+    });
+    expect(createInterleaveJob).toHaveBeenCalledTimes(1);
+    const payload = createInterleaveJob.mock.calls[0][0];
+    expect(payload.prompt).toBe("An illustrated guide to brewing tea");
+    expect(payload.model).toBe("sensenova_u1_8b");
+    expect(payload.maxImages).toBe(6);
   });
 });
