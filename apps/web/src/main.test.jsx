@@ -14,6 +14,19 @@ import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { TrainingStudio } from "./screens/TrainingStudio.jsx";
 
+// jsdom 27 omits Blob.text(); all real browsers implement it. Polyfill so the
+// dataset import flow (which reads .txt caption sidecars) is exercisable here.
+if (typeof Blob !== "undefined" && typeof Blob.prototype.text !== "function") {
+  Blob.prototype.text = function text() {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(this);
+    });
+  };
+}
+
 class FakeEventSource {
   static instances = [];
 
@@ -540,6 +553,59 @@ describe("SceneWorks app shell", () => {
       }),
     );
     expect(container.textContent).toContain("Dataset created");
+  });
+
+  it("imports caption sidecars alongside images and bakes them into the saved dataset", async () => {
+    const createDataset = vi.fn(async (payload) => ({
+      id: "dataset-new",
+      name: payload.name,
+      version: 1,
+      items: payload.items,
+    }));
+    const importAsset = vi.fn(async (file) => ({ id: "asset-mira", displayName: file.name }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <TrainingStudio
+          activeProject={{ id: "project-a", name: "Project A" }}
+          assets={[{ id: "asset-mira", type: "image", displayName: "mira.png", file: { path: "assets/images/mira.png", mimeType: "image/png" } }]}
+          createDataset={createDataset}
+          datasets={[]}
+          importAsset={importAsset}
+        />,
+      );
+    });
+
+    const imageFile = new File([new Uint8Array([1, 2, 3])], "mira.png", { type: "image/png" });
+    const captionFile = new File(["a portrait of mira"], "mira.txt", { type: "text/plain" });
+    const fileInput = container.querySelector(".training-import-button input[type=file]");
+    await act(async () => {
+      Object.defineProperty(fileInput, "files", { configurable: true, value: [imageFile, captionFile] });
+      fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    await settle();
+
+    // Only the image is uploaded as an asset; the .txt is parsed locally.
+    expect(importAsset).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Imported 1 image with 1 caption");
+
+    await changeField(field(container, "Dataset name"), "Mira Set");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
+    });
+
+    expect(createDataset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Mira Set",
+        items: [
+          expect.objectContaining({
+            assetId: "asset-mira",
+            caption: expect.objectContaining({ text: "a portrait of mira", source: "imported" }),
+          }),
+        ],
+      }),
+    );
   });
 
   it("opens and saves an existing training dataset membership", async () => {

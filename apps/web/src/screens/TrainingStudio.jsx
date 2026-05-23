@@ -216,6 +216,34 @@ function itemFileStem(item) {
   return dotIndex > 0 ? name.slice(0, dotIndex) : name;
 }
 
+const IMPORT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"]);
+
+function uploadFileBaseName(name) {
+  return String(name ?? "").replaceAll("\\", "/").split("/").pop() ?? "";
+}
+
+function uploadFileExtension(name) {
+  const base = uploadFileBaseName(name);
+  const dotIndex = base.lastIndexOf(".");
+  return dotIndex > 0 ? base.slice(dotIndex + 1).toLowerCase() : "";
+}
+
+// Lowercased stem used to pair an image upload with its caption sidecar
+// (e.g. `Mira_01.png` and `Mira_01.txt` both resolve to `mira_01`).
+function uploadFileStem(name) {
+  const base = uploadFileBaseName(name);
+  const dotIndex = base.lastIndexOf(".");
+  return (dotIndex > 0 ? base.slice(0, dotIndex) : base).toLowerCase();
+}
+
+function isCaptionUpload(file) {
+  return uploadFileExtension(file?.name) === "txt" || file?.type === "text/plain";
+}
+
+function isImageUpload(file) {
+  return String(file?.type ?? "").startsWith("image/") || IMPORT_IMAGE_EXTENSIONS.has(uploadFileExtension(file?.name));
+}
+
 function triggerWordsText(caption) {
   return (caption?.triggerWords ?? caption?.trigger_words ?? []).join(", ");
 }
@@ -341,7 +369,7 @@ function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) {
   };
 }
 
-function datasetPayload({ activeDataset, assetsById, name, selectedAssetIds }) {
+function datasetPayload({ activeDataset, assetsById, importedCaptions = {}, name, selectedAssetIds }) {
   const itemsByAssetId = new Map((activeDataset?.items ?? []).map((item) => [item.assetId, item]));
   return {
     name: name.trim(),
@@ -353,16 +381,27 @@ function datasetPayload({ activeDataset, assetsById, name, selectedAssetIds }) {
           return null;
         }
         const previous = itemsByAssetId.get(assetId);
+        const imported = importedCaptions[assetId];
+        let caption;
+        if (imported) {
+          // An imported .txt sidecar takes precedence over a carried-forward
+          // caption so the user can skip the manual captioning step.
+          caption = {
+            text: imported.text ?? "",
+            source: imported.source ?? "imported",
+            triggerWords: previous?.caption?.triggerWords ?? [],
+          };
+        } else if (previous?.caption) {
+          caption = {
+            text: previous.caption.text ?? "",
+            source: previous.caption.source ?? "manual",
+            triggerWords: previous.caption.triggerWords ?? [],
+          };
+        }
         return {
           assetId,
           displayName: asset.displayName ?? imageAssetName(asset),
-          caption: previous?.caption
-            ? {
-                text: previous.caption.text ?? "",
-                source: previous.caption.source ?? "manual",
-                triggerWords: previous.caption.triggerWords ?? [],
-              }
-            : undefined,
+          caption,
         };
       })
       .filter(Boolean),
@@ -765,6 +804,9 @@ export function TrainingStudio({
   const [importingAssets, setImportingAssets] = useState(false);
   const [savingDataset, setSavingDataset] = useState(false);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
+  // Captions parsed from .txt sidecars during import, keyed by imported asset id.
+  // Threaded into the dataset payload on save, then cleared once persisted.
+  const [importedCaptions, setImportedCaptions] = useState({});
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [renamePrefix, setRenamePrefix] = useState("");
   const [captionTriggerWords, setCaptionTriggerWords] = useState("");
@@ -897,6 +939,9 @@ export function TrainingStudio({
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
     setCaptionTriggerWords(datasetTriggerPhrase);
     setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
+    // Imported captions are persisted into the dataset once saved (which swaps
+    // activeDataset); drop the staging map so switching datasets can't leak them.
+    setImportedCaptions({});
   }, [activeDataset]);
 
   useEffect(() => {
@@ -1143,16 +1188,48 @@ export function TrainingStudio({
     }
     setImportingAssets(true);
     setDatasetError("");
+    setDatasetMessage("");
     try {
+      const imageFiles = files.filter(isImageUpload);
+      const captionFiles = files.filter((file) => !isImageUpload(file) && isCaptionUpload(file));
+
+      // Pair each caption with an image by filename stem (`Mira_01.txt` → `Mira_01.png`).
+      const captionByStem = new Map();
+      for (const file of captionFiles) {
+        const text = (await file.text()).trim();
+        if (text) {
+          captionByStem.set(uploadFileStem(file.name), text);
+        }
+      }
+
       const imported = [];
-      for (const file of files) {
+      const captionsByAssetId = {};
+      for (const file of imageFiles) {
         const asset = await importAsset(file);
         if (asset?.id) {
           imported.push(asset.id);
+          const caption = captionByStem.get(uploadFileStem(file.name));
+          if (caption) {
+            captionsByAssetId[asset.id] = { source: "imported", text: caption };
+          }
         }
       }
+
       if (imported.length) {
         setSelectedAssetIds((current) => Array.from(new Set([...current, ...imported])));
+        if (Object.keys(captionsByAssetId).length) {
+          setImportedCaptions((current) => ({ ...current, ...captionsByAssetId }));
+        }
+        const imageStems = new Set(imageFiles.map((file) => uploadFileStem(file.name)));
+        const unmatchedCaptions = captionFiles.filter((file) => !imageStems.has(uploadFileStem(file.name))).length;
+        const matchedCaptions = Object.keys(captionsByAssetId).length;
+        const captionNote = matchedCaptions ? ` with ${matchedCaptions} caption${matchedCaptions === 1 ? "" : "s"}` : "";
+        const unmatchedNote = unmatchedCaptions
+          ? ` ${unmatchedCaptions} caption file${unmatchedCaptions === 1 ? "" : "s"} had no matching image.`
+          : "";
+        setDatasetMessage(
+          `Imported ${imported.length} image${imported.length === 1 ? "" : "s"}${captionNote}. Save the dataset to keep them.${unmatchedNote}`,
+        );
       } else {
         setDatasetError("No images were imported.");
       }
@@ -1172,7 +1249,7 @@ export function TrainingStudio({
     setDatasetError("");
     setDatasetMessage("");
     try {
-      const payload = datasetPayload({ activeDataset, assetsById, name: draftName, selectedAssetIds });
+      const payload = datasetPayload({ activeDataset, assetsById, importedCaptions, name: draftName, selectedAssetIds });
       const dataset = activeDataset
         ? await updateDataset(activeDataset.id, payload)
         : await createDataset(payload);
@@ -1431,8 +1508,8 @@ export function TrainingStudio({
                           </select>
                         </label>
                         <label className="file-upload-button training-import-button">
-                          <input accept="image/*" disabled={importingAssets} multiple onChange={handleImport} type="file" />
-                          {importingAssets ? "Importing" : "Import images"}
+                          <input accept="image/*,.txt,text/plain" disabled={importingAssets} multiple onChange={handleImport} type="file" />
+                          {importingAssets ? "Importing" : "Import images & captions"}
                         </label>
                       </div>
                       <DatasetHealth health={health} />
