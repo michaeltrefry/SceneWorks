@@ -1321,6 +1321,71 @@ label {
   }
 }
 
+/* Document Studio (interleaved text-image) — sc-1607/1608. The screen reuses the
+   generic .field / .studio-results class names, which only carry layout inside
+   preset/ImageStudio scopes, so give them rhythm here. */
+.document-studio {
+  display: grid;
+  gap: var(--gap-5);
+}
+
+.document-studio .studio-form {
+  display: grid;
+  gap: var(--gap-4);
+  max-width: 760px;
+}
+
+.document-studio .field {
+  display: grid;
+  gap: var(--gap-1);
+}
+
+.document-studio .field > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
+
+.document-studio .field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-3);
+}
+
+.document-studio .field-row > .field {
+  flex: 1 1 180px;
+}
+
+.document-studio .studio-form > .primary-action {
+  justify-self: start;
+}
+
+/* The document reader is single-column — override ImageStudio's results+rail grid. */
+.document-studio .studio-results {
+  grid-template-columns: 1fr;
+}
+
+/* Generated/reopened interleaved document: ordered text runs + images. */
+.document-view {
+  display: grid;
+  gap: var(--gap-3);
+  max-width: 720px;
+}
+
+.document-text {
+  margin: 0;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.document-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--r-sm);
+}
+
 .studio-source-band {
   display: grid;
   gap: 12px;
