@@ -24,6 +24,7 @@ backend seam that real GPU runs exercise.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import contextlib
 import importlib
 import json
 import os
@@ -1516,6 +1517,34 @@ def ltx_flow_target(clean: Any, noise: Any) -> Any:
     return noise - clean
 
 
+@contextlib.contextmanager
+def _silence_output_fds() -> Any:
+    """Redirect OS-level stdout+stderr (fds 1 and 2) to /dev/null for the block.
+
+    The MLX generation pipeline prints chunked-eval / stage progress straight to
+    the file descriptors (it logs to stderr), which Python-level
+    ``contextlib.redirect_stdout`` does not capture — so mid-training previews
+    would otherwise flood the worker log with hundreds of lines per render. A
+    failed generation still raises a Python exception (caught by the caller), so
+    suppressing the stream text here loses no actionable error signal."""
+    saved_out, saved_err = os.dup(1), os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(devnull)
+        os.close(saved_out)
+        os.close(saved_err)
+
+
 class _LtxMlxLoraBackend:
     """Native MLX LoRA training backend for LTX-2.3 (Apple Silicon).
 
@@ -1745,9 +1774,108 @@ class _LtxMlxLoraBackend:
         plan: dict[str, Any],
         config: TrainingRunConfig,
     ) -> list[dict[str, Any]]:
-        # Live mid-training previews for LTX are video generations (heavy); not a
-        # V1 goal. Returning an empty list is handled gracefully by the trainer.
-        return []
+        """Render a short clip from the in-progress LoRA at each ``sampleEvery``
+        checkpoint so training progress is visible — the flow-matching loss is
+        uninformative (see :func:`ltx_flow_target`), so a generated preview is the
+        only honest signal of whether the adapter is converging.
+
+        The trained transformer carries the live adapter, but the generation
+        pipeline builds its own model and applies a *saved* LoRA, so we save the
+        current weights and drive the real ``generate_video_with_audio`` path with
+        them applied — previews then match final inference exactly. This reloads
+        the full inference stack (transformer + gemma + VAE decoder) per call, so
+        it is memory- and time-heavy and only runs when ``sampleEvery > 0``. A
+        preview failure is swallowed so it never aborts the training run.
+        """
+        cleaned = [str(p).strip() for p in (prompts or []) if str(p).strip()]
+        if not cleaned or not self._lora_paths or self._transformer is None:
+            return []
+
+        mx = self._mx
+        target = plan.get("target") or {}
+        advanced = config.advanced if isinstance(config.advanced, dict) else {}
+        repo = str(target.get("baseModelRepo") or LTX_MLX_REPO)
+        text_repo = str(advanced.get("textEncoderRepo") or LTX_MLX_TEXT_ENCODER_REPO)
+
+        # Fixed, modest preview geometry (divisible by 64) and a fixed seed so the
+        # same prompt is directly comparable across checkpoints — only the adapter
+        # changes between previews.
+        edge = max(256, min(512, (bucket_resolution(config.resolution) // 64) * 64))
+        num_frames = 25
+        seed = int(config.seed)
+
+        sample_dir = Path(output_dir) / "samples" / f"step-{step:06d}"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(file_name).stem or "lora"
+
+        # Persist the in-progress adapter where the inference loader can ingest it.
+        tmp_lora = self._save_lora(
+            output_dir=str(sample_dir), file_name=f".{stem}-adapter.safetensors"
+        )
+
+        generate_av = importlib.import_module("mlx_video.generate_av")
+        lora_mod = importlib.import_module("mlx_video.lora")
+        video_adapters = importlib.import_module("scene_worker.video_adapters")
+        video_adapters._ensure_ffmpeg_on_path()
+        video_adapters._install_ltx_lora_patch()
+
+        samples: list[dict[str, Any]] = []
+        for index, prompt in enumerate(cleaned):
+            sample_path = sample_dir / f"{stem}-step{step:06d}-{index + 1}.mp4"
+            try:
+                module_map = lora_mod.load_multiple_loras(
+                    [lora_mod.LoRAConfig(path=Path(tmp_lora), strength=1.0)]
+                )
+                token = video_adapters._PENDING_LTX_LORAS.set(module_map)
+                try:
+                    with _silence_output_fds():
+                        generate_av.generate_video_with_audio(
+                            model_repo=repo,
+                            text_encoder_repo=text_repo,
+                            prompt=prompt,
+                            height=edge,
+                            width=edge,
+                            num_frames=num_frames,
+                            seed=seed,
+                            output_path=str(sample_path),
+                            cfg_scale=config.sample_guidance_scale,
+                            num_inference_steps=max(2, config.sample_steps),
+                            enhance_prompt=False,
+                            no_audio=True,
+                            verbose=False,
+                        )
+                finally:
+                    video_adapters._PENDING_LTX_LORAS.reset(token)
+            except Exception as exc:  # noqa: BLE001 — a preview must never abort training
+                emit_worker_event(
+                    "training_sample_render_failed",
+                    kernel=LtxMlxLoraTrainer.kernel_id,
+                    step=step,
+                    error=str(exc),
+                )
+                continue
+            finally:
+                if mx is not None:
+                    with contextlib.suppress(Exception):
+                        mx.clear_cache()
+            if sample_path.exists():
+                samples.append(
+                    {
+                        "step": step,
+                        "prompt": prompt,
+                        "path": str(sample_path),
+                        "relativePath": project_relative_path(plan, sample_path),
+                        "sampleSource": "live_adapter",
+                        "mediaType": "video",
+                        "numInferenceSteps": config.sample_steps,
+                        "guidanceScale": config.sample_guidance_scale,
+                        "createdAt": now(),
+                    }
+                )
+
+        with contextlib.suppress(OSError):
+            os.remove(tmp_lora)
+        return samples
 
     def save_final(self, *, output_dir: str, file_name: str) -> str:
         return self._save_lora(output_dir=output_dir, file_name=file_name)

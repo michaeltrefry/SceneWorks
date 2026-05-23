@@ -123,6 +123,18 @@ SceneWorks storage, config defaults, or the target registry directly.
   caption caching, so the **training loop peaks ~27 GB**; the whole-run ceiling
   is now the dataset-caching phase at **~42 GB (text encoder still resident)** —
   a **48 GB Mac suffices** (64 GB+ comfortable). Generation peaks ~34 GB.
+  Mid-training previews are supported: with `config.advanced.sampleEvery > 0` the
+  kernel renders a short clip per `samplePrompts` entry from the in-progress
+  adapter at each interval (written under `<output>/samples/step-NNNNNN/`,
+  streamed through job progress) — the only honest convergence signal, since the
+  flow-matching loss is uninformative. A preview saves the live adapter and drives
+  the real `generate_video_with_audio` path with it applied (so previews match
+  final inference), which reloads the full inference stack — a fixed seed keeps
+  renders comparable across checkpoints, but the peak rises to **~46 GB** (a
+  64 GB+ Mac is recommended with previews on; otherwise keep them off and generate
+  from saved checkpoints). The distilled sampler is fixed (8+3 stage steps,
+  baked-in guidance), so `sampleSteps`/`sampleGuidanceScale` do not affect preview
+  output.
 
 The kernel produces the weights file and a result summary. Registering the
 produced adapter as a usable SceneWorks LoRA (with provenance and Image Studio

@@ -162,7 +162,11 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > (~1.35 s/step). The gemma text encoder (~28 GB) is freed after caption
 > caching, so the training loop peaks ~27 GB; the whole-run ceiling is the
 > dataset-caching phase at ~42 GB (text encoder still resident), which fits a
-> **48 GB Mac** (64 GB+ comfortable). Generation peaks ~34 GB.
+> **48 GB Mac** (64 GB+ comfortable). Generation peaks ~34 GB. Set `sampleEvery`
+> to render a preview clip from the in-progress adapter at intervals — the loss
+> alone won't tell you if it's working — but previews reload the full inference
+> stack (peak rises to ~46 GB; a 64 GB+ Mac is recommended with them on), and the
+> distilled sampler ignores `sampleSteps`/`sampleGuidanceScale`.
 
 AI Toolkit features such as EMA and Differential Output Preservation are not
 exposed as SceneWorks presets yet because the current worker does not implement
