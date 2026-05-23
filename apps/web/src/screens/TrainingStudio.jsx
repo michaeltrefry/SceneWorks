@@ -16,6 +16,10 @@ const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt"];
 const timestepTypeOptions = ["sigmoid", "linear", "weighted"];
 const timestepBiasOptions = ["balanced", "high_noise", "low_noise"];
 const lossTypeOptions = ["mse", "mae"];
+// Learning-rate schedulers the worker actually honors (constant holds the LR
+// fixed; linear/cosine decay it over the run). Distinct from the timestep/noise
+// scheduler above. The target's `limits.lrSchedulers` overrides this fallback.
+const lrSchedulerOptions = ["constant", "linear", "cosine"];
 const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -41,6 +45,8 @@ const configFieldLabels = {
   optimizer: "Optimizer",
   learningRate: "Learning rate",
   weightDecay: "Weight decay",
+  lrScheduler: "LR scheduler",
+  lrWarmupSteps: "LR warmup steps",
   steps: "Steps",
   timestepType: "Timestep type",
   timestepBias: "Timestep bias",
@@ -503,6 +509,8 @@ function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase = "", 
     optimizer: asText(defaults.optimizer),
     learningRate: numericDraft(defaults.learningRate),
     weightDecay: numericDraft(advanced.weightDecay),
+    lrScheduler: asText(advanced.lrScheduler || "constant"),
+    lrWarmupSteps: numericDraft(advanced.lrWarmupSteps),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -577,6 +585,8 @@ function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, se
   const advanced = compactObject({
     ...(defaults.advanced ?? {}),
     weightDecay: numberFromDraft(configDraft.weightDecay),
+    lrScheduler: asText(configDraft.lrScheduler).trim() || "constant",
+    lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),
@@ -893,6 +903,12 @@ export function TrainingStudio({
     configDraft.optimizer && !optimizerSelectOptions.includes(configDraft.optimizer)
       ? [...optimizerSelectOptions, configDraft.optimizer]
       : optimizerSelectOptions;
+  const lrSchedulerLimitOptions = rangeOptions(selectedTarget?.limits, "lrSchedulers");
+  const lrSchedulerSelectOptions = lrSchedulerLimitOptions.length ? lrSchedulerLimitOptions : lrSchedulerOptions;
+  const visibleLrSchedulerOptions =
+    configDraft.lrScheduler && !lrSchedulerSelectOptions.includes(configDraft.lrScheduler)
+      ? [...lrSchedulerSelectOptions, configDraft.lrScheduler]
+      : lrSchedulerSelectOptions;
   // De-distill training adapter is Z-Image-Turbo-only: show the version selector
   // only when the resolved config declares a trainingAdapterRepo.
   const showTrainingAdapter = Boolean(asText(configDraft.trainingAdapterRepo).trim());
@@ -2069,6 +2085,25 @@ export function TrainingStudio({
                                 </option>
                               ))}
                             </select>
+                          </label>
+                          <label title="Learning-rate scheduler (not the timestep/noise scheduler). Constant holds the LR fixed for the whole run; linear and cosine decay it toward zero over the run.">
+                            LR scheduler
+                            <select onChange={(event) => updateConfigDraft("lrScheduler", event.target.value)} value={configDraft.lrScheduler ?? ""}>
+                              {visibleLrSchedulerOptions.map((option) => (
+                                <option key={option} value={option}>
+                                  {optionLabel(option)}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label title="Optional linear warmup: number of steps to ramp the LR up from zero before the scheduler body runs. 0 disables warmup.">
+                            LR warmup steps
+                            <input
+                              min="0"
+                              onChange={(event) => updateConfigDraft("lrWarmupSteps", event.target.value)}
+                              type="number"
+                              value={configDraft.lrWarmupSteps ?? ""}
+                            />
                           </label>
                           {showTrainingAdapter ? (
                             <label title="ostris de-distill adapter for the step-distilled Z-Image-Turbo base. Fused in for training, removed at inference. v1 is stable; v2 is a heavier, experimental de-distill.">

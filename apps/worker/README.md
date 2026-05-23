@@ -99,11 +99,17 @@ SceneWorks storage, config defaults, or the target registry directly.
   target is `latents - noise` — the negated velocity, since the pipeline negates the
   output before the scheduler — at timestep `(1000 - t) / 1000`), and writes a `.safetensors`
   adapter with `ZImagePipeline.save_lora_weights`. The loop honors
-  `config.advanced.weightDecay`, `timestepType`, `timestepBias`, `lossType`, and
-  `gradientCheckpointing`. It reports preparing,
-  loading, caching, training, checkpointing (every `saveEvery` steps), and saving
-  stages, and honors cancellation between steps. A real run requires the
-  inference backend; the kernel reports clearly when it is missing.
+  `config.advanced.weightDecay`, `timestepType`, `timestepBias`, `lossType`,
+  `gradientCheckpointing`, and the learning-rate scheduler `lrScheduler`
+  (`constant`/`linear`/`cosine`, with an optional `lrWarmupSteps` linear ramp;
+  stepped once per optimizer update). Note the two distinct "schedulers":
+  `timestepType`/`timestepBias` configure the flow-matching **noise** scheduler
+  (which timesteps the loop trains on — `flowmatch`-style sigmoid sampling, a fixed
+  methodology for Z-Image), while `lrScheduler` decays the **optimizer learning
+  rate** over the run (`constant` keeps it fixed — the pre-scheduler behavior). It
+  reports preparing, loading, caching, training, checkpointing (every `saveEvery`
+  steps), and saving stages, and honors cancellation between steps. A real run
+  requires the inference backend; the kernel reports clearly when it is missing.
 - **Native MLX video LoRA** (`ltx_mlx_lora`, :class:`LtxMlxLoraTrainer`, Apple
   Silicon only — gated by `target.requiresAppleSilicon`) trains an LTX-2.3 video
   LoRA from a still-image dataset entirely in MLX. It loads the quantized
@@ -118,7 +124,10 @@ SceneWorks storage, config defaults, or the target registry directly.
   `.lora_B.weight` + scalar `.alpha`) so `mlx_video.lora` round-trips at
   inference with no key remap. The AdamW optimizer honors
   `config.advanced.weightDecay` (passed through to MLX `AdamW`; plain `Adam` has
-  no decoupled decay). Validated end-to-end: a rank-32 / 1500-step run on
+  no decoupled decay) and the same `lrScheduler` set (`constant`/`linear`/`cosine`
+  + `lrWarmupSteps`) via a schedule callable that shares the torch decay/warmup
+  math (`lr_decay_multiplier`), which MLX advances from the optimizer's own step
+  counter. Validated end-to-end: a rank-32 / 1500-step run on
   ~76 stills (res 512, weight decay 0.01, trigger-focused captions) produces a clearly attributable
   identity effect through the real `MlxVideoAdapter` generation path. Practical
   footprint: ~1.35 s/step. The gemma text encoder (~28 GB) is released after

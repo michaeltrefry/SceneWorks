@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 import contextlib
 import importlib
 import json
+import math
 import os
 import platform
 import sys
@@ -169,6 +170,12 @@ class TrainingRunConfig:
     timestep_type: str
     timestep_bias: str
     loss_type: str
+    # Learning-rate scheduler (distinct from the flow-matching noise scheduler
+    # configured by ``timestep_type``/``timestep_bias``). ``constant`` holds the
+    # optimizer LR fixed; ``linear``/``cosine`` decay it over the run, after an
+    # optional ``lr_warmup_steps`` linear ramp.
+    lr_scheduler: str
+    lr_warmup_steps: int
     gradient_checkpointing: bool
     mixed_precision: Any
     lora_target_modules: Any
@@ -242,6 +249,8 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         timestep_type=str(advanced.get("timestepType") or "sigmoid"),
         timestep_bias=str(advanced.get("timestepBias") or "balanced"),
         loss_type=str(advanced.get("lossType") or "mse"),
+        lr_scheduler=str(advanced.get("lrScheduler") or "constant"),
+        lr_warmup_steps=_as_int(advanced.get("lrWarmupSteps"), 0, minimum=0),
         gradient_checkpointing=_as_bool(advanced.get("gradientCheckpointing"), True),
         mixed_precision=advanced.get("mixedPrecision"),
         lora_target_modules=target_modules,
@@ -634,6 +643,8 @@ class ZImageLoraTrainer:
             "rank": config.rank,
             "alpha": config.alpha,
             "learningRate": config.learning_rate,
+            "lrScheduler": config.lr_scheduler,
+            "lrWarmupSteps": config.lr_warmup_steps,
             "resolution": (prepared or {}).get("resolution") or config.resolution,
             "triggerWords": trigger_words(plan),
             "planVersion": plan.get("planVersion"),
@@ -682,6 +693,85 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float, weight_d
     if normalized == "adam":
         return torch.optim.Adam(params, lr=learning_rate, weight_decay=weight_decay)
     return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
+
+
+# Learning-rate schedulers both backends honor. The flow-matching *noise*
+# scheduler (sigmoid/linear/weighted timestep sampling) is a separate concept,
+# configured via ``timestepType``/``timestepBias`` — see ``sample_training_timestep``.
+SUPPORTED_LR_SCHEDULERS = ("constant", "linear", "cosine")
+
+
+def normalize_lr_scheduler(name: str | None) -> str:
+    """Normalize an ``lrScheduler`` name to a supported value, raising a clear
+    error for anything outside :data:`SUPPORTED_LR_SCHEDULERS`. Rust validates the
+    same set at submit time; this is the kernel-side backstop for plans handed to
+    the worker directly."""
+
+    normalized = (name or "constant").strip().lower().replace("-", "_")
+    if normalized not in SUPPORTED_LR_SCHEDULERS:
+        raise TrainingKernelError(
+            f"Unsupported lrScheduler '{name}'. Supported schedulers: "
+            + ", ".join(SUPPORTED_LR_SCHEDULERS)
+            + "."
+        )
+    return normalized
+
+
+def lr_decay_multiplier(name: str, step: int, total: int, warmup: int) -> float:
+    """Base-LR multiplier in [0, 1] at optimizer-update ``step`` (0-indexed),
+    shared by the torch and MLX schedule builders so both kernels decay
+    identically. An optional linear warmup ramps to 1.0 over ``warmup`` updates
+    (no dead 0.0 first step), then the body decays: ``linear`` to 0, ``cosine`` on
+    a half-cosine to 0, ``constant`` holds at 1.0."""
+
+    if warmup > 0 and step < warmup:
+        return float(step + 1) / float(warmup + 1)
+    if total <= warmup:
+        return 1.0
+    progress = min(1.0, max(0.0, float(step - warmup) / float(total - warmup)))
+    if name == "linear":
+        return 1.0 - progress
+    if name == "cosine":
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+    return 1.0  # constant (with warmup)
+
+
+def lr_schedule_updates(steps: int, gradient_accumulation: int, warmup_steps: int) -> tuple[int, int]:
+    """Convert micro-step counts to optimizer-update counts (the scheduler steps
+    once per optimizer update, which gradient accumulation makes less frequent
+    than micro-steps). Returns ``(total_updates, warmup_updates)`` with warmup
+    clamped below the run so the body always has room to decay."""
+
+    accum = max(1, int(gradient_accumulation))
+    total = max(1, (max(1, int(steps)) + accum - 1) // accum)
+    warmup = (max(0, int(warmup_steps)) + accum - 1) // accum
+    return total, max(0, min(warmup, total - 1))
+
+
+def build_lr_scheduler(
+    torch: Any,
+    optimizer: Any,
+    name: str | None,
+    *,
+    total_updates: int,
+    warmup_updates: int,
+) -> Any | None:
+    """Build a ``torch.optim.lr_scheduler.LambdaLR`` that scales each param
+    group's base LR by :func:`lr_decay_multiplier`, stepped once per optimizer
+    update. Returns ``None`` for plain ``constant`` (no warmup) so the optimizer
+    LR stays exactly fixed — byte-identical to every pre-scheduler run. Raises
+    ``TrainingKernelError`` for an unsupported scheduler name."""
+
+    normalized = normalize_lr_scheduler(name)
+    total = max(1, int(total_updates))
+    warmup = max(0, min(int(warmup_updates), total - 1))
+    if normalized == "constant" and warmup == 0:
+        return None
+
+    def lr_lambda(step: int) -> float:
+        return lr_decay_multiplier(normalized, step, total, warmup)
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 def seeded_sample(torch: Any, fn: Any, shape: Any, *, generator: Any, device: Any, dtype: Any) -> Any:
@@ -813,6 +903,7 @@ class _ZImageLoraBackend:
         self._transformer: Any | None = None
         self._vae: Any | None = None
         self._optimizer: Any | None = None
+        self._lr_scheduler: Any | None = None
         self._generator: Any | None = None
         self._loaded_source: str | None = None
         self._latents: list[Any] = []
@@ -918,6 +1009,18 @@ class _ZImageLoraBackend:
             config.optimizer, trainable, config.learning_rate, config.weight_decay
         )
         self._optimizer.zero_grad()
+        # Learning-rate scheduler steps once per optimizer update; ``constant``
+        # with no warmup yields ``None`` so the LR stays exactly fixed.
+        total_updates, warmup_updates = lr_schedule_updates(
+            config.steps, config.gradient_accumulation, config.lr_warmup_steps
+        )
+        self._lr_scheduler = build_lr_scheduler(
+            torch,
+            self._optimizer,
+            config.lr_scheduler,
+            total_updates=total_updates,
+            warmup_updates=warmup_updates,
+        )
         vae_config = getattr(pipe.vae, "config", None)
         self._vae_scaling = float(getattr(vae_config, "scaling_factor", 1.0) or 1.0)
         self._vae_shift = float(getattr(vae_config, "shift_factor", 0.0) or 0.0)
@@ -939,6 +1042,8 @@ class _ZImageLoraBackend:
             # ``loraBNorm`` between here and save proves the adapter is learning.
             loraANorm=lora_a_norm,
             loraBNorm=lora_b_norm,
+            lrScheduler=config.lr_scheduler,
+            lrWarmupSteps=config.lr_warmup_steps,
             gpuMemory=gpu_memory_snapshot(torch, device),
         )
 
@@ -1128,6 +1233,10 @@ class _ZImageLoraBackend:
         if step % accum == 0 or step == total_steps:
             self._optimizer.step()
             self._optimizer.zero_grad()
+            # Advance the LR scheduler once per optimizer update (``None`` for a
+            # plain constant schedule, leaving the LR fixed).
+            if self._lr_scheduler is not None:
+                self._lr_scheduler.step()
         return float(loss.detach().to("cpu"))
 
     def _stack_model_output(self, torch: Any, model_out: Any) -> Any:
@@ -1498,13 +1607,46 @@ def inject_video_attention_lora(transformer: Any, config: TrainingRunConfig) -> 
     return target_paths
 
 
-def _build_mlx_optimizer(name: str, learning_rate: float, weight_decay: float = 0.0) -> Any:
+def _build_mlx_optimizer(name: str, learning_rate: Any, weight_decay: float = 0.0) -> Any:
+    # ``learning_rate`` is a float (constant) or a schedule callable (built by
+    # ``_build_mlx_lr_schedule``); both are valid optimizer inputs and MLX advances
+    # a schedule callable from the optimizer's own step counter.
     optim = importlib.import_module("mlx.optimizers")
     normalized = (name or "").strip().lower().replace("-", "").replace("_", "")
     if normalized == "adam":
         # Plain Adam has no decoupled weight decay; the parameter applies to AdamW only.
         return optim.Adam(learning_rate=learning_rate)
     return optim.AdamW(learning_rate=learning_rate, weight_decay=weight_decay)
+
+
+def _build_mlx_lr_schedule(
+    name: str | None, base_lr: float, *, total_updates: int, warmup_updates: int
+) -> Any:
+    """Resolve the learning rate handed to the MLX optimizer: a plain float for a
+    plain ``constant`` schedule (byte-identical to the pre-scheduler path), or a
+    schedule callable that ramps/decays per optimizer update.
+
+    The callable delegates to :func:`lr_decay_multiplier` — the *same* helper the
+    torch ``LambdaLR`` uses — so both backends honor identical curves. In
+    particular the warmup ramp starts nonzero (``1/(warmup+1)`` of the base LR),
+    never wasting the first optimizer update on a 0 LR the way a plain
+    ``linear_schedule(0, base, warmup)`` would. MLX advances the schedule from the
+    optimizer's own step counter (which increments once per optimizer update), so
+    the train loop never steps it manually. Eager-only: the callable reads the
+    step as a Python int, so it must not be traced under ``mx.compile``."""
+
+    normalized = normalize_lr_scheduler(name)
+    total = max(1, int(total_updates))
+    warmup = max(0, min(int(warmup_updates), total - 1))
+    if normalized == "constant" and warmup == 0:
+        return float(base_lr)
+
+    base = float(base_lr)
+
+    def schedule(step: Any) -> float:
+        return base * lr_decay_multiplier(normalized, int(step), total, warmup)
+
+    return schedule
 
 
 def ltx_flow_target(clean: Any, noise: Any) -> Any:
@@ -1622,8 +1764,19 @@ class _LtxMlxLoraBackend:
 
         progress("loading_model", "loading_model", 0.18, "Attaching LoRA adapters to the transformer.")
         lora_paths = inject_video_attention_lora(transformer, config)
+        # Resolve the LR (constant float, or a schedule callable that decays/ramps
+        # per optimizer update — MLX advances it from the optimizer's step count).
+        total_updates, warmup_updates = lr_schedule_updates(
+            config.steps, config.gradient_accumulation, config.lr_warmup_steps
+        )
+        learning_rate = _build_mlx_lr_schedule(
+            config.lr_scheduler,
+            config.learning_rate,
+            total_updates=total_updates,
+            warmup_updates=warmup_updates,
+        )
         self._optimizer = _build_mlx_optimizer(
-            config.optimizer, config.learning_rate, config.weight_decay
+            config.optimizer, learning_rate, config.weight_decay
         )
         self._accumulated_grads = None
 
@@ -1638,6 +1791,8 @@ class _LtxMlxLoraBackend:
             kernel=LtxMlxLoraTrainer.kernel_id,
             source=repo,
             loraModules=len(lora_paths),
+            lrScheduler=config.lr_scheduler,
+            lrWarmupSteps=config.lr_warmup_steps,
         )
 
     def prepare_dataset(

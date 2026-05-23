@@ -74,6 +74,7 @@ Recommended shape:
         "advanced": {
           "mixedPrecision": "bf16",
           "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "timestepType": "sigmoid",
           "timestepBias": "high_noise",
           "lossType": "mse",

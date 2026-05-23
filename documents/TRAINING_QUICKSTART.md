@@ -134,6 +134,20 @@ flow-matching loop with the configured timestep sampler/loss settings, checkpoin
 every `saveEvery` steps, and writes a `.safetensors` adapter that contains only the
 trained LoRA (the de-distill adapter is not saved).
 
+**Two "schedulers" — keep them distinct.** The Advanced panel exposes two
+independent settings that the word *scheduler* is used for elsewhere:
+
+- The **noise scheduler** (`timestepType` / `timestepBias`) controls *which*
+  flow-matching timesteps the loop trains on — the `flowmatch`-style sigmoid
+  sampler. For Z-Image this denoising methodology is fixed; the knobs only bias
+  where in the noise range sampling concentrates.
+- The **learning-rate scheduler** (`lrScheduler`) controls how the *optimizer
+  learning rate* changes over the run. `constant` (the default) holds the LR fixed
+  for the whole run; `linear` and `cosine` decay it toward zero, optionally after
+  an `lrWarmupSteps` linear warmup. It is a worker-backed control — selecting a
+  non-constant value genuinely changes the LR during real training, and an
+  unsupported name is rejected at submit.
+
 Progress reports flow through the job stream (`preparing → caching → training →
 checkpointing → saving → completed`) and the run honors cancellation between
 steps.

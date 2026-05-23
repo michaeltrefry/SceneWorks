@@ -65,16 +65,22 @@ from scene_worker.runtime import (
     worker_capabilities,
 )
 from scene_worker.training_adapters import (
+    SUPPORTED_LR_SCHEDULERS,
     SUPPORTED_TRAINING_PLAN_VERSION,
     LtxMlxLoraTrainer,
     TrainingKernelError,
     ZImageLoraTrainer,
     _ZImageLoraBackend,
+    _build_mlx_lr_schedule,
+    build_lr_scheduler,
     build_optimizer,
     bucket_resolution,
     create_training_kernel,
     dry_run_training_summary,
     flow_matching_velocity_target,
+    lr_decay_multiplier,
+    lr_schedule_updates,
+    normalize_lr_scheduler,
     read_run_config,
     require_mlx_runtime,
     resolve_pretrained_source,
@@ -1466,6 +1472,162 @@ def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
 
     assert isinstance(optimizer, FakeProdigy)
     assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6, "weight_decay": 0.0001}}
+
+
+def test_lr_schedule_updates_converts_microsteps_to_optimizer_updates():
+    # accum=1 -> one optimizer update per micro-step; warmup passes through.
+    assert lr_schedule_updates(1000, 1, 0) == (1000, 0)
+    assert lr_schedule_updates(1000, 1, 100) == (1000, 100)
+    # Gradient accumulation makes optimizer updates less frequent (ceil division),
+    # and the warmup step count is converted the same way.
+    assert lr_schedule_updates(1000, 4, 40) == (250, 10)
+    assert lr_schedule_updates(10, 4, 0) == (3, 0)  # ceil(10 / 4)
+    # Warmup is clamped strictly below the total so the body always decays.
+    assert lr_schedule_updates(10, 1, 50) == (10, 9)
+
+
+def test_normalize_lr_scheduler_accepts_supported_and_rejects_unknown():
+    assert normalize_lr_scheduler(None) == "constant"
+    assert normalize_lr_scheduler(" Cosine ") == "cosine"
+    assert normalize_lr_scheduler("LINEAR") == "linear"
+    for name in SUPPORTED_LR_SCHEDULERS:
+        assert normalize_lr_scheduler(name) == name
+    with pytest.raises(TrainingKernelError) as excinfo:
+        normalize_lr_scheduler("warmup_cosine")
+    assert "Unsupported lrScheduler" in str(excinfo.value)
+
+
+def test_lr_decay_multiplier_curves():
+    # Constant holds the base LR for the whole run.
+    assert lr_decay_multiplier("constant", 0, 10, 0) == 1.0
+    assert lr_decay_multiplier("constant", 5, 10, 0) == 1.0
+    # Linear decays 1 -> 0 across the run.
+    assert lr_decay_multiplier("linear", 0, 10, 0) == pytest.approx(1.0)
+    assert lr_decay_multiplier("linear", 5, 10, 0) == pytest.approx(0.5)
+    assert lr_decay_multiplier("linear", 10, 10, 0) == pytest.approx(0.0)
+    # Cosine: 1 at the start, 0.5 at the midpoint, 0 at the end.
+    assert lr_decay_multiplier("cosine", 0, 10, 0) == pytest.approx(1.0)
+    assert lr_decay_multiplier("cosine", 5, 10, 0) == pytest.approx(0.5)
+    assert lr_decay_multiplier("cosine", 10, 10, 0) == pytest.approx(0.0)
+    # A linear warmup ramps to 1.0 without a dead zero-LR first step, then the
+    # body schedule runs from its start (progress 0 -> multiplier 1.0).
+    assert lr_decay_multiplier("cosine", 0, 10, 4) == pytest.approx(1 / 5)
+    assert lr_decay_multiplier("cosine", 3, 10, 4) == pytest.approx(4 / 5)
+    assert lr_decay_multiplier("cosine", 4, 10, 4) == pytest.approx(1.0)
+    # Cosine and linear are different curves off the midpoint.
+    assert lr_decay_multiplier("cosine", 3, 10, 0) != pytest.approx(
+        lr_decay_multiplier("linear", 3, 10, 0)
+    )
+
+
+def test_build_lr_scheduler_rejects_unknown_before_touching_torch():
+    # The name is validated before the optimizer/torch is used, so a dummy torch
+    # is never dereferenced for an unknown scheduler.
+    with pytest.raises(TrainingKernelError):
+        build_lr_scheduler(
+            SimpleNamespace(), SimpleNamespace(), "exotic", total_updates=5, warmup_updates=0
+        )
+
+
+def test_build_lr_scheduler_constant_is_fixed_and_cosine_linear_decay():
+    torch = pytest.importorskip("torch")
+
+    def make_optimizer():
+        param = torch.nn.Parameter(torch.zeros(1))
+        return torch.optim.SGD([param], lr=0.1)
+
+    # Plain constant (no warmup) returns no scheduler: the LR stays exactly fixed,
+    # matching every pre-scheduler training run.
+    optimizer = make_optimizer()
+    assert (
+        build_lr_scheduler(torch, optimizer, "constant", total_updates=10, warmup_updates=0)
+        is None
+    )
+
+    def run(name):
+        optimizer = make_optimizer()
+        scheduler = build_lr_scheduler(torch, optimizer, name, total_updates=10, warmup_updates=0)
+        assert scheduler is not None
+        lrs = [optimizer.param_groups[0]["lr"]]
+        for _ in range(10):
+            optimizer.step()
+            scheduler.step()
+            lrs.append(optimizer.param_groups[0]["lr"])
+        return lrs
+
+    cosine = run("cosine")
+    linear = run("linear")
+
+    # Both start at the base LR, decay monotonically, and reach ~0 at the end.
+    for lrs in (cosine, linear):
+        assert lrs[0] == pytest.approx(0.1)
+        assert all(later <= earlier + 1e-12 for earlier, later in zip(lrs, lrs[1:]))
+        assert lrs[-1] == pytest.approx(0.0, abs=1e-7)
+        assert lrs[5] < lrs[0]
+    # Cosine and linear coincide at the exact midpoint (both 0.5) but differ
+    # off-center, so compare away from it.
+    assert cosine[3] != pytest.approx(linear[3])
+
+
+def test_build_lr_scheduler_applies_linear_warmup_then_holds_for_constant():
+    torch = pytest.importorskip("torch")
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.SGD([param], lr=0.1)
+
+    # Constant + warmup still builds a scheduler that ramps the LR in, then holds.
+    scheduler = build_lr_scheduler(
+        torch, optimizer, "constant", total_updates=10, warmup_updates=4
+    )
+    assert scheduler is not None
+
+    lrs = [optimizer.param_groups[0]["lr"]]
+    for _ in range(6):
+        optimizer.step()
+        scheduler.step()
+        lrs.append(optimizer.param_groups[0]["lr"])
+
+    # Linear ramp 0.02 -> 0.04 -> 0.06 -> 0.08 -> 0.10, then held at the base LR.
+    assert lrs[0] == pytest.approx(0.02)
+    assert lrs[1] > lrs[0]
+    assert lrs[4] == pytest.approx(0.1)
+    assert lrs[5] == pytest.approx(0.1)
+
+
+def test_read_run_config_parses_lr_scheduler_and_warmup():
+    config = read_run_config(
+        {"config": {"steps": 1200, "advanced": {"lrScheduler": "cosine", "lrWarmupSteps": 100}}}
+    )
+    assert config.lr_scheduler == "cosine"
+    assert config.lr_warmup_steps == 100
+
+
+def test_read_run_config_defaults_lr_scheduler_to_constant():
+    config = read_run_config({"config": {}})
+    assert config.lr_scheduler == "constant"
+    assert config.lr_warmup_steps == 0
+
+
+def test_build_mlx_lr_schedule_matches_shared_multiplier_and_warmup_is_nonzero():
+    # Plain constant (no warmup) collapses to a plain float — byte-identical to the
+    # pre-scheduler MLX path, with no schedule callable involved.
+    assert _build_mlx_lr_schedule("constant", 0.1, total_updates=10, warmup_updates=0) == pytest.approx(0.1)
+
+    # Non-constant / warmup returns a callable that mirrors the SAME shared
+    # multiplier the torch LambdaLR uses, so both backends decay identically. This
+    # is the parity guarantee: the MLX curve is lr_decay_multiplier by construction
+    # (no separately-derived schedule math that could drift). Runs without MLX.
+    base = 0.1
+    for name, total, warmup in [("cosine", 10, 4), ("linear", 8, 0), ("constant", 12, 3)]:
+        schedule = _build_mlx_lr_schedule(name, base, total_updates=total, warmup_updates=warmup)
+        assert callable(schedule)
+        for step in range(total + 1):
+            assert schedule(step) == pytest.approx(base * lr_decay_multiplier(name, step, total, warmup))
+
+    # The warmup first step is nonzero (1/(warmup+1) of base), not a wasted 0-LR
+    # update — the divergence the torch path deliberately avoids.
+    warmup_schedule = _build_mlx_lr_schedule("cosine", base, total_updates=10, warmup_updates=4)
+    assert warmup_schedule(0) > 0.0
+    assert warmup_schedule(0) == pytest.approx(base * (1 / 5))
 
 
 def test_z_image_lora_backend_activates_default_adapter():

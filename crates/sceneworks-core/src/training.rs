@@ -35,6 +35,13 @@ pub const TRAINING_CONTRACT_SCHEMA_VERSION: u32 = 1;
 /// kernel rejects plans whose `planVersion` it does not understand.
 pub const TRAINING_PLAN_VERSION: u32 = 1;
 
+/// Learning-rate schedulers both worker kernels honor. Submit-time validation
+/// rejects any `advanced.lrScheduler` outside this set so a non-constant choice
+/// is never accepted as no-op metadata. This is the *learning-rate* scheduler;
+/// the flow-matching noise scheduler is configured separately via
+/// `advanced.timestepType`/`timestepBias`.
+pub const SUPPORTED_LR_SCHEDULERS: [&str; 3] = ["constant", "linear", "cosine"];
+
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
     /// target; `Video` and `Audio` are reserved so the contract stays generic.
@@ -617,6 +624,12 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
                 "timestepBias": "high_noise",
                 "lossType": "mse",
                 "weightDecay": 0.0001,
+                // Learning-rate scheduler, distinct from the flow-matching noise
+                // scheduler driven by `timestepType`/`timestepBias`. `constant`
+                // holds the optimizer LR fixed for the whole run (matching every
+                // pre-scheduler training run); the worker also honors `linear` and
+                // `cosine`, with an optional `lrWarmupSteps` ramp.
+                "lrScheduler": "constant",
                 "sampleEvery": 250,
                 "sampleSteps": 8,
                 "sampleGuidanceScale": 0.0,
@@ -633,6 +646,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
@@ -682,7 +696,9 @@ fn ltx_video_lora_target() -> TrainingTarget {
                 "mixedPrecision": "bf16",
                 "cacheLatents": true,
                 "networkType": "lora",
-                "scheduler": "constant",
+                // Learning-rate scheduler (see the Z-Image target). MLX honors the
+                // same `constant`/`linear`/`cosine` set via mlx.optimizers schedules.
+                "lrScheduler": "constant",
                 "backend": "mlx",
                 // Still-image training: each item encodes to a single latent frame.
                 "numFrames": 1,
@@ -700,6 +716,7 @@ fn ltx_video_lora_target() -> TrainingTarget {
             "steps": [200, 4000],
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 2],
+            "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"],
             "requiresBackend": "mlx",
@@ -947,6 +964,48 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         return Err(TrainingPlanError::InvalidConfig(
             "learningRate must be a positive finite number.".to_owned(),
         ));
+    }
+    validate_lr_scheduler(config)?;
+    Ok(())
+}
+
+/// Validates the learning-rate scheduler knobs in `advanced`. The scheduler name
+/// must be one of [`SUPPORTED_LR_SCHEDULERS`] (so a non-constant choice is never
+/// silently ignored), and an optional `lrWarmupSteps` ramp must be a non-negative
+/// integer shorter than the run. Absent keys keep the constant-LR default.
+fn validate_lr_scheduler(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    if let Some(value) = config.advanced.get("lrScheduler") {
+        let name = value.as_str().ok_or_else(|| {
+            TrainingPlanError::InvalidConfig("lrScheduler must be a string.".to_owned())
+        })?;
+        let normalized = name.trim().to_lowercase();
+        if !SUPPORTED_LR_SCHEDULERS.contains(&normalized.as_str()) {
+            return Err(TrainingPlanError::InvalidConfig(format!(
+                "Unsupported lrScheduler '{name}'. Supported schedulers: {}.",
+                SUPPORTED_LR_SCHEDULERS.join(", ")
+            )));
+        }
+    }
+    if let Some(value) = config.advanced.get("lrWarmupSteps") {
+        let warmup = value
+            .as_u64()
+            .or_else(|| match value.as_f64() {
+                Some(number) if number.is_finite() && number >= 0.0 && number.fract() == 0.0 => {
+                    Some(number as u64)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                TrainingPlanError::InvalidConfig(
+                    "lrWarmupSteps must be a non-negative integer.".to_owned(),
+                )
+            })?;
+        if warmup >= u64::from(config.steps) {
+            return Err(TrainingPlanError::InvalidConfig(format!(
+                "lrWarmupSteps ({warmup}) must be less than steps ({}).",
+                config.steps
+            )));
+        }
     }
     Ok(())
 }

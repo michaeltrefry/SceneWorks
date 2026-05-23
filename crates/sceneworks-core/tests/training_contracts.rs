@@ -9,7 +9,7 @@ use sceneworks_core::training::{
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn fixture_path(relative_path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -353,6 +353,106 @@ fn build_training_plan_rejects_empty_dataset() {
     .expect_err("empty dataset is rejected");
 
     assert_eq!(error, TrainingPlanError::EmptyDataset);
+}
+
+/// Builds a plan from the Z-Image target defaults with the learning-rate
+/// scheduler knobs overridden, so the validation tests exercise the same submit
+/// path the API uses (`build_training_plan` → `validate_training_config`).
+fn build_plan_with_lr_overrides(
+    scheduler: Option<Value>,
+    warmup: Option<Value>,
+) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    match scheduler {
+        Some(value) => {
+            config.advanced.insert("lrScheduler".to_owned(), value);
+        }
+        None => {
+            config.advanced.remove("lrScheduler");
+        }
+    }
+    if let Some(value) = warmup {
+        config.advanced.insert("lrWarmupSteps".to_owned(), value);
+    }
+
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_lr",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_lr",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_lr"),
+        file_name: "lr.safetensors".to_owned(),
+        created_at: "2026-05-23T00:00:00Z".to_owned(),
+    })
+}
+
+#[test]
+fn build_training_plan_accepts_supported_lr_schedulers() {
+    // Canonical names plus case/whitespace variants the validator normalizes.
+    for name in ["constant", "linear", "cosine", "Cosine", " LINEAR "] {
+        let plan = build_plan_with_lr_overrides(Some(Value::String(name.to_owned())), None)
+            .unwrap_or_else(|error| panic!("scheduler {name:?} should be accepted: {error}"));
+        // The submitted value is preserved verbatim in the resolved config; only
+        // validation normalizes for the membership check.
+        assert_eq!(
+            plan.config.advanced["lrScheduler"],
+            Value::String(name.to_owned())
+        );
+    }
+}
+
+#[test]
+fn build_training_plan_rejects_unknown_lr_scheduler() {
+    let error = build_plan_with_lr_overrides(Some(Value::String("warmup_cosine".to_owned())), None)
+        .expect_err("unknown scheduler is rejected");
+    match error {
+        TrainingPlanError::InvalidConfig(detail) => {
+            assert!(detail.contains("Unsupported lrScheduler"), "got: {detail}");
+            assert!(
+                detail.contains("warmup_cosine"),
+                "names the bad value: {detail}"
+            );
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_training_plan_rejects_non_string_lr_scheduler() {
+    let error = build_plan_with_lr_overrides(Some(Value::Bool(true)), None)
+        .expect_err("non-string scheduler is rejected");
+    assert!(matches!(error, TrainingPlanError::InvalidConfig(_)));
+}
+
+#[test]
+fn build_training_plan_validates_lr_warmup_steps() {
+    // A non-negative warmup shorter than the 3000-step run is accepted.
+    let plan =
+        build_plan_with_lr_overrides(Some(Value::String("cosine".to_owned())), Some(json!(100)))
+            .expect("warmup within range is accepted");
+    assert_eq!(plan.config.advanced["lrWarmupSteps"], json!(100));
+
+    // Warmup at or beyond the total step count is rejected.
+    let error =
+        build_plan_with_lr_overrides(Some(Value::String("cosine".to_owned())), Some(json!(5000)))
+            .expect_err("warmup beyond the run is rejected");
+    assert!(matches!(error, TrainingPlanError::InvalidConfig(_)));
+
+    // Negative (and otherwise non-integer) warmup is rejected.
+    let error = build_plan_with_lr_overrides(None, Some(json!(-5)))
+        .expect_err("negative warmup is rejected");
+    assert!(matches!(error, TrainingPlanError::InvalidConfig(_)));
 }
 
 #[test]
