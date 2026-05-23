@@ -4707,6 +4707,9 @@ describe("SceneWorks app shell", () => {
     expect(modelValues).toContain("sensenova_u1_8b");
     // The text-to-image-only model is filtered out of the edit-mode picker.
     expect(modelValues).not.toContain("z_image_turbo");
+    // The selected model resets to an edit-capable one, so Generate doesn't submit
+    // the (filtered-out) text default and get rejected by the worker.
+    expect(field(container, "Model").value).toBe("sensenova_u1_8b");
   });
 
   it("uses preset modes as the Image Studio picker surface", async () => {
