@@ -1632,8 +1632,14 @@ def _build_mlx_lr_schedule(
     never wasting the first optimizer update on a 0 LR the way a plain
     ``linear_schedule(0, base, warmup)`` would. MLX advances the schedule from the
     optimizer's own step counter (which increments once per optimizer update), so
-    the train loop never steps it manually. Eager-only: the callable reads the
-    step as a Python int, so it must not be traced under ``mx.compile``."""
+    the train loop never steps it manually.
+
+    The callable must return an ``mx.array`` (not a Python float): MLX stores the
+    schedule's return value straight into ``optimizer.state["learning_rate"]`` and
+    then calls ``.astype(grad.dtype)`` on it inside ``apply_single`` — a Python
+    float would raise ``AttributeError`` on the first update. Eager-only: the
+    callable reads the step as a Python int, so it must not be traced under
+    ``mx.compile``."""
 
     normalized = normalize_lr_scheduler(name)
     total = max(1, int(total_updates))
@@ -1641,10 +1647,11 @@ def _build_mlx_lr_schedule(
     if normalized == "constant" and warmup == 0:
         return float(base_lr)
 
+    mx = importlib.import_module("mlx.core")
     base = float(base_lr)
 
-    def schedule(step: Any) -> float:
-        return base * lr_decay_multiplier(normalized, int(step), total, warmup)
+    def schedule(step: Any) -> Any:
+        return mx.array(base * lr_decay_multiplier(normalized, int(step), total, warmup))
 
     return schedule
 

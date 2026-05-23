@@ -72,6 +72,7 @@ from scene_worker.training_adapters import (
     ZImageLoraTrainer,
     _ZImageLoraBackend,
     _build_mlx_lr_schedule,
+    _build_mlx_optimizer,
     build_lr_scheduler,
     build_optimizer,
     bucket_resolution,
@@ -1607,27 +1608,64 @@ def test_read_run_config_defaults_lr_scheduler_to_constant():
     assert config.lr_warmup_steps == 0
 
 
-def test_build_mlx_lr_schedule_matches_shared_multiplier_and_warmup_is_nonzero():
+def test_build_mlx_lr_schedule_constant_no_warmup_is_plain_float():
     # Plain constant (no warmup) collapses to a plain float — byte-identical to the
-    # pre-scheduler MLX path, with no schedule callable involved.
+    # pre-scheduler MLX path, with no schedule callable and no MLX dependency.
     assert _build_mlx_lr_schedule("constant", 0.1, total_updates=10, warmup_updates=0) == pytest.approx(0.1)
 
+
+def test_build_mlx_lr_schedule_callable_returns_mx_array_matching_multiplier():
+    mx = pytest.importorskip("mlx.core")
+
     # Non-constant / warmup returns a callable that mirrors the SAME shared
-    # multiplier the torch LambdaLR uses, so both backends decay identically. This
-    # is the parity guarantee: the MLX curve is lr_decay_multiplier by construction
-    # (no separately-derived schedule math that could drift). Runs without MLX.
+    # multiplier the torch LambdaLR uses, so both backends decay identically. The
+    # value MUST be an mx.array, not a Python float: MLX stores the schedule's
+    # return straight into optimizer state and calls ``.astype()`` on it, so a
+    # float would crash on the first optimizer update.
     base = 0.1
     for name, total, warmup in [("cosine", 10, 4), ("linear", 8, 0), ("constant", 12, 3)]:
         schedule = _build_mlx_lr_schedule(name, base, total_updates=total, warmup_updates=warmup)
         assert callable(schedule)
         for step in range(total + 1):
-            assert schedule(step) == pytest.approx(base * lr_decay_multiplier(name, step, total, warmup))
+            value = schedule(step)
+            assert isinstance(value, mx.array)
+            assert float(value) == pytest.approx(base * lr_decay_multiplier(name, step, total, warmup))
 
     # The warmup first step is nonzero (1/(warmup+1) of base), not a wasted 0-LR
     # update — the divergence the torch path deliberately avoids.
     warmup_schedule = _build_mlx_lr_schedule("cosine", base, total_updates=10, warmup_updates=4)
-    assert warmup_schedule(0) > 0.0
-    assert warmup_schedule(0) == pytest.approx(base * (1 / 5))
+    assert float(warmup_schedule(0)) > 0.0
+    assert float(warmup_schedule(0)) == pytest.approx(base * (1 / 5))
+
+
+def test_build_mlx_lr_schedule_drives_real_optimizer_lr_per_update():
+    # Integration guard: feed the schedule to a real mlx.optimizers optimizer
+    # (exactly as the LTX MLX backend does) and confirm the effective LR follows
+    # lr_decay_multiplier, advancing once per optimizer.update() from the
+    # optimizer's own 0-indexed step counter — the same curve the torch LambdaLR
+    # path produces. This exercises the float-vs-mx.array contract that the
+    # in-isolation callable test cannot.
+    mx = pytest.importorskip("mlx.core")
+    nn = pytest.importorskip("mlx.nn")
+
+    base = 0.05
+    total, warmup = 10, 0
+    schedule = _build_mlx_lr_schedule("cosine", base, total_updates=total, warmup_updates=warmup)
+    optimizer = _build_mlx_optimizer("adamw", schedule, 0.0)
+    model = nn.Linear(2, 2)
+
+    observed = []
+    for _ in range(total):
+        _loss, grads = nn.value_and_grad(model, lambda m: mx.sum(m(mx.ones((1, 2))) ** 2))(model)
+        optimizer.update(model, grads)
+        mx.eval(model.parameters(), optimizer.state)
+        observed.append(float(optimizer.learning_rate))
+
+    expected = [base * lr_decay_multiplier("cosine", step, total, warmup) for step in range(total)]
+    assert observed == pytest.approx(expected, abs=1e-6)
+    # And it actually decays — regression guard for the float-return crash that
+    # silently left every non-constant MLX schedule non-functional.
+    assert observed[0] > observed[total // 2] > observed[-1]
 
 
 def test_z_image_lora_backend_activates_default_adapter():
