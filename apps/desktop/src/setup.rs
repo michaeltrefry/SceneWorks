@@ -20,6 +20,14 @@ use tauri_plugin_shell::ShellExt;
 const SETUP_VERSION: &str = "3";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Lens sidecar venv torch stack. cu128 for Blackwell (sm_120); torchvision MUST
+/// match the CUDA torch build or diffusers 0.38's Flux.2 VAE import fails with
+/// "operator torchvision::nms does not exist". Mirrors the Docker /opt/lens-venv.
+#[cfg(not(target_os = "macos"))]
+const LENS_TORCH_SPEC: &str = "torch>=2.11,<2.12";
+#[cfg(not(target_os = "macos"))]
+const LENS_TORCHVISION_SPEC: &str = "torchvision>=0.26,<0.27";
+
 /// Process handles + run guards shared across the app.
 #[derive(Default)]
 pub struct Managed {
@@ -94,6 +102,13 @@ pub fn venv_dir() -> PathBuf {
     app_support_dir().join("python").join("venv")
 }
 
+/// Separate Lens sidecar venv (torch 2.11 / transformers 5.8 / diffusers 0.38),
+/// kept apart from the main venv whose transformers 4.x stack native LTX-2.3
+/// requires. LensTurboAdapter runs its interpreter via SCENEWORKS_LENS_PYTHON.
+fn lens_venv_dir() -> PathBuf {
+    app_support_dir().join("python").join("lens-venv")
+}
+
 pub fn venv_python(venv: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         venv.join("Scripts").join("python.exe")
@@ -104,6 +119,11 @@ pub fn venv_python(venv: &Path) -> PathBuf {
 
 fn marker_path() -> PathBuf {
     app_support_dir().join("python").join(".venv-marker")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn lens_marker_path() -> PathBuf {
+    app_support_dir().join("python").join(".lens-venv-marker")
 }
 
 /// Platform-appropriate logs directory (also used for the API/worker logs).
@@ -170,6 +190,23 @@ fn requirements_ltx_path(app: &AppHandle) -> PathBuf {
         .join("..")
         .join("worker")
         .join("requirements-ltx.txt")
+}
+
+/// requirements-lens.txt location (Microsoft Lens sidecar venv deps): the bundled
+/// resource in a packaged app, or the repo copy during development. Optional —
+/// absent in older worker checkouts, in which case Lens is unavailable.
+#[cfg(not(target_os = "macos"))]
+fn requirements_lens_path(app: &AppHandle) -> PathBuf {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("python-src").join("requirements-lens.txt");
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("worker")
+        .join("requirements-lens.txt")
 }
 
 /// requirements-mlx.txt location (Apple Silicon MLX video inference deps): the
@@ -521,6 +558,95 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Provision the separate Lens sidecar venv (cu128 torch 2.11 + torchvision +
+/// requirements-lens.txt). Runs in the BACKGROUND after the app is up so the large
+/// torch download never blocks launch; non-macOS only (Lens needs CUDA). Idempotent
+/// via its own marker. Failures are non-fatal: Lens stays unavailable (LensTurboAdapter
+/// reports a clear error) while the rest of the app works. Opt out with
+/// SCENEWORKS_DISABLE_LENS=1.
+#[cfg(not(target_os = "macos"))]
+async fn provision_lens_venv(app: &AppHandle) -> Result<(), String> {
+    if std::env::var("SCENEWORKS_DISABLE_LENS")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let requirements = requirements_lens_path(app);
+    if !requirements.exists() {
+        // Older worker checkout without the Lens requirements; Lens stays off.
+        return Ok(());
+    }
+    let body = std::fs::read_to_string(&requirements)
+        .map_err(|error| format!("read requirements-lens: {error}"))?;
+    let venv = lens_venv_dir();
+    let python = venv_python(&venv);
+    let marker = lens_marker_path();
+    let index = std::env::var("SCENEWORKS_PYTORCH_INDEX_URL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://download.pytorch.org/whl/cu128".to_owned());
+    let expected =
+        format!("v{SETUP_VERSION}\n{LENS_TORCH_SPEC} {LENS_TORCHVISION_SPEC} @ {index}\n{body}");
+
+    if python.exists() {
+        if let Ok(found) = std::fs::read_to_string(&marker) {
+            if found == expected {
+                return Ok(());
+            }
+        }
+    }
+    if let Some(parent) = venv.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("create python dir: {error}"))?;
+    }
+    if !python.exists() {
+        run_uv(
+            app,
+            vec![
+                "venv".to_owned(),
+                "--clear".to_owned(),
+                "--python".to_owned(),
+                "3.12".to_owned(),
+                venv.to_string_lossy().into_owned(),
+            ],
+        )
+        .await?;
+    }
+    // torch + torchvision from the CUDA index first so they are an ABI-matched
+    // CUDA build (a CPU torchvision breaks diffusers 0.38's Flux.2 VAE import).
+    run_uv(
+        app,
+        vec![
+            "pip".to_owned(),
+            "install".to_owned(),
+            "--python".to_owned(),
+            python.to_string_lossy().into_owned(),
+            "--index-url".to_owned(),
+            index,
+            LENS_TORCH_SPEC.to_owned(),
+            LENS_TORCHVISION_SPEC.to_owned(),
+        ],
+    )
+    .await?;
+    // Then the remaining Lens deps from PyPI — they don't pin torch, so the
+    // cu128 torch/torchvision installed above stay put.
+    run_uv(
+        app,
+        vec![
+            "pip".to_owned(),
+            "install".to_owned(),
+            "--python".to_owned(),
+            python.to_string_lossy().into_owned(),
+            "-r".to_owned(),
+            requirements.to_string_lossy().into_owned(),
+        ],
+    )
+    .await?;
+    std::fs::write(&marker, &expected).map_err(|error| format!("write lens marker: {error}"))?;
+    Ok(())
+}
+
 /// Resolve the ffmpeg binary bundled with the venv's imageio-ffmpeg, used by the
 /// API's in-process utility worker for timeline export / frame extraction. The
 /// desktop ships no system ffmpeg, so without this those jobs fail. Returns None
@@ -724,6 +850,14 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
                 .env("SCENEWORKS_WORKER_ID", &worker_id)
                 .env("SCENEWORKS_API_URL", &api_url)
                 .env("HF_HOME", &hf_home)
+                // Point LensTurboAdapter at the Lens sidecar venv interpreter. The
+                // adapter existence-checks it at job time, so this is safe even
+                // while the venv is still provisioning in the background (and on
+                // macOS, where it never exists and Lens reports unavailable).
+                .env(
+                    "SCENEWORKS_LENS_PYTHON",
+                    venv_python(&lens_venv_dir()).to_string_lossy().to_string(),
+                )
                 .env(
                     "SCENEWORKS_DATA_DIR",
                     resolved_data_dir().to_string_lossy().to_string(),
@@ -994,7 +1128,24 @@ async fn run_startup(app: AppHandle) {
         emit(&app, "error", error, true);
         return;
     }
-    gate_window(app);
+    gate_window(app.clone());
+    // Provision the Lens sidecar venv in the background so its large cu128 torch
+    // download never blocks startup; Lens becomes usable once it finishes, while
+    // the rest of the app (incl. LTX/Z-Image/Qwen) is available immediately.
+    // Non-macOS only — Lens needs CUDA. Non-fatal: failures only mean Lens stays
+    // unavailable.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let lens_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = provision_lens_venv(&lens_app).await {
+                append_log(
+                    &logs_dir().join("lens-setup.log"),
+                    &format!("[desktop] lens venv provisioning failed: {error}\n"),
+                );
+            }
+        });
+    }
 }
 
 /// Frontend entry point (called on setup-screen load and on retry). Kicks off

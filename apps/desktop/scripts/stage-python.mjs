@@ -16,7 +16,10 @@ const outDir = join(desktopDir, "python-src");
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-for (const file of ["requirements.txt", "requirements-ltx.txt", "requirements-mlx.txt"]) {
+// requirements-lens.txt feeds the separate Lens sidecar venv (torch 2.11 /
+// transformers 5.8), provisioned alongside the main venv by setup.rs. scene_worker
+// (incl. lens_runner.py + _vendor/lens) is copied wholesale below.
+for (const file of ["requirements.txt", "requirements-ltx.txt", "requirements-mlx.txt", "requirements-lens.txt"]) {
   const src = join(workerDir, file);
   if (existsSync(src)) cpSync(src, join(outDir, file));
 }
