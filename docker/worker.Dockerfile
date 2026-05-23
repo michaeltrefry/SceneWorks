@@ -3,6 +3,10 @@ FROM python:3.12-slim AS builder
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG PYTORCH_SPEC=torch>=2.8,<2.9
 ARG PYTORCH_AUDIO_SPEC=torchaudio>=2.8,<2.9
+# torchvision is required by the vendored sensenova_u1 (SenseNova-U1 T2I). Install
+# it from the same index as torch so it's an ABI-matched build — a CPU torchvision
+# against a CUDA torch breaks with "operator torchvision::nms does not exist".
+ARG PYTORCH_VISION_SPEC=torchvision>=0.23,<0.24
 ARG INCLUDE_LTX_PIPELINES=1
 # Real person detection/tracking/segmentation backends (ultralytics + SAM2) for
 # the Replace Person workflow (epic sc-1090). Opt-in like the LTX pipelines.
@@ -32,7 +36,7 @@ COPY apps/worker/requirements.txt ./requirements.txt
 COPY apps/worker/requirements-ltx.txt ./requirements-ltx.txt
 COPY apps/worker/requirements-person.txt ./requirements-person.txt
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir --no-compile --index-url "${PYTORCH_INDEX_URL}" "${PYTORCH_SPEC}" "${PYTORCH_AUDIO_SPEC}" \
+    && pip install --no-cache-dir --no-compile --index-url "${PYTORCH_INDEX_URL}" "${PYTORCH_SPEC}" "${PYTORCH_AUDIO_SPEC}" "${PYTORCH_VISION_SPEC}" \
     && pip freeze | grep -E '^(torch|torchaudio|torchvision|nvidia-|triton)==.*' > /tmp/torch-constraints.txt \
     && pip install --no-cache-dir --no-compile -c /tmp/torch-constraints.txt -r requirements.txt \
     && if [ "${INCLUDE_LTX_PIPELINES}" = "1" ]; then pip install --no-cache-dir --no-compile -c /tmp/torch-constraints.txt -r requirements-ltx.txt; fi \

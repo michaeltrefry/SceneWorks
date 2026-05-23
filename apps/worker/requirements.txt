@@ -5,6 +5,12 @@ numpy>=2.0,<3
 imageio>=2.37,<3
 imageio-ffmpeg>=0.6,<1
 torch>=2.8,<2.9
+# Required by the vendored sensenova_u1 (models/neo_unify/utils.py imports
+# torchvision.transforms). Pinned to the torch range so the build matches —
+# a CPU torchvision ABI-mismatches a CUDA torch ("operator torchvision::nms
+# does not exist"). The Docker worker installs it from the cu128 index alongside
+# torch (PYTORCH_VISION_SPEC); desktop resolves it via the same index as torch.
+torchvision>=0.23,<0.24
 # Upper bound: the vendored sensenova_u1 (NEO-unify) and ltx-core both subclass
 # transformers' Qwen3/Gemma internals, which 4.58+ may rearrange; keep on 4.57.x.
 transformers>=4.57,<4.58

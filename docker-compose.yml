@@ -37,6 +37,8 @@ services:
         PYTORCH_INDEX_URL: ${SCENEWORKS_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
         PYTORCH_SPEC: ${SCENEWORKS_PYTORCH_SPEC:-torch>=2.8,<2.9}
         PYTORCH_AUDIO_SPEC: ${SCENEWORKS_PYTORCH_AUDIO_SPEC:-torchaudio>=2.8,<2.9}
+        # torchvision (matched to torch) for the vendored sensenova_u1 (SenseNova-U1).
+        PYTORCH_VISION_SPEC: ${SCENEWORKS_PYTORCH_VISION_SPEC:-torchvision>=0.23,<0.24}
         INCLUDE_LTX_PIPELINES: ${SCENEWORKS_INCLUDE_LTX_PIPELINES:-1}
         # Lens sidecar venv (/opt/lens-venv): its own cu128 torch 2.11 +
         # torchvision + transformers 5.8 + diffusers 0.38, isolated from the main
