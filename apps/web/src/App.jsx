@@ -20,6 +20,7 @@ import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { sortNewest, sortWorkers } from "./sorters.js";
 import { ensureItemVersionFields } from "./timeline.js";
 import { useCharacters } from "./hooks/useCharacters.js";
+import { usePresets } from "./hooks/usePresets.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
 // web/Docker keep the existing first-run project gate. Tauri commands persist the
@@ -366,7 +367,6 @@ export function App() {
   const [queueSummary, setQueueSummary] = useState(null);
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
-  const [presets, setPresets] = useState([]);
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
@@ -415,6 +415,16 @@ export function App() {
     detachCharacterLora,
     createCharacterTestJob,
   } = useCharacters({ token, activeProject, setError, requestedGpu, setActiveView, refreshData });
+
+  const {
+    presets,
+    setPresets,
+    refreshPresets,
+    createPreset,
+    updatePreset,
+    duplicatePreset,
+    deletePreset,
+  } = usePresets({ token, activeProject, setError });
 
   const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
   const imageModels = useMemo(() => {
@@ -845,20 +855,6 @@ export function App() {
       .catch(() => {});
   }
 
-  async function refreshPresets(projectId = activeProject?.id, { signal } = {}) {
-    try {
-      const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-      const items = await apiFetch(`/api/v1/recipe-presets${query}`, token, { signal });
-      setPresets(items);
-      setError("");
-      return items;
-    } catch (err) {
-      if (isAbortError(err)) return [];
-      setError(err.message);
-      return [];
-    }
-  }
-
   async function refreshTrainingDatasets(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
       setTrainingDatasets([]);
@@ -978,56 +974,6 @@ export function App() {
     setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
     setError("");
     return job;
-  }
-
-  function presetQuery(scope = null) {
-    const params = new URLSearchParams();
-    if (scope) {
-      params.set("scope", scope);
-    }
-    if (scope === "project" && activeProject?.id) {
-      params.set("projectId", activeProject.id);
-    }
-    const value = params.toString();
-    return value ? `?${value}` : "";
-  }
-
-  async function createPreset(payload) {
-    if (payload.scope === "project" && !activeProject) {
-      throw new Error("Create or open a project first.");
-    }
-    const created = await apiFetch(`/api/v1/recipe-presets${presetQuery(payload.scope)}`, token, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    await refreshPresets(activeProject?.id);
-    return created;
-  }
-
-  async function updatePreset(presetId, payload, scope = payload.scope) {
-    const updated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${presetQuery(scope)}`, token, {
-      method: "PATCH",
-      body: JSON.stringify(payload),
-    });
-    await refreshPresets(activeProject?.id);
-    return updated;
-  }
-
-  async function duplicatePreset(presetId, scope = null) {
-    const duplicated = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}/duplicate${presetQuery(scope)}`, token, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    await refreshPresets(activeProject?.id);
-    return duplicated;
-  }
-
-  async function deletePreset(presetId, scope = null) {
-    const archived = await apiFetch(`/api/v1/recipe-presets/${encodeURIComponent(presetId)}${presetQuery(scope)}`, token, {
-      method: "DELETE",
-    });
-    await refreshPresets(activeProject?.id);
-    return archived;
   }
 
   async function deleteModel(model) {
