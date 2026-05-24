@@ -14,7 +14,7 @@ import tempfile
 import warnings
 from pathlib import Path
 from textwrap import wrap
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol, TypeVar
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
@@ -1063,6 +1063,24 @@ _LENS_ASPECT_RATIOS = (
     ("16:9", 16 / 9),
     ("2:1", 2.0),
 )
+# (aspect_ratio, label) buckets for snap_to_aspect_bucket; preserves table order.
+_LENS_ASPECT_BUCKETS = [(ratio, label) for label, ratio in _LENS_ASPECT_RATIOS]
+
+
+_BucketT = TypeVar("_BucketT")
+
+
+def snap_to_aspect_bucket(
+    width: int, height: int, buckets: Iterable[tuple[float, _BucketT]]
+) -> _BucketT:
+    """Return the value of the bucket whose aspect ratio is closest to width/height
+    in log-space. ``buckets`` is an iterable of (aspect_ratio, value) pairs; ties
+    resolve to the first matching bucket, so callers pass tables in priority order.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    target = math.log(width / height)
+    return min(buckets, key=lambda bucket: abs(target - math.log(bucket[0])))[1]
 
 
 def lens_resolution_for(width: int, height: int) -> tuple[int, str]:
@@ -1072,12 +1090,8 @@ def lens_resolution_for(width: int, height: int) -> tuple[int, str]:
     bases' square areas (1024² and 1440²); the aspect ratio by closest log-ratio
     so portrait/landscape requests land on the matching bucket.
     """
-    width = max(1, int(width))
-    height = max(1, int(height))
-    base = 1440 if width * height >= 1024 * 1440 else 1024
-    target = math.log(width / height)
-    aspect = min(_LENS_ASPECT_RATIOS, key=lambda item: abs(target - math.log(item[1])))[0]
-    return base, aspect
+    base = 1440 if max(1, int(width)) * max(1, int(height)) >= 1024 * 1440 else 1024
+    return base, snap_to_aspect_bucket(width, height, _LENS_ASPECT_BUCKETS)
 
 
 class LensTurboAdapter:
@@ -1375,6 +1389,7 @@ _SENSENOVA_RESOLUTIONS: dict[str, tuple[int, int]] = {
     "1:3": (1152, 3456),
     "3:1": (3456, 1152),
 }
+_SENSENOVA_ASPECT_BUCKETS = [(w / h, (w, h)) for (w, h) in _SENSENOVA_RESOLUTIONS.values()]
 
 
 def sensenova_resolution_for(width: int, height: int) -> tuple[int, int]:
@@ -1384,13 +1399,7 @@ def sensenova_resolution_for(width: int, height: int) -> tuple[int, int]:
     degrade (upstream warns). Pick the bucket whose aspect ratio is closest in
     log-space so portrait/landscape requests land on the matching orientation.
     """
-    width = max(1, int(width))
-    height = max(1, int(height))
-    target = math.log(width / height)
-    return min(
-        _SENSENOVA_RESOLUTIONS.values(),
-        key=lambda wh: abs(target - math.log(wh[0] / wh[1])),
-    )
+    return snap_to_aspect_bucket(width, height, _SENSENOVA_ASPECT_BUCKETS)
 
 
 # SenseNova-U1 interleaved generation was trained at smaller buckets than plain
@@ -1409,18 +1418,13 @@ _INTERLEAVE_RESOLUTIONS: dict[str, tuple[int, int]] = {
     "1:3": (864, 2592),
     "3:1": (2592, 864),
 }
+_INTERLEAVE_ASPECT_BUCKETS = [(w / h, (w, h)) for (w, h) in _INTERLEAVE_RESOLUTIONS.values()]
 
 
 def interleave_resolution_for(width: int, height: int) -> tuple[int, int]:
     """Snap a requested W×H to the nearest SenseNova-U1 *interleave* bucket by
     aspect ratio (log-space). Off-bucket sizes degrade, as upstream warns."""
-    width = max(1, int(width))
-    height = max(1, int(height))
-    target = math.log(width / height)
-    return min(
-        _INTERLEAVE_RESOLUTIONS.values(),
-        key=lambda wh: abs(target - math.log(wh[0] / wh[1])),
-    )
+    return snap_to_aspect_bucket(width, height, _INTERLEAVE_ASPECT_BUCKETS)
 
 
 # Interleave inference requires a system prompt describing the think/no-think
@@ -2397,11 +2401,25 @@ def evict_other_image_adapters(adapters: dict[str, object], keep_id: str) -> Non
         emit_worker_event("image_adapters_evicted", keep=keep_id, evicted=freed)
 
 
-def torch_inference_backend_available(torch: Any) -> bool:
-    if torch.cuda.is_available():
-        return True
-    mps = getattr(getattr(torch, "backends", None), "mps", None)
-    return bool(mps and mps.is_available())
+def torch_inference_backend_available(torch: Any | None = None) -> bool:
+    """True when a CUDA or MPS inference backend is usable.
+
+    Callers that already imported torch pass it in; callers that haven't (e.g.
+    worker capability registration before torch setup) omit it, so we import torch
+    defensively and treat any failure as "no backend".
+    """
+    if torch is None:
+        try:
+            torch = importlib.import_module("torch")
+        except Exception:
+            return False
+    try:
+        if bool(torch.cuda.is_available()):
+            return True
+        mps = getattr(getattr(torch, "backends", None), "mps", None)
+        return bool(mps and mps.is_available())
+    except Exception:
+        return False
 
 
 def require_inference_backend_for_gpu_worker(torch: Any, gpu_id: str | None) -> None:

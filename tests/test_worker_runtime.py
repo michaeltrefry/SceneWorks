@@ -391,7 +391,7 @@ def test_mps_worker_can_advertise_generation_capabilities(monkeypatch):
                 def is_available():
                     return True
 
-    monkeypatch.setattr("scene_worker.runtime.importlib.import_module", lambda name: Torch if name == "torch" else None)
+    monkeypatch.setattr("scene_worker.image_adapters.importlib.import_module", lambda name: Torch if name == "torch" else None)
 
     capabilities = worker_capabilities({"id": "mps", "name": "Apple GPU", "capabilities": ["placeholder", "gpu"]})
 

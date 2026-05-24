@@ -76,10 +76,6 @@ class TrainingKernelError(RuntimeError):
     missing model component, unsupported diffusers build, ...)."""
 
 
-def now() -> str:
-    return utc_now()
-
-
 # --------------------------------------------------------------------------- #
 # Shared plan validation + dry-run summary (used by the dry-run and real paths)
 # --------------------------------------------------------------------------- #
@@ -145,7 +141,7 @@ def dry_run_training_summary(plan: dict[str, Any], *, dry_run: bool) -> dict[str
         "baseModelPath": base_model_path,
         "baseModelInstalled": bool(base_model_path and os.path.exists(base_model_path)),
         "planVersion": plan.get("planVersion"),
-        "completedAt": now(),
+        "completedAt": utc_now(),
     }
 
 
@@ -652,7 +648,7 @@ class ZImageLoraTrainer:
             "resolution": (prepared or {}).get("resolution") or config.resolution,
             "triggerWords": trigger_words(plan),
             "planVersion": plan.get("planVersion"),
-            "completedAt": now(),
+            "completedAt": utc_now(),
         }
 
 
@@ -1303,7 +1299,7 @@ class _ZImageLoraBackend:
                             "sampleSource": "live_adapter",
                             "numInferenceSteps": config.sample_steps,
                             "guidanceScale": config.sample_guidance_scale,
-                            "createdAt": now(),
+                            "createdAt": utc_now(),
                         }
                     )
         finally:
@@ -2038,7 +2034,7 @@ class _LtxMlxLoraBackend:
                         "mediaType": "video",
                         "numInferenceSteps": config.sample_steps,
                         "guidanceScale": config.sample_guidance_scale,
-                        "createdAt": now(),
+                        "createdAt": utc_now(),
                     }
                 )
 
@@ -2382,7 +2378,7 @@ class LensLoraTrainer:
             "resolution": result.get("resolution") or config.resolution,
             "triggerWords": trigger_words(plan),
             "planVersion": plan.get("planVersion"),
-            "completedAt": now(),
+            "completedAt": utc_now(),
         }
 
 

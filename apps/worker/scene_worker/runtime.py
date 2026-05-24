@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime
-import importlib
 import json
 import os
 import signal
@@ -13,6 +11,8 @@ import time
 from typing import Any, Callable
 
 import httpx
+
+from sceneworks_shared import utc_now
 
 from .caption_adapters import run_training_caption_job
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_utilization, gpu_worker_id
@@ -25,6 +25,7 @@ from .image_adapters import (
     create_image_adapter,
     evict_other_image_adapters,
     release_image_worker_memory,
+    torch_inference_backend_available,
 )
 from .person_adapters import (
     detector_backend_available,
@@ -81,10 +82,6 @@ VQA_JOB_TYPES = ("image_vqa",)
 INTERLEAVE_JOB_TYPES = ("image_interleave",)
 
 
-def now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 def emit(payload: dict) -> None:
     print(json.dumps(payload, sort_keys=True), flush=True)
 
@@ -134,20 +131,6 @@ def worker_capabilities(gpu: dict) -> list[str]:
     return sorted(capabilities)
 
 
-def torch_inference_backend_available() -> bool:
-    try:
-        torch = importlib.import_module("torch")
-    except Exception:
-        return False
-    try:
-        if bool(torch.cuda.is_available()):
-            return True
-        mps = getattr(getattr(torch, "backends", None), "mps", None)
-        return bool(mps and mps.is_available())
-    except Exception:
-        return False
-
-
 def loaded_models_from_adapter(adapter: object, *, job_id: str | None = None) -> list[str]:
     loaded_models = getattr(adapter, "loaded_models", None)
     if not callable(loaded_models):
@@ -173,7 +156,7 @@ def register_worker(api: ApiClient, settings: WorkerSettings, gpu: dict, loaded_
     if gpu.get("utilization"):
         payload["utilization"] = gpu["utilization"]
     worker = api.post("/api/v1/workers/register", payload)
-    emit({"event": "registered", "worker": worker, "reportedAt": now()})
+    emit({"event": "registered", "worker": worker, "reportedAt": utc_now()})
 
 
 def heartbeat(
@@ -199,7 +182,7 @@ def resolve_loaded_models(source: LoadedModelsSource, *, job_id: str | None = No
     try:
         return source()
     except Exception as exc:
-        payload = {"event": "loaded_models_failed", "error": str(exc), "reportedAt": now()}
+        payload = {"event": "loaded_models_failed", "error": str(exc), "reportedAt": utc_now()}
         if job_id:
             payload["jobId"] = job_id
         emit(payload)
@@ -424,7 +407,7 @@ class JobCancelMonitor:
             try:
                 requested = job_cancel_requested(self._api, self._job_id)
             except httpx.HTTPError as exc:
-                emit({"event": "cancel_poll_failed", "jobId": self._job_id, "error": str(exc), "reportedAt": now()})
+                emit({"event": "cancel_poll_failed", "jobId": self._job_id, "error": str(exc), "reportedAt": utc_now()})
                 continue
             if not requested:
                 continue
@@ -446,7 +429,7 @@ class JobCancelMonitor:
                 "jobId": self._job_id,
                 "workerId": getattr(self._settings, "worker_id", None),
                 "afterSeconds": self._deadline,
-                "reportedAt": now(),
+                "reportedAt": utc_now(),
             }
         )
         # Mark the job canceled *before* exiting so the UI resolves immediately
@@ -468,7 +451,7 @@ class JobCancelMonitor:
                     "event": "cancel_force_kill_finalize_failed",
                     "jobId": self._job_id,
                     "error": str(exc),
-                    "reportedAt": now(),
+                    "reportedAt": utc_now(),
                 }
             )
         # os._exit skips the cooperative adapter.cancel()/cleanup() path, so a
@@ -486,7 +469,7 @@ class JobCancelMonitor:
                         "event": "cancel_force_kill_cleanup_failed",
                         "jobId": self._job_id,
                         "error": str(exc),
-                        "reportedAt": now(),
+                        "reportedAt": utc_now(),
                     }
                 )
         # The main thread is wedged in a native call we cannot interrupt from
@@ -525,7 +508,7 @@ def keep_job_alive(
         try:
             heartbeat_with_loaded_models(api, settings, status, job_id, loaded_models)
         except httpx.HTTPError as exc:
-            emit({"event": "heartbeat_failed", "jobId": job_id, "error": str(exc), "reportedAt": now()})
+            emit({"event": "heartbeat_failed", "jobId": job_id, "error": str(exc), "reportedAt": utc_now()})
 
 
 def run_blocking_job_step(
@@ -588,7 +571,7 @@ def restart_worker_after_oom(settings: WorkerSettings, job_id: str) -> None:
             "workerId": getattr(settings, "worker_id", None),
             "gpuId": getattr(settings, "gpu_id", None),
             "jobId": job_id,
-            "reportedAt": now(),
+            "reportedAt": utc_now(),
         }
     )
     raise SystemExit(OOM_RESTART_EXIT_CODE)
@@ -631,7 +614,7 @@ def should_skip_claim_low_vram(settings: WorkerSettings) -> bool:
             "memoryTotalMb": total_mb,
             "thresholdMb": effective,
             "configuredThresholdMb": threshold,
-            "reportedAt": now(),
+            "reportedAt": utc_now(),
         }
     )
     return True
@@ -1244,7 +1227,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                     "maxAttempts": max_registration_attempts,
                     "retryInSeconds": delay,
                     "error": str(exc),
-                    "reportedAt": now(),
+                    "reportedAt": utc_now(),
                 }
             )
             if attempt == max_registration_attempts:
@@ -1263,7 +1246,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 time.sleep(settings.poll_seconds)
                 continue
 
-            emit({"event": "claimed", "jobId": job["id"], "gpuId": job["assignedGpu"], "reportedAt": now()})
+            emit({"event": "claimed", "jobId": job["id"], "gpuId": job["assignedGpu"], "reportedAt": utc_now()})
             if job["type"] in IMAGE_JOB_TYPES:
                 run_image_job(api, settings, job, image_adapters)
             elif job["type"] in VQA_JOB_TYPES:
@@ -1291,7 +1274,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                     },
                 )
         except httpx.HTTPError as exc:
-            emit({"event": "api_error", "error": str(exc), "reportedAt": now()})
+            emit({"event": "api_error", "error": str(exc), "reportedAt": utc_now()})
             time.sleep(settings.poll_seconds)
 
 
@@ -1312,7 +1295,7 @@ def child_environment(settings: WorkerSettings, *, worker_id: str, gpu_id: str) 
 
 
 def start_child_worker(settings: WorkerSettings, *, worker_id: str, gpu_id: str) -> subprocess.Popen:
-    emit({"event": "starting_worker", "workerId": worker_id, "gpuId": gpu_id, "reportedAt": now()})
+    emit({"event": "starting_worker", "workerId": worker_id, "gpuId": gpu_id, "reportedAt": utc_now()})
     return subprocess.Popen(
         [sys.executable, "-m", "scene_worker"],
         env=child_environment(settings, worker_id=worker_id, gpu_id=gpu_id),
@@ -1359,7 +1342,7 @@ def supervise_auto_workers(settings: WorkerSettings) -> None:
                     "gpuId": gpu_id,
                     "exitCode": exit_code,
                     "restartInSeconds": settings.poll_seconds,
-                    "reportedAt": now(),
+                    "reportedAt": utc_now(),
                 }
             )
             time.sleep(settings.poll_seconds)
@@ -1385,7 +1368,7 @@ def run_check(settings: WorkerSettings) -> None:
                 if job_type in capabilities
             ],
             "supportedJobTypes": list(SUPPORTED_JOB_TYPES + PERSON_JOB_TYPES + TRAINING_JOB_TYPES + CAPTION_JOB_TYPES),
-            "reportedAt": now(),
+            "reportedAt": utc_now(),
         }
     )
 
@@ -1457,7 +1440,7 @@ def start_parent_death_watchdog() -> None:
     def watch() -> None:
         while _pid_alive(parent_pid):
             time.sleep(3)
-        emit({"event": "parent_exited", "parentPid": parent_pid, "pid": os.getpid(), "reportedAt": now()})
+        emit({"event": "parent_exited", "parentPid": parent_pid, "pid": os.getpid(), "reportedAt": utc_now()})
         try:
             os.kill(os.getpid(), signal.SIGTERM)
         except OSError:
