@@ -1065,6 +1065,27 @@ _LENS_ASPECT_RATIOS = (
 )
 
 
+def snap_to_aspect_ratio_bucket(
+    width: int, height: int, buckets: tuple[tuple[Any, float], ...] | dict[str, tuple[int, int]]
+) -> tuple[Any, float] | tuple[int, int]:
+    """Snap a requested W×H to the nearest bucket by aspect ratio (log-space).
+
+    buckets can be either:
+    - Tuple of (label, aspect_ratio) for aspect-based snapping (Lens)
+    - Dict of {aspect_label: (width, height)} for direct resolution snapping (SenseNova/Interleave)
+
+    Returns the bucket value (aspect string for tuple buckets, (w, h) for dict buckets).
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    target = math.log(width / height)
+
+    if isinstance(buckets, dict):
+        return min(buckets.values(), key=lambda wh: abs(target - math.log(wh[0] / wh[1])))
+    else:
+        return min(buckets, key=lambda item: abs(target - math.log(item[1])))[0]
+
+
 def lens_resolution_for(width: int, height: int) -> tuple[int, str]:
     """Snap a requested W×H to the nearest Lens (base_resolution, aspect_ratio).
 
@@ -1075,8 +1096,7 @@ def lens_resolution_for(width: int, height: int) -> tuple[int, str]:
     width = max(1, int(width))
     height = max(1, int(height))
     base = 1440 if width * height >= 1024 * 1440 else 1024
-    target = math.log(width / height)
-    aspect = min(_LENS_ASPECT_RATIOS, key=lambda item: abs(target - math.log(item[1])))[0]
+    aspect = snap_to_aspect_ratio_bucket(width, height, _LENS_ASPECT_RATIOS)
     return base, aspect
 
 
@@ -1384,13 +1404,7 @@ def sensenova_resolution_for(width: int, height: int) -> tuple[int, int]:
     degrade (upstream warns). Pick the bucket whose aspect ratio is closest in
     log-space so portrait/landscape requests land on the matching orientation.
     """
-    width = max(1, int(width))
-    height = max(1, int(height))
-    target = math.log(width / height)
-    return min(
-        _SENSENOVA_RESOLUTIONS.values(),
-        key=lambda wh: abs(target - math.log(wh[0] / wh[1])),
-    )
+    return snap_to_aspect_ratio_bucket(width, height, _SENSENOVA_RESOLUTIONS)
 
 
 # SenseNova-U1 interleaved generation was trained at smaller buckets than plain
@@ -1414,13 +1428,7 @@ _INTERLEAVE_RESOLUTIONS: dict[str, tuple[int, int]] = {
 def interleave_resolution_for(width: int, height: int) -> tuple[int, int]:
     """Snap a requested W×H to the nearest SenseNova-U1 *interleave* bucket by
     aspect ratio (log-space). Off-bucket sizes degrade, as upstream warns."""
-    width = max(1, int(width))
-    height = max(1, int(height))
-    target = math.log(width / height)
-    return min(
-        _INTERLEAVE_RESOLUTIONS.values(),
-        key=lambda wh: abs(target - math.log(wh[0] / wh[1])),
-    )
+    return snap_to_aspect_ratio_bucket(width, height, _INTERLEAVE_RESOLUTIONS)
 
 
 # Interleave inference requires a system prompt describing the think/no-think
