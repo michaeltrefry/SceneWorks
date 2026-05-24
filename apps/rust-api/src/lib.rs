@@ -813,7 +813,10 @@ struct HealthResponse {
     runtime: String,
     version: String,
     auth_required: bool,
-    directories: DirectoriesResponse,
+    // Absolute host paths are withheld from the public health endpoint when a token is
+    // configured, so a LAN client can't map the host filesystem despite auth being on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    directories: Option<DirectoriesResponse>,
     interrupted_jobs_on_startup: usize,
 }
 
@@ -1296,17 +1299,24 @@ struct LoraImportRequest {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let token_configured = !state.settings.access_token.is_empty();
     Json(HealthResponse {
         status: "ok",
         service: "sceneworks-api",
         runtime: "rust".to_owned(),
         version: state.settings.app_version.clone(),
-        auth_required: !state.settings.access_token.is_empty(),
-        directories: DirectoriesResponse {
-            data: state.settings.data_dir.display().to_string(),
-            config: state.settings.config_dir.display().to_string(),
-            projects: state.settings.projects_dir().display().to_string(),
-            jobs_db: state.settings.jobs_db_path.display().to_string(),
+        auth_required: token_configured,
+        // When a token is configured the endpoint is public but the deployment expects
+        // auth, so don't leak absolute host paths to unauthenticated LAN callers.
+        directories: if token_configured {
+            None
+        } else {
+            Some(DirectoriesResponse {
+                data: state.settings.data_dir.display().to_string(),
+                config: state.settings.config_dir.display().to_string(),
+                projects: state.settings.projects_dir().display().to_string(),
+                jobs_db: state.settings.jobs_db_path.display().to_string(),
+            })
         },
         interrupted_jobs_on_startup: state.interrupted_jobs_on_startup,
     })
@@ -3228,6 +3238,24 @@ mod web_assets {
     #[folder = "../web/dist"]
     struct WebAssets;
 
+    // The desktop shell navigates its privileged webview to this server, so the embedded
+    // UI runs from this origin and its CSP must come from here (tauri.conf.json only
+    // governs the bundled setup screen). Kept narrow: scripts only from this origin (the
+    // theme bootstrap was moved to /theme-init.js so no inline script is needed), Google
+    // Fonts allowed, images/media as self/data/blob, IPC for the Tauri webview. Same-origin
+    // API + SSE are covered by connect-src 'self'.
+    pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+script-src 'self'; \
+style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+font-src 'self' https://fonts.gstatic.com data:; \
+img-src 'self' data: blob:; \
+media-src 'self' data: blob:; \
+connect-src 'self' ipc: http://ipc.localhost; \
+object-src 'none'; \
+base-uri 'self'; \
+frame-ancestors 'none'; \
+form-action 'self'";
+
     pub(super) async fn serve(uri: Uri) -> Response {
         let requested = uri.path().trim_start_matches('/');
         let requested = if requested.is_empty() {
@@ -3238,7 +3266,10 @@ mod web_assets {
         if let Some(file) = WebAssets::get(requested) {
             let mime = mime_guess::from_path(requested).first_or_octet_stream();
             return (
-                [(header::CONTENT_TYPE, mime.as_ref())],
+                [
+                    (header::CONTENT_TYPE, mime.as_ref()),
+                    (header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY),
+                ],
                 file.data.into_owned(),
             )
                 .into_response();
@@ -3247,7 +3278,10 @@ mod web_assets {
         // client-side deep links (e.g. project routes) load correctly.
         match WebAssets::get("index.html") {
             Some(index) => (
-                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY),
+                ],
                 index.data.into_owned(),
             )
                 .into_response(),
@@ -13356,6 +13390,29 @@ mod tests {
         assert_eq!(jobs, json!([]));
     }
 
+    #[tokio::test]
+    async fn public_health_withholds_host_paths_when_a_token_is_configured() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+
+        // No token: single-user/local, directories stay for diagnostics.
+        let open_app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, health) = request(open_app, "GET", "/api/v1/health", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(health["status"], "ok");
+        assert_eq!(health["authRequired"], false);
+        assert!(health.get("directories").is_some());
+
+        // Token configured but /health is public: don't leak absolute host paths.
+        let mut settings = test_settings(&temp_dir);
+        settings.access_token = "secret-token".to_owned();
+        let guarded_app = create_app(settings).expect("app creates");
+        let (status, health) = request(guarded_app, "GET", "/api/v1/health", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(health["status"], "ok");
+        assert_eq!(health["authRequired"], true);
+        assert!(health.get("directories").is_none());
+    }
+
     #[test]
     fn requires_token_only_gates_api_paths() {
         // Non-API paths (embedded UI / SPA fallback) must never require a token,
@@ -13386,6 +13443,26 @@ mod tests {
         // API routes stay protected.
         let (status, _) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "embed-web")]
+    #[test]
+    fn embedded_ui_csp_locks_down_scripts_but_allows_app_resources() {
+        let csp = super::web_assets::CONTENT_SECURITY_POLICY;
+        // The whole point: scripts only from this origin, no inline/eval escape hatch.
+        assert!(csp.contains("script-src 'self'"));
+        assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+        assert!(!csp.contains("unsafe-eval"));
+        // Resources the app genuinely needs.
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("font-src 'self' https://fonts.gstatic.com data:"));
+        assert!(csp.contains("https://fonts.googleapis.com"));
+        assert!(csp.contains("img-src 'self' data: blob:"));
+        // Tauri IPC for the navigated desktop webview.
+        assert!(csp.contains("ipc:"));
+        // Hardening directives.
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
     }
 
     #[test]
