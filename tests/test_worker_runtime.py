@@ -630,10 +630,11 @@ def test_mlx_adapter_rejects_incompatible_lora_family(tmp_path):
 
 
 def test_mlx_condition_image_resolves_source_asset_from_file_path(tmp_path):
-    # Regression: MLX image_to_video / first_last_frame jobs failed with
-    # "Image-to-video mode requires a source image asset." because the adapter
-    # read a non-existent top-level `mediaPath` sidecar key instead of the real
-    # nested `file.path`, so the source image never resolved.
+    # Regression: MLX image_to_video jobs failed with "Image-to-video mode
+    # requires a source image asset." because the adapter read a non-existent
+    # top-level `mediaPath` sidecar key instead of the real nested `file.path`,
+    # so the source image never resolved. (MLX supports only text/image-to-video;
+    # first_last_frame is rejected in ensure_models, so there's no _last frame.)
     project_path = tmp_path / "project"
     (project_path / "assets" / "images").mkdir(parents=True)
     image_rel = "assets/images/source.png"
@@ -660,20 +661,6 @@ def test_mlx_condition_image_resolves_source_asset_from_file_path(tmp_path):
     assert first_image.mode == "RGB"
     # Validation now passes instead of raising the source-image error.
     adapter._validate_inputs(project_path, i2v_request, first_image, None)
-
-    flf_request = video_request_from_job(
-        {
-            "id": "job-flf",
-            "payload": {
-                "projectId": "project-1",
-                "model": "ltx_2_3",
-                "mode": "first_last_frame",
-                "sourceAssetId": "asset-source",
-                "lastFrameAssetId": "asset-source",
-            },
-        }
-    )
-    assert adapter._last_condition_image(project_path, flf_request) is not None
 
 
 def test_mlx_wan_user_loras_resolved_to_path_strength_tuples(tmp_path):
@@ -3176,7 +3163,7 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
         def cleanup(self, _job_id):
             raise AssertionError("cleanup should not be called")
 
-    def run_immediately(_api, _settings, _job_id, _status, callback, *, loaded_models):
+    def run_immediately(_api, _settings, _job_id, _status, callback, *, loaded_models, on_force_terminate=None):
         blocking_models.append(loaded_models())
         result = callback(lambda: False)
         blocking_models.append(loaded_models())
