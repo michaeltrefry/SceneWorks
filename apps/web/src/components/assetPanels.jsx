@@ -1,4 +1,5 @@
 import React from "react";
+import { isAbortError } from "../api.js";
 import { AssetMedia, assetUrl } from "./assetMedia.jsx";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
@@ -16,10 +17,10 @@ function DocumentReader({ asset }) {
       setError("Document file is unavailable.");
       return undefined;
     }
-    let cancelled = false;
+    const controller = new AbortController();
     setSegments(null);
     setError("");
-    fetch(url)
+    fetch(url, { signal: controller.signal })
       .then((response) => {
         if (!response.ok) {
           throw new Error(`Request failed (${response.status})`);
@@ -27,18 +28,13 @@ function DocumentReader({ asset }) {
         return response.json();
       })
       .then((document) => {
-        if (!cancelled) {
-          setSegments(Array.isArray(document?.segments) ? document.segments : []);
-        }
+        setSegments(Array.isArray(document?.segments) ? document.segments : []);
       })
       .catch((err) => {
-        if (!cancelled) {
-          setError(String(err?.message ?? err));
-        }
+        if (isAbortError(err)) return;
+        setError(String(err?.message ?? err));
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [url]);
 
   if (error) {

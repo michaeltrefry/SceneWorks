@@ -11,6 +11,14 @@ export const API_BASE_URL =
       ? window.location.origin
       : configuredApiBaseUrl;
 
+// True for the DOMException fetch raises when an AbortController aborts a
+// request. Callers treat this as "request superseded", not a real error.
+export function isAbortError(err) {
+  return err?.name === "AbortError";
+}
+
+// `options` is forwarded to fetch, so callers can pass an AbortController
+// `signal` to cancel a request (e.g. a stale project-scoped load).
 export async function apiFetch(path, token, options = {}) {
   const headers = new Headers(options.headers ?? {});
   const isFormData = options.body instanceof FormData;

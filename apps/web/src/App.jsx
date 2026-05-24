@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, eventUrl } from "./api.js";
+import { apiFetch, eventUrl, isAbortError } from "./api.js";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
@@ -580,13 +580,18 @@ export function App() {
       setActiveTimeline(null);
       return;
     }
-    refreshAssets(activeProject.id);
-    refreshCharacters(activeProject.id);
-    refreshLoras(activeProject.id);
-    refreshPresets(activeProject.id);
-    refreshTrainingDatasets(activeProject.id);
-    refreshPersonTracks(activeProject.id);
-    refreshTimelines(activeProject.id);
+    // Switching projects (or unmounting) aborts the previous project's in-flight
+    // loads so a slow response can't overwrite the newly-selected project's data.
+    const controller = new AbortController();
+    const { signal } = controller;
+    refreshAssets(activeProject.id, { signal });
+    refreshCharacters(activeProject.id, { signal });
+    refreshLoras(activeProject.id, { signal });
+    refreshPresets(activeProject.id, { signal });
+    refreshTrainingDatasets(activeProject.id, { signal });
+    refreshPersonTracks(activeProject.id, { signal });
+    refreshTimelines(activeProject.id, { signal });
+    return () => controller.abort();
   }, [activeProject?.id, authenticated, token]);
 
   useEffect(() => {
@@ -783,41 +788,44 @@ export function App() {
     );
   }
 
-  async function refreshAssets(projectId = activeProject?.id) {
+  async function refreshAssets(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
       return;
     }
     try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token);
+      const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token, { signal });
       setAssets(items);
       const defaultAsset = items.find((asset) => !asset.status?.trashed && !asset.status?.rejected) ?? items[0] ?? null;
       setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);
       setError("");
     } catch (err) {
+      if (isAbortError(err)) return;
       setError(err.message);
     }
   }
 
-  async function refreshCharacters(projectId = activeProject?.id) {
+  async function refreshCharacters(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
       return;
     }
     try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token);
+      const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token, { signal });
       setCharacters(items);
       setError("");
     } catch (err) {
+      if (isAbortError(err)) return;
       setError(err.message);
     }
   }
 
-  async function refreshLoras(projectId = activeProject?.id) {
+  async function refreshLoras(projectId = activeProject?.id, { signal } = {}) {
     try {
       const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-      const items = await apiFetch(`/api/v1/loras${query}`, token);
+      const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
       setLoras(items);
       setError("");
     } catch (err) {
+      if (isAbortError(err)) return;
       setError(err.message);
     }
   }
@@ -832,20 +840,21 @@ export function App() {
       .catch(() => {});
   }
 
-  async function refreshPresets(projectId = activeProject?.id) {
+  async function refreshPresets(projectId = activeProject?.id, { signal } = {}) {
     try {
       const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-      const items = await apiFetch(`/api/v1/recipe-presets${query}`, token);
+      const items = await apiFetch(`/api/v1/recipe-presets${query}`, token, { signal });
       setPresets(items);
       setError("");
       return items;
     } catch (err) {
+      if (isAbortError(err)) return [];
       setError(err.message);
       return [];
     }
   }
 
-  async function refreshTrainingDatasets(projectId = activeProject?.id) {
+  async function refreshTrainingDatasets(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
       setTrainingDatasets([]);
       setTrainingDatasetsProjectId(null);
@@ -854,18 +863,22 @@ export function App() {
     }
     setLoadingTrainingDatasets(true);
     try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token);
+      const items = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token, { signal });
       setTrainingDatasets(items);
       setTrainingDatasetsProjectId(projectId);
       setTrainingDatasetsError("");
       return items;
     } catch (err) {
+      if (isAbortError(err)) return [];
       setTrainingDatasets([]);
       setTrainingDatasetsProjectId(projectId);
       setTrainingDatasetsError(err.message);
       return [];
     } finally {
-      setLoadingTrainingDatasets(false);
+      // A superseded load must not clear the loading flag the new load just set.
+      if (!signal?.aborted) {
+        setLoadingTrainingDatasets(false);
+      }
     }
   }
 
@@ -1115,25 +1128,26 @@ export function App() {
     return job;
   }
 
-  async function refreshPersonTracks(projectId = activeProject?.id) {
+  async function refreshPersonTracks(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
       return;
     }
     try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/person-tracks`, token);
+      const items = await apiFetch(`/api/v1/projects/${projectId}/person-tracks`, token, { signal });
       setPersonTracks(items);
       setError("");
     } catch (err) {
+      if (isAbortError(err)) return;
       setError(err.message);
     }
   }
 
-  async function refreshTimelines(projectId = activeProject?.id) {
+  async function refreshTimelines(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
       return;
     }
     try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token);
+      const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token, { signal });
       if (activeProjectRef.current?.id && activeProjectRef.current.id !== projectId) {
         return;
       }
@@ -1145,6 +1159,7 @@ export function App() {
       }
       setError("");
     } catch (err) {
+      if (isAbortError(err)) return;
       setError(err.message);
     }
   }

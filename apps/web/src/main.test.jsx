@@ -5659,8 +5659,11 @@ describe("SceneWorks app shell", () => {
     const image = container.querySelector("img.document-image");
     expect(image).not.toBeNull();
     expect(image.getAttribute("src")).toContain("assets/images/a.png");
-    // The document JSON was fetched from its file path.
-    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("assets/documents/doc_1.json"));
+    // The document JSON was fetched from its file path (with an abort signal).
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("assets/documents/doc_1.json"),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 });
 
