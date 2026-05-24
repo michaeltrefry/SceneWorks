@@ -33,15 +33,15 @@ import {
   loraWeight,
   clearPresetDefault,
   noPresetId,
-  presetLoraDetails as buildPresetLoraDetails,
-  presetMatchesModel,
-  presetMatchesWorkflow,
-  presetPromptParts as buildPresetPromptParts,
-  presetValidation,
   rememberPresetDefault,
 } from "../presetUtils.js";
+import {
+  onPromptKeyDown,
+  PresetGuidanceStrip,
+  PresetValidationWarnings,
+  useGenerationStudio,
+} from "./generationStudio.jsx";
 
-const completedResultFallbackMs = 30000;
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
 
@@ -143,7 +143,6 @@ export function ImageStudio({
   const [count, setCount] = useState(4);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [model, setModel] = useState(imageModels[0]?.id ?? "z_image_turbo");
-  const [stylePreset, setStylePreset] = useState(null);
   const [seed, setSeed] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [resolution, setResolution] = useState("1024x1024");
@@ -153,7 +152,6 @@ export function ImageStudio({
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [resultFallbackTick, setResultFallbackTick] = useState(0);
   const presetDefaultSnapshots = useRef({});
   const editImageAssets = useMemo(
     () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
@@ -196,12 +194,6 @@ export function ImageStudio({
   }
 
   useEffect(() => {
-    if (!imageModels.some((item) => item.id === model)) {
-      setModel(imageModels[0]?.id ?? "z_image_turbo");
-    }
-  }, [imageModels, model]);
-
-  useEffect(() => {
     if (mode === "edit_image" && selectedAsset?.id) {
       setSourceAssetId(selectedAsset.id);
     }
@@ -225,13 +217,6 @@ export function ImageStudio({
       setSourceAssetId(selectedAsset.id);
     }
   }, [launchRequest?.id, selectedAsset?.id]);
-
-  useEffect(() => {
-    if (characterId && !characters.some((character) => character.id === characterId)) {
-      setCharacterId("");
-      setCharacterLookId("");
-    }
-  }, [characters, characterId]);
 
   const availableModels = useMemo(
     () =>
@@ -275,15 +260,31 @@ export function ImageStudio({
         : resolutionOptions[0];
     setResolution(preferred);
   }, [resolutionOptions, resolution, selectedModel?.defaults?.resolution]);
-  const availablePresets = useMemo(() => {
-    return presets.filter((preset) => presetMatchesWorkflow(preset, mode) && presetMatchesModel(preset, selectedModel));
-  }, [mode, presets, selectedModel?.id]);
-  const selectedPreset =
-    stylePreset === noPresetId
-      ? null
-      : stylePreset
-        ? availablePresets.find((preset) => preset.id === stylePreset) ?? null
-        : availablePresets[0] ?? null;
+  const {
+    availablePresets,
+    selectedPreset,
+    setSelectedPresetId,
+    presetPromptParts,
+    presetLoraDetails,
+    presetValidationResult,
+    localJobs,
+  } = useGenerationStudio({
+    mode,
+    presets,
+    selectedModel,
+    loras,
+    models: imageModels,
+    model,
+    setModel,
+    fallbackModelId: "z_image_turbo",
+    characters,
+    characterId,
+    setCharacterId,
+    setCharacterLookId,
+    assets,
+    latestAssets,
+    trackedLocalJobs,
+  });
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
       return false;
@@ -306,12 +307,6 @@ export function ImageStudio({
       ok: incompatible.length === 0,
     };
   }, [selectedLoras, selectedModel]);
-  const presetLoraDetails = buildPresetLoraDetails(selectedPreset, loras);
-  const presetPromptParts = buildPresetPromptParts(selectedPreset);
-  const presetValidationResult = useMemo(
-    () => presetValidation(selectedPreset, loras, selectedModel),
-    [selectedPreset, loras, selectedModel],
-  );
   useEffect(() => {
     if (selectedLoraValidationResult.incompatible.length && !advancedOpen) {
       setAdvancedOpen(true);
@@ -326,15 +321,6 @@ export function ImageStudio({
         ? "No installed LoRAs in the library."
         : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
   const [width, height] = resolution.split("x").map((value) => Number(value));
-
-  useEffect(() => {
-    if (!stylePreset || stylePreset === noPresetId) {
-      return;
-    }
-    if (!selectedPreset) {
-      setStylePreset(availablePresets[0]?.id ?? noPresetId);
-    }
-  }, [availablePresets, selectedPreset, stylePreset]);
 
   useEffect(() => {
     if (!selectedPreset) {
@@ -385,53 +371,6 @@ export function ImageStudio({
     });
   }
 
-  function resultVisible(job) {
-    if (job.result?.generationSetId) {
-      return latestAssets.some((asset) => asset.generationSetId === job.result.generationSetId);
-    }
-    const assetIds = job.result?.assetIds ?? [];
-    return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
-  }
-
-  function completedAnchorMs(job) {
-    return Date.parse(job.completedAt ?? job.updatedAt ?? "");
-  }
-
-  function completedWaitExpired(job, nowMs = Date.now()) {
-    const anchorMs = completedAnchorMs(job);
-    return Number.isFinite(anchorMs) && nowMs - anchorMs > completedResultFallbackMs;
-  }
-
-  useEffect(() => {
-    const nowMs = Date.now();
-    const pendingCompletedJobs = trackedLocalJobs.filter(
-      (job) =>
-        job.status === "completed" &&
-        Number.isFinite(completedAnchorMs(job)) &&
-        !resultVisible(job) &&
-        !completedWaitExpired(job, nowMs),
-    );
-    if (!pendingCompletedJobs.length) {
-      return undefined;
-    }
-    const nextDelay = Math.min(
-      ...pendingCompletedJobs.map((job) => Math.max(0, completedResultFallbackMs - (nowMs - completedAnchorMs(job)))),
-    );
-    const timer = window.setTimeout(() => setResultFallbackTick((value) => value + 1), nextDelay + 50);
-    return () => window.clearTimeout(timer);
-  }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
-
-  const localJobs = useMemo(
-    () =>
-      trackedLocalJobs.filter(
-        (job) =>
-          // Canceled runs produce no output, so drop them instead of leaving a
-          // "Canceled" progress card and empty thumbnail placeholders behind.
-          job.status !== "canceled" &&
-          (job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job))),
-      ),
-    [assets, latestAssets, trackedLocalJobs, resultFallbackTick],
-  );
   const reviewSlots = useMemo(() => {
     if (!localJobs.length) {
       return latestAssets.map((asset) => ({ type: "asset", id: asset.id, asset }));
@@ -493,13 +432,6 @@ export function ImageStudio({
     (mode === "character_image" && !characterId) ||
     !presetValidationResult.ok ||
     !selectedLoraValidationResult.ok;
-
-  function onPromptKeyDown(event) {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-      event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
-    }
-  }
 
   return (
     <section className="main-surface image-studio">
@@ -673,7 +605,7 @@ export function ImageStudio({
               <div className="preset-chips">
                 <button
                   className={!selectedPreset ? "preset-chip active" : "preset-chip"}
-                  onClick={() => setStylePreset(noPresetId)}
+                  onClick={() => setSelectedPresetId(noPresetId)}
                   type="button"
                 >
                   None
@@ -682,7 +614,7 @@ export function ImageStudio({
                   <button
                     className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
                     key={preset.id}
-                    onClick={() => setStylePreset(preset.id)}
+                    onClick={() => setSelectedPresetId(preset.id)}
                     type="button"
                   >
                     {preset.name ?? preset.id}
@@ -706,23 +638,12 @@ export function ImageStudio({
               </label>
             </div>
 
-            {selectedPreset ? (
-              <div className="guidance-strip">
-                <strong>{selectedPreset.ui?.description ?? "Preset defaults active"}</strong>
-                <span>
-                  {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}
-                  {presetLoraDetails.length
-                    ? ` | Preset LoRA applied at generation: ${presetLoraDetails.map((lora) => lora.name ?? lora.id).join(", ")}`
-                    : " | No preset LoRAs"}
-                  {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
-                </span>
-              </div>
-            ) : (
-              <div className="guidance-strip">
-                <strong>No preset selected</strong>
-                <span>Generation uses only the prompt, model, and visible preset settings.</span>
-              </div>
-            )}
+            <PresetGuidanceStrip
+              selectedPreset={selectedPreset}
+              presetPromptParts={presetPromptParts}
+              presetLoraDetails={presetLoraDetails}
+              noPresetHint="Generation uses only the prompt, model, and visible preset settings."
+            />
 
             <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
               <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
@@ -792,16 +713,7 @@ export function ImageStudio({
               </div>
             ) : null}
 
-            {presetValidationResult.missing.length ? (
-              <p className="inline-warning">
-                Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
-              </p>
-            ) : null}
-            {presetValidationResult.incompatible.length ? (
-              <p className="inline-warning">
-                Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
-              </p>
-            ) : null}
+            <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
             {selectedLoraValidationResult.incompatible.length ? (
               <p className="inline-warning">
                 Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
