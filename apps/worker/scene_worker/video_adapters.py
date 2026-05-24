@@ -259,7 +259,6 @@ class LtxPipelinesResources:
     spatial_upsampler_path: Path
     distilled_lora_path: Path
     gemma_root: Path
-    temporal_upsampler_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1327,13 +1326,6 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
                 "gemmaRoot",
                 expect_file=False,
             ),
-            temporal_upsampler_path=self._optional_resource_path(
-                settings,
-                request,
-                resources,
-                "temporalUpscaler",
-                "temporalUpscalerPath",
-            ),
         )
 
     def _resource_path(
@@ -1373,22 +1365,6 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             return cached_root
         return root
 
-    def _optional_resource_path(
-        self,
-        settings: WorkerSettings,
-        request: VideoRequest,
-        resources: dict[str, Any],
-        resource_key: str,
-        advanced_key: str,
-    ) -> Path | None:
-        override = request.advanced.get(advanced_key)
-        if override:
-            return resolve_worker_path(settings, override)
-        resource = resources.get(resource_key) if isinstance(resources.get(resource_key), dict) else None
-        if not resource:
-            return None
-        return self._resource_path(settings, request, resources, resource_key, advanced_key)
-
     def _missing_resources(self, request: VideoRequest, resources: LtxPipelinesResources) -> list[tuple[str, Path]]:
         required = [
             ("checkpointPath", resources.checkpoint_path, "file"),
@@ -1402,8 +1378,6 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             for label, path, kind in required
             if not (path.is_file() if kind == "file" else path.is_dir())
         ]
-        if resources.temporal_upsampler_path is not None and not resources.temporal_upsampler_path.is_file():
-            missing.append(("temporalUpscalerPath", resources.temporal_upsampler_path))
         return missing
 
     def _missing_resource_search_details(
@@ -1419,7 +1393,6 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "checkpointPath": "distilledCheckpoint" if self._pipeline_module(request) in {"ltx_pipelines.distilled", "ltx_pipelines.ic_lora"} else "checkpoint",
             "spatialUpscalerPath": "spatialUpscaler",
             "distilledLoraPath": "distilledLora",
-            "temporalUpscalerPath": "temporalUpscaler",
         }
         details: list[str] = []
         for label, _path in missing:
@@ -1453,7 +1426,6 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             "spatialUpscalerPath": str(resources.spatial_upsampler_path),
             "distilledLoraPath": str(resources.distilled_lora_path),
             "gemmaRoot": str(resources.gemma_root),
-            "temporalUpscalerPath": str(resources.temporal_upsampler_path) if resources.temporal_upsampler_path else None,
         }
 
     def _dependencies_available(self, request: VideoRequest | None = None) -> bool:

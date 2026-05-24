@@ -1,4 +1,3 @@
-export const navItems = ["Library", "Image", "Video", "Presets", "Models", "Characters", "Editor", "Queue"];
 export const terminalStatuses = new Set(["completed", "failed", "canceled", "interrupted"]);
 export const actionStatuses = new Set(["failed", "canceled", "interrupted", "completed"]);
 

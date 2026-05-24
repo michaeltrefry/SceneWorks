@@ -1188,7 +1188,7 @@ describe("SceneWorks app shell", () => {
         },
       ],
     }));
-    const prepareTrainingConfig = vi.fn(async (snapshot) => snapshot);
+    const createTrainingJob = vi.fn(async () => ({ id: "job_dryrun_1", type: "lora_train", status: "queued" }));
 
     root = createRoot(container);
     await act(async () => {
@@ -1198,7 +1198,7 @@ describe("SceneWorks app shell", () => {
           datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
           gpuOptions={["auto", "0"]}
           loadDataset={loadDataset}
-          prepareTrainingConfig={prepareTrainingConfig}
+          createTrainingJob={createTrainingJob}
           trainingTargets={[zImageTrainingTarget]}
         />,
       );
@@ -1222,17 +1222,17 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Guidance scale"), "1.2");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
     });
     await settle();
 
-    expect(prepareTrainingConfig).toHaveBeenCalledWith(
+    expect(createTrainingJob).toHaveBeenCalledWith(
       expect.objectContaining({
         targetId: "z_image_turbo_lora",
         datasetId: "dataset-a",
         datasetVersion: 5,
         outputName: "Portrait Set LoRA",
-        requestedGpu: "auto",
+        dryRun: true,
         config: expect.objectContaining({
           rank: 16,
           alpha: 16,
@@ -1243,6 +1243,7 @@ describe("SceneWorks app shell", () => {
             mixedPrecision: "bf16",
             qualityPreset: "balanced",
             outputScope: "project",
+            requestedGpu: "auto",
             sampleSteps: 8,
             sampleGuidanceScale: 1.2,
             samplePrompts: expect.arrayContaining([expect.stringContaining("miraStyle")]),
@@ -1250,7 +1251,7 @@ describe("SceneWorks app shell", () => {
         }),
       }),
     );
-    expect(container.textContent).toContain("Config snapshot ready");
+    expect(container.textContent).toContain("Queued dry-run job");
   });
 
   it("applies training presets and includes selected preset metadata", async () => {
@@ -1581,7 +1582,7 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Requested GPU").value).toBe("auto");
   });
 
-  it("blocks config preparation until required fields are valid", async () => {
+  it("blocks job submission until required fields are valid", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",
       name: "Portrait Set",
@@ -1596,7 +1597,7 @@ describe("SceneWorks app shell", () => {
         },
       ],
     }));
-    const prepareTrainingConfig = vi.fn();
+    const createTrainingJob = vi.fn();
 
     root = createRoot(container);
     await act(async () => {
@@ -1605,7 +1606,7 @@ describe("SceneWorks app shell", () => {
           activeProject={{ id: "project-a", name: "Project A" }}
           datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
           loadDataset={loadDataset}
-          prepareTrainingConfig={prepareTrainingConfig}
+          createTrainingJob={createTrainingJob}
           trainingTargets={[zImageTrainingTarget]}
         />,
       );
@@ -1617,23 +1618,23 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Select a saved dataset");
     expect(container.textContent).toContain("Add a trigger phrase");
-    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config").disabled).toBe(true);
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").disabled).toBe(true);
 
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
     await changeField(field(container, "Checkpoint cadence"), "");
 
-    const prepareButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Prepare config");
+    const submitButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job");
     expect(container.textContent).toContain("Checkpoint cadence must be greater than zero");
-    expect(prepareButton.disabled).toBe(true);
+    expect(submitButton.disabled).toBe(true);
 
     await act(async () => {
-      prepareButton.click();
+      submitButton.click();
     });
     await settle();
 
-    expect(prepareTrainingConfig).not.toHaveBeenCalled();
+    expect(createTrainingJob).not.toHaveBeenCalled();
   });
 
   it("selects duplicate-titled assets through the thumbnail asset picker", async () => {

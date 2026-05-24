@@ -2237,7 +2237,7 @@ export function App() {
             onImportLora={createLoraImportJob}
             onImportModel={createModelImportJob}
             onOpenQueue={() => setActiveView("Queue")}
-            presets={presets}
+            recipePresets={presets}
           />
         ) : null}
 

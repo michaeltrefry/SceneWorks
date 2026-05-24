@@ -797,7 +797,6 @@ export function TrainingStudio({
   loadingDatasets = false,
   onPreview = () => {},
   onRefreshDatasets = () => {},
-  prepareTrainingConfig = async (snapshot) => snapshot,
   trainingPresets = [],
   trainingPresetsError = "",
   trainingTargets = [],
@@ -832,7 +831,6 @@ export function TrainingStudio({
   const [configMessage, setConfigMessage] = useState("");
   const [configError, setConfigError] = useState("");
   const [configTriggerFollowsCaptions, setConfigTriggerFollowsCaptions] = useState(true);
-  const [preparingConfig, setPreparingConfig] = useState(false);
   const [submittingJob, setSubmittingJob] = useState(false);
   // Dry run validates the Rust-resolved plan without training; a real run hands
   // the plan to the worker's Z-Image LoRA kernel. Default to the safe dry run.
@@ -925,7 +923,7 @@ export function TrainingStudio({
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
   const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
-  const canPrepareConfig = configWarnings.length === 0 && !preparingConfig;
+  const configReady = configWarnings.length === 0;
   const customizedConfigLabels = [...customizedConfigFields].map((field) => configFieldLabels[field] ?? field);
 
   useEffect(() => {
@@ -1336,28 +1334,8 @@ export function TrainingStudio({
     }
   }
 
-  async function prepareConfig() {
-    if (!canPrepareConfig) {
-      return;
-    }
-    setPreparingConfig(true);
-    setConfigError("");
-    setConfigMessage("");
-    try {
-      const dryRun = trainingRunMode === "dry_run";
-      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun });
-      const result = await prepareTrainingConfig(snapshot);
-      setConfigSnapshot(result ?? snapshot);
-      setConfigMessage("Config snapshot ready");
-    } catch (err) {
-      setConfigError(err.message);
-    } finally {
-      setPreparingConfig(false);
-    }
-  }
-
   async function submitTrainingJob() {
-    if (!canPrepareConfig || submittingJob) {
+    if (!configReady || submittingJob) {
       return;
     }
     setSubmittingJob(true);
@@ -1873,7 +1851,7 @@ export function TrainingStudio({
                       <p className="eyebrow">Configure Job</p>
                       <h3>{active.title}</h3>
                     </div>
-                    <span className="training-status-pill">{canPrepareConfig ? "Ready" : "Needs input"}</span>
+                    <span className="training-status-pill">{configReady ? "Ready" : "Needs input"}</span>
                   </div>
                   {trainingTargetsError ? <p className="inline-warning">{trainingTargetsError}</p> : null}
                   {trainingPresetsError ? <p className="inline-warning">{trainingPresetsError}</p> : null}
@@ -2178,12 +2156,9 @@ export function TrainingStudio({
                         <button className="secondary-action" onClick={resetConfigDefaults} type="button">
                           Reset defaults
                         </button>
-                        <button className="secondary-action" disabled={!canPrepareConfig} onClick={prepareConfig} type="button">
-                          {preparingConfig ? "Preparing" : "Prepare config"}
-                        </button>
                         <button
                           className="primary-action"
-                          disabled={!canPrepareConfig || submittingJob}
+                          disabled={!configReady || submittingJob}
                           onClick={submitTrainingJob}
                           type="button"
                         >

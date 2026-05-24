@@ -6,29 +6,6 @@ export const aspectOptions = {
 export const transitionOptions = ["cut", "crossfade", "fade_from_black", "fade_to_black"];
 export const speedPresets = [0.25, 0.5, 1, 2];
 
-export function createLocalTimeline(project, name = "Main timeline", aspectRatio = "16:9") {
-  const dimensions = aspectOptions[aspectRatio] ?? aspectOptions["16:9"];
-  return {
-    schemaVersion: 1,
-    id: `timeline_${crypto.randomUUID().replaceAll("-", "")}`,
-    projectId: project.id,
-    name,
-    aspectRatio,
-    width: dimensions.width,
-    height: dimensions.height,
-    fps: 30,
-    duration: 0,
-    tracks: [
-      { id: "track_main", name: "Main", kind: "video", locked: false, muted: false, items: [] },
-      { id: "track_overlay", name: "Overlay", kind: "overlay", locked: false, muted: false, items: [] },
-      { id: "track_audio", name: "Audio", kind: "audio", locked: false, muted: false, items: [] },
-    ],
-    transitions: [],
-    createdAt: null,
-    updatedAt: null,
-  };
-}
-
 export function timelineDuration(timeline) {
   return Math.max(0, ...timeline.tracks.flatMap((track) => track.items.map((item) => Number(item.timelineEnd) || 0)));
 }

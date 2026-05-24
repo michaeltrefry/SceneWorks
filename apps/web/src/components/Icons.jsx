@@ -45,6 +45,5 @@ export const Icon = {
   Wand: (p) => <I {...p} d="M15 4l5 5L9 20l-5-5zM14 5l5 5M3 14l3 3" />,
   Star: ({ filled = false, ...p }) => <I {...p} fill={filled} d="M12 2l2.4 7.4H22l-6.2 4.5L18 21l-6-4.4L6 21l2.2-7.1L2 9.4h7.6z" />,
   Stars: (p) => <I {...p} fill d="M12 2l2.4 7.4H22l-6.2 4.5L18 21l-6-4.4L6 21l2.2-7.1L2 9.4h7.6z" />,
-  Trash: (p) => <I {...p} d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />,
 };
 
