@@ -16,7 +16,6 @@ serde_json = "1.0"
 sha2 = "0.10"
 tempfile = "3.13"
 tokio = { version = "1.40", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "time"] }
-time = { version = "0.3", features = ["formatting"] }
 uuid = { version = "1.11", features = ["v4"] }
 
 [dev-dependencies]

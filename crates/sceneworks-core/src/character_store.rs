@@ -1,25 +1,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::asset_index::{asset_sidecars, normalize_asset, row_to_asset_record, upsert_asset_row};
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
+use crate::store_util::{
+    optional_bool, optional_f64, optional_str, random_hex, read_json, relative_string, write_json,
+};
+use crate::time::utc_now;
 
 pub const CHARACTER_SIDECAR_PATTERN: &str = ".sceneworks.character.json";
 
-const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
 const CHARACTER_INDEX_FINGERPRINT_KEY: &str = "characterIndexFingerprint";
-const ASSET_FOLDERS: &[&str] = &[
-    "assets/images",
-    "assets/videos",
-    "assets/uploads",
-    "assets/frames",
-    "assets/renders",
-    "trash",
-];
 
 #[derive(Debug, Clone)]
 pub struct CharacterCreateInput {
@@ -1199,72 +1195,6 @@ fn find_asset_sidecar_path_on_connection(
     Ok(None)
 }
 
-#[derive(Debug)]
-struct AssetRecord {
-    file_path: Option<String>,
-    sidecar_path: Option<String>,
-}
-
-fn row_to_asset_record(row: &Row<'_>) -> rusqlite::Result<AssetRecord> {
-    Ok(AssetRecord {
-        file_path: row.get(0)?,
-        sidecar_path: row.get(1)?,
-    })
-}
-
-fn asset_sidecars(project_path: &Path) -> ProjectStoreResult<Vec<PathBuf>> {
-    let mut sidecars = Vec::new();
-    for folder in ASSET_FOLDERS {
-        collect_sidecars(&project_path.join(folder), &mut sidecars)?;
-    }
-    let timeline_dir = project_path.join("timelines");
-    sidecars.retain(|path| !path.starts_with(&timeline_dir));
-    Ok(sidecars)
-}
-
-fn collect_sidecars(path: &Path, sidecars: &mut Vec<PathBuf>) -> ProjectStoreResult<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(path)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_sidecars(&path, sidecars)?;
-        } else if path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(ASSET_SIDECAR_PATTERN.trim_start_matches('*')))
-        {
-            sidecars.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn normalize_asset(
-    project_id: &str,
-    project_path: &Path,
-    sidecar_path: &Path,
-) -> ProjectStoreResult<Value> {
-    let mut asset = read_json(sidecar_path)?;
-    if let Some(path) = asset.pointer("/file/path").and_then(Value::as_str) {
-        let normalized_path = path.replace('\\', "/");
-        if let Some(object) = asset.as_object_mut() {
-            object.insert(
-                "url".to_owned(),
-                Value::String(format!(
-                    "/api/v1/projects/{project_id}/files/{normalized_path}"
-                )),
-            );
-        }
-    }
-    let sidecar_rel = relative_string(project_path, sidecar_path)?;
-    if let Some(object) = asset.as_object_mut() {
-        object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));
-    }
-    Ok(asset)
-}
-
 fn index_asset_on_connection(
     connection: &Connection,
     project_path: &Path,
@@ -1275,34 +1205,7 @@ fn index_asset_on_connection(
         Some(path) => Some(relative_string(project_path, path)?),
         None => None,
     };
-    let status = asset.get("status").unwrap_or(&Value::Null);
-    connection.execute(
-        "
-        insert or replace into assets (
-          id, type, display_name, file_path, generation_set_id, created_at,
-          favorite, rating, rejected, trashed, sidecar_path
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-        ",
-        params![
-            required_str(asset, "id")?,
-            required_str(asset, "type")?,
-            required_str(asset, "displayName")?,
-            asset
-                .get("file")
-                .and_then(|file| optional_str(file, "path"))
-                .ok_or_else(|| ProjectStoreError::BadRequest(
-                    "Asset file path is required".to_owned()
-                ))?,
-            optional_str(asset, "generationSetId"),
-            required_str(asset, "createdAt")?,
-            optional_bool(status, "favorite").unwrap_or(false),
-            optional_u64(status, "rating").unwrap_or(0),
-            optional_bool(status, "rejected").unwrap_or(false),
-            optional_bool(status, "trashed").unwrap_or(false),
-            sidecar_rel,
-        ],
-    )?;
-    Ok(())
+    upsert_asset_row(connection, asset, sidecar_rel.as_deref())
 }
 
 fn copy_lora_into_project(
@@ -1385,28 +1288,6 @@ fn prepend_array_field(payload: &mut Value, field: &str, item: Value) -> Project
         .unwrap_or_default();
     items.insert(0, item);
     object.insert(field.to_owned(), Value::Array(items));
-    Ok(())
-}
-
-fn read_json(path: &Path) -> ProjectStoreResult<Value> {
-    let payload = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&payload)?)
-}
-
-fn write_json(path: &Path, payload: &Value) -> ProjectStoreResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut output = serde_json::to_string_pretty(payload)?;
-    output.push('\n');
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("json")
-    ));
-    fs::write(&tmp_path, output)?;
-    fs::rename(tmp_path, path)?;
     Ok(())
 }
 
@@ -1594,14 +1475,6 @@ fn ordered_character_keys(object: &Map<String, Value>) -> Vec<&str> {
     keys
 }
 
-fn relative_string(root: &Path, path: &Path) -> ProjectStoreResult<String> {
-    Ok(path
-        .strip_prefix(root)
-        .map_err(|_| ProjectStoreError::BadRequest("Path is outside project".to_owned()))?
-        .to_string_lossy()
-        .replace('\\', "/"))
-}
-
 fn to_json_string(value: &Value) -> ProjectStoreResult<String> {
     serde_json::to_string(value).map_err(Into::into)
 }
@@ -1613,22 +1486,6 @@ fn required_str<'a>(value: &'a Value, key: &str) -> ProjectStoreResult<&'a str> 
             camel_to_title(key).unwrap_or_else(|| key.to_owned())
         ))
     })
-}
-
-fn optional_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str)
-}
-
-fn optional_bool(value: &Value, key: &str) -> Option<bool> {
-    value.get(key).and_then(Value::as_bool)
-}
-
-fn optional_u64(value: &Value, key: &str) -> Option<u64> {
-    value.get(key).and_then(Value::as_u64)
-}
-
-fn optional_f64(value: &Value, key: &str) -> Option<f64> {
-    value.get(key).and_then(Value::as_f64)
 }
 
 fn value_object_mut<'a>(
@@ -1714,49 +1571,4 @@ fn camel_to_title(value: &str) -> Option<String> {
     let mut characters = output.chars();
     let first = characters.next()?.to_uppercase().collect::<String>();
     Some(format!("{first}{}", characters.as_str()))
-}
-
-fn random_hex(bytes: usize) -> ProjectStoreResult<String> {
-    let connection = Connection::open_in_memory()?;
-    Ok(connection.query_row(
-        &format!("select lower(hex(randomblob({bytes})))"),
-        [],
-        |row| row.get(0),
-    )?)
-}
-
-fn utc_now() -> String {
-    format_unix_seconds(now_unix_seconds())
-}
-
-fn now_unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
-}
-
-fn format_unix_seconds(timestamp: i64) -> String {
-    let days = timestamp.div_euclid(86_400);
-    let seconds_of_day = timestamp.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let adjusted_days = days + 719_468;
-    let era = adjusted_days.div_euclid(146_097);
-    let day_of_era = adjusted_days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    (year, month, day)
 }

@@ -39,6 +39,7 @@ use sceneworks_core::project_store::{
     CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore, ProjectStoreError,
     UploadAsset,
 };
+use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use sceneworks_core::training::{
     build_training_plan, builtin_training_presets, builtin_training_targets, BuildTrainingPlan,
     LoraTrainingRequest, TrainingDataset, TrainingPresetProvenance, TrainingTarget,
@@ -52,8 +53,6 @@ use sceneworks_core::training_store::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
@@ -7298,11 +7297,7 @@ fn preset_name_exists(entries: &[Value], name: &str) -> bool {
 }
 
 fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .replace_nanosecond(0)
-        .expect("setting nanoseconds to zero must be valid")
-        .format(&Rfc3339)
-        .expect("formatting a UTC timestamp as RFC3339 must succeed")
+    format_unix_seconds(now_unix_seconds())
 }
 
 fn model_is_installed(path: &FsPath) -> bool {

@@ -1,12 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::project_store::{ProjectStoreError, ProjectStoreResult};
+use crate::store_util::{
+    is_safe_id, is_safe_relative_path, parse_string_enum, random_hex, read_json, relative_string,
+    write_json,
+};
+use crate::time::utc_now;
 use crate::training::{
     Caption, CaptionSource, TrainingDataset, TrainingDatasetItem, TrainingDatasetStatus,
     TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
@@ -817,7 +821,7 @@ fn resolve_asset_source(
                 .join(&file_path)
                 .with_extension("sceneworks.json")
         });
-    let asset: Value = read_json_value(&sidecar)?;
+    let asset: Value = read_json(&sidecar)?;
     if asset.get("projectId").and_then(Value::as_str) != Some(project_id) {
         return Err(ProjectStoreError::BadRequest(
             "Asset belongs to a different project".to_owned(),
@@ -1019,14 +1023,6 @@ fn ensure_training_dataset_column(
     Ok(())
 }
 
-fn parse_string_enum<T>(value: &str) -> T
-where
-    T: serde::de::DeserializeOwned,
-{
-    serde_json::from_value(Value::String(value.to_owned()))
-        .expect("string enum deserialization is infallible")
-}
-
 pub(crate) fn dataset_root(project_path: &Path, dataset_id: &str) -> PathBuf {
     project_path
         .join("training")
@@ -1078,23 +1074,6 @@ fn read_dataset(path: &Path) -> ProjectStoreResult<TrainingDataset> {
     Ok(serde_json::from_str(&payload)?)
 }
 
-fn read_json_value(path: &Path) -> ProjectStoreResult<Value> {
-    let payload = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&payload)?)
-}
-
-fn write_json<T: Serialize>(path: &Path, payload: &T) -> ProjectStoreResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut output = serde_json::to_string_pretty(payload)?;
-    output.push('\n');
-    let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, output)?;
-    fs::rename(tmp_path, path)?;
-    Ok(())
-}
-
 fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1103,14 +1082,6 @@ fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
     fs::write(&tmp_path, payload)?;
     fs::rename(tmp_path, path)?;
     Ok(())
-}
-
-fn relative_string(root: &Path, path: &Path) -> ProjectStoreResult<String> {
-    Ok(path
-        .strip_prefix(root)
-        .map_err(|_| ProjectStoreError::BadRequest("Path is outside project".to_owned()))?
-        .to_string_lossy()
-        .replace('\\', "/"))
 }
 
 fn dataset_item_path(
@@ -1138,21 +1109,6 @@ fn dataset_item_path(
         ));
     }
     Ok(path)
-}
-
-fn is_safe_relative_path(relative_path: &str) -> bool {
-    !relative_path.trim().is_empty()
-        && !relative_path.contains('\\')
-        && Path::new(relative_path)
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
-}
-
-fn is_safe_id(value: &str) -> bool {
-    !value.trim().is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
 fn is_safe_file_stem(value: &str) -> bool {
@@ -1189,49 +1145,4 @@ fn optional_u32(value: Option<&Value>) -> Option<u32> {
     value
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
-}
-
-fn random_hex(bytes: usize) -> ProjectStoreResult<String> {
-    let connection = Connection::open_in_memory()?;
-    Ok(connection.query_row(
-        &format!("select lower(hex(randomblob({bytes})))"),
-        [],
-        |row| row.get(0),
-    )?)
-}
-
-fn utc_now() -> String {
-    format_unix_seconds(now_unix_seconds())
-}
-
-fn now_unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
-}
-
-fn format_unix_seconds(timestamp: i64) -> String {
-    let days = timestamp.div_euclid(86_400);
-    let seconds_of_day = timestamp.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let adjusted_days = days + 719_468;
-    let era = adjusted_days.div_euclid(146_097);
-    let day_of_era = adjusted_days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    (year, month, day)
 }

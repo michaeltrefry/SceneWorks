@@ -21,11 +21,11 @@ use sceneworks_core::lora_url::{
     validate_public_ip,
 };
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
+use sceneworks_core::slug::slugify;
+use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
@@ -3839,11 +3839,7 @@ fn quote_path(value: &str) -> String {
 }
 
 fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .replace_nanosecond(0)
-        .expect("setting nanoseconds to zero must be valid")
-        .format(&Rfc3339)
-        .expect("formatting a UTC timestamp as RFC3339 must succeed")
+    format_unix_seconds(now_unix_seconds())
 }
 
 fn candidate_people(width: u32, height: u32, source_asset_id: &str, timestamp: f64) -> Vec<Value> {
@@ -4697,30 +4693,6 @@ fn asset_suffix(value: &str) -> String {
     let safe = safe_download_dir(value);
     let chars = safe.chars().rev().take(8).collect::<Vec<_>>();
     chars.into_iter().rev().collect::<String>()
-}
-
-fn slugify(value: &str, fallback: &str, max_length: Option<usize>) -> String {
-    let mut slug = String::new();
-    let mut previous_dash = false;
-    for character in value.trim().chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-            previous_dash = false;
-        } else if !previous_dash && !slug.is_empty() {
-            slug.push('-');
-            previous_dash = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    if slug.is_empty() {
-        slug = fallback.to_owned();
-    }
-    if let Some(max_length) = max_length {
-        slug.truncate(max_length);
-    }
-    slug
 }
 
 async fn existing_download_bytes(path: &Path, expected_size: Option<u64>) -> WorkerResult<u64> {
