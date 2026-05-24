@@ -10,6 +10,7 @@ import {
   workflowModelType,
   workflowModes,
 } from "../presetUtils.js";
+import { useAppContext } from "../context/AppContext.js";
 
 const workflowOptions = [
   ["text_to_image", "Text to Image"],
@@ -119,18 +120,20 @@ function presetStatusLabel(status) {
   return `Remove ${status.incompatible.join(", ")}`;
 }
 
-export function PresetManagerScreen({
-  activeProject,
-  createPreset,
-  deletePreset,
-  duplicatePreset,
-  imageModels,
-  loras = [],
-  onOpenModels,
-  presets = [],
-  updatePreset,
-  videoModels,
-}) {
+export function PresetManagerScreen() {
+  const {
+    activeProject,
+    createPreset,
+    deletePreset,
+    duplicatePreset,
+    imageModels,
+    loras = [],
+    presets = [],
+    updatePreset,
+    videoModels,
+    setActiveView,
+  } = useAppContext();
+  const onOpenModels = () => setActiveView("Models");
   const models = useMemo(() => [...imageModels, ...videoModels], [imageModels, videoModels]);
   const [selectedPresetId, setSelectedPresetId] = useState(presets.find((preset) => preset.scope !== "builtin")?.id ?? "");
   const selectedPreset = presets.find((preset) => preset.id === selectedPresetId) ?? null;

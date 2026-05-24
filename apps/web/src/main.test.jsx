@@ -3841,10 +3841,11 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <QueueScreen
-          activeProject={{ id: "project-1", name: "Project 1" }}
-          createJob={(event) => event.preventDefault()}
-          filteredJobs={[
+        withAppContext(
+          {
+          activeProject: { id: "project-1", name: "Project 1" },
+          createPlaceholderJob: (event) => event.preventDefault(),
+          filteredJobs: [
             {
               id: "job-waiting",
               type: "image_generate",
@@ -3923,17 +3924,17 @@ describe("SceneWorks app shell", () => {
               payload: { prompt: "dependent", dependsOnJobId: "job-dependency" },
               attempts: 1,
             },
-          ]}
-          gpuOptions={["auto", "0"]}
-          jobAction={() => {}}
-          jobPrompt="Placeholder generation"
-          projectFilter="all"
-          projects={[{ id: "project-1", name: "Project 1" }]}
-          requestedGpu="auto"
-          setJobPrompt={() => {}}
-          setProjectFilter={() => {}}
-          setRequestedGpu={() => {}}
-          workers={[
+          ],
+          gpuOptions: ["auto", "0"],
+          jobAction: () => {},
+          jobPrompt: "Placeholder generation",
+          projectFilter: "all",
+          projects: [{ id: "project-1", name: "Project 1" }],
+          requestedGpu: "auto",
+          setJobPrompt: () => {},
+          setProjectFilter: () => {},
+          setRequestedGpu: () => {},
+          visibleWorkers: [
             {
               id: "misregistered-cpu",
               gpuId: "cpu",
@@ -3952,8 +3953,10 @@ describe("SceneWorks app shell", () => {
               capabilities: ["placeholder", "gpu", "image_generate"],
               loadedModels: ["z_image_turbo"],
             },
-          ]}
-        />,
+          ],
+          },
+          <QueueScreen />,
+        ),
       );
     });
 
@@ -3967,7 +3970,7 @@ describe("SceneWorks app shell", () => {
   it("updates Queue GPU utilization when worker props change", async () => {
     const queueProps = {
       activeProject: { id: "project-1", name: "Project 1" },
-      createJob: (event) => event.preventDefault(),
+      createPlaceholderJob: (event) => event.preventDefault(),
       filteredJobs: [],
       gpuOptions: ["auto", "0"],
       jobAction: () => {},
@@ -3991,7 +3994,7 @@ describe("SceneWorks app shell", () => {
 
     root = createRoot(container);
     await act(async () => {
-      root.render(<QueueScreen {...queueProps} workers={[worker]} />);
+      root.render(withAppContext({ ...queueProps, visibleWorkers: [worker] }, <QueueScreen />));
     });
 
     expect(container.textContent).toContain("20.0 GB");
@@ -3999,15 +4002,18 @@ describe("SceneWorks app shell", () => {
 
     await act(async () => {
       root.render(
-        <QueueScreen
-          {...queueProps}
-          workers={[
-            {
-              ...worker,
-              utilization: { memoryTotalMb: 24576, memoryUsedMb: 12288, memoryFreeMb: 12288, gpuLoadPercent: 67 },
-            },
-          ]}
-        />,
+        withAppContext(
+          {
+            ...queueProps,
+            visibleWorkers: [
+              {
+                ...worker,
+                utilization: { memoryTotalMb: 24576, memoryUsedMb: 12288, memoryFreeMb: 12288, gpuLoadPercent: 67 },
+              },
+            ],
+          },
+          <QueueScreen />,
+        ),
       );
     });
 
@@ -5231,18 +5237,19 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <PresetManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          createPreset={createPreset}
-          deletePreset={deletePreset}
-          duplicatePreset={duplicatePreset}
-          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
-          loras={[
+        withAppContext(
+          {
+          activeProject: { id: "project-1", name: "Noir" },
+          createPreset,
+          deletePreset,
+          duplicatePreset,
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          loras: [
             { id: "cinematic_detail", name: "Cinematic Detail", family: "z-image", scope: "builtin", defaultWeight: 0.55 },
             { id: "global_detail", name: "Global Detail", family: "z-image", scope: "global", defaultWeight: 0.7 },
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
-          ]}
-          presets={[
+          ],
+          presets: [
             {
               id: "cinematic",
               name: "Cinematic",
@@ -5260,10 +5267,13 @@ describe("SceneWorks app shell", () => {
               model: "z_image_turbo",
               ui: { description: "Low key color." },
             },
-          ]}
-          updatePreset={updatePreset}
-          videoModels={[{ id: "ltx_2_3", name: "LTX", type: "video" }]}
-        />,
+          ],
+          updatePreset,
+          videoModels: [{ id: "ltx_2_3", name: "LTX", type: "video" }],
+          setActiveView: () => {},
+          },
+          <PresetManagerScreen />,
+        ),
       );
     });
 
@@ -5352,14 +5362,15 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <PresetManagerScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          createPreset={() => {}}
-          deletePreset={() => {}}
-          duplicatePreset={() => {}}
-          imageModels={[]}
-          loras={[{ id: "pending_style", name: "Pending Style", family: "z-image", scope: "global", installState: "missing" }]}
-          presets={[
+        withAppContext(
+          {
+          activeProject: { id: "project-1", name: "Noir" },
+          createPreset: () => {},
+          deletePreset: () => {},
+          duplicatePreset: () => {},
+          imageModels: [],
+          loras: [{ id: "pending_style", name: "Pending Style", family: "z-image", scope: "global", installState: "missing" }],
+          presets: [
             {
               id: "blocked",
               name: "Blocked",
@@ -5368,10 +5379,13 @@ describe("SceneWorks app shell", () => {
               model: "z_image_turbo",
               loras: [{ id: "pending_style" }],
             },
-          ]}
-          updatePreset={updatePreset}
-          videoModels={[]}
-        />,
+          ],
+          updatePreset,
+          videoModels: [],
+          setActiveView: () => {},
+          },
+          <PresetManagerScreen />,
+        ),
       );
     });
 

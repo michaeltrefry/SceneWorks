@@ -1246,12 +1246,28 @@ export function App() {
     jobAction,
     createVqaJob,
     createInterleaveJob,
+    // Queue screen (sc-1651 Phase B batch 2)
+    createPlaceholderJob,
+    filteredJobs,
+    jobPrompt,
+    setJobPrompt,
+    projectFilter,
+    setProjectFilter,
+    projects,
+    visibleWorkers,
     // Models / GPU
     imageModels,
+    videoModels,
     loras,
     gpuOptions,
     requestedGpu,
     setRequestedGpu,
+    // Presets
+    presets,
+    createPreset,
+    updatePreset,
+    deletePreset,
+    duplicatePreset,
     // Navigation
     setActiveView,
     // Characters
@@ -1493,37 +1509,11 @@ export function App() {
         ) : null}
 
         {activeView === "Presets" ? (
-          <PresetManagerScreen
-            activeProject={activeProject}
-            createPreset={createPreset}
-            deletePreset={deletePreset}
-            duplicatePreset={duplicatePreset}
-            imageModels={imageModels}
-            loras={loras}
-            onOpenModels={() => setActiveView("Models")}
-            presets={presets}
-            updatePreset={updatePreset}
-            videoModels={videoModels}
-          />
+          <PresetManagerScreen />
         ) : null}
 
         {activeView === "Queue" ? (
-          <QueueScreen
-            activeProject={activeProject}
-            createJob={createPlaceholderJob}
-            filteredJobs={filteredJobs}
-            gpuOptions={gpuOptions}
-            jobAction={jobAction}
-            jobs={jobs}
-            jobPrompt={jobPrompt}
-            projectFilter={projectFilter}
-            projects={projects}
-            requestedGpu={requestedGpu}
-            setJobPrompt={setJobPrompt}
-            setProjectFilter={setProjectFilter}
-            setRequestedGpu={setRequestedGpu}
-            workers={visibleWorkers}
-          />
+          <QueueScreen />
         ) : null}
 
         {activeView === "Models" ? (

@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
 import { actionStatuses, terminalStatuses } from "../constants.js";
 import { formatSeconds, percent } from "../formatting.js";
+import { useAppContext } from "../context/AppContext.js";
 
 const nonGpuJobTypes = new Set(["model_download", "model_import", "model_convert", "lora_import"]);
 // Keep GPU-required job types in sync with
@@ -198,22 +199,25 @@ function WorkerCard({ worker }) {
   );
 }
 
-export function QueueScreen({
-  activeProject,
-  createJob,
-  filteredJobs,
-  gpuOptions,
-  jobAction,
-  jobs = filteredJobs,
-  jobPrompt,
-  projectFilter,
-  projects,
-  requestedGpu,
-  setJobPrompt,
-  setProjectFilter,
-  setRequestedGpu,
-  workers,
-}) {
+export function QueueScreen() {
+  const {
+    activeProject,
+    createPlaceholderJob,
+    filteredJobs,
+    gpuOptions,
+    jobAction,
+    jobs = filteredJobs,
+    jobPrompt,
+    projectFilter,
+    projects,
+    requestedGpu,
+    setJobPrompt,
+    setProjectFilter,
+    setRequestedGpu,
+    visibleWorkers,
+  } = useAppContext();
+  const createJob = createPlaceholderJob;
+  const workers = visibleWorkers;
   const workersById = useMemo(() => new Map(workers.map((worker) => [worker.id, worker])), [workers]);
   const gpuWorkers = useMemo(() => workers.filter(isGpuWorker), [workers]);
   return (
