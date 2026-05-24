@@ -1210,6 +1210,23 @@ def test_huggingface_repo_cache_path_stays_under_cache_root(monkeypatch, tmp_pat
     assert path.name.startswith("models--")
 
 
+def test_repo_cache_path_is_a_single_guarded_helper(monkeypatch, tmp_path):
+    # The lora adapter previously had its own unguarded copy with a different
+    # cache-root order. Every adapter must now resolve through the one guarded
+    # helper, so a traversal repo id can't escape the cache root from any entry point.
+    from scene_worker.hf_cache import huggingface_repo_cache_path as shared
+    from scene_worker.lora_adapters import huggingface_repo_cache_path as lora_entry
+
+    assert huggingface_repo_cache_path is shared
+    assert lora_entry is shared
+
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "hub"))
+    path = lora_entry(r"..\..\outside/model")
+    assert path is not None
+    path.relative_to((tmp_path / "hub").resolve())
+    assert path.name.startswith("models--")
+
+
 def test_image_asset_writer_reports_partial_result_assets(tmp_path):
     data_dir = tmp_path / "data"
     project_path = tmp_path / "project"

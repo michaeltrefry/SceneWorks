@@ -31,6 +31,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import cancel_step_callback, filter_call_kwargs
+from .hf_cache import huggingface_repo_cache_path
 from .lora_adapters import (
     LoraPipelineState,
     apply_loras_to_pipeline,
@@ -63,22 +64,6 @@ def huggingface_repo_cache_exists(repo: str) -> bool:
     if repo_cache is None:
         return False
     return (repo_cache / "snapshots").is_dir() or (repo_cache / "blobs").is_dir()
-
-
-def huggingface_repo_cache_path(repo: str) -> Path | None:
-    default_home = Path.home() / ".cache" / "huggingface"
-    hf_home = Path(os.getenv("HF_HOME") or default_home)
-    cache_root = Path(os.getenv("HF_HUB_CACHE") or os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
-    safe_repo = "".join(char if char.isalnum() or char in "._-" else "--" for char in repo).strip("-")
-    if not safe_repo:
-        return None
-    try:
-        root = cache_root.resolve()
-        repo_cache = (root / f"models--{safe_repo}").resolve()
-        repo_cache.relative_to(root)
-    except (OSError, ValueError):
-        return None
-    return repo_cache
 
 
 def emit_worker_event(event: str, **payload: Any) -> None:
@@ -1859,7 +1844,7 @@ class SenseNovaU1Adapter:
         model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=None, job_id=job["id"])
         self._loaded_model = model_id
 
-        source_path = self._resolve_source_path(settings, project_id, source_asset_id, advanced.get("sourceImagePath"))
+        source_path = self._resolve_source_path(settings, project_id, source_asset_id)
         try:
             image = Image.open(source_path).convert("RGB")
         except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
@@ -1898,10 +1883,11 @@ class SenseNovaU1Adapter:
         settings: WorkerSettings,
         project_id: str,
         source_asset_id: str | None,
-        source_image_path: str | None,
     ) -> str:
-        if source_image_path:
-            return str(source_image_path)
+        # Resolve only through the project sidecar/DB (find_asset_media_path constrains
+        # the result to the project root). There is deliberately no client-supplied path
+        # escape hatch: an arbitrary sourceImagePath would let a job read any file the
+        # worker can open and, for VQA, return its contents to the caller.
         if not source_asset_id:
             raise RuntimeError("Visual question answering requires a source image asset.")
         project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
@@ -2457,12 +2443,13 @@ def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:
 
 
 def load_source_image(settings: WorkerSettings, request: ImageRequest) -> Image.Image:
-    source_path = request.advanced.get("sourceImagePath")
-    if not source_path and request.source_asset_id:
-        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
-        source_path = find_asset_media_path(project_path, request.source_asset_id)
-    if not source_path:
+    # Resolve only through the project sidecar/DB (find_asset_media_path constrains the
+    # result to the project root). No client-supplied path escape hatch: an arbitrary
+    # sourceImagePath would let an edit job read any file the worker can open.
+    if not request.source_asset_id:
         raise RuntimeError("Image edit jobs require a source image asset.")
+    project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+    source_path = find_asset_media_path(project_path, request.source_asset_id)
     try:
         image = Image.open(source_path).convert("RGB")
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:

@@ -31,6 +31,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import cancel_step_callback, filter_call_kwargs
+from .hf_cache import huggingface_cache_root, huggingface_cache_roots, huggingface_repo_cache_path_for_root
 from .image_adapters import emit_worker_event, empty_torch_cache, gpu_memory_snapshot, require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
 from .lora_adapters import (
     LoraPipelineState,
@@ -2664,42 +2665,6 @@ def resolve_manifest_path(settings: WorkerSettings, value: Any) -> Path:
         raw_path = raw_path.replace("${HF_CACHE}", str(huggingface_cache_root()))
     path = Path(raw_path)
     return path if path.is_absolute() else settings.data_dir / path
-
-
-def huggingface_cache_root() -> Path:
-    default_home = Path.home() / ".cache" / "huggingface"
-    hf_home = Path(os.getenv("HF_HOME") or default_home)
-    return Path(os.getenv("HF_HUB_CACHE") or os.getenv("HUGGINGFACE_HUB_CACHE") or hf_home / "hub")
-
-
-def huggingface_cache_roots(settings: WorkerSettings | None = None) -> list[Path]:
-    roots: list[Path] = []
-    for value in (os.getenv("HF_HUB_CACHE"), os.getenv("HUGGINGFACE_HUB_CACHE")):
-        if value:
-            roots.append(Path(value))
-    if os.getenv("HF_HOME"):
-        roots.append(Path(os.getenv("HF_HOME", "")) / "hub")
-    if settings is not None:
-        roots.append(settings.data_dir / "cache" / "huggingface" / "hub")
-    roots.append(huggingface_cache_root())
-    unique: list[Path] = []
-    for root in roots:
-        if root not in unique:
-            unique.append(root)
-    return unique
-
-
-def huggingface_repo_cache_path_for_root(cache_root: Path, repo: str) -> Path | None:
-    safe_repo = "".join(char if char.isalnum() or char in "._-" else "--" for char in repo).strip("-")
-    if not safe_repo:
-        return None
-    try:
-        root = cache_root.resolve()
-        repo_cache = (root / f"models--{safe_repo}").resolve()
-        repo_cache.relative_to(root)
-    except (OSError, ValueError):
-        return None
-    return repo_cache
 
 
 def huggingface_cached_snapshot_dir(settings: WorkerSettings, repo: str) -> Path | None:

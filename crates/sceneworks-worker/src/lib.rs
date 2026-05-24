@@ -1005,14 +1005,17 @@ async fn run_model_download_job(
     };
     let files = payload_string_array(&job.payload, "files");
     let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
-    let target_dir = optional_payload_string(&job.payload, "targetDir")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            settings
-                .data_dir
-                .join("models")
-                .join(safe_download_dir(repo))
-        });
+    // The worker is the trust boundary (jobs API is unauthenticated for local use), so a
+    // client-supplied targetDir must be constrained to app-managed data/models the same way
+    // import jobs are, not used verbatim.
+    let target_dir = resolve_model_import_target(
+        settings,
+        &job.payload,
+        settings
+            .data_dir
+            .join("models")
+            .join(safe_download_dir(repo)),
+    )?;
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -1201,7 +1204,10 @@ async fn run_model_convert_job(
     // canceled/failed conversion never leaves a partial directory that the catalog
     // and adapter would treat as a ready model (convert tools write config.json
     // before all weight shards).
-    let final_dir = PathBuf::from(&output_dir);
+    // Constrain the client-supplied outputDir to app-managed data/models the same way import
+    // jobs constrain targetDir; the worker is the trust boundary, so never create/rename a
+    // converted model tree to an arbitrary location.
+    let final_dir = resolve_model_convert_output(settings, &output_dir)?;
     let parent = final_dir
         .parent()
         .map(Path::to_path_buf)
@@ -1304,7 +1310,10 @@ async fn run_model_convert_job(
     let mut result = JsonObject::new();
     result.insert("modelId".to_owned(), Value::String(model_id));
     result.insert("sourceRepo".to_owned(), Value::String(source_repo));
-    result.insert("path".to_owned(), Value::String(output_dir));
+    result.insert(
+        "path".to_owned(),
+        Value::String(final_dir.display().to_string()),
+    );
     result.insert("storage".to_owned(), Value::String("mlx_local".to_owned()));
     result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
     update_job(
@@ -3730,6 +3739,17 @@ fn resolve_model_import_target(
     ))
 }
 
+fn resolve_model_convert_output(settings: &Settings, output_dir: &str) -> WorkerResult<PathBuf> {
+    let target = normalize_absolute_path(&PathBuf::from(output_dir))?;
+    let allowed_root = normalize_absolute_path(&settings.data_dir.join("models"))?;
+    if target.starts_with(&allowed_root) {
+        return Ok(target);
+    }
+    Err(WorkerError::InvalidPayload(
+        "Model convert outputDir must be inside app-managed data/models".to_owned(),
+    ))
+}
+
 fn model_manifest_target(settings: &Settings, payload: &JsonObject) -> WorkerResult<PathBuf> {
     let manifest_path = normalize_absolute_path(&PathBuf::from(required_payload_string(
         payload,
@@ -4773,12 +4793,12 @@ mod tests {
         cpu_gpu, cpu_worker_id, crossfade_duration, download_lora_source_url,
         download_progress_payload, fallback_gpu, finalize_converted_dir, fresh_asset_id,
         gpu_worker_id, import_lora_source_path, now_rfc3339, output_dimensions,
-        parse_nvidia_smi_gpus, restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir,
-        safe_project_path, utility_worker_specs, value_f64, visible_gpu_ids,
-        worker_capabilities_with_utility, write_model_install_marker, ApiClient, DownloadContext,
-        HuggingFaceSnapshot, Settings, SupervisedChild, WorkerError, WorkerSpec,
-        DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        parse_nvidia_smi_gpus, resolve_model_convert_output, resolve_model_import_target,
+        restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
+        utility_worker_specs, value_f64, visible_gpu_ids, worker_capabilities_with_utility,
+        write_model_install_marker, ApiClient, DownloadContext, HuggingFaceSnapshot, JsonObject,
+        Settings, SupervisedChild, WorkerError, WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES,
+        DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[tokio::test]
@@ -5374,6 +5394,79 @@ mod tests {
 
         assert!(tail.contains("caf\u{e9}"));
         assert!(!tail.contains("line 1 "));
+    }
+
+    #[test]
+    fn model_destinations_are_constrained_to_data_models() {
+        let temp = tempdir().expect("tempdir creates");
+        let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+        settings.data_dir = temp.path().to_path_buf();
+        let models_root = super::normalize_absolute_path(&temp.path().join("models"))
+            .expect("models root normalizes");
+        let fallback = temp.path().join("models").join("fallback");
+
+        // model_download/model_import: a targetDir under data/models is accepted.
+        let mut payload = JsonObject::new();
+        payload.insert(
+            "targetDir".to_owned(),
+            Value::String(
+                temp.path()
+                    .join("models")
+                    .join("z_image_turbo")
+                    .display()
+                    .to_string(),
+            ),
+        );
+        let resolved = resolve_model_import_target(&settings, &payload, fallback.clone())
+            .expect("destination under data/models is accepted");
+        assert!(resolved.starts_with(&models_root));
+
+        // No targetDir falls back to the supplied (contained) default.
+        let resolved_fallback =
+            resolve_model_import_target(&settings, &JsonObject::new(), fallback.clone())
+                .expect("fallback under data/models is accepted");
+        assert!(resolved_fallback.starts_with(&models_root));
+
+        // A targetDir outside data/models is rejected (arbitrary write blocked).
+        let mut escape = JsonObject::new();
+        escape.insert(
+            "targetDir".to_owned(),
+            Value::String(
+                temp.path()
+                    .join("ssh")
+                    .join("authorized_keys")
+                    .display()
+                    .to_string(),
+            ),
+        );
+        let error = resolve_model_import_target(&settings, &escape, fallback)
+            .expect_err("destination outside data/models is rejected");
+        assert!(error.to_string().contains("data/models"));
+
+        // model_convert: outputDir under data/models is accepted, traversal is rejected.
+        let ok = resolve_model_convert_output(
+            &settings,
+            &temp
+                .path()
+                .join("models")
+                .join("mlx")
+                .join("wan")
+                .display()
+                .to_string(),
+        )
+        .expect("convert output under data/models is accepted");
+        assert!(ok.starts_with(&models_root));
+
+        let traversal = temp
+            .path()
+            .join("models")
+            .join("..")
+            .join("escape")
+            .display()
+            .to_string();
+        let convert_error = resolve_model_convert_output(&settings, &traversal)
+            .expect_err("convert output escaping data/models is rejected");
+        assert!(convert_error.to_string().contains("data/models"));
     }
 
     #[tokio::test]

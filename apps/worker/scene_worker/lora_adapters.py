@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
+
+from .hf_cache import huggingface_repo_cache_path
 
 
 # Keep in sync with packages/schemas/recipe-preset.schema.json and the Rust
@@ -267,25 +268,6 @@ def huggingface_cached_lora_path(lora: dict[str, Any]) -> Path | None:
         if safetensors_path is not None:
             return safetensors_path
     return first_safetensors_path(root)
-
-
-def huggingface_repo_cache_path(repo: str) -> Path | None:
-    safe_repo = "".join(character if character.isalnum() or character in "._-" else "--" for character in repo).strip("-")
-    if not safe_repo:
-        return None
-    return huggingface_hub_cache_dir() / f"models--{safe_repo}"
-
-
-def huggingface_hub_cache_dir() -> Path:
-    for key in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
-        value = os.getenv(key, "").strip()
-        if value:
-            return Path(value).expanduser()
-    hf_home = os.getenv("HF_HOME", "").strip()
-    if hf_home:
-        return Path(hf_home).expanduser() / "hub"
-    data_dir = Path(os.getenv("SCENEWORKS_DATA_DIR", "data")).expanduser()
-    return data_dir / "cache" / "huggingface" / "hub"
 
 
 def huggingface_snapshot_dirs(repo_root: Path) -> list[Path]:
