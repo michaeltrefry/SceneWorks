@@ -2,12 +2,22 @@ import React, { useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { DocumentView } from "../components/DocumentView.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
+import {
+  DEFAULT_INTERLEAVE_RESOLUTION,
+  DEFAULT_INTERLEAVE_SYSTEM_MESSAGE,
+  INTERLEAVE_RESOLUTION_OPTIONS,
+} from "../constants.js";
 
 const MAX_IMAGES_DEFAULT = 6;
 const MAX_IMAGES_LIMIT = 10;
 
 function modelSupportsInterleave(model) {
   return Array.isArray(model?.capabilities) && model.capabilities.includes("interleave");
+}
+
+function formatResolutionLabel(value) {
+  const [width, height] = String(value).split("x");
+  return height ? `${width} × ${height}` : value;
 }
 
 function DocumentResult({ job, assets, projectId, onOpenQueue }) {
@@ -37,6 +47,8 @@ export function DocumentStudio({
   const [prompt, setPrompt] = useState("");
   const [sourceAssetIds, setSourceAssetIds] = useState([]);
   const [maxImages, setMaxImages] = useState(MAX_IMAGES_DEFAULT);
+  const [resolution, setResolution] = useState(DEFAULT_INTERLEAVE_RESOLUTION);
+  const [systemMessage, setSystemMessage] = useState(DEFAULT_INTERLEAVE_SYSTEM_MESSAGE);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -63,11 +75,21 @@ export function DocumentStudio({
       return;
     }
     setSubmitting(true);
+    const [width, height] = resolution.split("x").map((value) => Number(value));
+    const trimmedSystem = systemMessage.trim();
     const job = await createInterleaveJob({
       prompt: prompt.trim(),
       model: model || undefined,
       maxImages: Number(maxImages) || MAX_IMAGES_DEFAULT,
+      width,
+      height,
       sourceAssetIds,
+      // Only send the system prompt when edited; blank/default lets the worker use
+      // its own _INTERLEAVE_SYSTEM_MESSAGE.
+      advanced:
+        trimmedSystem && trimmedSystem !== DEFAULT_INTERLEAVE_SYSTEM_MESSAGE
+          ? { systemMessage: trimmedSystem }
+          : {},
     });
     setSubmitting(false);
     if (job) {
@@ -100,6 +122,16 @@ export function DocumentStudio({
               {interleaveModels.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.name ?? item.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Size</span>
+            <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
+              {INTERLEAVE_RESOLUTION_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {formatResolutionLabel(option)}
                 </option>
               ))}
             </select>
@@ -138,6 +170,25 @@ export function DocumentStudio({
           onChange={setSourceAssetIds}
           values={sourceAssetIds}
         />
+
+        <label className="field document-system-prompt">
+          <span>System prompt</span>
+          <small>Steers the model's think / no-think composition. Prefilled with the default — edit to change behavior.</small>
+          <textarea
+            onChange={(event) => setSystemMessage(event.target.value)}
+            rows={6}
+            value={systemMessage}
+          />
+          {systemMessage !== DEFAULT_INTERLEAVE_SYSTEM_MESSAGE ? (
+            <button
+              className="secondary-action"
+              onClick={() => setSystemMessage(DEFAULT_INTERLEAVE_SYSTEM_MESSAGE)}
+              type="button"
+            >
+              Reset to default
+            </button>
+          ) : null}
+        </label>
 
         <button className="primary-action" disabled={!canSubmit} type="submit">
           {submitting ? "Submitting…" : "Compose document"}

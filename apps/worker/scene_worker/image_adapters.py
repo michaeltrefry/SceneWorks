@@ -1895,6 +1895,9 @@ class SenseNovaU1Adapter:
         # chain-of-thought (mirrors the VQA think=False choice — "present images
         # naturally alongside the text"). Tunable; confirm on a real MPS run.
         think_mode = bool(advanced.get("thinkMode", False))
+        # The think/no-think system prompt is exposed in the UI (prefilled with the
+        # default); a blank/absent value falls back to _INTERLEAVE_SYSTEM_MESSAGE.
+        system_message = str(advanced.get("systemMessage") or "").strip() or _INTERLEAVE_SYSTEM_MESSAGE
         seed = resolve_seed(payload.get("seed"), prompt, 0, None)
 
         torch = importlib.import_module("torch")
@@ -1928,7 +1931,7 @@ class SenseNovaU1Adapter:
         generated_text, images = self._run_interleave(
             torch, model, tokenizer, prompt, input_images,
             width, height, steps, cfg_scale, img_cfg_scale, timestep_shift,
-            max_images, max_new_tokens, think_mode, seed,
+            max_images, max_new_tokens, think_mode, system_message, seed,
         )
         emit_worker_event(
             "image_interleave_complete",
@@ -1999,6 +2002,7 @@ class SenseNovaU1Adapter:
         max_images: int,
         max_new_tokens: int,
         think_mode: bool,
+        system_message: str,
         seed: int,
     ) -> tuple[str, list[Image.Image]]:
         generation_config = {"max_new_tokens": int(max_new_tokens), "do_sample": False}
@@ -2017,7 +2021,7 @@ class SenseNovaU1Adapter:
                 image_size=(width, height),
                 cfg_interval=(0.0, 1.0),
                 num_steps=int(steps),
-                system_message=_INTERLEAVE_SYSTEM_MESSAGE,
+                system_message=system_message,
                 think_mode=think_mode,
                 seed=int(seed),
             )

@@ -1342,6 +1342,16 @@ label {
   letter-spacing: 0.01em;
 }
 
+.document-studio .field > small {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+/* Keep the system-prompt "Reset to default" compact rather than full-width. */
+.document-studio .document-system-prompt > .secondary-action {
+  justify-self: start;
+}
+
 .document-studio .field-row {
   display: flex;
   flex-wrap: wrap;

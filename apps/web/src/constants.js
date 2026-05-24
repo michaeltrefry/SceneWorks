@@ -1,6 +1,30 @@
 export const navItems = ["Library", "Image", "Video", "Presets", "Models", "Characters", "Editor", "Queue"];
 export const terminalStatuses = new Set(["completed", "failed", "canceled", "interrupted"]);
 export const actionStatuses = new Set(["failed", "canceled", "interrupted", "completed"]);
+
+// SenseNova-U1 interleave resolution buckets (distinct from plain text-to-image).
+// Mirrors the worker's interleave_resolution_for / upstream examples/interleave.
+export const INTERLEAVE_RESOLUTION_OPTIONS = [
+  "1536x1536",
+  "2048x1152",
+  "1152x2048",
+  "1888x1248",
+  "1248x1888",
+  "1760x1312",
+  "1312x1760",
+];
+export const DEFAULT_INTERLEAVE_RESOLUTION = "2048x1152";
+
+// Default interleave system prompt (the think/no-think protocol). Prefilled in
+// Document Studio; the worker falls back to this same text when the field is blank.
+// Keep in sync with apps/worker/scene_worker/image_adapters.py::_INTERLEAVE_SYSTEM_MESSAGE.
+export const DEFAULT_INTERLEAVE_SYSTEM_MESSAGE = `You are a multimodal assistant capable of reasoning with both text and images. You support two modes:
+
+Think Mode: When reasoning is needed, you MUST start with a <think></think> block and place all reasoning inside it. You MUST interleave text with generated images using tags like <image1>, <image2>. Images can ONLY be generated between <think> and </think>, and may be referenced in the final answer.
+
+Non-Think Mode: When no reasoning is needed, directly provide the answer without reasoning. Do not use tags like <image1>, <image2>; present any images naturally alongside the text.
+
+After the think block, always provide a concise, user-facing final answer. The answer may include text, images, or both. Match the user's language in both reasoning and the final answer.`;
 export const fallbackModels = [
   {
     id: "z_image_turbo",

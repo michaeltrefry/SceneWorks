@@ -5366,11 +5366,16 @@ describe("SceneWorks app shell", () => {
     expect(image.getAttribute("src")).toContain("assets/images/a.png");
 
     // Only interleave-capable models are offered (Z-Image filtered out).
-    const modelOptions = [...container.querySelectorAll("select option")].map((option) => option.value);
-    expect(modelOptions).toContain("sensenova_u1_8b");
-    expect(modelOptions).not.toContain("z_image_turbo");
+    const optionValues = [...container.querySelectorAll("select option")].map((option) => option.value);
+    expect(optionValues).toContain("sensenova_u1_8b");
+    expect(optionValues).not.toContain("z_image_turbo");
+    // The size control offers the interleave buckets.
+    expect(optionValues).toContain("2048x1152");
+    // The system prompt is exposed and prefilled with the default.
+    const textareas = [...container.querySelectorAll("textarea")];
+    expect(textareas.some((field) => field.value.includes("multimodal assistant capable of reasoning"))).toBe(true);
 
-    // Submitting composes an interleave job with the prompt, model, and max images.
+    // Submitting composes an interleave job with prompt, model, size, and max images.
     await changeField(container.querySelector("textarea"), "An illustrated guide to brewing tea");
     const submit = [...container.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Compose document"),
@@ -5383,6 +5388,10 @@ describe("SceneWorks app shell", () => {
     expect(payload.prompt).toBe("An illustrated guide to brewing tea");
     expect(payload.model).toBe("sensenova_u1_8b");
     expect(payload.maxImages).toBe(6);
+    expect(payload.width).toBe(2048);
+    expect(payload.height).toBe(1152);
+    // Unedited system prompt is not sent (worker uses its own default).
+    expect(payload.advanced?.systemMessage).toBeUndefined();
   });
 
   it("AssetDetail reopens a saved document from the Library", async () => {
