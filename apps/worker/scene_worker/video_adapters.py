@@ -503,7 +503,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         self._loaded_models: set[str] = set()
         self._settings: WorkerSettings | None = None
         self._resources_by_model: dict[str, LtxPipelinesResources] = {}
-        self._lora_specs_by_request_id: dict[int, list[LoraSpec]] = {}
+        self._lora_specs: list[LoraSpec] | None = None
         self._pipeline: Any | None = None
         self._pipeline_key_value: str | None = None
 
@@ -512,7 +512,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
     def prepare(self, *, settings: WorkerSettings, job: dict[str, Any]) -> VideoRequest:
         self._settings = settings
-        self._lora_specs_by_request_id.clear()
+        self._lora_specs = None
         return video_request_from_job(job)
 
     def ensure_models(self, request: VideoRequest) -> None:
@@ -1187,12 +1187,12 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         )
 
     def _ltx_lora_specs(self, request: VideoRequest) -> list[LoraSpec]:
-        cache_key = id(request)
-        specs = self._lora_specs_by_request_id.get(cache_key)
-        if specs is None:
-            specs = normalize_lora_specs(request.loras)
-            self._lora_specs_by_request_id[cache_key] = specs
-        return specs
+        # Memoize the normalized specs for the current job (one job at a time;
+        # reset in prepare()). A single slot avoids the id(request)-keyed dict
+        # whose keys could be reused after a frozen VideoRequest is collected.
+        if self._lora_specs is None:
+            self._lora_specs = normalize_lora_specs(request.loras)
+        return self._lora_specs
 
     def _ltx_loras(self, loader: Any, request: VideoRequest) -> tuple[Any, ...]:
         specs = self._ltx_lora_specs(request)
@@ -1848,9 +1848,6 @@ class MlxVideoAdapter(VideoGenerationAdapter):
 
     def _first_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
         return self._condition_image(project_path, request.source_asset_id)
-
-    def _last_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
-        return self._condition_image(project_path, request.last_frame_asset_id)
 
     def _condition_image(self, project_path: Path, asset_id: str | None) -> Any:
         # Resolve via the shared helper: asset sidecars store the media path at

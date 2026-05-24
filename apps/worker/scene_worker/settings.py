@@ -24,7 +24,9 @@ class WorkerSettings:
         self.force_cancel_seconds = int(os.getenv("SCENEWORKS_WORKER_FORCE_CANCEL_SECONDS", "30"))
         # A GPU worker won't claim a job when its GPU has less free VRAM than this
         # (MB), so jobs flow to a free card when another tool (e.g. ComfyUI) is using
-        # one. 0 disables the gate. CPU workers are never gated.
+        # one. The 24 GB default is NVIDIA-tuned; at claim time it's clamped to a high
+        # fraction of the card's own capacity so a smaller card isn't blocked forever
+        # (see should_skip_claim_low_vram). 0 disables the gate. CPU/MPS are never gated.
         self.min_free_vram_mb = int(os.getenv("SCENEWORKS_MIN_FREE_VRAM_MB", "24000"))
 
     def for_worker(self, *, worker_id: str, gpu_id: str) -> "WorkerSettings":

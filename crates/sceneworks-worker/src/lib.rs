@@ -3035,6 +3035,23 @@ async fn download_snapshot(
             }
         }
         output.flush().await?;
+        // A truncated transfer (e.g. the server closes the stream at what looks
+        // like a clean EOF) would otherwise be treated as success: the install
+        // marker gets written over a corrupt dir and the bad shard only surfaces
+        // as an opaque load failure later. When the expected size is known,
+        // verify it and remove the partial so the next attempt re-downloads.
+        if let Some(expected) = file.size {
+            let written = tokio::fs::metadata(&target_path).await?.len();
+            if written != expected {
+                let _ = tokio::fs::remove_file(&target_path).await;
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{} download ended at {} but expected {}",
+                    file.path,
+                    format_bytes(written),
+                    format_bytes(expected)
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -4764,14 +4781,15 @@ mod tests {
         allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
         child_environment, cleanup_uploaded_import_source, concat_file_contents, copy_lora_source,
         cpu_gpu, cpu_worker_id, crossfade_duration, download_lora_source_url,
-        download_progress_payload, fallback_gpu, finalize_converted_dir, fresh_asset_id,
-        gpu_worker_id, import_lora_source_path, now_rfc3339, output_dimensions,
+        download_progress_payload, download_snapshot, fallback_gpu, finalize_converted_dir,
+        fresh_asset_id, gpu_worker_id, import_lora_source_path, now_rfc3339, output_dimensions,
         parse_nvidia_smi_gpus, resolve_model_convert_output, resolve_model_import_target,
         restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
         utility_worker_specs, value_f64, visible_gpu_ids, worker_capabilities_with_utility,
-        write_model_install_marker, ApiClient, DownloadContext, HuggingFaceSnapshot, JsonObject,
-        Settings, SupervisedChild, WorkerError, WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES,
-        DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        write_model_install_marker, ApiClient, DownloadContext, DownloadProgress,
+        HuggingFaceSnapshot, JsonObject, Settings, SnapshotFile, SupervisedChild, WorkerError,
+        WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
+        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
 
     #[tokio::test]
@@ -5223,6 +5241,52 @@ mod tests {
                 .unwrap(),
             b"old-lora"
         );
+    }
+
+    #[tokio::test]
+    async fn download_snapshot_rejects_truncated_file() {
+        let temp = tempdir().expect("tempdir creates");
+        // The stub serves 4 bytes, but the snapshot claims the shard is 64 —
+        // a truncated transfer that must not be accepted as complete.
+        let base_url = spawn_binary_stub(b"trun".to_vec()).await;
+        let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+        settings.api_url = base_url.clone();
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+        let target_dir = temp.path().join("model");
+
+        let snapshot = HuggingFaceSnapshot {
+            files: vec![SnapshotFile {
+                path: "shard.safetensors".to_owned(),
+                size: Some(64),
+                download_url: format!("{base_url}/owner/model/resolve/main/shard.safetensors"),
+            }],
+        };
+        let mut progress = DownloadProgress::new(
+            "owner/model",
+            0,
+            snapshot.total_bytes(),
+            Duration::from_secs(3600),
+        );
+
+        let error = download_snapshot(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "job-1",
+                cancel_message: "canceled",
+            },
+            &target_dir,
+            &snapshot,
+            &mut progress,
+        )
+        .await
+        .expect_err("truncated shard is rejected");
+
+        assert!(error.to_string().contains("expected"));
+        // The partial file is removed so a retry re-downloads from scratch.
+        assert!(!target_dir.join("shard.safetensors").exists());
     }
 
     #[tokio::test]

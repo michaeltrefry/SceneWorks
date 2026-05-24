@@ -310,14 +310,6 @@ class ImageRequest:
     advanced: dict[str, Any]
 
 
-def load_registry(data_dir: Path) -> list[dict[str, Any]]:
-    registry_path = data_dir / "recent-projects.json"
-    if not registry_path.exists():
-        return []
-    with registry_path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
 def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
     payload = job["payload"]
     return ImageRequest(

@@ -576,15 +576,31 @@ def should_skip_claim_low_vram(settings: WorkerSettings) -> bool:
     if threshold <= 0 or settings.gpu_id in ("cpu", "mps"):
         return False
     utilization = gpu_utilization(settings.gpu_id)
-    free_mb = utilization.get("memoryFreeMb") if utilization else None
-    if free_mb is None or free_mb >= threshold:
+    if not utilization:
+        return False
+    free_mb = utilization.get("memoryFreeMb")
+    if free_mb is None:
+        return False
+    # The configured gate (24 GB default) is NVIDIA-tuned for large cards. On a
+    # smaller card an absolute MB threshold can exceed what the card could ever
+    # report free, deferring every claim forever with no obvious signal. Clamp it
+    # to a high fraction of this card's capacity so a small idle card still
+    # claims, while keeping the "defer when another tool is hogging the card"
+    # intent on cards big enough to satisfy the configured value.
+    total_mb = utilization.get("memoryTotalMb")
+    effective = threshold
+    if isinstance(total_mb, int) and total_mb > 0:
+        effective = min(threshold, int(total_mb * 0.9))
+    if free_mb >= effective:
         return False
     emit(
         {
             "event": "claim_skipped_low_vram",
             "gpuId": settings.gpu_id,
             "memoryFreeMb": free_mb,
-            "thresholdMb": threshold,
+            "memoryTotalMb": total_mb,
+            "thresholdMb": effective,
+            "configuredThresholdMb": threshold,
             "reportedAt": now(),
         }
     )
