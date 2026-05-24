@@ -7,6 +7,7 @@ import {
   DEFAULT_INTERLEAVE_SYSTEM_MESSAGE,
   INTERLEAVE_RESOLUTION_OPTIONS,
 } from "../constants.js";
+import { useAppContext } from "../context/AppContext.js";
 
 const MAX_IMAGES_DEFAULT = 6;
 const MAX_IMAGES_LIMIT = 10;
@@ -28,18 +29,21 @@ function DocumentResult({ job, assets, projectId, onCancel, onOpenQueue }) {
   return <DocumentView assets={assets} projectId={projectId} segments={segments} />;
 }
 
-export function DocumentStudio({
-  activeProject,
-  assets,
-  createInterleaveJob,
-  gpuOptions,
-  imageModels,
-  jobs,
-  onCancelJob,
-  onOpenQueue,
-  requestedGpu,
-  setRequestedGpu,
-}) {
+export function DocumentStudio() {
+  const {
+    activeProject,
+    assets,
+    createInterleaveJob,
+    gpuOptions,
+    imageModels,
+    jobs,
+    jobAction,
+    setActiveView,
+    requestedGpu,
+    setRequestedGpu,
+  } = useAppContext();
+  const onCancelJob = (job) => jobAction(job, "cancel");
+  const onOpenQueue = () => setActiveView("Queue");
   const interleaveModels = useMemo(
     () => (imageModels ?? []).filter(modelSupportsInterleave),
     [imageModels],
