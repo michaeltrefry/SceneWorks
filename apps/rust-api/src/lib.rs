@@ -437,6 +437,50 @@ impl InProcessUtilityWorker {
     }
 }
 
+/// Poll cadence for the parent-death watchdog (see [`shutdown_signal`]).
+#[cfg(unix)]
+const PARENT_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// The parent PID this process should watch, parsed from `SCENEWORKS_PARENT_PID`.
+/// `None` when the var is unset/blank/unparseable or `<= 1`: a value of 0 or 1
+/// (init/launchd) means "already reparented or no real parent", so the watchdog
+/// must not fire. Server/Docker deployments leave the var unset.
+#[cfg(unix)]
+fn parent_pid_to_watch() -> Option<i32> {
+    let pid: i64 = std::env::var("SCENEWORKS_PARENT_PID")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    (pid > 1 && pid <= i64::from(i32::MAX)).then_some(pid as i32)
+}
+
+/// True while `pid` names a live process. `kill(pid, None)` checks for the
+/// process without delivering a signal: `Ok` means it's alive; `EPERM` means it
+/// exists but we may not signal it (still alive); `ESRCH` is the only "gone"
+/// case and yields false.
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+        Ok(()) => true,
+        Err(errno) => errno == nix::errno::Errno::EPERM,
+    }
+}
+
+/// Resolves once the watched parent process disappears, polling every
+/// [`PARENT_POLL_INTERVAL`]. With no parent to watch (`None`) it stays pending
+/// forever, so the `select!` branch in [`shutdown_signal`] never fires.
+#[cfg(unix)]
+async fn parent_death(parent_pid: Option<i32>) {
+    let Some(parent_pid) = parent_pid else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while pid_alive(parent_pid) {
+        tokio::time::sleep(PARENT_POLL_INTERVAL).await;
+    }
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -455,9 +499,24 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
+    // Parent-death watchdog: when launched as a desktop sidecar the Tauri shell
+    // sets SCENEWORKS_PARENT_PID to its own PID. A force-quit/crash skips the
+    // shell's graceful teardown (`begin_shutdown`), so without this the API
+    // orphans to launchd (PPID=1) — holding its OS-assigned port and a jobs.db
+    // handle until the next launch reaps it. Unset (server/Docker) -> the future
+    // stays pending and this branch never fires.
+    #[cfg(unix)]
+    let parent_gone = parent_death(parent_pid_to_watch());
+
+    #[cfg(not(unix))]
+    let parent_gone = std::future::pending::<()>();
+
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+        _ = parent_gone => {
+            eprintln!("SceneWorks API: parent process exited; shutting down");
+        }
     }
 }
 
@@ -13460,5 +13519,79 @@ mod tests {
             .get("access-control-allow-headers")
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.to_ascii_lowercase().contains("x-sceneworks-token")));
+    }
+
+    /// The watchdog must stay pending while the parent lives and resolve once it
+    /// exits — the desktop-sidecar orphan fix. Mirrors the Python worker's
+    /// parent-death test: spawn a dummy parent, confirm it isn't flagged alive
+    /// falsely, kill it, and assert the future then resolves promptly.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_death_resolves_when_watched_parent_exits() {
+        let mut parent = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn dummy parent");
+        let pid = parent.id() as i32;
+
+        assert!(super::pid_alive(pid), "freshly spawned parent reads as dead");
+        // Still alive -> the watchdog must not resolve within a poll cycle.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                super::parent_death(Some(pid)),
+            )
+            .await
+            .is_err(),
+            "watchdog resolved while the parent was still alive"
+        );
+
+        parent.kill().expect("kill dummy parent");
+        parent.wait().expect("reap dummy parent");
+        assert!(!super::pid_alive(pid), "reaped parent still reads as alive");
+
+        // Now gone -> the watchdog resolves on its next check.
+        tokio::time::timeout(
+            super::PARENT_POLL_INTERVAL + Duration::from_secs(2),
+            super::parent_death(Some(pid)),
+        )
+        .await
+        .expect("watchdog did not resolve after the parent exited");
+    }
+
+    /// No configured parent (server/Docker) -> the watchdog future never resolves.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_death_never_fires_without_a_parent_pid() {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), super::parent_death(None))
+                .await
+                .is_err(),
+            "watchdog fired with no parent PID configured"
+        );
+    }
+
+    /// PIDs of 0 or 1 (and unset/garbage) yield no parent to watch.
+    #[cfg(unix)]
+    #[test]
+    fn parent_pid_to_watch_rejects_init_and_invalid_values() {
+        use std::env;
+        // Serialize: the helper reads a process-global env var.
+        for (value, expected) in [
+            (Some("0"), None),
+            (Some("1"), None),
+            (Some("-5"), None),
+            (Some(" not-a-pid "), None),
+            (Some(""), None),
+            (Some(" 4242 "), Some(4242_i32)),
+            (None, None),
+        ] {
+            match value {
+                Some(v) => env::set_var("SCENEWORKS_PARENT_PID", v),
+                None => env::remove_var("SCENEWORKS_PARENT_PID"),
+            }
+            assert_eq!(super::parent_pid_to_watch(), expected, "value={value:?}");
+        }
+        env::remove_var("SCENEWORKS_PARENT_PID");
     }
 }

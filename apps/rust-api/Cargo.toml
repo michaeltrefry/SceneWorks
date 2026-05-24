@@ -25,6 +25,12 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1.11", features = ["v4"] }
 
+# Unix-only: parent-death watchdog liveness probe (safe kill(pid, None) wrapper).
+# Mirrors the desktop crate; the workspace forbids `unsafe`, so we use nix rather
+# than raw libc. Already in the workspace lock, so this pulls no new crate.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["signal"] }
+
 # Embed the built apps/web/dist bundle into the binary and serve it with SPA
 # fallback. Off by default (server/test builds need no web build); the desktop
 # release pipeline runs `npm --prefix apps/web run build` then enables this.

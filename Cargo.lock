@@ -3132,6 +3132,7 @@ dependencies = [
  "futures-util",
  "glob",
  "mime_guess",
+ "nix",
  "parking_lot",
  "reqwest 0.12.28",
  "rust-embed",

@@ -702,6 +702,11 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         // port is discovered from the API's startup line below.
         .env("SCENEWORKS_API_PORT", "0")
         .env("SCENEWORKS_RUN_UTILITY_INPROCESS", "true")
+        // Parent-death watchdog: a force-quit/crash skips `begin_shutdown`, so
+        // without this the API orphans to launchd (PPID=1), holding its
+        // OS-assigned port + a jobs.db handle. The API self-terminates when this
+        // PID disappears; unset (server/Docker) -> the watchdog never fires.
+        .env("SCENEWORKS_PARENT_PID", std::process::id().to_string())
         .env(
             "SCENEWORKS_DATA_DIR",
             resolved_data_dir().to_string_lossy().to_string(),
