@@ -4262,6 +4262,48 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("No fresh image batch");
   });
 
+  it("removes a canceled image job's progress card and placeholder thumbnails", async () => {
+    const canceledJob = {
+      id: "image-job-canceled",
+      type: "image_generate",
+      status: "canceled",
+      stage: "canceled",
+      progress: 0.5,
+      requestedGpu: "auto",
+      payload: { prompt: "abandon ship", count: 4 },
+      result: { expectedCount: 4 },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ImageStudio
+          activeProject={{ id: "project-1", name: "Noir" }}
+          assets={[]}
+          characters={[]}
+          createImageJob={() => {}}
+          deleteAsset={() => {}}
+          gpuOptions={["auto"]}
+          imageModels={[{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }]}
+          latestAssets={[]}
+          localJobs={[canceledJob]}
+          loras={[]}
+          onPreview={() => {}}
+          purgeAsset={() => {}}
+          requestedGpu="auto"
+          selectedAsset={null}
+          setRequestedGpu={() => {}}
+          updateAssetStatus={() => {}}
+        />,
+      );
+    });
+    await settle();
+
+    expect(container.querySelector(".local-job-card")).toBeNull();
+    expect(container.querySelector(".review-placeholder")).toBeNull();
+    expect(container.textContent).not.toContain("Canceled #");
+    expect(container.textContent).toContain("No fresh image batch");
+  });
+
   it("submits compatible image LoRAs while capping simple user selections at two", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);

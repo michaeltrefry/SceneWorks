@@ -382,7 +382,11 @@ export function VideoStudio({
   }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
 
   const localJobs = trackedLocalJobs.filter(
-    (job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job)),
+    (job) =>
+      // Canceled runs produce no output, so drop them instead of leaving a
+      // "Canceled" progress card behind.
+      job.status !== "canceled" &&
+      (job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job))),
   );
   const hasReviewContent = Boolean(localJobs.length || latestAssets.length);
 

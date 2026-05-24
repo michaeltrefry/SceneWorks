@@ -422,7 +422,14 @@ export function ImageStudio({
   }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
 
   const localJobs = useMemo(
-    () => trackedLocalJobs.filter((job) => job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job))),
+    () =>
+      trackedLocalJobs.filter(
+        (job) =>
+          // Canceled runs produce no output, so drop them instead of leaving a
+          // "Canceled" progress card and empty thumbnail placeholders behind.
+          job.status !== "canceled" &&
+          (job.status !== "completed" || (!resultVisible(job) && !completedWaitExpired(job))),
+      ),
     [assets, latestAssets, trackedLocalJobs, resultFallbackTick],
   );
   const reviewSlots = useMemo(() => {
