@@ -381,11 +381,15 @@ class JobCancelMonitor:
         *,
         poll_interval: float = 1.0,
         force_cancel_seconds: float | None = None,
+        on_force_terminate: Callable[[], None] | None = None,
     ) -> None:
         self._api = api
         self._settings = settings
         self._job_id = job_id
         self._poll_interval = max(0.05, poll_interval)
+        # Best-effort hook run just before os._exit (which skips adapter cleanup).
+        # Must be filesystem-only — see _force_terminate.
+        self._on_force_terminate = on_force_terminate
         deadline = (
             force_cancel_seconds
             if force_cancel_seconds is not None
@@ -467,6 +471,24 @@ class JobCancelMonitor:
                     "reportedAt": now(),
                 }
             )
+        # os._exit skips the cooperative adapter.cancel()/cleanup() path, so a
+        # force-killed job would otherwise orphan its temp files. Give the caller
+        # one best-effort hook to reap them first. It must be filesystem-only: the
+        # main thread is wedged in a native call, so touching torch/GPU here is
+        # unsafe (the hook removes tracked temp files, not the resident pipeline,
+        # which os._exit frees anyway).
+        if self._on_force_terminate is not None:
+            try:
+                self._on_force_terminate()
+            except Exception as exc:  # noqa: BLE001 - never block the hard stop
+                emit(
+                    {
+                        "event": "cancel_force_kill_cleanup_failed",
+                        "jobId": self._job_id,
+                        "error": str(exc),
+                        "reportedAt": now(),
+                    }
+                )
         # The main thread is wedged in a native call we cannot interrupt from
         # Python, so os._exit is the only way to stop it now. It skips interpreter
         # cleanup by design — the supervisor restarts a fresh worker.
@@ -474,9 +496,15 @@ class JobCancelMonitor:
 
 
 @contextmanager
-def job_cancel_monitor(api: ApiClient, settings: WorkerSettings, job_id: str):
+def job_cancel_monitor(
+    api: ApiClient,
+    settings: WorkerSettings,
+    job_id: str,
+    *,
+    on_force_terminate: Callable[[], None] | None = None,
+):
     """Run a JobCancelMonitor for the duration of a job's blocking work."""
-    monitor = JobCancelMonitor(api, settings, job_id)
+    monitor = JobCancelMonitor(api, settings, job_id, on_force_terminate=on_force_terminate)
     monitor.start()
     try:
         yield monitor
@@ -508,13 +536,15 @@ def run_blocking_job_step(
     callback: Callable[[CancelCallback], Any],
     *,
     loaded_models: LoadedModelsSource,
+    on_force_terminate: Callable[[], None] | None = None,
 ) -> Any:
     """Run a job's blocking work while keeping it alive and cancelable.
 
     Spawns a heartbeat thread and a JobCancelMonitor for the duration of the
     work, then invokes ``callback`` with a cached cancel predicate so adapters
     can poll cancellation cheaply (and so the monitor can force-stop the worker
-    if a cancel goes unacknowledged past the deadline)."""
+    if a cancel goes unacknowledged past the deadline). ``on_force_terminate`` is
+    a best-effort, filesystem-only hook run just before the hard-stop os._exit."""
     stop_event = threading.Event()
     thread = threading.Thread(
         target=keep_job_alive,
@@ -523,7 +553,7 @@ def run_blocking_job_step(
     )
     thread.start()
     try:
-        with job_cancel_monitor(api, settings, job_id) as monitor:
+        with job_cancel_monitor(api, settings, job_id, on_force_terminate=on_force_terminate) as monitor:
             return callback(monitor.requested)
     finally:
         stop_event.set()
@@ -876,6 +906,9 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
                 cancel_requested=cancel,
             ),
             loaded_models=adapter_loaded_models,
+            # Reap the job's partial .tmp.mp4/.control.mp4 outputs if the hard-stop
+            # backstop force-kills the worker (os._exit skips adapter cleanup).
+            on_force_terminate=lambda: adapter.discard_temp_outputs(job_id),
         )
         update_job(
             api,

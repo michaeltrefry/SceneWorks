@@ -336,6 +336,15 @@ class VideoGenerationAdapter(ABC):
     def cleanup(self, job_id: str) -> None:
         raise NotImplementedError
 
+    def discard_temp_outputs(self, job_id: str) -> None:
+        """Reap the job's temp files only — no model/pipeline teardown.
+
+        The force-cancel backstop calls this from the monitor thread right before
+        os._exit, so it must stay filesystem-only: the main thread may be wedged
+        in a native call and touching torch/GPU from here would be unsafe.
+        Adapters that track temp files override this; the default is a no-op."""
+        return
+
 
 class ProceduralVideoAdapter(VideoGenerationAdapter):
     id = "procedural_video"
@@ -460,6 +469,9 @@ class ProceduralVideoAdapter(VideoGenerationAdapter):
         self.cleanup(job_id)
 
     def cleanup(self, job_id: str) -> None:
+        self.discard_temp_outputs(job_id)
+
+    def discard_temp_outputs(self, job_id: str) -> None:
         for path in self._temporary_outputs.pop(job_id, []):
             path.unlink(missing_ok=True)
 
