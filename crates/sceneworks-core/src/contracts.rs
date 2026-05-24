@@ -280,6 +280,10 @@ string_enum! {
         // and apps/worker/scene_worker/runtime.py.
         PersonDetectPreview => "person_detect_preview",
         PersonTrackPreview => "person_track_preview",
+        // Real person segmentation (SAM2), advertised only by the Python GPU worker
+        // (runtime.py, gated on segmenter_backend_available) and consumed by
+        // replace-person readiness; the Rust worker never emits it. Not dead — see
+        // the API "segment" capability mapping.
         PersonSegment => "person_segment",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",

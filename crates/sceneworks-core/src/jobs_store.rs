@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToSql};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
 
@@ -302,38 +302,26 @@ impl JobsStore {
         let _guard = self.lock.lock();
         let connection = self.connect()?;
         let limit = limit.clamp(1, 500);
-        let jobs = match (project_id, status) {
-            (Some(project_id), Some(status)) => {
-                let mut statement = connection.prepare(
-                    "select * from jobs where project_id = ?1 and status = ?2 order by created_at desc limit ?3",
-                )?;
-                let jobs = collect_jobs(
-                    statement.query_map(params![project_id, status, limit], row_to_job)?,
-                )?;
-                jobs
-            }
-            (Some(project_id), None) => {
-                let mut statement = connection.prepare(
-                    "select * from jobs where project_id = ?1 order by created_at desc limit ?2",
-                )?;
-                let jobs =
-                    collect_jobs(statement.query_map(params![project_id, limit], row_to_job)?)?;
-                jobs
-            }
-            (None, Some(status)) => {
-                let mut statement = connection.prepare(
-                    "select * from jobs where status = ?1 order by created_at desc limit ?2",
-                )?;
-                let jobs = collect_jobs(statement.query_map(params![status, limit], row_to_job)?)?;
-                jobs
-            }
-            (None, None) => {
-                let mut statement =
-                    connection.prepare("select * from jobs order by created_at desc limit ?1")?;
-                let jobs = collect_jobs(statement.query_map(params![limit], row_to_job)?)?;
-                jobs
-            }
-        };
+        let mut conditions: Vec<&str> = Vec::new();
+        let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
+        if let Some(project_id) = project_id {
+            conditions.push("project_id = ?");
+            bindings.push(Box::new(project_id.to_owned()));
+        }
+        if let Some(status) = status {
+            conditions.push("status = ?");
+            bindings.push(Box::new(status.to_owned()));
+        }
+        let mut sql = String::from("select * from jobs");
+        if !conditions.is_empty() {
+            sql.push_str(" where ");
+            sql.push_str(&conditions.join(" and "));
+        }
+        sql.push_str(" order by created_at desc limit ?");
+        bindings.push(Box::new(limit));
+        let mut statement = connection.prepare(&sql)?;
+        let jobs =
+            collect_jobs(statement.query_map(params_from_iter(bindings.iter()), row_to_job)?)?;
         Ok(jobs)
     }
 

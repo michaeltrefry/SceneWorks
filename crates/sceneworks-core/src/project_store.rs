@@ -1270,7 +1270,19 @@ struct ReindexCounts {
     timelines: u32,
 }
 
+/// Bump whenever the project.db schema changes (new table, column, or index).
+/// `apply_project_migrations` only re-runs its DDL when `PRAGMA user_version`
+/// is behind this; forgetting to bump means an existing DB never gets the change.
+const PROJECT_SCHEMA_VERSION: i64 = 1;
+
+fn project_schema_version(connection: &Connection) -> ProjectStoreResult<i64> {
+    Ok(connection.query_row("pragma user_version", [], |row| row.get(0))?)
+}
+
 pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<()> {
+    if project_schema_version(connection)? >= PROJECT_SCHEMA_VERSION {
+        return Ok(());
+    }
     connection.execute_batch(
         "
         create table if not exists project_metadata (
@@ -1315,6 +1327,8 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
     ensure_column(connection, "assets", "sidecar_path", "text")?;
     apply_character_migrations(connection)?;
     apply_training_dataset_migrations(connection)?;
+    // Pragma assignment cannot be parameterized; the version is a trusted const.
+    connection.execute_batch(&format!("pragma user_version = {PROJECT_SCHEMA_VERSION}"))?;
     Ok(())
 }
 

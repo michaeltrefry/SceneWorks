@@ -5,7 +5,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::project_store::{ProjectStoreError, ProjectStoreResult};
+use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     is_safe_id, is_safe_relative_path, parse_string_enum, random_hex, read_json, relative_string,
     write_json,
@@ -907,7 +907,9 @@ fn ensure_dataset_project(project_id: &str, dataset: &TrainingDataset) -> Projec
 
 pub fn ensure_training_dataset_table(project_path: &Path) -> ProjectStoreResult<()> {
     let connection = Connection::open(project_path.join("project.db"))?;
-    apply_training_dataset_migrations(&connection)
+    // Route through the version-gated comprehensive migration so the training
+    // path stops replaying DDL on every call (the table is created either way).
+    apply_project_migrations(&connection)
 }
 
 pub fn apply_training_dataset_migrations(connection: &Connection) -> ProjectStoreResult<()> {

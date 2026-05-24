@@ -318,8 +318,10 @@ where
     let mut exited = Vec::new();
     for (worker_id, child) in children.iter_mut() {
         if let Some(status) = child.process.try_wait()? {
-            let restart_attempt = child.restart_attempt.saturating_add(1);
-            let delay = retry_delay(settings.poll_seconds, restart_attempt);
+            // Advance the attempt once here so the logged ETA and the actual
+            // backoff below both read the same stored value.
+            child.restart_attempt = child.restart_attempt.saturating_add(1);
+            let delay = retry_delay(settings.poll_seconds, child.restart_attempt);
             emit_json(json!({
                 "event": "worker_exited",
                 "workerId": worker_id,
@@ -335,7 +337,6 @@ where
         let Some(mut child) = children.remove(&worker_id) else {
             continue;
         };
-        child.restart_attempt = child.restart_attempt.saturating_add(1);
         let delay = retry_delay(settings.poll_seconds, child.restart_attempt);
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
