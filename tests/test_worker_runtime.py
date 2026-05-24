@@ -1128,7 +1128,8 @@ def test_write_interleaved_document_persists_document_and_image_assets(tmp_path)
     assert sidecar["recipe"]["mode"] == "interleave"
 
     # The two generated images persist as ordinary image assets.
-    assert len(list((project_path / "assets" / "images").glob("*.png"))) == 2
+    # rglob: the writer nests each generation set in its own subfolder.
+    assert len(list((project_path / "assets" / "images").rglob("*.png"))) == 2
     assert len(result["imageAssetIds"]) == 2
     assert result["documentId"] == document["id"]
     assert result["segments"] == document["segments"]
@@ -1285,8 +1286,9 @@ def test_image_asset_writer_persists_each_image_before_requesting_next(tmp_path)
 
     def image_at_index(index):
         if index == 1:
-            assert len(list((project_path / "assets" / "images").glob("*.png"))) == 1
-            assert len(list((project_path / "assets" / "images").glob("*.sceneworks.json"))) == 1
+            # rglob: PNGs/sidecars live in a per-generation-set subfolder.
+            assert len(list((project_path / "assets" / "images").rglob("*.png"))) == 1
+            assert len(list((project_path / "assets" / "images").rglob("*.sceneworks.json"))) == 1
         return Image.new("RGB", (16, 16), (255, 0, 0) if index == 0 else (0, 255, 0))
 
     result = ImageAssetWriter().write_incremental_outputs(
@@ -1301,7 +1303,105 @@ def test_image_asset_writer_persists_each_image_before_requesting_next(tmp_path)
     )
 
     assert len(result["assetIds"]) == 2
-    assert len(list((project_path / "assets" / "images").glob("*.png"))) == 2
+    assert len(list((project_path / "assets" / "images").rglob("*.png"))) == 2
+
+
+def test_image_asset_writer_does_not_clobber_identical_jobs(tmp_path):
+    # Two jobs sharing the same date + model + prompt + image index must not
+    # collide on disk: the per-generation-set subfolder keeps each job's PNG
+    # distinct so the first asset's pixels are never overwritten by the second.
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    job = {
+        "id": "job-1",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "Neon alley",
+            "model": "sensenova_u1_8b",
+            "count": 1,
+            "width": 16,
+            "height": 16,
+        },
+    }
+
+    def run(color):
+        return ImageAssetWriter().write_incremental_outputs(
+            settings=SimpleNamespace(data_dir=data_dir),
+            job=job,
+            image_count=1,
+            image_at_index=lambda _index: Image.new("RGB", (16, 16), color),
+            adapter_id="sensenova_u1",
+            progress=lambda *_args, **_kwargs: None,
+            cancel_requested=lambda: False,
+            raw_settings={"realModelInference": True},
+        )
+
+    first = run((255, 0, 0))
+    second = run((0, 255, 0))
+
+    # Distinct generation sets, distinct asset ids, distinct files on disk.
+    assert first["generationSetId"] != second["generationSetId"]
+    assert first["assetIds"] != second["assetIds"]
+    pngs = list((project_path / "assets" / "images").rglob("*.png"))
+    assert len(pngs) == 2
+
+    # The first asset's recorded path still points at the first job's pixels;
+    # the second job did not overwrite it.
+    first_path = project_path / first["assets"][0]["file"]["path"]
+    second_path = project_path / second["assets"][0]["file"]["path"]
+    assert first_path.exists() and second_path.exists()
+    assert first_path != second_path
+    with Image.open(first_path) as handle:
+        assert handle.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
+    with Image.open(second_path) as handle:
+        assert handle.convert("RGB").getpixel((0, 0)) == (0, 255, 0)
+
+
+def test_image_asset_writer_records_actual_output_dimensions(tmp_path):
+    # The sidecar's file.width/height must reflect the PNG actually saved (e.g.
+    # a model that snaps to a trained bucket), not the requested size or the old
+    # min(request, 1280) cap.
+    data_dir = tmp_path / "data"
+    project_path = tmp_path / "project"
+    data_dir.mkdir()
+    project_path.mkdir()
+    (data_dir / "recent-projects.json").write_text(
+        json.dumps([{"id": "project-1", "path": str(project_path)}]),
+        encoding="utf-8",
+    )
+    job = {
+        "id": "job-1",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "Neon alley",
+            "model": "sensenova_u1_8b",
+            "count": 1,
+            "width": 2720,
+            "height": 1536,
+        },
+    }
+
+    result = ImageAssetWriter().write_incremental_outputs(
+        settings=SimpleNamespace(data_dir=data_dir),
+        job=job,
+        image_count=1,
+        image_at_index=lambda _index: Image.new("RGB", (2720, 1536), "navy"),
+        adapter_id="sensenova_u1",
+        progress=lambda *_args, **_kwargs: None,
+        cancel_requested=lambda: False,
+        raw_settings={"realModelInference": True},
+    )
+
+    file_meta = result["assets"][0]["file"]
+    assert (file_meta["width"], file_meta["height"]) == (2720, 1536)
 
 
 def test_image_asset_writer_batch_progress_is_monotonic(tmp_path):
@@ -4732,6 +4832,8 @@ def test_character_image_recipe_marks_conditioning_inactive():
         created_at="2026-05-17T00:00:00Z",
         seed=101,
         index=0,
+        width=512,
+        height=512,
         model_target=MODEL_TARGETS["z_image_turbo"],
         adapter_id="procedural_preview",
         raw_settings={},

@@ -383,6 +383,14 @@ class ImageAssetWriter:
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
         prompt_slug = slugify(request.prompt, fallback="image", max_length=42)
         date_slug = created_at[:10]
+        # Each generation set writes into its own subfolder so two jobs that share
+        # the same date + model + prompt + image index cannot collide on a flat
+        # `<date>_<model>_<prompt>_<index>.png` name and clobber each other's PNGs.
+        # The folder carries the uniqueness (a full UUID), so the per-image
+        # filenames stay short and readable. Asset discovery is rglob-based and
+        # paths are stored in the sidecar/DB, so nesting is transparent downstream.
+        images_dir = project_path / "assets" / "images" / generation_set_id
+        images_dir.mkdir(parents=True, exist_ok=True)
         assets = []
 
         generation_set = {
@@ -410,7 +418,7 @@ class ImageAssetWriter:
             asset_id = f"asset_{uuid4().hex}"
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
             filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
-            media_rel = f"assets/images/{filename}"
+            media_rel = f"assets/images/{generation_set_id}/{filename}"
             media_path = project_path / media_rel
             sidecar_path = media_path.with_suffix(".sceneworks.json")
             image.save(media_path, "PNG")
@@ -425,6 +433,12 @@ class ImageAssetWriter:
                 created_at=created_at,
                 seed=seed,
                 index=index,
+                # Record the true saved dimensions, not the request's. SenseNova-U1
+                # (and any model that snaps to a trained bucket) saves at a size
+                # that differs from request.width/height, and the old min(..,1280)
+                # cap further misreported large outputs.
+                width=image.width,
+                height=image.height,
                 model_target=model_target,
                 adapter_id=adapter_id,
                 raw_settings=raw_settings,
@@ -2366,6 +2380,8 @@ def build_asset_sidecar(
     created_at: str,
     seed: int,
     index: int,
+    width: int,
+    height: int,
     model_target: dict[str, Any],
     adapter_id: str,
     raw_settings: dict[str, Any],
@@ -2381,8 +2397,11 @@ def build_asset_sidecar(
         "file": {
             "path": media_rel,
             "mimeType": "image/png",
-            "width": min(request.width, 1280),
-            "height": min(request.height, 1280),
+            # Actual saved pixel dimensions of the PNG on disk — passed by the
+            # writer from the rendered image, not derived (and capped) from the
+            # request, which misreported bucket-snapped/large outputs.
+            "width": width,
+            "height": height,
             "duration": None,
             "fps": None,
         },
