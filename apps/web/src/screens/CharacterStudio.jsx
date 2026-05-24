@@ -7,6 +7,7 @@ import {
   editableLora,
 } from "./characterPanels.jsx";
 import { extractFamilies } from "../presetUtils.js";
+import { useAppContext } from "../context/AppContext.js";
 
 const characterTypes = [
   ["person", "Person"],
@@ -18,33 +19,38 @@ function typeLabel(value) {
   return characterTypes.find(([id]) => id === value)?.[1] ?? "Person";
 }
 
-export function CharacterStudio({
-  activeProject,
-  assets,
-  characters,
-  createCharacter,
-  updateCharacter,
-  archiveCharacter,
-  addCharacterReference,
-  updateCharacterReference,
-  removeCharacterReference,
-  createCharacterLook,
-  updateCharacterLook,
-  deleteCharacterLook,
-  attachCharacterLora,
-  updateCharacterLora,
-  detachCharacterLora,
-  createCharacterTestJob,
-  deleteAsset,
-  purgeAsset,
-  imageModels,
-  latestAssets,
-  loras,
-  onPreview,
-  onSendImage,
-  onSendVideo,
-  updateAssetStatus,
-}) {
+export function CharacterStudio() {
+  const {
+    activeProject,
+    assets,
+    characters,
+    createCharacter,
+    updateCharacter,
+    archiveCharacter,
+    addCharacterReference,
+    updateCharacterReference,
+    removeCharacterReference,
+    createCharacterLook,
+    updateCharacterLook,
+    deleteCharacterLook,
+    attachCharacterLora,
+    updateCharacterLora,
+    detachCharacterLora,
+    createCharacterTestJob,
+    deleteAsset,
+    purgeAsset,
+    imageModels,
+    latestImageAssets,
+    loras,
+    setPreviewAsset,
+    sendCharacterToImage,
+    sendCharacterToVideo,
+    updateAssetStatus,
+  } = useAppContext();
+  const latestAssets = latestImageAssets;
+  const onPreview = setPreviewAsset;
+  const onSendImage = sendCharacterToImage;
+  const onSendVideo = sendCharacterToVideo;
   const [selectedCharacterId, setSelectedCharacterId] = useState(characters[0]?.id ?? "");
   const [draft, setDraft] = useState({ name: "", type: "person", description: "" });
   const [newCharacter, setNewCharacter] = useState({ name: "", type: "person", description: "" });

@@ -17,6 +17,14 @@ import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { TrainingStudio } from "./screens/TrainingStudio.jsx";
+import { AppContext } from "./context/AppContext.js";
+
+// sc-1651 Phase B: screens converted to useAppContext() read their data from the
+// provider instead of props. Tests wrap the screen in a provider carrying only the
+// values that screen reads.
+function withAppContext(value, ui) {
+  return <AppContext.Provider value={value}>{ui}</AppContext.Provider>;
+}
 
 // jsdom 27 omits Blob.text(); all real browsers implement it. Polyfill so the
 // dataset import flow (which reads .txt caption sidecars) is exercisable here.
@@ -1851,33 +1859,36 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <CharacterStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          addCharacterReference={addCharacterReference}
-          archiveCharacter={() => {}}
-          assets={assets}
-          attachCharacterLora={() => {}}
-          characters={[{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }]}
-          createCharacter={() => {}}
-          createCharacterLook={() => {}}
-          createCharacterTestJob={() => {}}
-          deleteAsset={() => {}}
-          deleteCharacterLook={() => {}}
-          detachCharacterLora={() => {}}
-          imageModels={[]}
-          latestAssets={[]}
-          loras={[]}
-          onPreview={() => {}}
-          onSendImage={() => {}}
-          onSendVideo={() => {}}
-          purgeAsset={() => {}}
-          removeCharacterReference={() => {}}
-          updateAssetStatus={() => {}}
-          updateCharacter={() => {}}
-          updateCharacterLook={() => {}}
-          updateCharacterLora={() => {}}
-          updateCharacterReference={() => {}}
-        />,
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            addCharacterReference,
+            archiveCharacter: () => {},
+            assets,
+            attachCharacterLora: () => {},
+            characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+            createCharacter: () => {},
+            createCharacterLook: () => {},
+            createCharacterTestJob: () => {},
+            deleteAsset: () => {},
+            deleteCharacterLook: () => {},
+            detachCharacterLora: () => {},
+            imageModels: [],
+            latestImageAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            sendCharacterToImage: () => {},
+            sendCharacterToVideo: () => {},
+            purgeAsset: () => {},
+            removeCharacterReference: () => {},
+            updateAssetStatus: () => {},
+            updateCharacter: () => {},
+            updateCharacterLook: () => {},
+            updateCharacterLora: () => {},
+            updateCharacterReference: () => {},
+          },
+          <CharacterStudio />,
+        ),
       );
     });
 
@@ -5478,31 +5489,34 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <LibraryScreen
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[asset]}
-          jobs={[
-            {
-              id: "job-vqa-1",
-              type: "image_vqa",
-              status: "completed",
-              payload: { sourceAssetId: "asset-1", question: "What time of day is it?" },
-              result: { question: "What time of day is it?", answer: "It appears to be nighttime." },
-            },
-          ]}
-          imageModels={[{ id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "vqa"] }]}
-          createVqaJob={createVqaJob}
-          deleteAsset={() => {}}
-          purgeAsset={() => {}}
-          importAsset={() => {}}
-          onPreview={() => {}}
-          onSendImage={() => {}}
-          onSendVideo={() => {}}
-          onSendEditor={() => {}}
-          selectedAsset={asset}
-          setSelectedAssetId={() => {}}
-          updateAssetStatus={() => {}}
-        />,
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [asset],
+            jobs: [
+              {
+                id: "job-vqa-1",
+                type: "image_vqa",
+                status: "completed",
+                payload: { sourceAssetId: "asset-1", question: "What time of day is it?" },
+                result: { question: "What time of day is it?", answer: "It appears to be nighttime." },
+              },
+            ],
+            imageModels: [{ id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "vqa"] }],
+            createVqaJob,
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: asset,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+          },
+          <LibraryScreen />,
+        ),
       );
     });
     await settle();
@@ -5557,20 +5571,24 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <DocumentStudio
-          activeProject={{ id: "project-1", name: "Noir" }}
-          assets={[imageAsset]}
-          createInterleaveJob={createInterleaveJob}
-          gpuOptions={["auto"]}
-          imageModels={[
-            { id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "interleave"] },
-            { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", capabilities: ["text_to_image"] },
-          ]}
-          jobs={[completedJob]}
-          onOpenQueue={() => {}}
-          requestedGpu="auto"
-          setRequestedGpu={() => {}}
-        />,
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [imageAsset],
+            createInterleaveJob,
+            gpuOptions: ["auto"],
+            imageModels: [
+              { id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "interleave"] },
+              { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", capabilities: ["text_to_image"] },
+            ],
+            jobs: [completedJob],
+            jobAction: () => {},
+            setActiveView: () => {},
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+          },
+          <DocumentStudio />,
+        ),
       );
     });
     await settle();

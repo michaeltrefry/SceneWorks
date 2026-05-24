@@ -1,24 +1,33 @@
 import React, { useState } from "react";
 import { AssetDetail, AssetGrid } from "../components/assetPanels.jsx";
 import { terminalStatuses } from "../constants.js";
+import { useAppContext } from "../context/AppContext.js";
 
-export function LibraryScreen({
-  activeProject,
-  assets,
-  jobs = [],
-  imageModels = [],
-  createVqaJob,
-  deleteAsset,
-  purgeAsset,
-  importAsset,
-  onPreview,
-  onSendImage,
-  onSendVideo,
-  onSendEditor,
-  selectedAsset,
-  setSelectedAssetId,
-  updateAssetStatus,
-}) {
+export function LibraryScreen() {
+  const {
+    activeProject,
+    assets,
+    jobs = [],
+    imageModels = [],
+    createVqaJob,
+    deleteAsset,
+    purgeAsset,
+    importAsset,
+    setPreviewAsset,
+    sendAssetToImage,
+    sendAssetToVideo,
+    selectedAsset,
+    setSelectedAssetId,
+    setActiveView,
+    updateAssetStatus,
+  } = useAppContext();
+  const onPreview = setPreviewAsset;
+  const onSendImage = (asset) => sendAssetToImage(asset);
+  const onSendVideo = (asset) => sendAssetToVideo(asset);
+  const onSendEditor = (asset) => {
+    setSelectedAssetId(asset.id);
+    setActiveView("Editor");
+  };
   const vqaEnabled = Boolean(createVqaJob) && imageModels.some((model) => (model.capabilities ?? []).includes("vqa"));
   const assetVqaJobs = selectedAsset
     ? jobs.filter((job) => job.type === "image_vqa" && job.payload?.sourceAssetId === selectedAsset.id)

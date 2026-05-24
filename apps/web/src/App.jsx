@@ -1232,6 +1232,45 @@ export function App() {
     exportTimeline,
     extractTimelineFrame,
     queueTimelineVideoJob,
+    // Assets / library (sc-1651 Phase B batch 1)
+    assets,
+    selectedAsset,
+    setSelectedAssetId,
+    deleteAsset,
+    purgeAsset,
+    importAsset,
+    updateAssetStatus,
+    latestImageAssets,
+    // Jobs / queue
+    jobs,
+    jobAction,
+    createVqaJob,
+    createInterleaveJob,
+    // Models / GPU
+    imageModels,
+    loras,
+    gpuOptions,
+    requestedGpu,
+    setRequestedGpu,
+    // Navigation
+    setActiveView,
+    // Characters
+    characters,
+    createCharacter,
+    updateCharacter,
+    archiveCharacter,
+    addCharacterReference,
+    updateCharacterReference,
+    removeCharacterReference,
+    createCharacterLook,
+    updateCharacterLook,
+    deleteCharacterLook,
+    attachCharacterLora,
+    updateCharacterLora,
+    detachCharacterLora,
+    createCharacterTestJob,
+    sendCharacterToImage,
+    sendCharacterToVideo,
   };
 
   return (
@@ -1353,26 +1392,7 @@ export function App() {
         ) : (
           <>
         {activeView === "Library" ? (
-          <LibraryScreen
-            activeProject={activeProject}
-            assets={assets}
-            jobs={jobs}
-            imageModels={imageModels}
-            createVqaJob={createVqaJob}
-            deleteAsset={deleteAsset}
-            purgeAsset={purgeAsset}
-            importAsset={importAsset}
-            onPreview={setPreviewAsset}
-            onSendImage={(asset) => sendAssetToImage(asset)}
-            selectedAsset={selectedAsset}
-            setSelectedAssetId={setSelectedAssetId}
-            onSendVideo={(asset) => sendAssetToVideo(asset)}
-            onSendEditor={(asset) => {
-              setSelectedAssetId(asset.id);
-              setActiveView("Editor");
-            }}
-            updateAssetStatus={updateAssetStatus}
-          />
+          <LibraryScreen />
         ) : null}
 
         {activeView === "Image" ? (
@@ -1442,18 +1462,7 @@ export function App() {
         ) : null}
 
         {activeView === "Document" ? (
-          <DocumentStudio
-            activeProject={activeProject}
-            assets={assets}
-            createInterleaveJob={createInterleaveJob}
-            gpuOptions={gpuOptions}
-            imageModels={imageModels}
-            jobs={jobs}
-            onCancelJob={(job) => jobAction(job, "cancel")}
-            onOpenQueue={() => setActiveView("Queue")}
-            requestedGpu={requestedGpu}
-            setRequestedGpu={setRequestedGpu}
-          />
+          <DocumentStudio />
         ) : null}
 
         {activeView === "Train" ? (
@@ -1540,33 +1549,7 @@ export function App() {
         ) : null}
 
         {activeView === "Characters" ? (
-          <CharacterStudio
-            activeProject={activeProject}
-            addCharacterReference={addCharacterReference}
-            archiveCharacter={archiveCharacter}
-            assets={assets}
-            attachCharacterLora={attachCharacterLora}
-            characters={characters}
-            createCharacter={createCharacter}
-            createCharacterLook={createCharacterLook}
-            createCharacterTestJob={createCharacterTestJob}
-            deleteAsset={deleteAsset}
-            deleteCharacterLook={deleteCharacterLook}
-            detachCharacterLora={detachCharacterLora}
-            imageModels={imageModels}
-            latestAssets={latestImageAssets}
-            loras={loras}
-            onPreview={setPreviewAsset}
-            onSendImage={sendCharacterToImage}
-            onSendVideo={sendCharacterToVideo}
-            purgeAsset={purgeAsset}
-            removeCharacterReference={removeCharacterReference}
-            updateAssetStatus={updateAssetStatus}
-            updateCharacter={updateCharacter}
-            updateCharacterLook={updateCharacterLook}
-            updateCharacterLora={updateCharacterLora}
-            updateCharacterReference={updateCharacterReference}
-          />
+          <CharacterStudio />
         ) : null}
         {activeView === "Settings" ? <SettingsScreen /> : null}
           </>
