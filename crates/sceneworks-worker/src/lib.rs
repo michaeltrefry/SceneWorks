@@ -2700,24 +2700,9 @@ async fn run_timeline_export_job(
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
-    let timeline_path = safe_project_path(&project_path, &request.timeline_path)?;
-    let timeline = read_json_value(&timeline_path).await?;
-    let (width, height) = output_dimensions(
-        timeline
-            .get("aspectRatio")
-            .and_then(Value::as_str)
-            .unwrap_or("16:9"),
-        request.resolution,
-    );
-    let mut items = main_track_items(&timeline);
-    items.sort_by(|left, right| {
-        item_f64(left, "timelineStart", 0.0).total_cmp(&item_f64(right, "timelineStart", 0.0))
-    });
-    if items.is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Timeline has no main video items to export.".to_owned(),
-        ));
-    }
+
+    let (timeline, width, height, items, render_spec) =
+        plan_timeline_segments(&request, &project_path).await?;
 
     let temp_dir = tempfile::Builder::new()
         .prefix(&format!(
@@ -2727,105 +2712,25 @@ async fn run_timeline_export_job(
         .tempdir()?;
     let tmp_path = temp_dir.path().to_path_buf();
 
-    let mut segments = Vec::new();
-    let mut cursor = 0.0_f64;
-    let total = items.len().max(1);
-    let render_spec = RenderSpec {
-        width,
-        height,
-        fps: request.fps,
-    };
     let ffmpeg_context = FfmpegContext {
         api,
         settings,
         job_id: &job.id,
         cancel_message: "Timeline export canceled by user.",
     };
-    let render_result = async {
-        for (index, item) in items.iter().enumerate() {
-            check_cancel(api, &job.id, "Timeline export canceled by user.").await?;
-            let start = item_f64(item, "timelineStart", 0.0);
-            let item_end = item_f64(item, "timelineEnd", start);
-            if item_end <= start {
-                return Err(WorkerError::InvalidPayload(
-                    "timelineEnd must be greater than timelineStart.".to_owned(),
-                ));
-            }
-            if start > cursor {
-                let gap_duration = start - cursor;
-                let gap_path = tmp_path.join(format!("segment_{:04}_gap.mp4", segments.len()));
-                render_black_segment(
-                    "ffmpeg",
-                    &gap_path,
-                    gap_duration,
-                    render_spec,
-                    Some(ffmpeg_context),
-                )
-                .await?;
-                segments.push(TimelineSegment {
-                    path: gap_path,
-                    duration: gap_duration,
-                    transition: None,
-                    transition_duration: 0.0,
-                });
-                cursor = start;
-            }
 
-            let asset_id = required_value_str(item, "assetId")?;
-            let asset = store.get_asset(&request.project_id, asset_id)?;
-            let display_name = item
-                .get("displayName")
-                .and_then(Value::as_str)
-                .unwrap_or("item");
-            let segment_path = tmp_path.join(format!(
-                "segment_{:04}_{}.mp4",
-                segments.len(),
-                slugify(display_name, "timeline-export", Some(48))
-            ));
-            let duration = render_item_segment(
-                "ffmpeg",
-                &project_path,
-                item,
-                &asset,
-                &segment_path,
-                render_spec,
-                Some(ffmpeg_context),
-            )
-            .await?;
-            let transition_in = item.get("transitionIn").unwrap_or(&Value::Null);
-            segments.push(TimelineSegment {
-                path: segment_path,
-                duration,
-                transition: transition_in
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                transition_duration: value_f64(
-                    transition_in.get("duration").unwrap_or(&Value::Null),
-                    DEFAULT_TRANSITION_DURATION_SECONDS,
-                ),
-            });
-            cursor = cursor.max(item_end);
-            update_job(
-                api,
-                &job.id,
-                progress_payload(
-                    JobStatus::Running,
-                    ProgressStage::Rendering,
-                    0.12 + (((index + 1) as f64 / total as f64) * 0.58),
-                    "Rendering timeline segments.",
-                    None,
-                    None,
-                    None,
-                ),
-            )
-            .await?;
-        }
-        WorkerResult::Ok(())
-    }
-    .await;
-
-    render_result?;
+    let (segments, duration) = render_timeline_segments(
+        api,
+        job,
+        &request,
+        &store,
+        &project_path,
+        &items,
+        &render_spec,
+        &tmp_path,
+        ffmpeg_context,
+    )
+    .await?;
 
     let output_rel = format!(
         "assets/renders/{}_{}_{}.mp4",
@@ -2861,14 +2766,168 @@ async fn run_timeline_export_job(
     )
     .await?;
 
-    let asset = build_render_asset(
-        &request,
-        &timeline,
+    finalize_timeline_asset(
+        api,
         &job.id,
+        &request,
+        &store,
+        &project_path,
+        &timeline,
         &output_rel,
         width,
         height,
-        cursor,
+        duration,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn plan_timeline_segments(
+    request: &TimelineExportRequest,
+    project_path: &Path,
+) -> WorkerResult<(Value, u32, u32, Vec<Value>, RenderSpec)> {
+    let timeline_path = safe_project_path(project_path, &request.timeline_path)?;
+    let timeline = read_json_value(&timeline_path).await?;
+    let (width, height) = output_dimensions(
+        timeline
+            .get("aspectRatio")
+            .and_then(Value::as_str)
+            .unwrap_or("16:9"),
+        request.resolution,
+    );
+    let mut items = main_track_items(&timeline);
+    items.sort_by(|left, right| {
+        item_f64(left, "timelineStart", 0.0).total_cmp(&item_f64(right, "timelineStart", 0.0))
+    });
+    if items.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Timeline has no main video items to export.".to_owned(),
+        ));
+    }
+    let render_spec = RenderSpec {
+        width,
+        height,
+        fps: request.fps,
+    };
+    Ok((timeline, width, height, items, render_spec))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_timeline_segments<'a>(
+    api: &ApiClient,
+    job: &JobSnapshot,
+    request: &TimelineExportRequest,
+    store: &ProjectStore,
+    project_path: &Path,
+    items: &[Value],
+    render_spec: &RenderSpec,
+    tmp_path: &Path,
+    ffmpeg_context: FfmpegContext<'a>,
+) -> WorkerResult<(Vec<TimelineSegment>, f64)> {
+    let mut segments = Vec::new();
+    let mut cursor = 0.0_f64;
+    let total = items.len().max(1);
+
+    for (index, item) in items.iter().enumerate() {
+        check_cancel(api, &job.id, "Timeline export canceled by user.").await?;
+        let start = item_f64(item, "timelineStart", 0.0);
+        let item_end = item_f64(item, "timelineEnd", start);
+        if item_end <= start {
+            return Err(WorkerError::InvalidPayload(
+                "timelineEnd must be greater than timelineStart.".to_owned(),
+            ));
+        }
+        if start > cursor {
+            let gap_duration = start - cursor;
+            let gap_path = tmp_path.join(format!("segment_{:04}_gap.mp4", segments.len()));
+            render_black_segment(
+                "ffmpeg",
+                &gap_path,
+                gap_duration,
+                *render_spec,
+                Some(ffmpeg_context),
+            )
+            .await?;
+            segments.push(TimelineSegment {
+                path: gap_path,
+                duration: gap_duration,
+                transition: None,
+                transition_duration: 0.0,
+            });
+            cursor = start;
+        }
+
+        let asset_id = required_value_str(item, "assetId")?;
+        let asset = store.get_asset(&request.project_id, asset_id)?;
+        let display_name = item
+            .get("displayName")
+            .and_then(Value::as_str)
+            .unwrap_or("item");
+        let segment_path = tmp_path.join(format!(
+            "segment_{:04}_{}.mp4",
+            segments.len(),
+            slugify(display_name, "timeline-export", Some(48))
+        ));
+        let duration = render_item_segment(
+            "ffmpeg",
+            project_path,
+            item,
+            &asset,
+            &segment_path,
+            *render_spec,
+            Some(ffmpeg_context),
+        )
+        .await?;
+        let transition_in = item.get("transitionIn").unwrap_or(&Value::Null);
+        segments.push(TimelineSegment {
+            path: segment_path,
+            duration,
+            transition: transition_in
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            transition_duration: value_f64(
+                transition_in.get("duration").unwrap_or(&Value::Null),
+                DEFAULT_TRANSITION_DURATION_SECONDS,
+            ),
+        });
+        cursor = cursor.max(item_end);
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Rendering,
+                0.12 + (((index + 1) as f64 / total as f64) * 0.58),
+                "Rendering timeline segments.",
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+    }
+
+    Ok((segments, cursor))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_timeline_asset(
+    api: &ApiClient,
+    job_id: &str,
+    request: &TimelineExportRequest,
+    store: &ProjectStore,
+    project_path: &Path,
+    timeline: &Value,
+    output_rel: &str,
+    width: u32,
+    height: u32,
+    duration: f64,
+) -> WorkerResult<()> {
+    let output_path = project_path.join(output_rel);
+    let asset = build_render_asset(
+        request, timeline, job_id, output_rel, width, height, duration,
     );
     let sidecar_path = output_path.with_extension("sceneworks.json");
     write_json_value(&sidecar_path, &asset).await?;
@@ -2890,14 +2949,17 @@ async fn run_timeline_export_job(
         "timelineId".to_owned(),
         Value::String(request.timeline_id.clone()),
     );
-    result.insert("renderPath".to_owned(), Value::String(output_rel));
+    result.insert(
+        "renderPath".to_owned(),
+        Value::String(output_rel.to_owned()),
+    );
     result.insert(
         "adapter".to_owned(),
         Value::String("ffmpeg_timeline".to_owned()),
     );
     update_job(
         api,
-        &job.id,
+        job_id,
         progress_payload(
             JobStatus::Completed,
             ProgressStage::Completed,
