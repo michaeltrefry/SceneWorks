@@ -3391,6 +3391,15 @@ async fn create_model_download_job(
     );
     job_payload.insert("repo".to_owned(), Value::String(repo.clone()));
     job_payload.insert("files".to_owned(), json!(files));
+    // Forward the catalog-declared family so the worker can re-verify the downloaded
+    // weights match it (parity with model import). The catalog is project-curated, but
+    // a mis-declared family would otherwise silently mismatch downstream adapter
+    // selection; the worker reconciles and fails on a confident conflict (sc-1663).
+    if let Some(family) = model.get("family").and_then(Value::as_str) {
+        if !family.trim().is_empty() {
+            job_payload.insert("family".to_owned(), Value::String(family.to_owned()));
+        }
+    }
     job_payload.insert(
         "targetDir".to_owned(),
         Value::String(
@@ -11883,6 +11892,71 @@ mod tests {
         assert!(models[0]["installedPath"]
             .as_str()
             .is_some_and(|value| value.contains("models--owner--model")));
+    }
+
+    #[tokio::test]
+    async fn model_download_job_forwards_catalog_family_for_worker_reconciliation() {
+        // sc-1663: the download job must carry the catalog-declared family so the
+        // worker can re-verify the downloaded weights match it (parity with import).
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "base_model",
+                "name": "Base Model",
+                "type": "image",
+                "family": "z-image",
+                "downloads": [{ "provider": "huggingface", "repo": "owner/model" }]
+              }]
+            }
+            "#,
+        )
+        .expect("builtin models writes");
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("user models writes");
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("builtin loras writes");
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras writes");
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("builtin presets writes");
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("user presets writes");
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, job) = request(
+            app,
+            "POST",
+            "/api/v1/models/base_model/download",
+            json!({ "requestedGpu": "auto" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(job["type"], "model_download");
+        assert_eq!(job["payload"]["modelId"], "base_model");
+        assert_eq!(job["payload"]["family"], "z-image");
     }
 
     #[tokio::test]

@@ -1886,6 +1886,7 @@
     "lastHeartbeatAt": null,
     "message": "Waiting for an available worker.",
     "payload": {
+      "family": "z-image",
       "files": [
         "*.safetensors"
       ],

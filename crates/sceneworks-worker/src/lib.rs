@@ -14,7 +14,7 @@ use sceneworks_core::contracts::{
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
-    read_safetensors_header, reconcile_detected_family, SafetensorsHeaderError,
+    read_safetensors_header, reconcile_detected_family, FamilyMismatch, SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
@@ -1043,6 +1043,9 @@ async fn run_model_download_job(
     if let Some(cache_path) =
         download_model_with_hf_cli(api, settings, job, repo, revision, &files, &target_dir).await?
     {
+        if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
+            return Ok(());
+        }
         let mut result = JsonObject::new();
         result.insert(
             "modelId".to_owned(),
@@ -1114,6 +1117,10 @@ async fn run_model_download_job(
     )
     .await?;
     write_model_install_marker(&target_dir, &job.payload, repo, &job.id).await?;
+
+    if !reconcile_downloaded_model_family(api, job, &target_dir).await? {
+        return Ok(());
+    }
 
     let mut result = JsonObject::new();
     result.insert(
@@ -1702,6 +1709,79 @@ fn model_family_detection_error(error: SafetensorsHeaderError) -> String {
         }
         SafetensorsHeaderError::InvalidHeader => {
             "Imported model file has an invalid safetensors header.".to_owned()
+        }
+    }
+}
+
+/// Outcome of re-checking a downloaded model's architecture family against the
+/// catalog-declared family (sc-1663). Kept pure (no API I/O) so the decision is
+/// unit-testable; [`reconcile_downloaded_model_family`] maps it to a job failure.
+#[derive(Debug)]
+enum DownloadFamilyCheck {
+    /// Detection agrees, is inconclusive, or no family was declared — proceed.
+    Proceed,
+    /// The catalog declared one family but the weights are confidently another.
+    Mismatch(FamilyMismatch),
+    /// A safetensors file was found but its header could not be read.
+    DetectionFailed(SafetensorsHeaderError),
+}
+
+/// Re-detect the architecture family of the downloaded weights and reconcile it
+/// against the catalog-declared `supplied` family. A missing declaration or an
+/// inconclusive detector result proceeds — the curated catalog is trusted when there
+/// is no confident contradicting signal — so this never blocks a legitimate
+/// download; only a confident conflict is a mismatch.
+fn check_downloaded_model_family(
+    supplied: Option<String>,
+    model_dir: &Path,
+) -> DownloadFamilyCheck {
+    let detected = match detect_model_family(model_dir) {
+        Ok(detected) => detected,
+        Err(error) => return DownloadFamilyCheck::DetectionFailed(error),
+    };
+    match reconcile_detected_family(supplied, detected) {
+        Ok(_) => DownloadFamilyCheck::Proceed,
+        Err(mismatch) => DownloadFamilyCheck::Mismatch(mismatch),
+    }
+}
+
+/// Enforce family parity with model import on a completed download: verify the
+/// downloaded weights match the catalog-declared family and fail the job on a
+/// confident mismatch (or an unreadable header). Returns `Ok(true)` when the
+/// download may complete, `Ok(false)` when the job was already failed and the
+/// caller should return.
+async fn reconcile_downloaded_model_family(
+    api: &ApiClient,
+    job: &JobSnapshot,
+    model_dir: &Path,
+) -> WorkerResult<bool> {
+    let supplied = optional_payload_string(&job.payload, "family").map(str::to_owned);
+    match check_downloaded_model_family(supplied, model_dir) {
+        DownloadFamilyCheck::Proceed => Ok(true),
+        DownloadFamilyCheck::DetectionFailed(error) => {
+            let detail = match error {
+                SafetensorsHeaderError::Io(io_error) => {
+                    format!("Unable to inspect downloaded model file: {io_error}")
+                }
+                SafetensorsHeaderError::InvalidHeader => {
+                    "Downloaded model file has an invalid safetensors header.".to_owned()
+                }
+            };
+            fail_job(api, &job.id, "Model download failed.", Some(detail)).await?;
+            Ok(false)
+        }
+        DownloadFamilyCheck::Mismatch(mismatch) => {
+            fail_job(
+                api,
+                &job.id,
+                "Model download failed.",
+                Some(format!(
+                    "Downloaded model files appear to be {}, but the catalog declared family {}. Fix the catalog entry to family {} or correct the download source.",
+                    mismatch.detected, mismatch.supplied, mismatch.detected
+                )),
+            )
+            .await?;
+            Ok(false)
         }
     }
 }
@@ -4789,18 +4869,94 @@ mod tests {
 
     use super::{
         allow_pattern_matches, auto_worker_specs, bounded_tail, candidate_people,
-        child_environment, cleanup_uploaded_import_source, concat_file_contents, copy_lora_source,
-        cpu_gpu, cpu_worker_id, crossfade_duration, download_lora_source_url,
-        download_progress_payload, download_snapshot, fallback_gpu, finalize_converted_dir,
-        fresh_asset_id, gpu_worker_id, import_lora_source_path, now_rfc3339, output_dimensions,
-        parse_nvidia_smi_gpus, resolve_model_convert_output, resolve_model_import_target,
-        restart_exited_children_with_spawner, run_ffmpeg, safe_download_dir, safe_project_path,
-        utility_worker_specs, value_f64, visible_gpu_ids, worker_capabilities_with_utility,
-        write_model_install_marker, ApiClient, DownloadContext, DownloadProgress,
-        HuggingFaceSnapshot, JsonObject, Settings, SnapshotFile, SupervisedChild, WorkerError,
-        WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-        DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+        check_downloaded_model_family, child_environment, cleanup_uploaded_import_source,
+        concat_file_contents, copy_lora_source, cpu_gpu, cpu_worker_id, crossfade_duration,
+        download_lora_source_url, download_progress_payload, download_snapshot, fallback_gpu,
+        finalize_converted_dir, fresh_asset_id, gpu_worker_id, import_lora_source_path,
+        now_rfc3339, output_dimensions, parse_nvidia_smi_gpus, resolve_model_convert_output,
+        resolve_model_import_target, restart_exited_children_with_spawner, run_ffmpeg,
+        safe_download_dir, safe_project_path, utility_worker_specs, value_f64, visible_gpu_ids,
+        worker_capabilities_with_utility, write_model_install_marker, ApiClient, DownloadContext,
+        DownloadFamilyCheck, DownloadProgress, HuggingFaceSnapshot, JsonObject, Settings,
+        SnapshotFile, SupervisedChild, WorkerError, WorkerSpec, DEFAULT_MAX_LORA_URL_BYTES,
+        DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
     };
+
+    fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
+        // Minimal valid safetensors: 8-byte little-endian header length + JSON header.
+        // The family detector only reads the header, so empty tensor slices are fine.
+        let mut header = serde_json::Map::new();
+        header.insert("__metadata__".to_owned(), json!({"format": "pt"}));
+        for key in keys {
+            header.insert(
+                key.clone(),
+                json!({"dtype": "F16", "shape": [1], "data_offsets": [0, 0]}),
+            );
+        }
+        let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("serialize header");
+        let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        buffer.extend_from_slice(&header_bytes);
+        std::fs::write(path, buffer).expect("write safetensors");
+    }
+
+    fn wan_video_safetensors_keys() -> Vec<String> {
+        // Mirrors the Wan2.2 architecture signature the family detector keys on.
+        let mut keys = Vec::new();
+        for block in 0..30 {
+            for module in ["self_attn.q", "self_attn.k", "cross_attn.q", "ffn.0"] {
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_A.weight"));
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_B.weight"));
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn download_family_check_proceeds_when_no_weights_to_detect() {
+        // A curated catalog download with no detectable signal (no safetensors yet, or
+        // an inconclusive header) is trusted — the guard must never block a legitimate
+        // download, whether or not a family was declared.
+        let dir = tempdir().expect("tempdir creates");
+        assert!(matches!(
+            check_downloaded_model_family(Some("z-image".to_owned()), dir.path()),
+            DownloadFamilyCheck::Proceed
+        ));
+        assert!(matches!(
+            check_downloaded_model_family(None, dir.path()),
+            DownloadFamilyCheck::Proceed
+        ));
+    }
+
+    #[test]
+    fn download_family_check_flags_confident_mismatch() {
+        // Weights that confidently detect as one family while the catalog declared
+        // another are rejected (parity with model import).
+        let dir = tempdir().expect("tempdir creates");
+        write_safetensors_with_keys(
+            &dir.path().join("model.safetensors"),
+            &wan_video_safetensors_keys(),
+        );
+        match check_downloaded_model_family(Some("z-image".to_owned()), dir.path()) {
+            DownloadFamilyCheck::Mismatch(mismatch) => {
+                assert_eq!(mismatch.supplied, "z-image");
+                assert_eq!(mismatch.detected, "wan-video");
+            }
+            other => panic!("expected a family mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn download_family_check_proceeds_when_detection_matches_catalog() {
+        let dir = tempdir().expect("tempdir creates");
+        write_safetensors_with_keys(
+            &dir.path().join("model.safetensors"),
+            &wan_video_safetensors_keys(),
+        );
+        assert!(matches!(
+            check_downloaded_model_family(Some("wan-video".to_owned()), dir.path()),
+            DownloadFamilyCheck::Proceed
+        ));
+    }
 
     #[tokio::test]
     async fn finalize_converted_dir_promotes_atomically_and_replaces_stale() {
