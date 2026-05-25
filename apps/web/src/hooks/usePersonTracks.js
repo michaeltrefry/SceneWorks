@@ -4,8 +4,9 @@ import { apiFetch, isAbortError } from "../api.js";
 // Owns the project's person-track state plus detection/track job creation and manual
 // track corrections. Extracted from App.jsx (sc-1651). personTracks is project-scoped
 // (loaded by the project-load effect, not the bulk refreshData), so the hook just
-// takes the shared concerns it needs; detection/track jobs refresh via refreshData.
-export function usePersonTracks({ token, activeProject, setError, requestedGpu, setActiveView, refreshData }) {
+// takes the shared concerns it needs; detection/track jobs surface live via the SSE
+// job stream (the create endpoints publish job.updated), so no post-create refetch.
+export function usePersonTracks({ token, activeProject, setError, requestedGpu, setActiveView }) {
   const [personTracks, setPersonTracks] = useState([]);
 
   async function refreshPersonTracks(projectId = activeProject?.id, { signal } = {}) {
@@ -37,7 +38,6 @@ export function usePersonTracks({ token, activeProject, setError, requestedGpu, 
         setActiveView("Queue");
       }
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);
@@ -60,7 +60,6 @@ export function usePersonTracks({ token, activeProject, setError, requestedGpu, 
         setActiveView("Queue");
       }
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);

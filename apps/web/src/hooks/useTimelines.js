@@ -18,7 +18,6 @@ export function useTimelines({
   setError,
   requestedGpu,
   setActiveView,
-  refreshData,
   createVideoJob,
 }) {
   const [timelines, setTimelines] = useState([]);
@@ -131,7 +130,6 @@ export function useTimelines({
       });
       setActiveView("Queue");
       setError("");
-      refreshData();
     } catch (err) {
       setError(err.message);
     }
@@ -147,7 +145,6 @@ export function useTimelines({
         body: JSON.stringify({ playheadSeconds, intendedUse, requestedGpu }),
       });
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);

@@ -3,9 +3,10 @@ import { apiFetch, isAbortError } from "../api.js";
 
 // Owns the project's character roster plus every character CRUD/reference/look/LoRA
 // mutation. Extracted from App.jsx (sc-1651) to shrink the god module; behavior is
-// unchanged — shared concerns (token, active project, error/navigation, refreshData)
-// are passed in so the hook stays a thin data layer.
-export function useCharacters({ token, activeProject, setError, requestedGpu, setActiveView, refreshData }) {
+// unchanged — shared concerns (token, active project, error/navigation) are passed in
+// so the hook stays a thin data layer. Character test jobs surface live via the SSE
+// job stream (the create endpoint publishes job.updated), so no post-create refetch.
+export function useCharacters({ token, activeProject, setError, requestedGpu, setActiveView }) {
   const [characters, setCharacters] = useState([]);
 
   async function refreshCharacters(projectId = activeProject?.id, { signal } = {}) {
@@ -170,7 +171,6 @@ export function useCharacters({ token, activeProject, setError, requestedGpu, se
         body: JSON.stringify({ ...payload, requestedGpu }),
       });
       setActiveView("Queue");
-      refreshData();
       return { id: characterId, status: "queued" };
     });
   }

@@ -98,7 +98,6 @@ export function useModelsAndLoras({
       setActiveView("Queue");
     }
     setError("");
-    refreshData();
     return job;
   }
 
@@ -139,7 +138,6 @@ export function useModelsAndLoras({
       setActiveView("Queue");
     }
     setError("");
-    refreshDataWithLoraOverlay(activeProject?.id);
     return job;
   }
 
@@ -151,7 +149,6 @@ export function useModelsAndLoras({
       });
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);
@@ -167,7 +164,6 @@ export function useModelsAndLoras({
       });
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);

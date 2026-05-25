@@ -398,7 +398,7 @@ export function App() {
     updateCharacterLora,
     detachCharacterLora,
     createCharacterTestJob,
-  } = useCharacters({ token, activeProject, setError, requestedGpu, setActiveView, refreshData });
+  } = useCharacters({ token, activeProject, setError, requestedGpu, setActiveView });
 
   const {
     presets,
@@ -457,7 +457,7 @@ export function App() {
     createPersonDetectionJob,
     createPersonTrackJob,
     saveTrackCorrections,
-  } = usePersonTracks({ token, activeProject, setError, requestedGpu, setActiveView, refreshData });
+  } = usePersonTracks({ token, activeProject, setError, requestedGpu, setActiveView });
 
   const {
     timelines,
@@ -481,7 +481,6 @@ export function App() {
     setError,
     requestedGpu,
     setActiveView,
-    refreshData,
     createVideoJob,
   });
 
@@ -948,7 +947,6 @@ export function App() {
       });
       setActiveView("Queue");
       setError("");
-      refreshData();
     } catch (err) {
       setError(err.message);
     }
@@ -971,7 +969,6 @@ export function App() {
       });
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);
@@ -998,7 +995,6 @@ export function App() {
       });
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);
@@ -1023,7 +1019,6 @@ export function App() {
       });
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);
@@ -1075,7 +1070,6 @@ export function App() {
       }
       setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
       setError("");
-      refreshData();
       return job;
     } catch (err) {
       setError(err.message);
@@ -1192,7 +1186,6 @@ export function App() {
       const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
       setJobs((items) => [updatedJob, ...items.filter((item) => item.id !== updatedJob.id)].sort(sortNewest));
       setError("");
-      await refreshData();
     } catch (err) {
       setError(err.message);
     }
