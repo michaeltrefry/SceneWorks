@@ -1030,6 +1030,79 @@ impl ProjectStore {
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
 
+    /// Persist a generated asset the worker reported as flat facts: build the
+    /// sidecar (Rust owns this schema now — story 1656), write it next to the
+    /// media the worker already saved, write the recipe, and index project.db.
+    /// Idempotent — re-applied progress updates upsert the same row/files.
+    /// Returns the built sidecar so the API can re-inject it into the job result.
+    pub fn persist_generated_asset(
+        &self,
+        project_id: &str,
+        job_id: &str,
+        generation_set_id: &str,
+        fact: &Value,
+    ) -> ProjectStoreResult<Value> {
+        let project_path = self.find_project_path(project_id)?;
+        let media_rel = fact
+            .get("mediaPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest("generated asset fact missing mediaPath".to_owned())
+            })?;
+        let asset_id = fact.get("assetId").and_then(Value::as_str).ok_or_else(|| {
+            ProjectStoreError::BadRequest("generated asset fact missing assetId".to_owned())
+        })?;
+        let asset = build_generated_asset_sidecar(project_id, job_id, generation_set_id, fact);
+        let media_path = project_path.join(media_rel);
+        let sidecar_path = media_path.with_extension("sceneworks.json");
+        if let Some(parent) = sidecar_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_json(&sidecar_path, &asset)?;
+        let recipes_dir = project_path.join("recipes");
+        fs::create_dir_all(&recipes_dir)?;
+        write_json(
+            &recipes_dir.join(format!("{asset_id}.recipe.json")),
+            &asset["recipe"],
+        )?;
+        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        Ok(asset)
+    }
+
+    /// Write the generation-set JSON for a job from the worker-reported facts.
+    /// Idempotent — overwrites the same `<id>.json` on re-applied updates.
+    pub fn write_generation_set(
+        &self,
+        project_id: &str,
+        job_id: &str,
+        generation_set: &Value,
+    ) -> ProjectStoreResult<()> {
+        let project_path = self.find_project_path(project_id)?;
+        let id = generation_set
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest("generation set fact missing id".to_owned())
+            })?;
+        let get = |key: &str| generation_set.get(key).cloned().unwrap_or(Value::Null);
+        let record = json!({
+            "schemaVersion": 1,
+            "id": id,
+            "projectId": project_id,
+            "jobId": job_id,
+            "mode": get("mode"),
+            "model": get("model"),
+            "prompt": get("prompt"),
+            "negativePrompt": get("negativePrompt"),
+            "count": get("count"),
+            "createdAt": get("createdAt"),
+        });
+        let dir = project_path.join("generation-sets");
+        fs::create_dir_all(&dir)?;
+        write_json(&dir.join(format!("{id}.json")), &record)?;
+        Ok(())
+    }
+
     pub fn update_asset_status(
         &self,
         project_id: &str,
@@ -1986,6 +2059,79 @@ fn ensure_column(
     Ok(())
 }
 
+/// Assemble the on-disk asset sidecar from the worker-reported flat facts. Rust
+/// is the single owner of this envelope schema now (story 1656): the worker
+/// ships values (paths, dimensions, seed, recipe inputs) and Rust builds the
+/// `file`/`status`/`recipe`/`lineage` structure, matching the shape pinned by
+/// `resource_sidecars.json` and the Python `build_asset_sidecar`. `type` is
+/// derived from the mime so the video slice can reuse this.
+fn build_generated_asset_sidecar(
+    project_id: &str,
+    job_id: &str,
+    generation_set_id: &str,
+    fact: &Value,
+) -> Value {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let mime = fact
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or("image/png");
+    let media_type = if mime.starts_with("video/") {
+        "video"
+    } else {
+        "image"
+    };
+    let parents = match fact.get("sourceAssetId").and_then(Value::as_str) {
+        Some(source) => vec![Value::String(source.to_owned())],
+        None => Vec::new(),
+    };
+    json!({
+        "schemaVersion": 1,
+        "id": get("assetId"),
+        "projectId": project_id,
+        "generationSetId": generation_set_id,
+        "type": media_type,
+        "displayName": get("displayName"),
+        "createdAt": get("createdAt"),
+        "file": {
+            "path": get("mediaPath"),
+            "mimeType": mime,
+            "width": get("width"),
+            "height": get("height"),
+            "duration": get("duration"),
+            "fps": get("fps"),
+        },
+        "status": { "favorite": false, "rating": 0, "rejected": false, "trashed": false },
+        "recipe": {
+            "mode": get("mode"),
+            "model": get("model"),
+            "adapter": get("adapter"),
+            "prompt": get("prompt"),
+            "negativePrompt": get("negativePrompt"),
+            "seed": get("seed"),
+            "loras": fact.get("loras").cloned().unwrap_or_else(|| json!([])),
+            "stylePreset": get("stylePreset"),
+            "normalizedSettings": {
+                "width": get("normalizedWidth"),
+                "height": get("normalizedHeight"),
+                "count": get("count"),
+                "family": get("family"),
+                "characterId": get("characterId"),
+                "characterLookId": get("characterLookId"),
+                "characterConditioningActive": false,
+                "characterConditioningNote": "Character metadata is recorded, but adapter-level character conditioning is not active in this build.",
+            },
+            "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
+        },
+        "lineage": {
+            "parents": parents,
+            "sourceAssetId": get("sourceAssetId"),
+            "sourceTimestamp": Value::Null,
+            "jobId": job_id,
+        },
+    })
+}
+
 fn index_asset(
     project_path: &Path,
     asset: &Value,
@@ -2287,8 +2433,104 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 
 #[cfg(test)]
 mod tests {
-    use super::{guess_mime_from_filename, is_safe_relative_path, ProjectStore, PROJECT_FOLDERS};
-    use serde_json::json;
+    use super::{
+        build_generated_asset_sidecar, guess_mime_from_filename, is_safe_relative_path,
+        ProjectStore, PROJECT_FOLDERS,
+    };
+    use serde_json::{json, Value};
+
+    #[test]
+    fn build_generated_asset_sidecar_assembles_the_contract_schema() {
+        // sc-1656: Rust owns the generated-asset sidecar schema now. Pin the
+        // envelope it assembles from worker facts to the shared contract
+        // (resource_sidecars.json imageAsset + recipe required keys) and the
+        // load-bearing field mappings.
+        let fact = json!({
+            "assetId": "asset_abc",
+            "mediaPath": "assets/images/genset_x/2026-05-25_z_image_turbo_city_0001.png",
+            "mimeType": "image/png",
+            "width": 1280,
+            "height": 768,
+            "normalizedWidth": 1024,
+            "normalizedHeight": 768,
+            "count": 1,
+            "family": "z-image",
+            "seed": 42,
+            "index": 0,
+            "displayName": "city #1",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "city",
+            "negativePrompt": "",
+            "loras": [],
+            "stylePreset": "none",
+            "characterId": Value::Null,
+            "characterLookId": Value::Null,
+            "sourceAssetId": Value::Null,
+            "rawAdapterSettings": {"steps": 8},
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_x", &fact);
+
+        for key in [
+            "schemaVersion",
+            "id",
+            "projectId",
+            "generationSetId",
+            "type",
+            "displayName",
+            "createdAt",
+            "file",
+            "status",
+            "recipe",
+            "lineage",
+        ] {
+            assert!(asset.get(key).is_some(), "missing top-level key {key}");
+        }
+        for key in [
+            "mode",
+            "model",
+            "adapter",
+            "prompt",
+            "negativePrompt",
+            "seed",
+            "loras",
+            "normalizedSettings",
+            "rawAdapterSettings",
+        ] {
+            assert!(
+                asset["recipe"].get(key).is_some(),
+                "missing recipe key {key}"
+            );
+        }
+        assert_eq!(asset["type"], json!("image"));
+        assert_eq!(asset["id"], json!("asset_abc"));
+        assert_eq!(asset["projectId"], json!("project-1"));
+        assert_eq!(asset["generationSetId"], json!("genset_x"));
+        assert_eq!(asset["file"]["path"], fact["mediaPath"]);
+        assert_eq!(asset["file"]["width"], json!(1280));
+        assert_eq!(asset["recipe"]["adapter"], json!("z_image_diffusers"));
+        assert_eq!(asset["recipe"]["seed"], json!(42));
+        assert_eq!(asset["recipe"]["normalizedSettings"]["width"], json!(1024));
+        assert_eq!(
+            asset["recipe"]["normalizedSettings"]["family"],
+            json!("z-image")
+        );
+        assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
+    }
+
+    #[test]
+    fn build_generated_asset_sidecar_derives_video_type_from_mime() {
+        let fact = json!({
+            "assetId": "asset_v",
+            "mediaPath": "assets/videos/genset_y/clip.mp4",
+            "mimeType": "video/mp4",
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_y", &fact);
+        assert_eq!(asset["type"], json!("video"));
+        assert_eq!(asset["file"]["mimeType"], json!("video/mp4"));
+    }
 
     #[test]
     fn project_create_writes_python_compatible_files_and_registry() {

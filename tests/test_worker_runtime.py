@@ -1262,11 +1262,16 @@ def test_image_asset_writer_reports_partial_result_assets(tmp_path):
     )
 
     result_progress = [call["result"] for call in progress_calls if call["result"]]
-    assert [len(item["assetIds"]) for item in result_progress] == [1, 2]
+    # The worker reports flat facts now (story 1656); the Rust API builds the
+    # sidecars and injects assets/assetIds. So the worker-side result streams the
+    # growing assetWrites list, one more entry per image.
+    assert [len(item["assetWrites"]) for item in result_progress] == [1, 2]
     assert result_progress[0]["expectedCount"] == 2
     assert result_progress[0]["generationSetId"] == result["generationSetId"]
-    assert result_progress[0]["assets"][0]["file"]["path"].startswith("assets/images/")
-    assert result_progress[1]["assetIds"] == result["assetIds"]
+    assert result_progress[0]["assetWrites"][0]["mediaPath"].startswith("assets/images/")
+    assert [write["assetId"] for write in result_progress[1]["assetWrites"]] == [
+        write["assetId"] for write in result["assetWrites"]
+    ]
     assert result["expectedCount"] == 2
 
 
@@ -1294,9 +1299,11 @@ def test_image_asset_writer_persists_each_image_before_requesting_next(tmp_path)
 
     def image_at_index(index):
         if index == 1:
-            # rglob: PNGs/sidecars live in a per-generation-set subfolder.
+            # The worker saves each PNG before requesting the next image (so a
+            # multi-image batch streams). Sidecars are written by Rust now (story
+            # 1656), so only the PNG lands on disk here — rglob into the
+            # per-generation-set subfolder.
             assert len(list((project_path / "assets" / "images").rglob("*.png"))) == 1
-            assert len(list((project_path / "assets" / "images").rglob("*.sceneworks.json"))) == 1
         return Image.new("RGB", (16, 16), (255, 0, 0) if index == 0 else (0, 255, 0))
 
     result = ImageAssetWriter().write_incremental_outputs(
@@ -1310,7 +1317,7 @@ def test_image_asset_writer_persists_each_image_before_requesting_next(tmp_path)
         raw_settings={"realModelInference": True},
     )
 
-    assert len(result["assetIds"]) == 2
+    assert len(result["assetWrites"]) == 2
     assert len(list((project_path / "assets" / "images").rglob("*.png"))) == 2
 
 
@@ -1356,14 +1363,16 @@ def test_image_asset_writer_does_not_clobber_identical_jobs(tmp_path):
 
     # Distinct generation sets, distinct asset ids, distinct files on disk.
     assert first["generationSetId"] != second["generationSetId"]
-    assert first["assetIds"] != second["assetIds"]
+    assert [write["assetId"] for write in first["assetWrites"]] != [
+        write["assetId"] for write in second["assetWrites"]
+    ]
     pngs = list((project_path / "assets" / "images").rglob("*.png"))
     assert len(pngs) == 2
 
     # The first asset's recorded path still points at the first job's pixels;
     # the second job did not overwrite it.
-    first_path = project_path / first["assets"][0]["file"]["path"]
-    second_path = project_path / second["assets"][0]["file"]["path"]
+    first_path = project_path / first["assetWrites"][0]["mediaPath"]
+    second_path = project_path / second["assetWrites"][0]["mediaPath"]
     assert first_path.exists() and second_path.exists()
     assert first_path != second_path
     with Image.open(first_path) as handle:
@@ -1373,9 +1382,9 @@ def test_image_asset_writer_does_not_clobber_identical_jobs(tmp_path):
 
 
 def test_image_asset_writer_records_actual_output_dimensions(tmp_path):
-    # The sidecar's file.width/height must reflect the PNG actually saved (e.g.
-    # a model that snaps to a trained bucket), not the requested size or the old
-    # min(request, 1280) cap.
+    # The reported width/height (which Rust writes into the sidecar's file block)
+    # must reflect the PNG actually saved (e.g. a model that snaps to a trained
+    # bucket), not the requested size or the old min(request, 1280) cap.
     data_dir = tmp_path / "data"
     project_path = tmp_path / "project"
     data_dir.mkdir()
@@ -1408,8 +1417,8 @@ def test_image_asset_writer_records_actual_output_dimensions(tmp_path):
         raw_settings={"realModelInference": True},
     )
 
-    file_meta = result["assets"][0]["file"]
-    assert (file_meta["width"], file_meta["height"]) == (2720, 1536)
+    write = result["assetWrites"][0]
+    assert (write["width"], write["height"]) == (2720, 1536)
 
 
 def test_image_asset_writer_batch_progress_is_monotonic(tmp_path):

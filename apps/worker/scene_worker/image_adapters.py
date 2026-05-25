@@ -372,6 +372,127 @@ class ImageAssetWriter:
     ) -> dict[str, Any]:
         request = image_request_from_job(job)
         project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
+
+        created_at = utc_now()
+        generation_set_id = f"genset_{uuid4().hex}"
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
+        prompt_slug = slugify(request.prompt, fallback="image", max_length=42)
+        date_slug = created_at[:10]
+        # Each generation set saves its PNGs into its own subfolder so two jobs that
+        # share the same date + model + prompt + image index cannot collide on a flat
+        # `<date>_<model>_<prompt>_<index>.png` name and clobber each other's PNGs.
+        # The folder carries the uniqueness (a full UUID), so the per-image filenames
+        # stay short and readable. Asset discovery is rglob-based and paths are stored
+        # in the sidecar/DB, so nesting is transparent downstream.
+        images_dir = project_path / "assets" / "images" / generation_set_id
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        # Rust is the single project-store writer now (story 1656): the worker saves
+        # only the PNG bytes and reports flat facts; the Rust API builds + writes the
+        # sidecar / generation-set / recipe and indexes project.db on each progress
+        # update, then re-injects the built assets into the result. We still emit a
+        # progress update per image so multi-image batches keep streaming into the UI.
+        generation_set = {
+            "id": generation_set_id,
+            "mode": request.mode,
+            "model": request.model,
+            "prompt": request.prompt,
+            "negativePrompt": request.negative_prompt,
+            "count": image_count,
+            "createdAt": created_at,
+        }
+        asset_writes: list[dict[str, Any]] = []
+
+        for index in range(image_count):
+            if cancel_requested():
+                raise InterruptedError("Image generation canceled by user.")
+
+            image = image_at_index(index)
+            if cancel_requested():
+                raise InterruptedError("Image generation canceled by user.")
+
+            asset_id = f"asset_{uuid4().hex}"
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
+            media_rel = f"assets/images/{generation_set_id}/{filename}"
+            image.save(project_path / media_rel, "PNG")
+
+            asset_writes.append(
+                {
+                    "assetId": asset_id,
+                    "mediaPath": media_rel,
+                    "mimeType": "image/png",
+                    # True saved pixel dimensions, not the request's. SenseNova-U1 (and
+                    # any model that snaps to a trained bucket) saves at a size that
+                    # differs from request.width/height.
+                    "width": image.width,
+                    "height": image.height,
+                    "normalizedWidth": request.width,
+                    "normalizedHeight": request.height,
+                    "count": request.count,
+                    "family": model_target["family"],
+                    "seed": seed,
+                    "index": index,
+                    "displayName": f"{request.prompt[:56] or 'Generated image'} #{index + 1}",
+                    "createdAt": created_at,
+                    "mode": request.mode,
+                    "model": request.model,
+                    "adapter": adapter_id,
+                    "prompt": request.prompt,
+                    "negativePrompt": request.negative_prompt,
+                    "loras": request.loras,
+                    "stylePreset": request.style_preset,
+                    "characterId": request.character_id,
+                    "characterLookId": request.character_look_id,
+                    "sourceAssetId": request.source_asset_id,
+                    "rawAdapterSettings": raw_settings,
+                }
+            )
+            progress(
+                "saving",
+                "saving",
+                image_batch_progress(index + 1, image_count),
+                f"Saved image asset {index + 1} of {image_count}.",
+                {
+                    "generationSetId": generation_set_id,
+                    "expectedCount": image_count,
+                    "adapter": adapter_id,
+                    "model": request.model,
+                    "generationSet": generation_set,
+                    "assetWrites": list(asset_writes),
+                },
+            )
+
+        return {
+            "generationSetId": generation_set_id,
+            "expectedCount": image_count,
+            "adapter": adapter_id,
+            "model": request.model,
+            "generationSet": generation_set,
+            "assetWrites": asset_writes,
+        }
+
+    def persist_images_directly(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        images: list[Image.Image],
+        adapter_id: str,
+        raw_settings: dict[str, Any],
+        cancel_requested: CancelCallback = lambda: False,
+    ) -> dict[str, Any]:
+        """Build + write the sidecar/generation-set/recipe and index project.db for
+        a fixed set of images, returning the built asset records.
+
+        Story 1656 moves the main image-generate path to the Rust project-store
+        writer (``write_incremental_outputs`` now ships flat facts). The
+        interleave/document path still needs the built image assets synchronously
+        (to compose the document segments + sidecar) and is migrated in a later
+        slice, so it keeps writing its embedded images here for now. This mirrors
+        the pre-migration ``write_incremental_outputs`` behavior."""
+        request = image_request_from_job(job)
+        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
         for folder in ("assets/images", "generation-sets", "recipes"):
             (project_path / folder).mkdir(parents=True, exist_ok=True)
 
@@ -380,14 +501,9 @@ class ImageAssetWriter:
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
         prompt_slug = slugify(request.prompt, fallback="image", max_length=42)
         date_slug = created_at[:10]
-        # Each generation set writes into its own subfolder so two jobs that share
-        # the same date + model + prompt + image index cannot collide on a flat
-        # `<date>_<model>_<prompt>_<index>.png` name and clobber each other's PNGs.
-        # The folder carries the uniqueness (a full UUID), so the per-image
-        # filenames stay short and readable. Asset discovery is rglob-based and
-        # paths are stored in the sidecar/DB, so nesting is transparent downstream.
         images_dir = project_path / "assets" / "images" / generation_set_id
         images_dir.mkdir(parents=True, exist_ok=True)
+        image_count = len(images)
         assets = []
 
         generation_set = {
@@ -404,14 +520,9 @@ class ImageAssetWriter:
         }
         write_json(project_path / "generation-sets" / f"{generation_set_id}.json", generation_set)
 
-        for index in range(image_count):
+        for index, image in enumerate(images):
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
-
-            image = image_at_index(index)
-            if cancel_requested():
-                raise InterruptedError("Image generation canceled by user.")
-
             asset_id = f"asset_{uuid4().hex}"
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
             filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
@@ -419,7 +530,6 @@ class ImageAssetWriter:
             media_path = project_path / media_rel
             sidecar_path = media_path.with_suffix(".sceneworks.json")
             image.save(media_path, "PNG")
-
             asset = build_asset_sidecar(
                 asset_id=asset_id,
                 project_id=request.project_id,
@@ -430,10 +540,6 @@ class ImageAssetWriter:
                 created_at=created_at,
                 seed=seed,
                 index=index,
-                # Record the true saved dimensions, not the request's. SenseNova-U1
-                # (and any model that snaps to a trained bucket) saves at a size
-                # that differs from request.width/height, and the old min(..,1280)
-                # cap further misreported large outputs.
                 width=image.width,
                 height=image.height,
                 model_target=model_target,
@@ -444,20 +550,6 @@ class ImageAssetWriter:
             write_json(project_path / "recipes" / f"{asset_id}.recipe.json", asset["recipe"])
             index_asset(project_path, asset, sidecar_path)
             assets.append(asset)
-            progress(
-                "saving",
-                "saving",
-                image_batch_progress(index + 1, image_count),
-                f"Saved image asset {index + 1} of {image_count}.",
-                {
-                    "generationSetId": generation_set_id,
-                    "assetIds": [item["id"] for item in assets],
-                    "assets": assets,
-                    "expectedCount": image_count,
-                    "adapter": adapter_id,
-                    "model": request.model,
-                },
-            )
 
         return {
             "generationSetId": generation_set_id,
@@ -2157,12 +2249,11 @@ class SenseNovaU1Adapter:
         generation_set_id: str | None = None
         image_asset_ids: list[str] = []
         if images:
-            image_result = ImageAssetWriter().write_outputs(
+            image_result = ImageAssetWriter().persist_images_directly(
                 settings=settings,
                 job=job,
                 images=images,
                 adapter_id=self.id,
-                progress=lambda *_args, **_kwargs: None,
                 cancel_requested=cancel_requested,
                 raw_settings={**raw_settings, "interleaved": True},
             )

@@ -4711,6 +4711,12 @@ async fn update_job_progress(
             result.get_or_insert_with(JsonObject::new).extend(status);
         }
     }
+    // Persist any generated assets the worker reported as `assetWrites` facts and
+    // re-inject the built sidecars into the result so the UI keeps streaming them
+    // (story 1656 — Rust is the single project-store writer).
+    if let Some(result_obj) = result.as_mut() {
+        persist_reported_assets(&state, &job_id, result_obj).await?;
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.update_job_progress(
             &job_id,
@@ -4729,6 +4735,67 @@ async fn update_job_progress(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok(Json(job))
+}
+
+/// Persist the generated assets a worker reports as `assetWrites` facts in its
+/// progress result, then re-inject the built sidecars into `result.assets` /
+/// `result.assetIds` so ImageStudio's live preview and the library refresh keep
+/// streaming (story 1656). Idempotent: re-applied progress updates upsert the
+/// same rows/files. No-op when there are no `assetWrites` (status-only updates,
+/// or job types that still write their own assets).
+async fn persist_reported_assets(
+    state: &AppState,
+    job_id: &str,
+    result: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let Some(asset_writes) = result.get("assetWrites").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if asset_writes.is_empty() {
+        return Ok(());
+    }
+    let asset_writes = asset_writes.clone();
+    let generation_set_id = result
+        .get("generationSetId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let generation_set = result.get("generationSet").cloned();
+    // The job row is authoritative for the project id (never the worker payload).
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await?;
+    let Some(project_id) = job.project_id.clone() else {
+        return Ok(());
+    };
+    let job_id_owned = job_id.to_owned();
+    let built = project_call(state.clone(), move |store| {
+        if let Some(generation_set) = generation_set.as_ref() {
+            store.write_generation_set(&project_id, &job_id_owned, generation_set)?;
+        }
+        let mut built = Vec::with_capacity(asset_writes.len());
+        for fact in &asset_writes {
+            built.push(store.persist_generated_asset(
+                &project_id,
+                &job_id_owned,
+                &generation_set_id,
+                fact,
+            )?);
+        }
+        Ok(built)
+    })
+    .await?;
+    let asset_ids: Vec<Value> = built
+        .iter()
+        .filter_map(|asset| asset.get("id").cloned())
+        .collect();
+    result.insert("assets".to_owned(), Value::Array(built));
+    result.insert("assetIds".to_owned(), Value::Array(asset_ids));
+    result.remove("assetWrites");
+    result.remove("generationSet");
+    Ok(())
 }
 
 /// Attempts LoRA registration for a job reporting completion, returning result
