@@ -638,15 +638,19 @@ impl JobsStore {
                and (type in ('model_download', 'model_import', 'lora_import') or requested_gpu = 'auto' or requested_gpu = ?1)
                and (?2 = 0 or type in ('model_download', 'model_import', 'lora_import'))
              order by created_at asc
-             limit 50
             ",
         )?;
         let queued_rows = collect_jobs(statement.query_map(
             params![worker.gpu_id, i64::from(has_active_gpu_job)],
             row_to_job,
         )?)?;
-        // Keep this bounded while the queue is still small; revisit before large multi-tenant
-        // queues so capability-incompatible jobs cannot hide a later compatible job indefinitely.
+        // No row cap (sc-1630): choose_claimable_job must see every gpu/type-gated queued row,
+        // or a capability-incompatible prefix (e.g. 50+ jobs the worker can't run) would hide a
+        // later compatible job and the worker would sit idle. It also needs the whole compatible
+        // set for its priority pass (an explicit-GPU / loaded-model job jumps ahead of an earlier
+        // auto-GPU one), so a bounded scan can't preserve that anyway. The WHERE above already
+        // narrows rows to this worker's gpu/type lane; pushing the capability filter into SQL is
+        // the scale lever if queues ever grow large enough for the full scan to matter.
         let queued = choose_claimable_job(queued_rows, &worker);
         let Some(queued) = queued else {
             return Ok(None);

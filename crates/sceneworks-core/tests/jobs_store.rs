@@ -182,6 +182,51 @@ fn claim_skips_jobs_not_supported_by_worker_capabilities() {
 }
 
 #[test]
+fn claim_finds_compatible_job_behind_large_incompatible_prefix() {
+    // sc-1630: a worker must still claim a compatible job even when far more than the
+    // old 50-row query cap of incompatible jobs precede it in the queue — otherwise a
+    // specialized/utility worker sits idle behind a long incompatible prefix.
+    let store = store("starvation");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "downloader".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![WorkerCapability::ModelDownload],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+
+    // 60 image jobs the worker cannot run (no ImageGenerate capability), enqueued first
+    // so they fill the front of the created_at ordering (well past the old limit 50).
+    for index in 0..60 {
+        let prompt = format!("incompatible {index}");
+        store
+            .create_job(image_job(object(json!({ "prompt": prompt }))))
+            .expect("incompatible job creates");
+    }
+    let download_job = store
+        .create_job(CreateJob {
+            job_type: JobType::ModelDownload,
+            project_id: None,
+            project_name: None,
+            payload: object(json!({ "repo": "owner/model" })),
+            requested_gpu: "auto".to_owned(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+        })
+        .expect("download job creates");
+
+    let claimed = store
+        .claim_next_job("downloader")
+        .expect("claim succeeds")
+        .expect("compatible job claimed despite the incompatible prefix");
+    assert_eq!(claimed.id, download_job.id);
+}
+
+#[test]
 fn real_lora_train_requires_execute_capability() {
     let store = store("lora-train-execute-routing");
     // A GPU worker that can validate dry-run plans but lacks the inference backend
