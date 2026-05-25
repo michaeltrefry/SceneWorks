@@ -726,6 +726,7 @@ pub(crate) async fn run_timeline_export_job(
             "Timeline has no main video items to export.".to_owned(),
         ));
     }
+    let (plan, duration) = plan_segments(&items)?;
 
     let temp_dir = tempfile::Builder::new()
         .prefix(&format!(
@@ -735,39 +736,117 @@ pub(crate) async fn run_timeline_export_job(
         .tempdir()?;
     let tmp_path = temp_dir.path().to_path_buf();
 
-    let mut segments = Vec::new();
-    let mut cursor = 0.0_f64;
-    let total = items.len().max(1);
-    let render_spec = RenderSpec {
+    let spec = RenderSpec {
         width,
         height,
         fps: request.fps,
     };
-    let ffmpeg_context = FfmpegContext {
-        api,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Timeline export canceled by user.",
+    let export = TimelineExport {
+        context: FfmpegContext {
+            api,
+            settings,
+            job_id: &job.id,
+            cancel_message: "Timeline export canceled by user.",
+        },
+        store: &store,
+        request,
+        project_path,
+        timeline,
+        spec,
     };
-    let render_result = async {
-        for (index, item) in items.iter().enumerate() {
-            check_cancel(api, &job.id, "Timeline export canceled by user.").await?;
-            let start = item_f64(item, "timelineStart", 0.0);
-            let item_end = item_f64(item, "timelineEnd", start);
-            if item_end <= start {
-                return Err(WorkerError::InvalidPayload(
-                    "timelineEnd must be greater than timelineStart.".to_owned(),
-                ));
-            }
-            if start > cursor {
-                let gap_duration = start - cursor;
+    let segments = export.render(&plan, &tmp_path).await?;
+    export.finalize(&segments, &tmp_path, duration).await?;
+    Ok(())
+}
+
+/// A timeline item resolved to its render plan: the optional black gap to emit
+/// before it (when items leave a hole in the timeline) plus the transition it
+/// carries in. Pure data, so `plan_segments` can build it without touching
+/// ffmpeg or the store and the planning logic stays unit-testable.
+#[derive(Debug)]
+pub(crate) struct PlannedItem<'a> {
+    pub(crate) leading_gap: Option<f64>,
+    pub(crate) item: &'a Value,
+    pub(crate) transition: Option<String>,
+    pub(crate) transition_duration: f64,
+}
+
+/// Walk the sorted main-track items into an ordered render plan, inserting a
+/// black gap wherever an item does not abut the previous one, and return the
+/// plan together with the total timeline duration. No I/O: the gap, transition,
+/// and span-validation logic can be exercised in isolation.
+pub(crate) fn plan_segments(items: &[Value]) -> WorkerResult<(Vec<PlannedItem<'_>>, f64)> {
+    let mut plan = Vec::with_capacity(items.len());
+    let mut cursor = 0.0_f64;
+    for item in items {
+        let start = item_f64(item, "timelineStart", 0.0);
+        let item_end = item_f64(item, "timelineEnd", start);
+        if item_end <= start {
+            return Err(WorkerError::InvalidPayload(
+                "timelineEnd must be greater than timelineStart.".to_owned(),
+            ));
+        }
+        let leading_gap = if start > cursor {
+            let gap = start - cursor;
+            cursor = start;
+            Some(gap)
+        } else {
+            None
+        };
+        let transition_in = item.get("transitionIn").unwrap_or(&Value::Null);
+        plan.push(PlannedItem {
+            leading_gap,
+            item,
+            transition: transition_in
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            transition_duration: value_f64(
+                transition_in.get("duration").unwrap_or(&Value::Null),
+                DEFAULT_TRANSITION_DURATION_SECONDS,
+            ),
+        });
+        cursor = cursor.max(item_end);
+    }
+    Ok((plan, cursor))
+}
+
+/// Per-job state for a timeline MP4 export, resolved once so the rendering and
+/// finalization steps can share it without threading a long argument list.
+struct TimelineExport<'a> {
+    context: FfmpegContext<'a>,
+    store: &'a ProjectStore,
+    request: TimelineExportRequest,
+    project_path: PathBuf,
+    timeline: Value,
+    spec: RenderSpec,
+}
+
+impl TimelineExport<'_> {
+    /// Render each planned segment (gaps then source items) into `tmp_path`,
+    /// reporting progress and honoring cancellation between items.
+    async fn render(
+        &self,
+        plan: &[PlannedItem<'_>],
+        tmp_path: &Path,
+    ) -> WorkerResult<Vec<TimelineSegment>> {
+        let mut segments = Vec::new();
+        let total = plan.len().max(1);
+        for (index, planned) in plan.iter().enumerate() {
+            check_cancel(
+                self.context.api,
+                self.context.job_id,
+                "Timeline export canceled by user.",
+            )
+            .await?;
+            if let Some(gap_duration) = planned.leading_gap {
                 let gap_path = tmp_path.join(format!("segment_{:04}_gap.mp4", segments.len()));
                 render_black_segment(
                     "ffmpeg",
                     &gap_path,
                     gap_duration,
-                    render_spec,
-                    Some(ffmpeg_context),
+                    self.spec,
+                    Some(self.context),
                 )
                 .await?;
                 segments.push(TimelineSegment {
@@ -776,12 +855,12 @@ pub(crate) async fn run_timeline_export_job(
                     transition: None,
                     transition_duration: 0.0,
                 });
-                cursor = start;
             }
 
-            let asset_id = required_value_str(item, "assetId")?;
-            let asset = store.get_asset(&request.project_id, asset_id)?;
-            let display_name = item
+            let asset_id = required_value_str(planned.item, "assetId")?;
+            let asset = self.store.get_asset(&self.request.project_id, asset_id)?;
+            let display_name = planned
+                .item
                 .get("displayName")
                 .and_then(Value::as_str)
                 .unwrap_or("item");
@@ -792,31 +871,23 @@ pub(crate) async fn run_timeline_export_job(
             ));
             let duration = render_item_segment(
                 "ffmpeg",
-                &project_path,
-                item,
+                &self.project_path,
+                planned.item,
                 &asset,
                 &segment_path,
-                render_spec,
-                Some(ffmpeg_context),
+                self.spec,
+                Some(self.context),
             )
             .await?;
-            let transition_in = item.get("transitionIn").unwrap_or(&Value::Null);
             segments.push(TimelineSegment {
                 path: segment_path,
                 duration,
-                transition: transition_in
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                transition_duration: value_f64(
-                    transition_in.get("duration").unwrap_or(&Value::Null),
-                    DEFAULT_TRANSITION_DURATION_SECONDS,
-                ),
+                transition: planned.transition.clone(),
+                transition_duration: planned.transition_duration,
             });
-            cursor = cursor.max(item_end);
             update_job(
-                api,
-                &job.id,
+                self.context.api,
+                self.context.job_id,
                 progress_payload(
                     JobStatus::Running,
                     ProgressStage::Rendering,
@@ -829,95 +900,103 @@ pub(crate) async fn run_timeline_export_job(
             )
             .await?;
         }
-        WorkerResult::Ok(())
+        Ok(segments)
     }
-    .await;
 
-    render_result?;
+    /// Mux the rendered segments into the project's render directory, write the
+    /// asset sidecar and recipe, index the asset, and report completion.
+    async fn finalize(
+        &self,
+        segments: &[TimelineSegment],
+        tmp_path: &Path,
+        duration: f64,
+    ) -> WorkerResult<()> {
+        let output_rel = format!(
+            "assets/renders/{}_{}_{}.mp4",
+            &now_rfc3339()[..10],
+            slugify(&self.request.timeline_name, "timeline-export", Some(48)),
+            asset_suffix(self.context.job_id)
+        );
+        let output_path = self.project_path.join(&output_rel);
+        tokio::fs::create_dir_all(output_path.parent().ok_or_else(|| {
+            WorkerError::InvalidPayload("Render output has no parent directory.".to_owned())
+        })?)
+        .await?;
+        update_job(
+            self.context.api,
+            self.context.job_id,
+            progress_payload(
+                JobStatus::Saving,
+                ProgressStage::Muxing,
+                0.78,
+                "Muxing MP4 export.",
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+        mux_segments(
+            "ffmpeg",
+            segments,
+            tmp_path,
+            &output_path,
+            Some(self.context),
+        )
+        .await?;
 
-    let output_rel = format!(
-        "assets/renders/{}_{}_{}.mp4",
-        &now_rfc3339()[..10],
-        slugify(&request.timeline_name, "timeline-export", Some(48)),
-        asset_suffix(&job.id)
-    );
-    let output_path = project_path.join(&output_rel);
-    tokio::fs::create_dir_all(output_path.parent().ok_or_else(|| {
-        WorkerError::InvalidPayload("Render output has no parent directory.".to_owned())
-    })?)
-    .await?;
-    update_job(
-        api,
-        &job.id,
-        progress_payload(
-            JobStatus::Saving,
-            ProgressStage::Muxing,
-            0.78,
-            "Muxing MP4 export.",
-            None,
-            None,
-            None,
-        ),
-    )
-    .await?;
-    mux_segments(
-        "ffmpeg",
-        &segments,
-        &tmp_path,
-        &output_path,
-        Some(ffmpeg_context),
-    )
-    .await?;
+        let asset = build_render_asset(
+            &self.request,
+            &self.timeline,
+            self.context.job_id,
+            &output_rel,
+            self.spec.width,
+            self.spec.height,
+            duration,
+        );
+        let sidecar_path = output_path.with_extension("sceneworks.json");
+        write_json_value(&sidecar_path, &asset).await?;
+        tokio::fs::create_dir_all(self.project_path.join("recipes")).await?;
+        let asset_id = required_value_str(&asset, "id")?.to_owned();
+        write_json_value(
+            &self
+                .project_path
+                .join("recipes")
+                .join(format!("{asset_id}.recipe.json")),
+            &asset["recipe"],
+        )
+        .await?;
+        self.store
+            .index_asset_sidecar(&self.request.project_id, &sidecar_path)?;
 
-    let asset = build_render_asset(
-        &request,
-        &timeline,
-        &job.id,
-        &output_rel,
-        width,
-        height,
-        cursor,
-    );
-    let sidecar_path = output_path.with_extension("sceneworks.json");
-    write_json_value(&sidecar_path, &asset).await?;
-    tokio::fs::create_dir_all(project_path.join("recipes")).await?;
-    let asset_id = required_value_str(&asset, "id")?.to_owned();
-    write_json_value(
-        &project_path
-            .join("recipes")
-            .join(format!("{asset_id}.recipe.json")),
-        &asset["recipe"],
-    )
-    .await?;
-    store.index_asset_sidecar(&request.project_id, &sidecar_path)?;
-
-    let mut result = JsonObject::new();
-    result.insert("assetIds".to_owned(), json!([asset_id]));
-    result.insert("assets".to_owned(), json!([asset]));
-    result.insert(
-        "timelineId".to_owned(),
-        Value::String(request.timeline_id.clone()),
-    );
-    result.insert("renderPath".to_owned(), Value::String(output_rel));
-    result.insert(
-        "adapter".to_owned(),
-        Value::String("ffmpeg_timeline".to_owned()),
-    );
-    update_job(
-        api,
-        &job.id,
-        progress_payload(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            "Timeline MP4 export saved.",
-            None,
-            Some(result),
-            None,
-        ),
-    )
-    .await?;
-    Ok(())
+        let mut result = JsonObject::new();
+        result.insert("assetIds".to_owned(), json!([asset_id]));
+        result.insert("assets".to_owned(), json!([asset]));
+        result.insert(
+            "timelineId".to_owned(),
+            Value::String(self.request.timeline_id.clone()),
+        );
+        result.insert("renderPath".to_owned(), Value::String(output_rel));
+        result.insert(
+            "adapter".to_owned(),
+            Value::String("ffmpeg_timeline".to_owned()),
+        );
+        update_job(
+            self.context.api,
+            self.context.job_id,
+            progress_payload(
+                JobStatus::Completed,
+                ProgressStage::Completed,
+                1.0,
+                "Timeline MP4 export saved.",
+                None,
+                Some(result),
+                None,
+            ),
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 pub(crate) fn candidate_people(

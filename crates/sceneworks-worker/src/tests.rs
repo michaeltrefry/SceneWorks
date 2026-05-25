@@ -23,7 +23,8 @@ use super::gpu::{
     worker_capabilities_with_utility,
 };
 use super::media_jobs::{
-    candidate_people, concat_file_contents, crossfade_duration, output_dimensions, run_ffmpeg,
+    candidate_people, concat_file_contents, crossfade_duration, output_dimensions, plan_segments,
+    run_ffmpeg,
 };
 use super::model_jobs::{
     check_downloaded_model_family, finalize_converted_dir, DownloadFamilyCheck,
@@ -742,6 +743,61 @@ fn ffmpeg_helper_shapes_match_python_timeline_exporter() {
     assert!(asset_id["asset_".len()..]
         .chars()
         .all(|character| character.is_ascii_hexdigit()));
+}
+
+#[test]
+fn plan_segments_inserts_gaps_and_totals_duration() {
+    let items = vec![
+        json!({"assetId": "a", "timelineStart": 1.0, "timelineEnd": 3.0}),
+        json!({"assetId": "b", "timelineStart": 3.0, "timelineEnd": 5.0}),
+        json!({"assetId": "c", "timelineStart": 6.5, "timelineEnd": 8.0}),
+    ];
+
+    let (plan, duration) = plan_segments(&items).expect("plan succeeds");
+
+    assert_eq!(plan.len(), 3);
+    // Leading hole before the first item becomes a black gap.
+    assert_eq!(plan[0].leading_gap, Some(1.0));
+    // Abutting items leave no gap.
+    assert_eq!(plan[1].leading_gap, None);
+    // Interior hole between items becomes a gap of the missing span.
+    assert_eq!(plan[2].leading_gap, Some(1.5));
+    // Total duration is the running max of item ends.
+    assert_eq!(duration, 8.0);
+}
+
+#[test]
+fn plan_segments_carries_item_transitions() {
+    let items = vec![
+        json!({
+            "assetId": "a",
+            "timelineStart": 0.0,
+            "timelineEnd": 2.0,
+            "transitionIn": {"type": "crossfade", "duration": 0.8}
+        }),
+        json!({"assetId": "b", "timelineStart": 2.0, "timelineEnd": 4.0}),
+    ];
+
+    let (plan, _) = plan_segments(&items).expect("plan succeeds");
+
+    assert_eq!(plan[0].transition.as_deref(), Some("crossfade"));
+    assert_eq!(plan[0].transition_duration, 0.8);
+    // Missing transitionIn falls back to the default transition duration.
+    assert_eq!(plan[1].transition, None);
+    assert_eq!(
+        plan[1].transition_duration,
+        DEFAULT_TRANSITION_DURATION_SECONDS
+    );
+}
+
+#[test]
+fn plan_segments_rejects_nonpositive_item_span() {
+    let items = vec![json!({"assetId": "a", "timelineStart": 2.0, "timelineEnd": 2.0})];
+
+    let error = plan_segments(&items).expect_err("zero-length span rejects");
+
+    assert!(matches!(error, WorkerError::InvalidPayload(_)));
+    assert!(error.to_string().contains("timelineEnd must be greater"));
 }
 
 #[test]
