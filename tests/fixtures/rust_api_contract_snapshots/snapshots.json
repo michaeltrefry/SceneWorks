@@ -2370,6 +2370,7 @@
       "loras": [],
       "mode": "replace_person",
       "model": "ltx_2_3",
+      "modelManifestEntry": {},
       "negativePrompt": "",
       "personTrackId": "track_fixture",
       "projectId": "project_fixture",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import gc
 import hashlib
 import importlib
@@ -251,6 +251,11 @@ class VideoRequest:
     source_clip_asset_id: str | None
     bridge_right_clip_asset_id: str | None
     advanced: dict[str, Any]
+    # Resolved builtin+user model manifest entry, merged by the Rust API and
+    # passed in the job payload as `modelManifestEntry` (story 1653). The worker
+    # no longer parses builtin/user.models.jsonc itself. Empty when the model is
+    # absent from the manifests — same graceful fallback as before.
+    model_manifest_entry: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1304,7 +1309,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
 
     def resolve_resources(self, request: VideoRequest) -> LtxPipelinesResources:
         settings = self._settings or WorkerSettings()
-        entry = ltx_model_manifest_entry(settings, request.model)
+        entry = request.model_manifest_entry
         resources = entry.get("resources", {}) if isinstance(entry.get("resources"), dict) else {}
         resources = self._apply_distilled_variant(resources, self._distilled_variant(request))
         checkpoint_resource_key = "distilledCheckpoint" if self._pipeline_module(request) in {"ltx_pipelines.distilled", "ltx_pipelines.ic_lora"} else "checkpoint"
@@ -1399,7 +1404,7 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
         missing: list[tuple[str, Path]],
     ) -> str:
         settings = self._settings or WorkerSettings()
-        entry = ltx_model_manifest_entry(settings, request.model)
+        entry = request.model_manifest_entry
         manifest_resources = entry.get("resources", {}) if isinstance(entry.get("resources"), dict) else {}
         resource_names = {
             "checkpointPath": "distilledCheckpoint" if self._pipeline_module(request) in {"ltx_pipelines.distilled", "ltx_pipelines.ic_lora"} else "checkpoint",
@@ -2519,6 +2524,7 @@ def video_request_from_job(job: dict[str, Any]) -> VideoRequest:
         source_clip_asset_id=payload.get("sourceClipAssetId"),
         bridge_right_clip_asset_id=payload.get("bridgeRightClipAssetId"),
         advanced=payload.get("advanced", {}),
+        model_manifest_entry=payload.get("modelManifestEntry") or {},
     )
 
 
@@ -2557,75 +2563,6 @@ def ltx_frame_count(raw_frames: int) -> int:
     lower_delta = abs(frame_count - lower)
     upper_delta = abs(upper - frame_count)
     return lower if lower_delta <= upper_delta else upper
-
-
-def ltx_model_manifest_entry(settings: WorkerSettings, model_id: str) -> dict[str, Any]:
-    config_dir = getattr(settings, "config_dir", Path("config").resolve())
-    builtin_entry: dict[str, Any] = {}
-    user_entry: dict[str, Any] = {}
-    for manifest_name in ("builtin.models.jsonc", "user.models.jsonc"):
-        manifest_path = config_dir / "manifests" / manifest_name
-        try:
-            payload = json.loads(strip_jsonc_comments(manifest_path.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            continue
-        models = payload.get("models", [])
-        if not isinstance(models, list):
-            continue
-        for entry in models:
-            if isinstance(entry, dict) and entry.get("id") == model_id:
-                if manifest_name.startswith("builtin"):
-                    builtin_entry = entry
-                else:
-                    user_entry = entry
-    if not user_entry:
-        return builtin_entry
-    merged = {**builtin_entry, **user_entry}
-    for nested_key in ("paths", "resources", "defaults", "limits", "loraCompatibility", "ui"):
-        builtin_nested = builtin_entry.get(nested_key) if isinstance(builtin_entry.get(nested_key), dict) else {}
-        user_nested = user_entry.get(nested_key) if isinstance(user_entry.get(nested_key), dict) else {}
-        if builtin_nested or user_nested:
-            merged[nested_key] = {**builtin_nested, **user_nested}
-    return merged
-
-
-def strip_jsonc_comments(text: str) -> str:
-    output = []
-    index = 0
-    in_string = False
-    escaped = False
-    while index < len(text):
-        char = text[index]
-        next_char = text[index + 1] if index + 1 < len(text) else ""
-        if in_string:
-            output.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            index += 1
-            continue
-        if char == '"':
-            in_string = True
-            output.append(char)
-            index += 1
-            continue
-        if char == "/" and next_char == "/":
-            index += 2
-            while index < len(text) and text[index] not in "\r\n":
-                index += 1
-            continue
-        if char == "/" and next_char == "*":
-            index += 2
-            while index + 1 < len(text) and not (text[index] == "*" and text[index + 1] == "/"):
-                index += 1
-            index += 2
-            continue
-        output.append(char)
-        index += 1
-    return "".join(output)
 
 
 def resolve_worker_path(settings: WorkerSettings, value: Any) -> Path:

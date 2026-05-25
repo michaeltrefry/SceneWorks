@@ -112,7 +112,6 @@ from scene_worker.video_adapters import (
     evenly_spaced_indices,
     frames_from_output,
     install_ltx_pipelines_multigpu_compat,
-    ltx_model_manifest_entry,
     ltx_frame_count,
     ltx_mps_gating,
     load_seekable_image_frame,
@@ -3496,31 +3495,29 @@ def write_native_ltx_manifest(config_dir, *, checkpoint=None, spatial=None, lora
         resources["distilledLora"] = {"path": str(lora)}
     if gemma is not None:
         resources["gemma"] = {"path": str(gemma)}
+    model_entry = {
+        "id": "ltx_2_3",
+        "name": "LTX-2.3",
+        "family": "ltx-video",
+        "type": "video",
+        "adapter": "ltx_video",
+        "capabilities": ["text_to_video", "image_to_video"],
+        "downloads": [],
+        "paths": {},
+        "resources": resources,
+        "defaults": {},
+        "limits": {},
+        "loraCompatibility": {},
+        "ui": {},
+    }
     (manifest_dir / "builtin.models.jsonc").write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "models": [
-                    {
-                        "id": "ltx_2_3",
-                        "name": "LTX-2.3",
-                        "family": "ltx-video",
-                        "type": "video",
-                        "adapter": "ltx_video",
-                        "capabilities": ["text_to_video", "image_to_video"],
-                        "downloads": [],
-                        "paths": {},
-                        "resources": resources,
-                        "defaults": {},
-                        "limits": {},
-                        "loraCompatibility": {},
-                        "ui": {},
-                    }
-                ],
-            }
-        ),
+        json.dumps({"schemaVersion": 1, "models": [model_entry]}),
         encoding="utf-8",
     )
+    # Rust now resolves+merges the manifest and passes the entry in the job
+    # payload as `modelManifestEntry` (story 1653); tests inject this return
+    # value so the worker resolves resources without reading the file itself.
+    return model_entry
 
 
 def write_native_ltx_resource_files(tmp_path):
@@ -3555,7 +3552,7 @@ def test_native_ltx_adapter_reports_mocked_pipeline_requirements(tmp_path):
     config_dir = tmp_path / "config"
     data_dir.mkdir()
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
-    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
     adapter = LtxPipelinesVideoAdapter()
     request = adapter.prepare(
         settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
@@ -3566,6 +3563,7 @@ def test_native_ltx_adapter_reports_mocked_pipeline_requirements(tmp_path):
                 "mode": "text_to_video",
                 "prompt": "city",
                 "model": "ltx_2_3",
+                "modelManifestEntry": manifest_entry,
                 "duration": 6,
                 "fps": 25,
                 "quality": "fast",
@@ -3590,7 +3588,7 @@ def test_native_ltx_pipeline_override_decouples_from_quality(tmp_path):
     config_dir = tmp_path / "config"
     data_dir.mkdir()
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
-    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
 
     def pipeline_for(quality, advanced):
         adapter = LtxPipelinesVideoAdapter()
@@ -3603,6 +3601,7 @@ def test_native_ltx_pipeline_override_decouples_from_quality(tmp_path):
                     "mode": "text_to_video",
                     "prompt": "city",
                     "model": "ltx_2_3",
+                    "modelManifestEntry": manifest_entry,
                     "duration": 6,
                     "fps": 25,
                     "quality": quality,
@@ -3681,29 +3680,23 @@ def test_native_ltx_distilled_variant_switches_files(tmp_path):
         },
         "gemma": {"repo": "google/gemma-3-12b-it-qat-q4_0-unquantized"},
     }
+    manifest_entry = {
+        "id": "ltx_2_3",
+        "name": "LTX-2.3",
+        "family": "ltx-video",
+        "type": "video",
+        "adapter": "ltx_video",
+        "capabilities": ["text_to_video"],
+        "downloads": [],
+        "paths": {},
+        "resources": resources,
+        "defaults": {},
+        "limits": {},
+        "loraCompatibility": {},
+        "ui": {},
+    }
     (manifest_dir / "builtin.models.jsonc").write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "models": [
-                    {
-                        "id": "ltx_2_3",
-                        "name": "LTX-2.3",
-                        "family": "ltx-video",
-                        "type": "video",
-                        "adapter": "ltx_video",
-                        "capabilities": ["text_to_video"],
-                        "downloads": [],
-                        "paths": {},
-                        "resources": resources,
-                        "defaults": {},
-                        "limits": {},
-                        "loraCompatibility": {},
-                        "ui": {},
-                    }
-                ],
-            }
-        ),
+        json.dumps({"schemaVersion": 1, "models": [manifest_entry]}),
         encoding="utf-8",
     )
 
@@ -3718,6 +3711,7 @@ def test_native_ltx_distilled_variant_switches_files(tmp_path):
                     "mode": "text_to_video",
                     "prompt": "city",
                     "model": "ltx_2_3",
+                    "modelManifestEntry": manifest_entry,
                     "duration": 6,
                     "fps": 25,
                     "quality": quality,
@@ -3743,7 +3737,7 @@ def test_native_ltx_missing_resources_reports_all_paths(monkeypatch, tmp_path):
     monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "empty-hf-home"))
-    write_native_ltx_manifest(config_dir)
+    manifest_entry = write_native_ltx_manifest(config_dir)
     adapter = LtxPipelinesVideoAdapter()
     request = adapter.prepare(
         settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
@@ -3754,6 +3748,7 @@ def test_native_ltx_missing_resources_reports_all_paths(monkeypatch, tmp_path):
                 "mode": "text_to_video",
                 "prompt": "city",
                 "model": "ltx_2_3",
+                "modelManifestEntry": manifest_entry,
                 "advanced": {},
             },
         },
@@ -3777,7 +3772,7 @@ def test_native_ltx_resources_resolve_from_huggingface_cache(monkeypatch, tmp_pa
     cache_root = tmp_path / "hf" / "hub"
     data_dir.mkdir()
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(cache_root))
-    write_native_ltx_manifest(config_dir)
+    manifest_entry = write_native_ltx_manifest(config_dir)
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "checkpoint.safetensors")
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "spatial.safetensors")
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "distilled-lora.safetensors")
@@ -3792,6 +3787,7 @@ def test_native_ltx_resources_resolve_from_huggingface_cache(monkeypatch, tmp_pa
                 "mode": "text_to_video",
                 "prompt": "city",
                 "model": "ltx_2_3",
+                "modelManifestEntry": manifest_entry,
                 "advanced": {"mockNativeInference": True},
             },
         },
@@ -3815,7 +3811,7 @@ def test_native_ltx_resources_resolve_from_mounted_data_cache_without_hf_env(mon
     monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
     monkeypatch.delenv("HF_HOME", raising=False)
-    write_native_ltx_manifest(config_dir)
+    manifest_entry = write_native_ltx_manifest(config_dir)
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "checkpoint.safetensors")
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "spatial.safetensors")
     write_huggingface_cache_resource(cache_root, "Lightricks/LTX-2.3", "distilled-lora.safetensors")
@@ -3830,6 +3826,7 @@ def test_native_ltx_resources_resolve_from_mounted_data_cache_without_hf_env(mon
                 "mode": "text_to_video",
                 "prompt": "city",
                 "model": "ltx_2_3",
+                "modelManifestEntry": manifest_entry,
                 "advanced": {"mockNativeInference": True},
             },
         },
@@ -3848,7 +3845,7 @@ def test_native_ltx_fast_pipeline_does_not_require_distilled_lora(tmp_path):
     config_dir = tmp_path / "config"
     data_dir.mkdir()
     checkpoint, spatial, _lora, gemma = write_native_ltx_resource_files(tmp_path)
-    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, gemma=gemma)
+    manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, gemma=gemma)
     adapter = LtxPipelinesVideoAdapter()
     request = adapter.prepare(
         settings=SimpleNamespace(data_dir=data_dir, config_dir=config_dir),
@@ -3859,6 +3856,7 @@ def test_native_ltx_fast_pipeline_does_not_require_distilled_lora(tmp_path):
                 "mode": "text_to_video",
                 "prompt": "city",
                 "model": "ltx_2_3",
+                "modelManifestEntry": manifest_entry,
                 "quality": "fast",
                 "advanced": {"mockNativeInference": True},
             },
@@ -3905,71 +3903,6 @@ def test_native_ltx_advanced_resource_overrides_win(tmp_path):
     assert resources["spatialUpscalerPath"] == str(spatial)
     assert resources["distilledLoraPath"] == str(lora)
     assert resources["gemmaRoot"] == str(gemma)
-
-
-def test_ltx_model_manifest_entry_reads_jsonc_comments(tmp_path):
-    config_dir = tmp_path / "config"
-    manifest_dir = config_dir / "manifests"
-    manifest_dir.mkdir(parents=True)
-    (manifest_dir / "builtin.models.jsonc").write_text(
-        """
-        {
-          "schemaVersion": 1,
-          "models": [
-            {
-              // Keep comment stripping out of quoted strings like "https://example.test".
-              "id": "ltx_2_3",
-              "resources": { "checkpoint": { "path": "models/checkpoint.safetensors" } }
-            }
-          ]
-        }
-        """,
-        encoding="utf-8",
-    )
-
-    entry = ltx_model_manifest_entry(SimpleNamespace(config_dir=config_dir), "ltx_2_3")
-
-    assert entry["resources"]["checkpoint"]["path"] == "models/checkpoint.safetensors"
-
-
-def test_ltx_model_manifest_entry_preserves_builtin_resources_for_user_entry(tmp_path):
-    config_dir = tmp_path / "config"
-    manifest_dir = config_dir / "manifests"
-    manifest_dir.mkdir(parents=True)
-    (manifest_dir / "builtin.models.jsonc").write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "models": [
-                    {
-                        "id": "ltx_2_3",
-                        "paths": {"model": "data/models/builtin"},
-                        "resources": {"checkpoint": {"path": "models/checkpoint.safetensors"}},
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (manifest_dir / "user.models.jsonc").write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "models": [
-                    {
-                        "id": "ltx_2_3",
-                        "paths": {"model": "data/models/user"},
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    entry = ltx_model_manifest_entry(SimpleNamespace(config_dir=config_dir), "ltx_2_3")
-
-    assert entry["paths"]["model"] == "data/models/user"
-    assert entry["resources"]["checkpoint"]["path"] == "models/checkpoint.safetensors"
 
 
 def test_native_ltx_adapter_rejects_unsupported_modes():
@@ -4051,7 +3984,7 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
         encoding="utf-8",
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
-    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
     calls = {"init": None, "run": None, "encode": None}
 
     class FakePipeline:
@@ -4114,6 +4047,7 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
             "prompt": "Neon harbor",
             "negativePrompt": "rain",
             "model": "ltx_2_3",
+            "modelManifestEntry": manifest_entry,
             "duration": 1,
             "fps": 12,
             "width": 320,
@@ -4216,7 +4150,7 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
         encoding="utf-8",
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
-    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
     ic_lora = tmp_path / "identity-control.safetensors"
     ic_lora.write_bytes(b"ic-lora")
     calls = {"run": None, "encode": None}
@@ -4287,6 +4221,7 @@ def test_native_ltx_image_to_video_passes_source_image_conditioning(monkeypatch,
             "mode": "image_to_video",
             "prompt": "Make the harbor move",
             "model": "ltx_2_3",
+            "modelManifestEntry": manifest_entry,
             "sourceAssetId": "asset-source",
             "duration": 1,
             "fps": 12,
@@ -4344,7 +4279,7 @@ def test_native_ltx_image_to_video_falls_back_without_ic_lora(monkeypatch, tmp_p
         encoding="utf-8",
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
-    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
     style_lora = tmp_path / "cinematic-style.safetensors"
     style_lora.write_bytes(b"style-lora")
     calls = {"init": None, "run": None}
@@ -4416,6 +4351,7 @@ def test_native_ltx_image_to_video_falls_back_without_ic_lora(monkeypatch, tmp_p
                 "mode": "image_to_video",
                 "prompt": "Make the harbor move",
                 "model": "ltx_2_3",
+                "modelManifestEntry": manifest_entry,
                 "sourceAssetId": "asset-source",
                 "duration": 1,
                 "fps": 12,
@@ -4471,7 +4407,7 @@ def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp
         encoding="utf-8",
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
-    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
     ic_lora = tmp_path / "identity-control.safetensors"
     ic_lora.write_bytes(b"ic-lora")
     calls = {"init": None, "run": None, "encode": None}
@@ -4529,6 +4465,7 @@ def test_native_ltx_extend_clip_uses_ic_lora_video_conditioning(monkeypatch, tmp
             "mode": "extend_clip",
             "prompt": "Keep the character walking",
             "model": "ltx_2_3",
+            "modelManifestEntry": manifest_entry,
             "sourceClipAssetId": "asset-source-video",
             "duration": 1,
             "fps": 12,
@@ -4579,7 +4516,7 @@ def test_native_ltx_cleanup_deletes_temp_output_and_evicts_pipeline(monkeypatch,
         encoding="utf-8",
     )
     checkpoint, spatial, lora, gemma = write_native_ltx_resource_files(tmp_path)
-    write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
+    manifest_entry = write_native_ltx_manifest(config_dir, checkpoint=checkpoint, spatial=spatial, lora=lora, gemma=gemma)
 
     class FakePipeline:
         def __init__(self, **_kwargs):
@@ -4639,6 +4576,7 @@ def test_native_ltx_cleanup_deletes_temp_output_and_evicts_pipeline(monkeypatch,
             "mode": "text_to_video",
             "prompt": "Neon harbor",
             "model": "ltx_2_3",
+            "modelManifestEntry": manifest_entry,
             "duration": 1,
             "fps": 12,
             "width": 320,

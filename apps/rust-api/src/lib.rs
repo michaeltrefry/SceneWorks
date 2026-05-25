@@ -3211,6 +3211,12 @@ async fn create_video_job(
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
     }
+    // Resolve the model manifest entry here so the GPU worker never re-parses
+    // builtin/user.models.jsonc itself — Rust owns manifest parsing/merging
+    // (story 1653). An unknown model resolves to {}, matching the worker's
+    // existing fallback to the model's default repo.
+    let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
+    job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility(&state, Some(&payload.project_id), &mut job_payload, false)
         .await?;
     let job = create_generation_job(
@@ -6776,6 +6782,69 @@ fn merge_object(base: &mut Value, override_value: Value) {
     }
 }
 
+/// Resolve the merged model manifest entry for `model_id` so the GPU worker no
+/// longer re-parses `builtin.models.jsonc`/`user.models.jsonc` itself — Rust is
+/// the single owner of manifest parsing/merging (story 1653). The merged entry
+/// is injected into video job payloads as `modelManifestEntry`. Returns `{}`
+/// when the model is absent from both manifests, which the worker treats the
+/// same as before (fall back to the model's default repo).
+async fn resolve_model_manifest_entry(state: &AppState, model_id: &str) -> Result<Value, ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let builtin =
+        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
+    let user =
+        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
+    let find = |entries: &[Value]| -> Option<Value> {
+        entries
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+            .cloned()
+    };
+    Ok(merge_model_manifest_entry(find(&builtin), find(&user)))
+}
+
+/// One-level-deep merge of the builtin and user manifest entries for a single
+/// model id. Mirrors the worker's former `ltx_model_manifest_entry` exactly so
+/// this migration is behavior-preserving: user top-level keys override builtin
+/// (shallow), and the nested config blocks the adapters read are merged
+/// key-by-key rather than replaced wholesale. (This is intentionally deeper than
+/// `merge_entries_by_id`, which the model catalog uses for display.)
+fn merge_model_manifest_entry(builtin: Option<Value>, user: Option<Value>) -> Value {
+    const NESTED_KEYS: [&str; 6] = [
+        "paths",
+        "resources",
+        "defaults",
+        "limits",
+        "loraCompatibility",
+        "ui",
+    ];
+    match (builtin, user) {
+        (builtin, None) => builtin.unwrap_or_else(|| Value::Object(JsonObject::new())),
+        (None, Some(user)) => user,
+        (Some(builtin), Some(user)) => {
+            let mut merged = builtin.clone();
+            merge_object(&mut merged, user.clone());
+            for key in NESTED_KEYS {
+                let builtin_nested = builtin.get(key).and_then(Value::as_object);
+                let user_nested = user.get(key).and_then(Value::as_object);
+                if builtin_nested.is_none() && user_nested.is_none() {
+                    continue;
+                }
+                let mut nested = builtin_nested.cloned().unwrap_or_default();
+                if let Some(user_nested) = user_nested {
+                    for (nested_key, value) in user_nested {
+                        nested.insert(nested_key.clone(), value.clone());
+                    }
+                }
+                if let Some(object) = merged.as_object_mut() {
+                    object.insert(key.to_owned(), Value::Object(nested));
+                }
+            }
+            merged
+        }
+    }
+}
+
 fn strip_jsonc_comments(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();
@@ -8187,10 +8256,11 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::{
         create_app, huggingface_repo_cache_path, inprocess_worker_gpu_id, insufficient_disk_space,
-        lora_artifact_paths, mlx_catalog_status, person_readiness_from_workers, requires_token,
-        strip_jsonc_comments, sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings,
-        WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
-        EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+        lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
+        person_readiness_from_workers, requires_token, strip_jsonc_comments,
+        sweep_stale_lora_uploads_before, EventHub, EventMessage, Settings, WorkerCapability,
+        WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, EVENT_BUFFER_SIZE,
+        HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -8254,6 +8324,47 @@ mod tests {
         assert_eq!(readiness["replace"]["ready"], json!(true));
         assert_eq!(readiness["detectPreview"]["ready"], json!(true));
         assert_eq!(readiness["segment"]["ready"], json!(false));
+    }
+
+    #[test]
+    fn merge_model_manifest_entry_deep_merges_nested_blocks() {
+        // The worker reads the merged manifest entry from the job payload now
+        // (story 1653). This pins the behavior-preserving deep merge that the
+        // worker's former `ltx_model_manifest_entry` performed: a user entry
+        // overrides top-level keys, but builtin's siblings inside a nested block
+        // (e.g. resources) survive rather than being replaced wholesale.
+        let builtin = json!({
+            "id": "ltx_2_3",
+            "paths": {"model": "data/models/builtin"},
+            "resources": {"checkpoint": {"path": "models/checkpoint.safetensors"}},
+        });
+        let user = json!({
+            "id": "ltx_2_3",
+            "paths": {"model": "data/models/user"},
+            "resources": {"spatialUpscaler": {"path": "models/spatial.safetensors"}},
+        });
+        let merged = merge_model_manifest_entry(Some(builtin), Some(user));
+        assert_eq!(merged["paths"]["model"], json!("data/models/user"));
+        assert_eq!(
+            merged["resources"]["checkpoint"]["path"],
+            json!("models/checkpoint.safetensors")
+        );
+        assert_eq!(
+            merged["resources"]["spatialUpscaler"]["path"],
+            json!("models/spatial.safetensors")
+        );
+    }
+
+    #[test]
+    fn merge_model_manifest_entry_handles_single_or_missing_sources() {
+        let builtin = json!({"id": "ltx_2_3", "resources": {"checkpoint": {"path": "a"}}});
+        assert_eq!(
+            merge_model_manifest_entry(Some(builtin.clone()), None),
+            builtin
+        );
+        let user = json!({"id": "ltx_2_3", "name": "user"});
+        assert_eq!(merge_model_manifest_entry(None, Some(user.clone())), user);
+        assert_eq!(merge_model_manifest_entry(None, None), json!({}));
     }
 
     fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
