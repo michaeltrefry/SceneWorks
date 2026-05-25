@@ -8,6 +8,22 @@ on:
       - "codex/**"
 
 jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install web dependencies
+        run: npm ci --prefix apps/web
+      - name: Run web test suite
+        run: npm --prefix apps/web run test
+      - name: Build web production bundle
+        run: npm --prefix apps/web run build
+
   parity:
     runs-on: ubuntu-latest
     steps:
