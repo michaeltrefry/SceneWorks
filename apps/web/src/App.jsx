@@ -1289,6 +1289,24 @@ export function App() {
     updatePreset,
     deletePreset,
     duplicatePreset,
+    // Training (sc-1651 Phase B batch 7)
+    authenticated,
+    trainingDatasets,
+    trainingDatasetsProjectId,
+    trainingDatasetsError,
+    loadingTrainingDatasets,
+    refreshTrainingDatasets,
+    loadTrainingDataset,
+    createTrainingDataset,
+    updateTrainingDataset,
+    batchRenameTrainingDataset,
+    writeTrainingDatasetCaptionSidecars,
+    createTrainingDatasetCaptionJob,
+    createTrainingJob,
+    trainingPresets,
+    trainingPresetsError,
+    trainingTargets,
+    trainingTargetsError,
     // Navigation
     setActiveView,
     // Characters
@@ -1445,30 +1463,7 @@ export function App() {
         ) : null}
 
         {activeView === "Train" ? (
-          <TrainingStudio
-            activeProject={activeProject}
-            authenticated={authenticated}
-            assets={assets}
-            batchRenameDataset={batchRenameTrainingDataset}
-            createDataset={createTrainingDataset}
-            createCaptionJob={createTrainingDatasetCaptionJob}
-            createTrainingJob={createTrainingJob}
-            datasets={trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []}
-            datasetsError={trainingDatasetsError}
-            gpuOptions={gpuOptions}
-            importAsset={(file) => importAsset(file, { throwOnError: true })}
-            jobs={jobs}
-            loadDataset={loadTrainingDataset}
-            loadingDatasets={loadingTrainingDatasets}
-            onPreview={setPreviewAsset}
-            onRefreshDatasets={() => refreshTrainingDatasets(activeProject?.id)}
-            trainingPresets={trainingPresets.presets ?? []}
-            trainingPresetsError={trainingPresetsError}
-            trainingTargets={trainingTargets.targets ?? []}
-            trainingTargetsError={trainingTargetsError}
-            updateDataset={updateTrainingDataset}
-            writeCaptionSidecars={writeTrainingDatasetCaptionSidecars}
-          />
+          <TrainingStudio />
         ) : null}
 
         {activeView === "Presets" ? (
