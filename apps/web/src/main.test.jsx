@@ -85,6 +85,41 @@ function withModelManagerContext(p) {
   );
 }
 
+// TrainingStudio (sc-1651 Phase B) — maps the old prop-shaped fixtures onto the
+// provider. The screen unwraps catalogs ({presets}/{targets}) and project-scopes
+// datasets, so feed those raw, and route the derived callbacks back to the
+// fixture's on* / wrapped fns.
+function withTrainingStudioContext(p) {
+  return withAppContext(
+    {
+      activeProject: p.activeProject,
+      authenticated: p.authenticated,
+      assets: p.assets,
+      gpuOptions: p.gpuOptions,
+      jobs: p.jobs,
+      setPreviewAsset: p.onPreview ?? (() => {}),
+      importAsset: p.importAsset,
+      trainingDatasets: p.datasets,
+      trainingDatasetsProjectId: p.activeProject?.id,
+      trainingDatasetsError: p.datasetsError,
+      loadingTrainingDatasets: p.loadingDatasets,
+      refreshTrainingDatasets: p.onRefreshDatasets ? () => p.onRefreshDatasets() : () => {},
+      loadTrainingDataset: p.loadDataset,
+      createTrainingDataset: p.createDataset,
+      updateTrainingDataset: p.updateDataset,
+      batchRenameTrainingDataset: p.batchRenameDataset,
+      writeTrainingDatasetCaptionSidecars: p.writeCaptionSidecars,
+      createTrainingDatasetCaptionJob: p.createCaptionJob,
+      createTrainingJob: p.createTrainingJob,
+      trainingPresets: { presets: p.trainingPresets },
+      trainingPresetsError: p.trainingPresetsError,
+      trainingTargets: { targets: p.trainingTargets },
+      trainingTargetsError: p.trainingTargetsError,
+    },
+    <TrainingStudio />,
+  );
+}
+
 // jsdom 27 omits Blob.text(); all real browsers implement it. Polyfill so the
 // dataset import flow (which reads .txt caption sidecars) is exercisable here.
 if (typeof Blob !== "undefined" && typeof Blob.prototype.text !== "function") {
@@ -563,11 +598,11 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }]}
-          onRefreshDatasets={() => {}}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }],
+          onRefreshDatasets: () => {},
+        }),
       );
     });
 
@@ -599,12 +634,12 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
-          createDataset={createDataset}
-          datasets={[]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          createDataset,
+          datasets: [],
+        }),
       );
     });
 
@@ -638,13 +673,13 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={[{ id: "asset-mira", type: "image", displayName: "mira.png", file: { path: "assets/images/mira.png", mimeType: "image/png" } }]}
-          createDataset={createDataset}
-          datasets={[]}
-          importAsset={importAsset}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-mira", type: "image", displayName: "mira.png", file: { path: "assets/images/mira.png", mimeType: "image/png" } }],
+          createDataset,
+          datasets: [],
+          importAsset,
+        }),
       );
     });
 
@@ -700,13 +735,13 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={assets}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          loadDataset={loadDataset}
-          updateDataset={updateDataset}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset,
+          updateDataset,
+        }),
       );
     });
 
@@ -757,13 +792,13 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }]}
-          loadDataset={loadDataset}
-          updateDataset={updateDataset}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }],
+          loadDataset,
+          updateDataset,
+        }),
       );
     });
 
@@ -802,13 +837,13 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          loadDataset={loadDataset}
-          updateDataset={updateDataset}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset,
+          updateDataset,
+        }),
       );
     });
 
@@ -870,15 +905,15 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
-          batchRenameDataset={batchRenameDataset}
-          createCaptionJob={createCaptionJob}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          loadDataset={loadDataset}
-          writeCaptionSidecars={writeCaptionSidecars}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          batchRenameDataset,
+          createCaptionJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset,
+          writeCaptionSidecars,
+        }),
       );
     });
 
@@ -950,14 +985,14 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={[{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }]}
-          createCaptionJob={createCaptionJob}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          loadDataset={loadDataset}
-          writeCaptionSidecars={writeCaptionSidecars}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          createCaptionJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset,
+          writeCaptionSidecars,
+        }),
       );
     });
 
@@ -1027,9 +1062,9 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={[
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [
             {
               id: "asset-a",
               type: "image",
@@ -1037,11 +1072,11 @@ describe("SceneWorks app shell", () => {
               file: { path: "assets/images/Mira.png", mimeType: "image/png" },
               recipe: { prompt: "studio portrait with soft light" },
             },
-          ]}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          loadDataset={loadDataset}
-          writeCaptionSidecars={writeCaptionSidecars}
-        />,
+          ],
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset,
+          writeCaptionSidecars,
+        }),
       );
     });
 
@@ -1103,16 +1138,16 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          assets={[
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [
             { id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } },
             { id: "asset-b", type: "image", displayName: "Mira 2.png", file: { path: "assets/images/Mira2.png", mimeType: "image/png" } },
-          ]}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }]}
-          loadDataset={loadDataset}
-          writeCaptionSidecars={writeCaptionSidecars}
-        />,
+          ],
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }],
+          loadDataset,
+          writeCaptionSidecars,
+        }),
       );
     });
 
@@ -1158,13 +1193,13 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          gpuOptions={["auto", "0"]}
-          loadDataset={loadDataset}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions: ["auto", "0"],
+          loadDataset,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
 
@@ -1202,9 +1237,9 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          jobs={[
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          jobs: [
             {
               id: "job-train-1",
               type: "lora_train",
@@ -1224,9 +1259,9 @@ describe("SceneWorks app shell", () => {
                 ],
               },
             },
-          ]}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+          ],
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
 
@@ -1261,14 +1296,14 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          gpuOptions={["auto", "0"]}
-          loadDataset={loadDataset}
-          createTrainingJob={createTrainingJob}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions: ["auto", "0"],
+          loadDataset,
+          createTrainingJob,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
     await settle();
@@ -1342,15 +1377,15 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          createTrainingJob={createTrainingJob}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          gpuOptions={["auto", "0"]}
-          loadDataset={loadDataset}
-          trainingPresets={zImageTrainingPresets}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          createTrainingJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions: ["auto", "0"],
+          loadDataset,
+          trainingPresets: zImageTrainingPresets,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
     await settle();
@@ -1407,15 +1442,15 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          createTrainingJob={createTrainingJob}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          gpuOptions={["auto", "0"]}
-          loadDataset={loadDataset}
-          trainingPresets={zImageTrainingPresets}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          createTrainingJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions: ["auto", "0"],
+          loadDataset,
+          trainingPresets: zImageTrainingPresets,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
     await settle();
@@ -1457,12 +1492,12 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          trainingPresets={zImageTrainingPresets}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          trainingPresets: zImageTrainingPresets,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
     await settle();
@@ -1495,14 +1530,14 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          createTrainingJob={createTrainingJob}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          gpuOptions={["auto", "0"]}
-          loadDataset={loadDataset}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          createTrainingJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions: ["auto", "0"],
+          loadDataset,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
     await settle();
@@ -1552,14 +1587,14 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          createTrainingJob={createTrainingJob}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          gpuOptions={["auto", "0"]}
-          loadDataset={loadDataset}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          createTrainingJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions: ["auto", "0"],
+          loadDataset,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
     await settle();
@@ -1607,13 +1642,13 @@ describe("SceneWorks app shell", () => {
 
     function render(gpuOptions) {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          gpuOptions={gpuOptions}
-          loadDataset={loadDataset}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions,
+          loadDataset,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     }
 
@@ -1670,13 +1705,13 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <TrainingStudio
-          activeProject={{ id: "project-a", name: "Project A" }}
-          datasets={[{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }]}
-          loadDataset={loadDataset}
-          createTrainingJob={createTrainingJob}
-          trainingTargets={[zImageTrainingTarget]}
-        />,
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset,
+          createTrainingJob,
+          trainingTargets: [zImageTrainingTarget],
+        }),
       );
     });
     await settle();

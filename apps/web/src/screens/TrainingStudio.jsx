@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useAppContext } from "../context/AppContext.js";
 import { API_BASE_URL } from "../api.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -780,30 +781,46 @@ function TrainingLiveProgress({ jobs, projectId }) {
   );
 }
 
-export function TrainingStudio({
-  activeProject,
-  authenticated = true,
-  assets = [],
-  batchRenameDataset = async () => null,
-  createCaptionJob = async () => null,
-  createDataset = async () => null,
-  createTrainingJob = async () => null,
-  datasets = [],
-  datasetsError = "",
-  gpuOptions = defaultGpuOptions,
-  importAsset = async () => null,
-  jobs = [],
-  loadDataset = async () => null,
-  loadingDatasets = false,
-  onPreview = () => {},
-  onRefreshDatasets = () => {},
-  trainingPresets = [],
-  trainingPresetsError = "",
-  trainingTargets = [],
-  trainingTargetsError = "",
-  updateDataset = async () => null,
-  writeCaptionSidecars = async () => null,
-}) {
+export function TrainingStudio() {
+  const {
+    activeProject,
+    authenticated = true,
+    assets = [],
+    gpuOptions = defaultGpuOptions,
+    jobs = [],
+    setPreviewAsset,
+    importAsset: importAssetRaw,
+    trainingDatasets = [],
+    trainingDatasetsProjectId,
+    trainingDatasetsError = "",
+    loadingTrainingDatasets = false,
+    refreshTrainingDatasets,
+    loadTrainingDataset,
+    createTrainingDataset,
+    updateTrainingDataset,
+    batchRenameTrainingDataset,
+    writeTrainingDatasetCaptionSidecars,
+    createTrainingDatasetCaptionJob,
+    createTrainingJob,
+    trainingPresets: trainingPresetsCatalog,
+    trainingPresetsError = "",
+    trainingTargets: trainingTargetsCatalog,
+    trainingTargetsError = "",
+  } = useAppContext();
+  const datasets = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
+  const datasetsError = trainingDatasetsError;
+  const loadingDatasets = loadingTrainingDatasets;
+  const onPreview = setPreviewAsset;
+  const onRefreshDatasets = () => refreshTrainingDatasets(activeProject?.id);
+  const importAsset = (file) => importAssetRaw(file, { throwOnError: true });
+  const loadDataset = loadTrainingDataset;
+  const createDataset = createTrainingDataset;
+  const updateDataset = updateTrainingDataset;
+  const batchRenameDataset = batchRenameTrainingDataset;
+  const writeCaptionSidecars = writeTrainingDatasetCaptionSidecars;
+  const createCaptionJob = createTrainingDatasetCaptionJob;
+  const trainingPresets = trainingPresetsCatalog?.presets ?? [];
+  const trainingTargets = trainingTargetsCatalog?.targets ?? [];
   const [activeTab, setActiveTab] = useState("dataset");
   const [activeDataset, setActiveDataset] = useState(null);
   const [datasetError, setDatasetError] = useState("");
