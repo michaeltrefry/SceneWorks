@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import httpx
 
-from sceneworks_shared import utc_now
+from sceneworks_shared import find_project_path, utc_now
 
 from .caption_adapters import run_training_caption_job
 from .gpu import cpu_worker_id, discover_gpu, discover_gpus, gpu_utilization, gpu_worker_id
@@ -24,6 +24,7 @@ from .image_adapters import (
     ZImageDiffusersAdapter,
     create_image_adapter,
     evict_other_image_adapters,
+    image_request_from_job,
     release_image_worker_memory,
     torch_inference_backend_available,
 )
@@ -646,6 +647,11 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
     try:
         progress("preparing", "preparing", 0.08, "Preparing Image Studio request.")
         progress("loading_model", "loading_model", 0.16, "Resolving image adapter target.")
+        # Resolve the request + project path once per job (sc-1678); the adapter, the
+        # asset writer, and source-image loading reuse these instead of each re-parsing
+        # the job and re-scanning recent-projects.json.
+        request = image_request_from_job(job)
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
         result = run_blocking_job_step(
             api,
             settings,
@@ -654,6 +660,8 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
             lambda cancel: adapter.generate(
                 settings=settings,
                 job=job,
+                request=request,
+                project_path=project_path,
                 progress=progress,
                 cancel_requested=cancel,
             ),
@@ -787,6 +795,11 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
 
     try:
         progress("preparing", "preparing", 0.08, "Preparing interleaved document.")
+        # Resolve the request + project path once per job (sc-1678); generate_interleaved
+        # threads them into input-image loading, the asset writer, and the document write
+        # instead of re-scanning recent-projects.json at each step.
+        request = image_request_from_job(job)
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
         result = run_blocking_job_step(
             api,
             settings,
@@ -795,6 +808,8 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
             lambda cancel: adapter.generate_interleaved(
                 settings=settings,
                 job=job,
+                request=request,
+                project_path=project_path,
                 progress=progress,
                 cancel_requested=cancel,
             ),
