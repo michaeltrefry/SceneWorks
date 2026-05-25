@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
-    is_safe_id, is_safe_relative_path, parse_string_enum, random_hex, read_json, relative_string,
-    write_json,
+    atomic_write, is_safe_id, is_safe_relative_path, parse_string_enum, random_hex, read_json,
+    relative_string, write_json,
 };
 use crate::time::utc_now;
 use crate::training::{
@@ -1077,13 +1077,7 @@ fn read_dataset(path: &Path) -> ProjectStoreResult<TrainingDataset> {
 }
 
 fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp_path = path.with_extension("txt.tmp");
-    fs::write(&tmp_path, payload)?;
-    fs::rename(tmp_path, path)?;
-    Ok(())
+    atomic_write(path, payload.as_bytes())
 }
 
 fn dataset_item_path(

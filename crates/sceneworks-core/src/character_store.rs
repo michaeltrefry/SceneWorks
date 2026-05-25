@@ -9,7 +9,8 @@ use serde_json::{json, Map, Value};
 use crate::asset_index::{asset_sidecars, normalize_asset, row_to_asset_record, upsert_asset_row};
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
-    optional_bool, optional_f64, optional_str, random_hex, read_json, relative_string, write_json,
+    atomic_write, optional_bool, optional_f64, optional_str, random_hex, read_json,
+    relative_string, write_json,
 };
 use crate::time::utc_now;
 
@@ -1292,21 +1293,10 @@ fn prepend_array_field(payload: &mut Value, field: &str, item: Value) -> Project
 }
 
 fn write_character_json(path: &Path, payload: &Value) -> ProjectStoreResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let mut output = String::new();
     write_character_value(payload, 0, None, &mut output)?;
     output.push('\n');
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("json")
-    ));
-    fs::write(&tmp_path, output)?;
-    fs::rename(tmp_path, path)?;
-    Ok(())
+    atomic_write(path, output.as_bytes())
 }
 
 fn write_character_value(

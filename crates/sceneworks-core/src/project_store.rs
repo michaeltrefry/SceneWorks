@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -20,8 +20,8 @@ pub use crate::character_store::{
 };
 use crate::slug::slugify;
 use crate::store_util::{
-    is_safe_relative_path, optional_f64, optional_str, optional_u64, random_hex, read_json,
-    relative_string, write_json,
+    is_safe_relative_path, lock_project_files, optional_f64, optional_str, optional_u64,
+    random_hex, read_json, relative_string, write_json,
 };
 use crate::time::utc_now;
 use crate::training::TrainingDataset;
@@ -285,7 +285,7 @@ impl ProjectStore {
         project_id: &str,
         input: TrainingDatasetCreateInput,
     ) -> ProjectStoreResult<TrainingDataset> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).create_dataset(project_id, input)
     }
 
@@ -325,7 +325,7 @@ impl ProjectStore {
         dataset_id: &str,
         input: TrainingDatasetUpdateInput,
     ) -> ProjectStoreResult<TrainingDataset> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).update_dataset(project_id, dataset_id, input)
     }
 
@@ -335,7 +335,7 @@ impl ProjectStore {
         dataset_id: &str,
         input: TrainingDatasetBatchRenameInput,
     ) -> ProjectStoreResult<TrainingDataset> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path)
             .batch_rename_dataset_items(project_id, dataset_id, input)
     }
@@ -346,7 +346,7 @@ impl ProjectStore {
         dataset_id: &str,
         input: TrainingDatasetCaptionSidecarsInput,
     ) -> ProjectStoreResult<TrainingCaptionSidecarsResult> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path)
             .write_caption_sidecars(project_id, dataset_id, input)
     }
@@ -356,7 +356,7 @@ impl ProjectStore {
         project_id: &str,
         dataset_id: &str,
     ) -> ProjectStoreResult<TrainingDatasetMutationResult> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).delete_dataset(project_id, dataset_id)
     }
 
@@ -370,7 +370,7 @@ impl ProjectStore {
     }
 
     pub fn reindex_project(&self, project_id: &str) -> ProjectStoreResult<ReindexResult> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let counts = reindex_project_path(&project_path)?;
         Ok(ReindexResult {
             project_id: project_id.to_owned(),
@@ -463,7 +463,7 @@ impl ProjectStore {
         project_id: &str,
         mut timeline: Value,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let timeline_id = required_str(&timeline, "id")?.to_owned();
         let timeline_project_id = required_str(&timeline, "projectId")?;
         if timeline_project_id != project_id {
@@ -628,7 +628,7 @@ impl ProjectStore {
         project_id: &str,
         input: CharacterCreateInput,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).create_character(project_id, input)
     }
 
@@ -643,7 +643,7 @@ impl ProjectStore {
         character_id: &str,
         input: CharacterUpdateInput,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).update_character(
             project_id,
             character_id,
@@ -656,7 +656,7 @@ impl ProjectStore {
         project_id: &str,
         character_id: &str,
     ) -> ProjectStoreResult<CharacterMutationResult> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).archive_character(character_id)
     }
 
@@ -665,7 +665,7 @@ impl ProjectStore {
         project_id: &str,
         character_id: &str,
     ) -> ProjectStoreResult<CharacterMutationResult> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).purge_character(character_id)
     }
 
@@ -675,7 +675,7 @@ impl ProjectStore {
         character_id: &str,
         input: CharacterReferenceInput,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).add_reference(
             project_id,
             character_id,
@@ -690,7 +690,7 @@ impl ProjectStore {
         asset_id: &str,
         input: CharacterReferenceUpdateInput,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).update_reference(
             project_id,
             character_id,
@@ -705,7 +705,7 @@ impl ProjectStore {
         character_id: &str,
         asset_id: &str,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).remove_reference(
             project_id,
             character_id,
@@ -719,7 +719,7 @@ impl ProjectStore {
         character_id: &str,
         input: CharacterLookInput,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).create_look(
             project_id,
             character_id,
@@ -734,7 +734,7 @@ impl ProjectStore {
         look_id: &str,
         input: CharacterLookUpdateInput,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).update_look(
             project_id,
             character_id,
@@ -749,7 +749,7 @@ impl ProjectStore {
         character_id: &str,
         look_id: &str,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).delete_look(
             project_id,
             character_id,
@@ -763,7 +763,7 @@ impl ProjectStore {
         character_id: &str,
         input: CharacterLoraInput,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).attach_lora(
             project_id,
             character_id,
@@ -778,7 +778,7 @@ impl ProjectStore {
         link_id: &str,
         input: CharacterLoraUpdateInput,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).update_lora_link(
             project_id,
             character_id,
@@ -793,7 +793,7 @@ impl ProjectStore {
         character_id: &str,
         link_id: &str,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         CharacterStore::new(&self.data_dir, project_path).detach_lora(
             project_id,
             character_id,
@@ -878,7 +878,7 @@ impl ProjectStore {
                 "Invalid person track ID".to_owned(),
             ));
         }
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let tracks_dir = project_path.join("person-tracks");
         let track_path = tracks_dir.join(format!("{track_id}.sceneworks.person-track.json"));
         if !track_path.exists() {
@@ -942,7 +942,7 @@ impl ProjectStore {
                 "Uploaded file is empty".to_owned(),
             ));
         }
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let upload_dir = project_path.join("assets").join("uploads");
         fs::create_dir_all(&upload_dir)?;
 
@@ -1042,7 +1042,7 @@ impl ProjectStore {
         generation_set_id: &str,
         fact: &Value,
     ) -> ProjectStoreResult<Value> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let media_rel = fact
             .get("mediaPath")
             .and_then(Value::as_str)
@@ -1077,7 +1077,7 @@ impl ProjectStore {
         job_id: &str,
         generation_set: &Value,
     ) -> ProjectStoreResult<()> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let id = generation_set
             .get("id")
             .and_then(Value::as_str)
@@ -1114,7 +1114,7 @@ impl ProjectStore {
                 "Rating must be between 0 and 5".to_owned(),
             ));
         }
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
         let mut asset = read_json(&sidecar_path)?;
         let status = asset
@@ -1155,7 +1155,7 @@ impl ProjectStore {
         project_id: &str,
         sidecar_path: &Path,
     ) -> ProjectStoreResult<()> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let asset = read_json(sidecar_path)?;
         index_asset(&project_path, &asset, Some(sidecar_path))
     }
@@ -1165,7 +1165,7 @@ impl ProjectStore {
         project_id: &str,
         asset_id: &str,
     ) -> ProjectStoreResult<AssetMutationResult> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
         let mut asset = read_json(&sidecar_path)?;
         let media_rel = asset
@@ -1219,7 +1219,7 @@ impl ProjectStore {
         project_id: &str,
         asset_id: &str,
     ) -> ProjectStoreResult<AssetMutationResult> {
-        let project_path = self.find_project_path(project_id)?;
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
         let asset = read_json(&sidecar_path)?;
         let media_path = project_path.join(
@@ -1303,10 +1303,22 @@ impl ProjectStore {
 
     fn save_registry(&self, projects: &[RegistryItem]) -> ProjectStoreResult<()> {
         fs::create_dir_all(&self.data_dir)?;
-        let tmp_path = self.registry_path().with_extension("json.tmp");
-        write_json(&tmp_path, &serde_json::to_value(projects)?)?;
-        fs::rename(tmp_path, self.registry_path())?;
-        Ok(())
+        // `write_json` stages to a unique temp and renames atomically (sc-1633),
+        // so the registry write no longer needs its own intermediate temp file.
+        write_json(&self.registry_path(), &serde_json::to_value(projects)?)
+    }
+
+    /// Resolves the project path and acquires the per-project file lock, so the
+    /// caller's read-modify-write of that project's JSON/sidecar files is
+    /// serialized against other threads mutating the same project (sc-1633).
+    /// Read-only paths keep using [`find_project_path`] and don't take the lock.
+    fn lock_project(
+        &self,
+        project_id: &str,
+    ) -> ProjectStoreResult<(PathBuf, ReentrantMutexGuard<'static, ()>)> {
+        let project_path = self.find_project_path(project_id)?;
+        let guard = lock_project_files(&project_path);
+        Ok((project_path, guard))
     }
 
     fn find_project_path(&self, project_id: &str) -> ProjectStoreResult<PathBuf> {
@@ -2580,9 +2592,10 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 mod tests {
     use super::{
         build_generated_asset_sidecar, guess_mime_from_filename, is_safe_relative_path,
-        ProjectStore, PROJECT_FOLDERS,
+        CharacterCreateInput, CharacterLookInput, ProjectStore, PROJECT_FOLDERS,
     };
     use serde_json::{json, Value};
+    use std::sync::Arc;
 
     #[test]
     fn build_generated_asset_sidecar_assembles_the_contract_schema() {
@@ -3068,5 +3081,70 @@ mod tests {
             guess_mime_from_filename("reference.avif").as_deref(),
             Some("image/avif")
         );
+    }
+
+    #[test]
+    fn concurrent_look_adds_do_not_lose_updates() {
+        // sc-1633: create_character_look does a read-modify-write of the character
+        // sidecar (read looks -> prepend -> write). The per-project file lock makes
+        // overlapping calls serialize, so concurrent threads can't clobber each
+        // other's appended look. Without the lock this race drops updates and the
+        // final count comes up short. Asserts the lock is wired into the mutation.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = Arc::new(ProjectStore::new(
+            temp_dir.path().join("data"),
+            "test-version",
+        ));
+        let project = store.create_project("Race").expect("project creates");
+        let character = store
+            .create_character(
+                &project.id,
+                CharacterCreateInput {
+                    name: "Hero".to_owned(),
+                    character_type: "person".to_owned(),
+                    description: String::new(),
+                },
+            )
+            .expect("character creates");
+        let character_id = character
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("character id")
+            .to_owned();
+
+        let threads = 4;
+        let per_thread = 12;
+        std::thread::scope(|scope| {
+            for worker in 0..threads {
+                let store = Arc::clone(&store);
+                let project_id = project.id.clone();
+                let character_id = character_id.clone();
+                scope.spawn(move || {
+                    for index in 0..per_thread {
+                        store
+                            .create_character_look(
+                                &project_id,
+                                &character_id,
+                                CharacterLookInput {
+                                    name: format!("look-{worker}-{index}"),
+                                    description: String::new(),
+                                    approved_reference_ids: Vec::new(),
+                                    recipe_settings: serde_json::Map::new(),
+                                },
+                            )
+                            .expect("look adds");
+                    }
+                });
+            }
+        });
+
+        let character = store
+            .get_character(&project.id, &character_id)
+            .expect("character reads");
+        let looks = character
+            .get("looks")
+            .and_then(Value::as_array)
+            .expect("looks array");
+        assert_eq!(looks.len(), threads * per_thread);
     }
 }
