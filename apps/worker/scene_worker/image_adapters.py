@@ -339,8 +339,8 @@ class ImageAssetWriter:
     def write_outputs(
         self,
         *,
-        settings: WorkerSettings,
-        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
         images: list[Image.Image],
         adapter_id: str,
         progress: ProgressCallback,
@@ -348,8 +348,8 @@ class ImageAssetWriter:
         raw_settings: dict[str, Any],
     ) -> dict[str, Any]:
         return self.write_incremental_outputs(
-            settings=settings,
-            job=job,
+            request=request,
+            project_path=project_path,
             image_count=len(images),
             image_at_index=lambda index: images[index],
             adapter_id=adapter_id,
@@ -361,8 +361,8 @@ class ImageAssetWriter:
     def write_incremental_outputs(
         self,
         *,
-        settings: WorkerSettings,
-        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
         image_count: int,
         image_at_index: Callable[[int], Image.Image],
         adapter_id: str,
@@ -370,9 +370,6 @@ class ImageAssetWriter:
         cancel_requested: CancelCallback,
         raw_settings: dict[str, Any],
     ) -> dict[str, Any]:
-        request = image_request_from_job(job)
-        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
-
         created_at = utc_now()
         generation_set_id = f"genset_{uuid4().hex}"
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
@@ -499,10 +496,11 @@ class ZImageDiffusersAdapter:
         *,
         settings: WorkerSettings,
         job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
-        request = image_request_from_job(job)
         if request.mode == "edit_image" and not model_supports_edit(request.model):
             raise RuntimeError(f"{request.model} does not support image editing.")
 
@@ -565,8 +563,8 @@ class ZImageDiffusersAdapter:
             return image
 
         return ImageAssetWriter().write_incremental_outputs(
-            settings=settings,
-            job=job,
+            request=request,
+            project_path=project_path,
             image_count=total,
             image_at_index=image_at_index,
             adapter_id=self.id,
@@ -732,7 +730,7 @@ class ZImageDiffusersAdapter:
         if request.negative_prompt:
             kwargs["negative_prompt"] = request.negative_prompt
         if request.mode == "edit_image":
-            kwargs["image"] = load_source_image(settings, request)
+            kwargs["image"] = load_source_image(project_path, request)
             kwargs["strength"] = float(request.advanced.get("strength", 0.6))
         step_callback = cancel_step_callback(pipe, cancel_requested)
         if step_callback is not None:
@@ -800,10 +798,11 @@ class QwenImageAdapter:
         *,
         settings: WorkerSettings,
         job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
-        request = image_request_from_job(job)
         model_target = MODEL_TARGETS.get(request.model, {})
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a Qwen Image target.")
@@ -864,8 +863,8 @@ class QwenImageAdapter:
             return image
 
         return ImageAssetWriter().write_incremental_outputs(
-            settings=settings,
-            job=job,
+            request=request,
+            project_path=project_path,
             image_count=request.count,
             image_at_index=image_at_index,
             adapter_id=self.id,
@@ -1012,7 +1011,7 @@ class QwenImageAdapter:
         if request.negative_prompt:
             kwargs["negative_prompt"] = request.negative_prompt
         if request.mode == "edit_image":
-            kwargs["image"] = load_source_image(settings, request)
+            kwargs["image"] = load_source_image(project_path, request)
             kwargs["strength"] = float(request.advanced.get("strength", 0.6))
             kwargs["true_cfg_scale"] = float(request.advanced.get("trueCfgScale", 4.0))
         step_callback = cancel_step_callback(pipe, cancel_requested)
@@ -1137,10 +1136,11 @@ class LensTurboAdapter:
         *,
         settings: WorkerSettings,
         job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
-        request = image_request_from_job(job)
         if request.mode == "edit_image":
             raise RuntimeError(f"{request.model} does not support image editing.")
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
@@ -1216,8 +1216,8 @@ class LensTurboAdapter:
                     return handle.convert("RGB")
 
             return ImageAssetWriter().write_incremental_outputs(
-                settings=settings,
-                job=job,
+                request=request,
+                project_path=project_path,
                 image_count=total,
                 image_at_index=image_at_index,
                 adapter_id=self.id,
@@ -1345,10 +1345,11 @@ class ProceduralImageAdapter:
         *,
         settings: WorkerSettings,
         job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
-        request = image_request_from_job(job)
         reject_loras_if_unsupported(request.loras, self.id)
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
         if request.mode == "edit_image" and not model_supports_edit(request.model):
@@ -1365,8 +1366,8 @@ class ProceduralImageAdapter:
             return render_preview_image(request, model_target, seed, index)
 
         return ImageAssetWriter().write_incremental_outputs(
-            settings=settings,
-            job=job,
+            request=request,
+            project_path=project_path,
             image_count=request.count,
             image_at_index=image_at_index,
             adapter_id=self.id,
@@ -1529,10 +1530,11 @@ class SenseNovaU1Adapter:
         *,
         settings: WorkerSettings,
         job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
-        request = image_request_from_job(job)
         reject_loras_if_unsupported(request.loras, self.id)
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["sensenova_u1_8b"])
         if model_target.get("adapter") != self.id:
@@ -1553,7 +1555,7 @@ class SenseNovaU1Adapter:
         timestep_shift = float(request.advanced.get("timestepShift", 3.0) or 3.0)
         img_guidance_scale = self._image_guidance_scale(request)
         width, height = sensenova_resolution_for(request.width, request.height)
-        source_image = load_source_image(settings, request) if is_edit else None
+        source_image = load_source_image(project_path, request) if is_edit else None
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=distill_lora, job_id=job["id"])
@@ -1610,8 +1612,8 @@ class SenseNovaU1Adapter:
             return image
 
         return ImageAssetWriter().write_incremental_outputs(
-            settings=settings,
-            job=job,
+            request=request,
+            project_path=project_path,
             image_count=request.count,
             image_at_index=image_at_index,
             adapter_id=self.id,
@@ -1951,6 +1953,8 @@ class SenseNovaU1Adapter:
         *,
         settings: WorkerSettings,
         job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
@@ -2000,7 +2004,7 @@ class SenseNovaU1Adapter:
         model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=None, job_id=job["id"])
         self._loaded_model = model_id
 
-        input_images = self._load_input_images(settings, project_id, source_asset_ids)
+        input_images = self._load_input_images(project_path, source_asset_ids)
 
         if cancel_requested():
             raise InterruptedError("Interleaved generation canceled by user.")
@@ -2032,7 +2036,8 @@ class SenseNovaU1Adapter:
         )
 
         return self._write_interleaved_document(
-            settings=settings,
+            project_path=project_path,
+            request=request,
             job=job,
             project_id=project_id,
             model_id=model_id,
@@ -2059,13 +2064,11 @@ class SenseNovaU1Adapter:
 
     def _load_input_images(
         self,
-        settings: WorkerSettings,
-        project_id: str,
+        project_path: Path,
         source_asset_ids: list[str],
     ) -> list[Image.Image]:
         if not source_asset_ids:
             return []
-        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
         images: list[Image.Image] = []
         for asset_id in source_asset_ids:
             path = find_asset_media_path(project_path, asset_id)
@@ -2142,7 +2145,8 @@ class SenseNovaU1Adapter:
     def _write_interleaved_document(
         self,
         *,
-        settings: WorkerSettings,
+        project_path: Path,
+        request: ImageRequest,
         job: dict[str, Any],
         project_id: str,
         model_id: str,
@@ -2154,15 +2158,14 @@ class SenseNovaU1Adapter:
         progress: ProgressCallback,
         raw_settings: dict[str, Any],
     ) -> dict[str, Any]:
-        project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", project_id)
         (project_path / "assets" / "documents").mkdir(parents=True, exist_ok=True)
 
         # Generated images persist as ordinary image assets — the worker saves the
         # PNG bytes + reports facts, and the Rust API builds + indexes their
         # sidecars (story 1656). The document references them in order.
         image_result = ImageAssetWriter().write_outputs(
-            settings=settings,
-            job=job,
+            request=request,
+            project_path=project_path,
             images=images,
             adapter_id=self.id,
             progress=lambda *_args, **_kwargs: None,
@@ -2431,13 +2434,12 @@ def select_torch_dtype(torch: Any, device: str, requested: Any) -> Any:
     return torch.bfloat16
 
 
-def load_source_image(settings: WorkerSettings, request: ImageRequest) -> Image.Image:
+def load_source_image(project_path: Path, request: ImageRequest) -> Image.Image:
     # Resolve only through the project sidecar/DB (find_asset_media_path constrains the
     # result to the project root). No client-supplied path escape hatch: an arbitrary
     # sourceImagePath would let an edit job read any file the worker can open.
     if not request.source_asset_id:
         raise RuntimeError("Image edit jobs require a source image asset.")
-    project_path = shared_find_project_path(settings.data_dir / "recent-projects.json", request.project_id)
     source_path = find_asset_media_path(project_path, request.source_asset_id)
     try:
         image = Image.open(source_path).convert("RGB")

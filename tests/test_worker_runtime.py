@@ -911,7 +911,10 @@ def test_lens_turbo_rejects_image_edit(tmp_path):
     }
     noop = lambda *args, **kwargs: None  # noqa: E731
     try:
-        LensTurboAdapter().generate(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+        LensTurboAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
     except RuntimeError as exc:
         assert "does not support image editing" in str(exc)
     else:
@@ -934,7 +937,10 @@ def test_lens_turbo_requires_sidecar_when_missing(monkeypatch):
     }
     noop = lambda *args, **kwargs: None  # noqa: E731
     try:
-        LensTurboAdapter().generate(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+        LensTurboAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
     except RuntimeError as exc:
         assert "sidecar" in str(exc).lower()
     else:
@@ -1022,7 +1028,10 @@ def test_generate_interleaved_requires_prompt():
     job = {"id": "job_il", "payload": {"projectId": "p", "prompt": "   "}}
     noop = lambda *args, **kwargs: None  # noqa: E731
     with pytest.raises(RuntimeError, match="requires a prompt"):
-        adapter.generate_interleaved(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+        adapter.generate_interleaved(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
 
 
 def test_generate_interleaved_rejects_non_sensenova_model():
@@ -1030,7 +1039,10 @@ def test_generate_interleaved_rejects_non_sensenova_model():
     job = {"id": "job_il", "payload": {"projectId": "p", "prompt": "guide", "model": "z_image_turbo"}}
     noop = lambda *args, **kwargs: None  # noqa: E731
     with pytest.raises(RuntimeError, match="not a SenseNova-U1 target"):
-        adapter.generate_interleaved(settings=None, job=job, progress=noop, cancel_requested=lambda: False)
+        adapter.generate_interleaved(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
 
 
 def test_interleave_segments_interleave_text_and_images():
@@ -1087,7 +1099,8 @@ def test_write_interleaved_document_persists_document_and_image_assets(tmp_path)
             progress_results.append(result)
 
     result = SenseNovaU1Adapter()._write_interleaved_document(
-        settings=SimpleNamespace(data_dir=data_dir),
+        project_path=project_path,
+        request=image_request_from_job(job),
         job=job,
         project_id="project-1",
         model_id="sensenova_u1_8b",
@@ -1258,8 +1271,8 @@ def test_image_asset_writer_reports_partial_result_assets(tmp_path):
         )
 
     result = ImageAssetWriter().write_outputs(
-        settings=SimpleNamespace(data_dir=data_dir),
-        job=job,
+        request=image_request_from_job(job),
+        project_path=project_path,
         images=[
             Image.new("RGB", (16, 16), (255, 0, 0)),
             Image.new("RGB", (16, 16), (0, 255, 0)),
@@ -1316,8 +1329,8 @@ def test_image_asset_writer_persists_each_image_before_requesting_next(tmp_path)
         return Image.new("RGB", (16, 16), (255, 0, 0) if index == 0 else (0, 255, 0))
 
     result = ImageAssetWriter().write_incremental_outputs(
-        settings=SimpleNamespace(data_dir=data_dir),
-        job=job,
+        request=image_request_from_job(job),
+        project_path=project_path,
         image_count=2,
         image_at_index=image_at_index,
         adapter_id="z_image_diffusers",
@@ -1357,8 +1370,8 @@ def test_image_asset_writer_does_not_clobber_identical_jobs(tmp_path):
 
     def run(color):
         return ImageAssetWriter().write_incremental_outputs(
-            settings=SimpleNamespace(data_dir=data_dir),
-            job=job,
+            request=image_request_from_job(job),
+            project_path=project_path,
             image_count=1,
             image_at_index=lambda _index: Image.new("RGB", (16, 16), color),
             adapter_id="sensenova_u1",
@@ -1416,8 +1429,8 @@ def test_image_asset_writer_records_actual_output_dimensions(tmp_path):
     }
 
     result = ImageAssetWriter().write_incremental_outputs(
-        settings=SimpleNamespace(data_dir=data_dir),
-        job=job,
+        request=image_request_from_job(job),
+        project_path=project_path,
         image_count=1,
         image_at_index=lambda _index: Image.new("RGB", (2720, 1536), "navy"),
         adapter_id="sensenova_u1",
@@ -1461,8 +1474,8 @@ def test_image_asset_writer_batch_progress_is_monotonic(tmp_path):
         return Image.new("RGB", (16, 16), (255, 0, 0))
 
     ImageAssetWriter().write_incremental_outputs(
-        settings=SimpleNamespace(data_dir=data_dir),
-        job=job,
+        request=image_request_from_job(job),
+        project_path=project_path,
         image_count=4,
         image_at_index=image_at_index,
         adapter_id="z_image_diffusers",
@@ -5091,6 +5104,8 @@ def test_z_image_adapter_emits_phase_diagnostics_and_running_message(tmp_path, m
     adapter.generate(
         settings=SimpleNamespace(data_dir=data_dir, gpu_id="0"),
         job=job,
+        request=image_request_from_job(job),
+        project_path=project_path,
         progress=progress,
         cancel_requested=lambda: False,
     )
@@ -5202,6 +5217,8 @@ def test_z_image_adapter_fails_fast_when_pipeline_stays_on_cpu_with_offload_fall
         adapter.generate(
             settings=SimpleNamespace(data_dir=data_dir, gpu_id="0"),
             job=job,
+            request=image_request_from_job(job),
+            project_path=project_path,
             progress=lambda *_args, **_kwargs: None,
             cancel_requested=lambda: False,
         )
