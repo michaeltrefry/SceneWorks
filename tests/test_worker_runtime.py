@@ -105,7 +105,9 @@ from scene_worker.video_adapters import (
     LtxPipelinesVideoAdapter,
     MlxVideoAdapter,
     VIDEO_MODEL_TARGETS,
+    VendorPatchDriftError,
     _PENDING_LTX_LORAS,
+    _require_patch_target,
     character_reference_images,
     create_video_adapter,
     evenly_spaced_indices,
@@ -3502,6 +3504,39 @@ def test_ltx_pipelines_multigpu_compat_installs_missing_type_module(monkeypatch)
     module = importlib.import_module("ltx_pipelines.multigpu.delegating_builder")
     with pytest.raises(RuntimeError, match="optional multigpu DelegatingBuilder"):
         module.DelegatingBuilder()
+
+
+def test_require_patch_target_returns_existing_symbol():
+    owner = SimpleNamespace(load_weights=lambda self: None)
+    target = _require_patch_target(
+        owner, "load_weights", pin="some-dep==1.0", patch="example patch"
+    )
+    assert target is owner.load_weights
+
+
+def test_require_patch_target_raises_naming_pin_on_missing_symbol():
+    owner = SimpleNamespace()
+    with pytest.raises(VendorPatchDriftError) as excinfo:
+        _require_patch_target(
+            owner, "load_weights", pin="mlx-video-with-audio>=0.1.36,<0.2", patch="LTX LoRA wrap (sc-1647)"
+        )
+    message = str(excinfo.value)
+    assert "load_weights" in message
+    assert "mlx-video-with-audio>=0.1.36,<0.2" in message
+    assert "LTX LoRA wrap (sc-1647)" in message
+
+
+def test_require_patch_target_raises_when_required_callable_is_not_callable():
+    owner = SimpleNamespace(load_weights="not-callable")
+    with pytest.raises(VendorPatchDriftError, match="no longer callable"):
+        _require_patch_target(
+            owner, "load_weights", pin="some-dep==1.0", patch="example patch", require_callable=True
+        )
+
+
+def test_require_patch_target_allows_non_callable_when_not_required():
+    owner = SimpleNamespace(some_attr=123)
+    assert _require_patch_target(owner, "some_attr", pin="some-dep==1.0", patch="example patch") == 123
 
 
 class _FakeQuantizationPolicy:

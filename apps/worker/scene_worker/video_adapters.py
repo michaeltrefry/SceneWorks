@@ -90,6 +90,53 @@ def ltx_mps_gating(*, cuda_available: bool, device_str: str) -> dict[str, Any]:
     }
 
 
+class VendorPatchDriftError(RuntimeError):
+    """A pinned-dependency runtime monkeypatch's target symbol drifted away.
+
+    The off-CUDA LTX/MLX patches below reassign or wrap symbols owned by
+    commit-/version-pinned third-party packages (ltx-core / ltx-pipelines and
+    mlx-video-with-audio — see ``requirements-ltx.txt`` / ``requirements-mlx.txt``).
+    Those patches target method/symbol names that only hold at the pinned versions,
+    so a dependency bump can move or rename a target out from under us. We raise this
+    loudly at the patch site rather than letting a bare ``AttributeError`` or a silent
+    no-op mask the drift, pointing the operator at the pin to re-validate (sc-1647).
+    """
+
+
+_PATCH_TARGET_MISSING = object()
+
+
+def _require_patch_target(
+    owner: Any,
+    attr: str,
+    *,
+    pin: str,
+    patch: str,
+    require_callable: bool = False,
+) -> Any:
+    """Return ``owner.attr`` or raise :class:`VendorPatchDriftError` naming the pin.
+
+    Pure helper used by the LTX/MLX runtime monkeypatches so a pinned dependency
+    drifting out from under a patched symbol fails loudly and actionably instead of
+    silently (sc-1647). ``owner`` is the module/class that should expose ``attr``;
+    ``pin`` and ``patch`` are surfaced verbatim in the error so the message points at
+    the requirement to re-validate.
+    """
+    target = getattr(owner, attr, _PATCH_TARGET_MISSING)
+    owner_name = getattr(owner, "__name__", type(owner).__name__)
+    if target is _PATCH_TARGET_MISSING:
+        raise VendorPatchDriftError(
+            f"{patch}: expected symbol '{attr}' on '{owner_name}' is missing. "
+            f"The pinned dependency ({pin}) likely drifted — re-validate this patch against the installed version."
+        )
+    if require_callable and not callable(target):
+        raise VendorPatchDriftError(
+            f"{patch}: symbol '{owner_name}.{attr}' is no longer callable. "
+            f"The pinned dependency ({pin}) likely drifted — re-validate this patch against the installed version."
+        )
+    return target
+
+
 _CUDA_SYNC_NEUTRALIZED = False
 
 
@@ -102,20 +149,29 @@ def _neutralize_cuda_sync_for_mps() -> None:
     and aborts the run. ``empty_cache()`` is already a safe no-op there but we
     neutralize both for symmetry. Guarded on ``not is_available()`` so it can never
     mask a real CUDA sync, and idempotent so repeated pipeline loads are cheap.
+
+    Drift guard (sc-1647): required by the pinned native LTX path
+    (``requirements-ltx.txt``); targets the stable ``torch.cuda`` surface. We assert
+    both symbols exist before reassigning so a torch bump that removes them fails
+    loudly instead of leaving the unguarded sync silently in place. ``torch`` being
+    unimportable (e.g. light-dep unit tests) stays a no-op.
     """
     global _CUDA_SYNC_NEUTRALIZED
     if _CUDA_SYNC_NEUTRALIZED:
         return
     try:
         import torch
-
-        if torch.cuda.is_available():
-            return
-        torch.cuda.synchronize = lambda *_args, **_kwargs: None  # type: ignore[assignment]
-        torch.cuda.empty_cache = lambda *_args, **_kwargs: None  # type: ignore[assignment]
-        _CUDA_SYNC_NEUTRALIZED = True
     except Exception:
         return
+    if torch.cuda.is_available():
+        return
+    pin = "torch (requirements.txt: torch>=2.8,<2.9)"
+    patch = "off-CUDA cuda-sync neutralize (sc-1647)"
+    _require_patch_target(torch.cuda, "synchronize", pin=pin, patch=patch, require_callable=True)
+    _require_patch_target(torch.cuda, "empty_cache", pin=pin, patch=patch, require_callable=True)
+    torch.cuda.synchronize = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+    torch.cuda.empty_cache = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+    _CUDA_SYNC_NEUTRALIZED = True
 
 
 class _Fp32AudioDecoder:
@@ -288,6 +344,19 @@ class LtxReplacementControl:
 
 
 def install_ltx_pipelines_multigpu_compat() -> None:
+    """Inject a stub ``ltx_pipelines.multigpu.delegating_builder`` so the import resolves.
+
+    The pinned ltx-pipelines (commit ``1799988…`` in ``requirements-ltx.txt``)
+    references an optional ``DelegatingBuilder`` from a ``multigpu`` submodule it does
+    not actually ship; importing the package without it raises ``ModuleNotFoundError``.
+    We register a synthetic module whose ``DelegatingBuilder`` raises only if
+    instantiated (the single-GPU/MPS path never does).
+
+    Drift guard (sc-1647): unlike the other patches there is no upstream symbol to
+    assert — this provides a *fallback*, not a wrapper. The early ``in sys.modules``
+    return and ``setdefault`` mean a future ltx-pipelines bump that ships a real
+    ``multigpu`` module transparently wins. Re-validate against the pin on bump.
+    """
     if "ltx_pipelines.multigpu.delegating_builder" in sys.modules:
         return
 
@@ -1531,14 +1600,27 @@ _ltx_lora_patch_installed = False
 def _install_ltx_lora_patch() -> None:
     """Idempotently wrap LTXModel.load_weights to apply the LoRAs in _PENDING_LTX_LORAS
     after each load. Targets only LTXModel (the text encoder, VAEs, and vocoder are
-    distinct classes), and fires after nn.quantize so the LoRA'd layers are quantized."""
+    distinct classes), and fires after nn.quantize so the LoRA'd layers are quantized.
+
+    Drift guard (sc-1647): targets symbols pinned to mlx-video-with-audio>=0.1.36,<0.2
+    (``requirements-mlx.txt``). The two imports below fail loudly (ImportError) if the
+    package moves ``apply_loras_to_model`` or ``LTXModel``; we additionally assert
+    ``LTXModel.load_weights`` exists and is callable so a rename surfaces as an
+    actionable VendorPatchDriftError instead of a bare AttributeError. Re-validate on
+    any mlx-video-with-audio bump."""
     global _ltx_lora_patch_installed
     if _ltx_lora_patch_installed:
         return
     from mlx_video.lora import apply_loras_to_model
     from mlx_video.models.ltx.ltx import LTXModel
 
-    original_load_weights = LTXModel.load_weights
+    original_load_weights = _require_patch_target(
+        LTXModel,
+        "load_weights",
+        pin="mlx-video-with-audio>=0.1.36,<0.2 (requirements-mlx.txt)",
+        patch="LTX LoRA load_weights wrap (sc-1647)",
+        require_callable=True,
+    )
     if getattr(original_load_weights, "_sw_lora_wrapped", False):  # guard against double-wrap
         _ltx_lora_patch_installed = True
         return

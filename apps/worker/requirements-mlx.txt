@@ -17,3 +17,12 @@
 mlx-video-with-audio>=0.1.36,<0.2
 mlx>=0.31,<1
 mlx-vlm>=0.3.6,<0.3.10
+#
+# Runtime monkeypatch keyed to the mlx-video-with-audio pin above (sc-1647), in
+# apps/worker/scene_worker/video_adapters.py — re-validate it when bumping the pin:
+#   - _install_ltx_lora_patch(): wraps mlx_video.models.ltx.ltx.LTXModel.load_weights
+#     to merge user LoRAs after the quantized weights load (the turnkey
+#     generate_video_with_audio API exposes no loras kwarg). The from-imports fail
+#     loudly (ImportError) if apply_loras_to_model / LTXModel move; the patch also
+#     asserts LTXModel.load_weights exists and is callable (VendorPatchDriftError on
+#     a rename instead of a bare AttributeError).

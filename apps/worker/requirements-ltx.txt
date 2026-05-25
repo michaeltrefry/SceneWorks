@@ -8,3 +8,14 @@
 torchaudio>=2.8,<2.9
 ltx-core @ git+https://github.com/Lightricks/LTX-2.git@1799988521d5e9725a4fbd4533d0cc12f07c07ed#subdirectory=packages/ltx-core
 ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@1799988521d5e9725a4fbd4533d0cc12f07c07ed#subdirectory=packages/ltx-pipelines
+#
+# Runtime monkeypatches keyed to the commit pin above (sc-1647), in
+# apps/worker/scene_worker/video_adapters.py — re-validate them when bumping it:
+#   - install_ltx_pipelines_multigpu_compat(): stubs the optional
+#     ltx_pipelines.multigpu.delegating_builder.DelegatingBuilder this commit imports
+#     but does not ship. Self-healing: defers to a real multigpu module if a future
+#     bump ships one (sys.modules early-return + setdefault).
+#   - _neutralize_cuda_sync_for_mps(): no-ops torch.cuda.synchronize/empty_cache off
+#     CUDA because ltx-core's cleanup_memory()/gpu_model call them unguarded. Asserts
+#     the torch.cuda symbols exist before reassigning (raises VendorPatchDriftError on
+#     torch drift instead of silently leaving the unguarded sync in place).
