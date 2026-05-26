@@ -23,6 +23,7 @@ from scene_worker.caption_adapters import (
     normalize_processor_resample,
 )
 from scene_worker.image_adapters import (
+    FluxDiffusersAdapter,
     ImageAssetWriter,
     LensTurboAdapter,
     MODEL_TARGETS,
@@ -969,6 +970,146 @@ def test_lens_resolution_for_snaps_to_buckets():
     assert lens_resolution_for(720, 1280) == (1024, "9:16")
     assert lens_resolution_for(1152, 864) == (1024, "4:3")
     assert lens_resolution_for(864, 1152) == (1024, "3:4")
+
+
+def test_create_image_adapter_routes_flux_schnell_and_dev():
+    schnell = create_image_adapter({"payload": {"model": "flux_schnell"}})
+    assert schnell.__class__.__name__ == "FluxDiffusersAdapter"
+    assert schnell.id == "flux_diffusers"
+    dev = create_image_adapter({"payload": {"model": "flux_dev"}})
+    assert dev.__class__.__name__ == "FluxDiffusersAdapter"
+
+
+def test_image_adapter_env_override_selects_flux(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "flux_diffusers")
+    # Env override wins even when the payload names a different family's model.
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "FluxDiffusersAdapter"
+
+
+def test_flux_model_target_defaults():
+    schnell = MODEL_TARGETS["flux_schnell"]
+    assert schnell["adapter"] == "flux_diffusers"
+    assert schnell["family"] == "flux"
+    assert schnell["supportsEdit"] is False
+    # Guidance-distilled: 4 steps, guidance 0, T5 max_seq_len 256.
+    assert schnell["steps"] == 4
+    assert schnell["guidanceScale"] == 0.0
+    assert schnell["maxSequenceLength"] == 256
+    assert schnell["repo"] == "black-forest-labs/FLUX.1-schnell"
+
+    dev = MODEL_TARGETS["flux_dev"]
+    assert dev["adapter"] == "flux_diffusers"
+    assert dev["family"] == "flux"
+    assert dev["supportsEdit"] is False
+    # Guided: 28 steps, guidance 3.5, T5 max_seq_len 512.
+    assert dev["steps"] == 28
+    assert dev["guidanceScale"] == 3.5
+    assert dev["maxSequenceLength"] == 512
+    assert dev["repo"] == "black-forest-labs/FLUX.1-dev"
+
+
+def test_flux_guidance_scale_uses_per_model_default_and_override():
+    adapter = FluxDiffusersAdapter()
+    schnell = MODEL_TARGETS["flux_schnell"]
+    dev = MODEL_TARGETS["flux_dev"]
+    # Per-model default applies when the request does not override guidance.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={}), schnell) == 0.0
+    assert adapter._guidance_scale(SimpleNamespace(advanced={}), dev) == 3.5
+    # An explicit request value wins.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": 2.0}), dev) == 2.0
+    # Unparseable override falls back to the per-model default.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": "x"}), dev) == 3.5
+
+
+def test_flux_num_inference_steps_default_and_override():
+    adapter = FluxDiffusersAdapter()
+    schnell = MODEL_TARGETS["flux_schnell"]
+    dev = MODEL_TARGETS["flux_dev"]
+    # Defaults come straight from the model target (no Z-Image +1 quirk).
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), schnell) == 4
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), dev) == 28
+    # Explicit override is honored and clamped to [1, 80].
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 12}), schnell) == 12
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 999}), dev) == 80
+
+
+def test_flux_max_sequence_length_default_and_override():
+    adapter = FluxDiffusersAdapter()
+    schnell = MODEL_TARGETS["flux_schnell"]
+    dev = MODEL_TARGETS["flux_dev"]
+    assert adapter._max_sequence_length(SimpleNamespace(advanced={}), schnell) == 256
+    assert adapter._max_sequence_length(SimpleNamespace(advanced={}), dev) == 512
+    # Override honored, clamped to the T5 max of 512.
+    assert adapter._max_sequence_length(SimpleNamespace(advanced={"maxSequenceLength": 128}), dev) == 128
+    assert adapter._max_sequence_length(SimpleNamespace(advanced={"maxSequenceLength": 4096}), dev) == 512
+
+
+def test_flux_rejects_image_edit():
+    job = {
+        "id": "job_flux_edit",
+        "payload": {
+            "projectId": "project_x",
+            "mode": "edit_image",
+            "model": "flux_dev",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        FluxDiffusersAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "does not support image editing" in str(exc)
+    else:
+        raise AssertionError("FLUX.1 is text-to-image only and must reject edit_image.")
+
+
+def test_flux_adapter_applies_flux_lora(tmp_path):
+    lora = tmp_path / "flux_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = FluxDiffusersAdapter()
+    request = SimpleNamespace(
+        model="flux_schnell",
+        loras=[
+            {
+                "id": "flux_style",
+                "installedPath": str(lora),
+                "weight": 0.7,
+                "compatibility": {"families": ["flux"]},
+            }
+        ],
+    )
+    adapter._apply_loras(pipe, request)
+    state = adapter._loaded_lora_states["text"]
+    assert [path for path, _name in pipe.loaded] == [str(lora)]
+    assert pipe.set_calls == [(list(state.adapter_names), [0.7])]
+
+
+def test_flux_adapter_rejects_incompatible_lora_family(tmp_path):
+    lora = tmp_path / "qwen_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = FluxDiffusersAdapter()
+    request = SimpleNamespace(
+        model="flux_dev",
+        loras=[
+            {
+                "id": "qwen_style",
+                "installedPath": str(lora),
+                "compatibility": {"families": ["qwen-image"]},
+            }
+        ],
+    )
+    try:
+        adapter._apply_loras(pipe, request)
+    except RuntimeError as exc:
+        assert "not compatible with model family flux" in str(exc)
+    else:
+        raise AssertionError("FLUX.1 must reject a LoRA whose family is not flux.")
 
 
 def test_create_image_adapter_routes_sensenova_u1():

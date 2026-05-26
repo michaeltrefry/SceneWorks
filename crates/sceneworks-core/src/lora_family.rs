@@ -355,6 +355,24 @@ const SIGNATURES: &[BucketSignature] = &[
         ],
     },
     BucketSignature {
+        bucket: Bucket::Flux,
+        // XLabs / x-flux Flux LoRAs adapt only the double-stream blocks through an
+        // attention-processor layout (`double_blocks.<n>.processor.{qkv,proj}_lora{1,2}`)
+        // and ship no single-stream keys, so the primary Flux signature (which
+        // requires a single-block marker) misses them. `double_blocks.` is unique to
+        // Flux among the architectures we detect; pairing it with the x-flux
+        // processor/lora naming keeps this tight. Disqualified whenever single-block
+        // keys are present so it never co-scores with the primary Flux signature
+        // (two same-bucket scores could otherwise trip the runner-up margin and
+        // return ambiguous).
+        require_all_of: &[
+            &["double_blocks."],
+            &["qkv_lora", "proj_lora", "processor."],
+        ],
+        disqualifiers: &["single_transformer_blocks.", "single_blocks_"],
+        markers: &["double_blocks.", "processor.", "qkv_lora", "proj_lora"],
+    },
+    BucketSignature {
         bucket: Bucket::WanVideo,
         // Wan transformers expose their blocks under `transformer.blocks.<n>.`
         // (not `transformer.transformer_blocks.`) and use `self_attn`/`cross_attn`/`ffn`
@@ -742,6 +760,31 @@ mod tests {
         });
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("flux"));
+    }
+
+    #[test]
+    fn detects_xflux_double_blocks_only() {
+        // XLabs / x-flux realism-style LoRAs adapt only the double-stream blocks
+        // (no single blocks, no metadata) via the attention-processor layout.
+        let mut keys = Vec::new();
+        for block in 0..19 {
+            for module in ["qkv_lora1", "qkv_lora2", "proj_lora1", "proj_lora2"] {
+                keys.push(format!("double_blocks.{block}.processor.{module}.down.weight"));
+                keys.push(format!("double_blocks.{block}.processor.{module}.up.weight"));
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("flux"));
+    }
+
+    #[test]
+    fn flux_family_maps_to_flux_diffusers_adapter_and_image_capabilities() {
+        assert_eq!(model_adapter_for_family("flux"), Some("flux_diffusers"));
+        assert_eq!(
+            model_capabilities_for_type_and_family("image", "flux"),
+            vec!["text_to_image", "style_variations"],
+        );
     }
 
     #[test]

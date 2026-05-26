@@ -428,9 +428,8 @@
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
-        // Flipped to ["flux"] in sc-1784 once generation-side LoRA lands.
-        "families": [],
-        "types": []
+        "families": ["flux"],
+        "types": ["style", "enhance", "character"]
       },
       "ui": {
         "label": "FLUX.1 [schnell]",
@@ -477,9 +476,8 @@
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
-        // Flipped to ["flux"] in sc-1784 once generation-side LoRA lands.
-        "families": [],
-        "types": []
+        "families": ["flux"],
+        "types": ["style", "enhance", "character"]
       },
       "ui": {
         "label": "FLUX.1 [dev]",
