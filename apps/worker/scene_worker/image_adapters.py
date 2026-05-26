@@ -318,6 +318,18 @@ class ImageRequest:
     upscale: UpscaleRequest = field(default_factory=UpscaleRequest)
 
 
+class ImageUpscaler(Protocol):
+    id: str
+
+    def upscale(
+        self,
+        image: Image.Image,
+        *,
+        request: ImageRequest,
+        cancel_requested: CancelCallback,
+    ) -> Image.Image: ...
+
+
 def upscale_request_from_payload(payload: dict[str, Any]) -> UpscaleRequest:
     raw = payload.get("upscale")
     if not isinstance(raw, dict):
@@ -367,6 +379,8 @@ class ImageAssetWriter:
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
         raw_settings: dict[str, Any],
+        settings: WorkerSettings | None = None,
+        job_id: str | None = None,
     ) -> dict[str, Any]:
         return self.write_incremental_outputs(
             request=request,
@@ -377,6 +391,8 @@ class ImageAssetWriter:
             progress=progress,
             cancel_requested=cancel_requested,
             raw_settings=raw_settings,
+            settings=settings,
+            job_id=job_id,
         )
 
     def write_incremental_outputs(
@@ -390,6 +406,8 @@ class ImageAssetWriter:
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
         raw_settings: dict[str, Any],
+        settings: WorkerSettings | None = None,
+        job_id: str | None = None,
     ) -> dict[str, Any]:
         created_at = utc_now()
         generation_set_id = f"genset_{uuid4().hex}"
@@ -420,6 +438,7 @@ class ImageAssetWriter:
             "createdAt": created_at,
         }
         asset_writes: list[dict[str, Any]] = []
+        upscaler = create_image_upscaler(request, settings=settings, job_id=job_id)
 
         for index in range(image_count):
             if cancel_requested():
@@ -428,6 +447,31 @@ class ImageAssetWriter:
             image = image_at_index(index)
             if cancel_requested():
                 raise InterruptedError("Image generation canceled by user.")
+            source_width = image.width
+            source_height = image.height
+            upscale_settings: dict[str, Any] | None = None
+            if upscaler is not None:
+                progress(
+                    "running",
+                    "upscaling",
+                    image_batch_progress(index, image_count),
+                    f"Upscaling image {index + 1} of {image_count}.",
+                )
+                image = upscaler.upscale(image, request=request, cancel_requested=cancel_requested)
+                if cancel_requested():
+                    raise InterruptedError("Image generation canceled by user.")
+                upscale_settings = {
+                    "enabled": True,
+                    "engine": upscaler.id,
+                    "factor": request.upscale.factor,
+                    "sourceWidth": source_width,
+                    "sourceHeight": source_height,
+                    "width": image.width,
+                    "height": image.height,
+                }
+            asset_raw_settings = dict(raw_settings)
+            if upscale_settings is not None:
+                asset_raw_settings["upscale"] = upscale_settings
 
             asset_id = f"asset_{uuid4().hex}"
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
@@ -463,7 +507,7 @@ class ImageAssetWriter:
                     "characterId": request.character_id,
                     "characterLookId": request.character_look_id,
                     "sourceAssetId": request.source_asset_id,
-                    "rawAdapterSettings": raw_settings,
+                    "rawAdapterSettings": asset_raw_settings,
                 }
             )
             progress(
@@ -489,6 +533,162 @@ class ImageAssetWriter:
             "generationSet": generation_set,
             "assetWrites": asset_writes,
         }
+
+
+REAL_ESRGAN_MODEL_SPECS: dict[int, dict[str, Any]] = {
+    2: {
+        "name": "RealESRGAN_x2plus",
+        "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+        "scale": 2,
+        "num_block": 23,
+    },
+    4: {
+        "name": "RealESRGAN_x4plus",
+        "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        "scale": 4,
+        "num_block": 23,
+    },
+}
+
+
+def create_image_upscaler(
+    request: ImageRequest,
+    *,
+    settings: WorkerSettings | None = None,
+    job_id: str | None = None,
+) -> ImageUpscaler | None:
+    if not request.upscale.enabled:
+        return None
+    engine = request.upscale.engine.strip().lower()
+    if engine in {"real-esrgan", "realesrgan", "real_esrgan"}:
+        return RealEsrganUpscaler(settings=settings, job_id=job_id)
+    raise RuntimeError(f"Unsupported image upscale engine: {request.upscale.engine}.")
+
+
+class RealEsrganUpscaler:
+    id = "real-esrgan"
+
+    def __init__(self, *, settings: WorkerSettings | None = None, job_id: str | None = None) -> None:
+        self._settings = settings
+        self._job_id = job_id
+        self._upsamplers: dict[int, Any] = {}
+
+    def upscale(
+        self,
+        image: Image.Image,
+        *,
+        request: ImageRequest,
+        cancel_requested: CancelCallback,
+    ) -> Image.Image:
+        if cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+        upsampler = self._load_upsampler(request)
+        numpy = importlib.import_module("numpy")
+        bgr = numpy.array(image.convert("RGB"))[:, :, ::-1]
+        output, _mode = upsampler.enhance(bgr, outscale=request.upscale.factor)
+        if cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+        rgb = output[:, :, ::-1]
+        return Image.fromarray(rgb).convert("RGB")
+
+    def _load_upsampler(self, request: ImageRequest) -> Any:
+        factor = request.upscale.factor
+        cached = self._upsamplers.get(factor)
+        if cached is not None:
+            return cached
+        spec = REAL_ESRGAN_MODEL_SPECS.get(factor)
+        if spec is None:
+            raise RuntimeError("Real-ESRGAN upscale factor must be 2 or 4.")
+        try:
+            ensure_realesrgan_torchvision_compat()
+            arch = importlib.import_module("basicsr.archs.rrdbnet_arch")
+            realesrgan = importlib.import_module("realesrgan")
+            torch = importlib.import_module("torch")
+        except Exception as exc:  # noqa: BLE001 - convert optional dependency failures.
+            raise RuntimeError(
+                "Real-ESRGAN upscaling requires the optional worker packages "
+                "`realesrgan` and `basicsr` to be installed."
+            ) from exc
+        device = select_torch_device(torch, self._settings.gpu_id if self._settings else None)
+        model = arch.RRDBNet(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_block=spec["num_block"],
+            num_grow_ch=32,
+            scale=spec["scale"],
+        )
+        model_path = self._resolve_model_path(request, spec)
+        half = bool(device.startswith("cuda") and not request.advanced.get("upscaleFullPrecision", False))
+        emit_worker_event(
+            "image_upscaler_load_start",
+            jobId=self._job_id,
+            engine=self.id,
+            factor=factor,
+            model=spec["name"],
+            modelPath=str(model_path),
+            device=device,
+            half=half,
+        )
+        upsampler = realesrgan.RealESRGANer(
+            scale=spec["scale"],
+            model_path=str(model_path),
+            model=model,
+            tile=safe_int(request.advanced.get("upscaleTile"), 0, 0, 2048),
+            tile_pad=safe_int(request.advanced.get("upscaleTilePad"), 10, 0, 256),
+            pre_pad=safe_int(request.advanced.get("upscalePrePad"), 0, 0, 256),
+            half=half,
+            device=device,
+        )
+        self._upsamplers[factor] = upsampler
+        emit_worker_event(
+            "image_upscaler_load_complete",
+            jobId=self._job_id,
+            engine=self.id,
+            factor=factor,
+            model=spec["name"],
+            device=device,
+        )
+        return upsampler
+
+    def _resolve_model_path(self, request: ImageRequest, spec: dict[str, Any]) -> Path:
+        explicit = (
+            request.advanced.get("upscaleModelPath")
+            or request.advanced.get("realEsrganModelPath")
+            or os.getenv(f"SCENEWORKS_REALESRGAN_X{request.upscale.factor}_MODEL_PATH")
+            or os.getenv("SCENEWORKS_REALESRGAN_MODEL_PATH")
+        )
+        if explicit:
+            path = Path(str(explicit)).expanduser()
+            if not path.is_file():
+                raise RuntimeError(f"Real-ESRGAN model file does not exist: {path}")
+            return path
+        download_util = importlib.import_module("basicsr.utils.download_util")
+        cache_root = Path(
+            os.getenv("SCENEWORKS_UPSCALER_CACHE_DIR")
+            or os.getenv("SCENEWORKS_CACHE_DIR", "")
+            or Path.home() / ".cache" / "sceneworks"
+        )
+        model_dir = cache_root / "upscalers" / "real-esrgan"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        return Path(
+            download_util.load_file_from_url(
+                url=spec["url"],
+                model_dir=str(model_dir),
+                progress=True,
+                file_name=f"{spec['name']}.pth",
+            )
+        )
+
+
+def ensure_realesrgan_torchvision_compat() -> None:
+    if "torchvision.transforms.functional_tensor" in sys.modules:
+        return
+    try:
+        functional = importlib.import_module("torchvision.transforms.functional")
+    except Exception:
+        return
+    sys.modules.setdefault("torchvision.transforms.functional_tensor", functional)
 
 
 class ZImageDiffusersAdapter:
@@ -598,6 +798,8 @@ class ZImageDiffusersAdapter:
                 "guidanceScale": self._guidance_scale(request),
                 "realModelInference": True,
             },
+            settings=settings,
+            job_id=job["id"],
         )
 
     def _load_pipeline(
@@ -898,6 +1100,8 @@ class QwenImageAdapter:
                 "guidanceScale": self._guidance_scale(request),
                 "realModelInference": True,
             },
+            settings=settings,
+            job_id=job["id"],
         )
 
     def _load_pipeline(
@@ -1273,6 +1477,8 @@ class LensTurboAdapter:
                     "sidecarVenv": self._lens_python(),
                     "realModelInference": True,
                 },
+                settings=settings,
+                job_id=job["id"],
             )
         finally:
             # The writer has read every PNG into the project by now; drop the
@@ -1418,6 +1624,8 @@ class ProceduralImageAdapter:
                 "targetSteps": model_target["steps"],
                 "previewRenderer": True,
             },
+            settings=settings,
+            job_id=job["id"],
         )
 
 
@@ -1669,6 +1877,8 @@ class SenseNovaU1Adapter:
                 "resolution": f"{width}x{height}",
                 "realModelInference": True,
             },
+            settings=settings,
+            job_id=job["id"],
         )
 
     def _load_model(
@@ -2211,6 +2421,7 @@ class SenseNovaU1Adapter:
             progress=lambda *_args, **_kwargs: None,
             cancel_requested=cancel_requested,
             raw_settings={**raw_settings, "interleaved": True},
+            job_id=job["id"],
         )
         image_writes = image_result.get("assetWrites", [])
         generation_set_id = image_result.get("generationSetId")

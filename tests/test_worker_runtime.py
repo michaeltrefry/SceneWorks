@@ -29,6 +29,7 @@ from scene_worker.image_adapters import (
     QwenImageAdapter,
     ZImageDiffusersAdapter,
     create_image_adapter,
+    create_image_upscaler,
     emit_worker_event,
     format_batch_running_message,
     gpu_memory_snapshot,
@@ -1194,6 +1195,73 @@ def test_image_request_parses_optional_upscale_contract():
     assert request.upscale.enabled is True
     assert request.upscale.factor == 4
     assert request.upscale.engine == "real-esrgan"
+
+
+def test_create_image_upscaler_rejects_unknown_engine():
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "p",
+                "upscale": {"enabled": True, "factor": 2, "engine": "mystery-upscale"},
+            }
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Unsupported image upscale engine"):
+        create_image_upscaler(request)
+
+
+def test_image_asset_writer_applies_enabled_upscaler(monkeypatch, tmp_path):
+    class FakeUpscaler:
+        id = "real-esrgan"
+
+        def upscale(self, image, *, request, cancel_requested):
+            assert request.upscale.factor == 2
+            assert cancel_requested() is False
+            return image.resize((image.width * 2, image.height * 2))
+
+    monkeypatch.setattr("scene_worker.image_adapters.create_image_upscaler", lambda *_args, **_kwargs: FakeUpscaler())
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    job = {
+        "id": "job-1",
+        "payload": {
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "Neon alley",
+            "model": "z_image_turbo",
+            "count": 1,
+            "width": 16,
+            "height": 16,
+            "upscale": {"enabled": True, "factor": 2, "engine": "real-esrgan"},
+        },
+    }
+
+    result = ImageAssetWriter().write_incremental_outputs(
+        request=image_request_from_job(job),
+        project_path=project_path,
+        image_count=1,
+        image_at_index=lambda _index: Image.new("RGB", (16, 12), "navy"),
+        adapter_id="z_image_diffusers",
+        progress=lambda *_args, **_kwargs: None,
+        cancel_requested=lambda: False,
+        raw_settings={"realModelInference": True},
+        job_id=job["id"],
+    )
+
+    write = result["assetWrites"][0]
+    assert (write["width"], write["height"]) == (32, 24)
+    assert write["rawAdapterSettings"]["upscale"] == {
+        "enabled": True,
+        "engine": "real-esrgan",
+        "factor": 2,
+        "sourceWidth": 16,
+        "sourceHeight": 12,
+        "width": 32,
+        "height": 24,
+    }
+    with Image.open(project_path / write["mediaPath"]) as saved:
+        assert saved.size == (32, 24)
 
 
 def test_create_image_adapter_routes_sensenova_u1_fast():
