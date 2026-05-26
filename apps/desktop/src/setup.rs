@@ -892,6 +892,9 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
             if let Some(token) = crate::settings::read_hf_token() {
                 command = command.env("HF_TOKEN", token);
             }
+            if let Some(credentials) = crate::settings::credentials_env_json() {
+                command = command.env("SCENEWORKS_CREDENTIALS", credentials);
+            }
             let spawned = command.spawn();
             let (mut events, child) = match spawned {
                 Ok(pair) => pair,

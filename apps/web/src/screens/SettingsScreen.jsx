@@ -4,11 +4,19 @@ import React, { useCallback, useEffect, useState } from "react";
 const isDesktop = typeof window !== "undefined" && !!window.__TAURI__;
 const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
 
+const SCHEME_LABELS = {
+  bearer: "Bearer header",
+  query: "Query token",
+};
+
 export function SettingsScreen() {
   const [settings, setSettings] = useState(null);
   const [gpu, setGpu] = useState(null);
-  const [tokenPresent, setTokenPresent] = useState(false);
-  const [tokenInput, setTokenInput] = useState("");
+  const [credentials, setCredentials] = useState([]);
+  const [newHost, setNewHost] = useState("");
+  const [newLabel, setNewLabel] = useState("");
+  const [newScheme, setNewScheme] = useState("bearer");
+  const [newToken, setNewToken] = useState("");
   const [status, setStatus] = useState("");
 
   const refresh = useCallback(async () => {
@@ -16,14 +24,14 @@ export function SettingsScreen() {
       return;
     }
     try {
-      const [loadedSettings, gpuInfo, present] = await Promise.all([
+      const [loadedSettings, gpuInfo, storedCredentials] = await Promise.all([
         invoke("get_app_settings"),
         invoke("get_gpu_info"),
-        invoke("hf_token_present"),
+        invoke("list_credentials"),
       ]);
       setSettings(loadedSettings);
       setGpu(gpuInfo);
-      setTokenPresent(present);
+      setCredentials(storedCredentials ?? []);
     } catch (error) {
       setStatus(String(error));
     }
@@ -65,12 +73,30 @@ export function SettingsScreen() {
     }
   }
 
-  async function saveToken() {
+  async function addCredential() {
     try {
-      await invoke("set_hf_token", { token: tokenInput });
-      setTokenInput("");
+      await invoke("set_credential", {
+        host: newHost,
+        label: newLabel,
+        scheme: newScheme,
+        token: newToken,
+      });
+      setNewHost("");
+      setNewLabel("");
+      setNewScheme("bearer");
+      setNewToken("");
       await refresh();
-      setStatus(`Hugging Face token saved to the ${secretStore}.`);
+      setStatus(`Credential saved to the ${secretStore}.`);
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function removeCredential(host) {
+    try {
+      await invoke("delete_credential", { host });
+      await refresh();
+      setStatus(`Removed the credential for ${host}.`);
     } catch (error) {
       setStatus(String(error));
     }
@@ -94,6 +120,8 @@ export function SettingsScreen() {
     }
   }
 
+  const canSaveCredential = newHost.trim() && newToken.trim();
+
   return (
     <div className="settings-screen">
       {status ? <p className="settings-status">{status}</p> : null}
@@ -112,20 +140,64 @@ export function SettingsScreen() {
       </section>
 
       <section className="settings-card">
-        <h3>Hugging Face token</h3>
+        <h3>Service credentials</h3>
         <p className="settings-muted">
-          Stored in the system {secretStore}. {tokenPresent ? "A token is currently set." : "No token set."}
+          API tokens for model &amp; LoRA downloads (Hugging Face, Civit.ai, and any
+          other authenticated source). Stored in the system {secretStore}; tokens
+          are never displayed again after saving.
         </p>
-        <div className="settings-actions">
+        {credentials.length ? (
+          <ul className="settings-list">
+            {credentials.map((credential) => (
+              <li key={credential.host} className="settings-credential">
+                <span className="settings-value">
+                  {credential.label} — <code>{credential.host}</code>{" "}
+                  <span className="settings-muted">
+                    ({SCHEME_LABELS[credential.scheme] ?? credential.scheme}
+                    {credential.present ? "" : " · token missing"})
+                  </span>
+                </span>
+                <button type="button" onClick={() => removeCredential(credential.host)}>
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="settings-muted">No credentials saved.</p>
+        )}
+        <div className="settings-actions settings-credential-form">
+          <input
+            type="text"
+            placeholder="Host (e.g. huggingface.co)"
+            value={newHost}
+            onChange={(event) => setNewHost(event.target.value)}
+            aria-label="Credential host"
+          />
+          <input
+            type="text"
+            placeholder="Label (optional)"
+            value={newLabel}
+            onChange={(event) => setNewLabel(event.target.value)}
+            aria-label="Credential label"
+          />
+          <select
+            value={newScheme}
+            onChange={(event) => setNewScheme(event.target.value)}
+            aria-label="Authentication scheme"
+          >
+            <option value="bearer">Bearer header</option>
+            <option value="query">Query token</option>
+          </select>
           <input
             type="password"
-            placeholder="hf_…"
-            value={tokenInput}
-            onChange={(event) => setTokenInput(event.target.value)}
-            aria-label="Hugging Face token"
+            placeholder="Token"
+            value={newToken}
+            onChange={(event) => setNewToken(event.target.value)}
+            aria-label="Credential token"
           />
-          <button type="button" onClick={saveToken}>
-            {tokenInput.trim() ? "Save" : "Clear"}
+          <button type="button" onClick={addCredential} disabled={!canSaveCredential}>
+            Save
           </button>
         </div>
       </section>
