@@ -688,9 +688,12 @@
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
-        // Kolors uses an SDXL-style UNet; generation-side Kolors LoRA is not wired
-        // yet, so advertise no compatible families until that lands.
-        "families": [],
+        // Kolors uses an SDXL-style UNet. Advertise only the kolors family so the
+        // picker never offers cross-architecture LoRAs (e.g. z-image): an empty
+        // list makes loraMatchesModel treat Kolors as compatible with EVERY LoRA.
+        // No kolors-family LoRAs exist yet, so the compatible list stays empty
+        // until generation-side Kolors LoRA support lands.
+        "families": ["kolors"],
         "types": ["style", "enhance", "character"]
       },
       "ui": {

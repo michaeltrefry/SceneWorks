@@ -4676,6 +4676,46 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("excludes cross-family LoRAs from a Kolors selection (sc-1927)", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          // Mirrors the Kolors manifest entry: family "kolors", LoRA families ["kolors"].
+          imageModels: [
+            { id: "kolors", name: "Kolors", type: "image", family: "kolors", loraCompatibility: { families: ["kolors"] }, capabilities: ["text_to_image"] },
+          ],
+          latestAssets: [],
+          loras: [
+            { id: "z_style", name: "Z Style", family: "z-image", scope: "global" },
+            { id: "kolors_style", name: "Kolors Style", family: "kolors", scope: "global" },
+          ],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+
+    const loraNames = [...container.querySelectorAll(".lora-choice strong")].map((node) => node.textContent);
+    // A kolors-family model must not offer a z-image LoRA as compatible.
+    expect(loraNames).toContain("Kolors Style");
+    expect(loraNames).not.toContain("Z Style");
+  });
+
   it("blocks image submit when a visible incompatible LoRA is selected", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
