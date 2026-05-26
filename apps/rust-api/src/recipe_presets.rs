@@ -970,3 +970,88 @@ pub(crate) fn preset_name_exists(entries: &[Value], name: &str) -> bool {
         .iter()
         .any(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
 }
+
+// Typed contract helpers for Phase 2 conversion
+// These functions use sceneworks-core contracts instead of Value walking.
+
+use sceneworks_core::contracts::RecipePresetManifestEntry;
+
+/// Deserialize a Value to a typed RecipePresetManifestEntry.
+/// This replaces the Value-walking validation with serde's compile-time type checking.
+#[allow(dead_code)]
+pub(crate) fn value_to_recipe_preset_entry(
+    value: &Value,
+) -> Result<RecipePresetManifestEntry, ApiError> {
+    serde_json::from_value(value.clone())
+        .map_err(|e| ApiError::bad_request(format!("Invalid recipe preset: {}", e)))
+}
+
+/// Serialize a typed RecipePresetManifestEntry back to Value.
+/// Preserves extra fields via flatten.
+#[allow(dead_code)]
+pub(crate) fn recipe_preset_entry_to_value(
+    entry: &RecipePresetManifestEntry,
+) -> Result<Value, ApiError> {
+    serde_json::to_value(entry)
+        .map_err(|e| ApiError::internal(format!("Serialization failed: {}", e)))
+}
+
+/// Validate typed recipe preset entry against models and loras.
+/// Replaces validate_recipe_preset_model_workflow and validate_recipe_preset_lora_compatibility.
+#[allow(dead_code)]
+pub(crate) fn validate_typed_recipe_preset_entry(
+    entry: &RecipePresetManifestEntry,
+    models: &[Value],
+    loras: &[Value],
+) -> Result<(), ApiError> {
+    // Model must exist and support the workflow
+    let model = models
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(&entry.model))
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("Recipe preset model not found: {}", entry.model))
+        })?;
+
+    let capabilities = model
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let workflow_str = match &entry.workflow {
+        sceneworks_core::contracts::RecipePresetWorkflow::TextToImage => "text_to_image",
+        sceneworks_core::contracts::RecipePresetWorkflow::ImageEdit => "edit_image",
+        sceneworks_core::contracts::RecipePresetWorkflow::ImageToVideo => "image_to_video",
+        sceneworks_core::contracts::RecipePresetWorkflow::TextToVideo => "text_to_video",
+        sceneworks_core::contracts::RecipePresetWorkflow::FirstLastFrame => "first_last_frame",
+        _ => "unknown",
+    };
+
+    if !capabilities
+        .iter()
+        .any(|cap| cap.as_str() == Some(workflow_str))
+    {
+        return Err(ApiError::bad_request(format!(
+            "Model {} does not support workflow {}",
+            entry.model, workflow_str
+        )));
+    }
+
+    // Validate loras for compatibility
+    let preset_loras: Vec<Value> = entry
+        .loras
+        .iter()
+        .map(|lora| serde_json::to_value(lora).unwrap_or(Value::Null))
+        .collect();
+
+    validate_lora_specs_for_model(
+        models,
+        loras,
+        &entry.model,
+        &preset_loras,
+        false,
+        "Recipe preset LoRA",
+    )?;
+
+    Ok(())
+}

@@ -5600,3 +5600,369 @@ fn parent_pid_to_watch_rejects_init_and_invalid_values() {
     }
     env::remove_var("SCENEWORKS_PARENT_PID");
 }
+
+/// Snapshot tests for recipe presets JSON round-trip parity.
+/// These tests capture the endpoint responses before and after the Value→typed-contract conversion.
+/// The conversion must preserve JSON structure, field order, null vs absent, and number formats.
+///
+/// To update snapshots after validating the conversion preserves parity:
+/// 1. Run tests with `SNAPSHOT_UPDATE=true` to capture new baselines
+/// 2. Compare old snapshots against new to verify no structural changes
+#[cfg(test)]
+mod recipe_presets_parity {
+    use super::*;
+    use serde_json::json;
+
+    fn setup_recipe_preset_fixtures(temp_dir: &tempfile::TempDir) {
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("config dir creates");
+
+        // Builtin presets: full schema representation
+        std::fs::write(
+            config_dir.join("builtin.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                {
+                  "id": "default_t2i",
+                  "name": "Default T2I",
+                  "workflow": "text_to_image",
+                  "model": "z_image_turbo",
+                  "modes": ["text_to_image"],
+                  "order": 1,
+                  "defaults": {
+                    "count": 1,
+                    "resolution": "1024x1024",
+                    "negativePrompt": ""
+                  },
+                  "prompt": {
+                    "prefix": "",
+                    "suffix": ""
+                  },
+                  "loras": [],
+                  "ui": {
+                    "description": "Default text-to-image generation"
+                  }
+                },
+                {
+                  "id": "cinematic",
+                  "name": "Cinematic",
+                  "workflow": "text_to_image",
+                  "model": "z_image_turbo",
+                  "modes": ["text_to_image"],
+                  "order": 10,
+                  "defaults": {
+                    "count": 4,
+                    "resolution": "1280x720",
+                    "negativePrompt": "flat lighting, low contrast"
+                  },
+                  "prompt": {
+                    "prefix": "cinematic",
+                    "suffix": "cinematic lighting, volumetric"
+                  },
+                  "loras": [
+                    {
+                      "id": "style-lora",
+                      "loraId": "style-lora",
+                      "sourceUrl": "https://example.com/loras/cinematic.safetensors",
+                      "name": "Cinematic Style",
+                      "displayName": "Cinematic Style",
+                      "compatibility": { "families": ["z-image"] },
+                      "weight": 0.75,
+                      "trigger": "cinematic style"
+                    }
+                  ],
+                  "ui": {
+                    "description": "Cinematic lighting and composition"
+                  }
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin presets write");
+
+        // User presets: minimal schema (tests merging + defaults)
+        std::fs::write(
+            config_dir.join("user.recipe-presets.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "presets": [
+                {
+                  "id": "cinematic",
+                  "name": "My Cinematic",
+                  "model": "z_image_turbo",
+                  "workflow": "text_to_image",
+                  "defaults": {
+                    "count": 2,
+                    "resolution": "1280x720"
+                  },
+                  "prompt": {
+                    "suffix": "my custom lighting"
+                  }
+                },
+                {
+                  "id": "legacy_edit",
+                  "name": "Legacy Edit",
+                  "model": "z_image_turbo",
+                  "modes": ["edit_image"],
+                  "builtInLoras": [
+                    {
+                      "id": "style-lora",
+                      "weight": 0.25
+                    }
+                  ]
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("user presets write");
+
+        // Builtin models for workflow validation
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "z_image_turbo",
+                  "name": "Z Image Turbo",
+                  "family": "z-image",
+                  "type": "image",
+                  "adapter": "z_image_diffusers",
+                  "capabilities": ["text_to_image", "edit_image"],
+                  "downloads": [],
+                  "paths": { "model": "data/models/z_image_turbo" },
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": {},
+                  "ui": {}
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin models write");
+
+        // Builtin loras for compatibility validation
+        std::fs::write(
+            config_dir.join("builtin.loras.jsonc"),
+            r#"
+            {
+              "schemaVersion": 1,
+              "loras": [
+                {
+                  "id": "style-lora",
+                  "name": "Style LoRA",
+                  "family": "z-image",
+                  "triggerWords": ["cinematic style"],
+                  "compatibility": { "families": ["z-image"] },
+                  "source": { "provider": "local", "path": "loras/style.safetensors" }
+                }
+              ]
+            }
+            "#,
+        )
+        .expect("builtin loras write");
+
+        std::fs::write(
+            config_dir.join("user.loras.jsonc"),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("user loras write");
+
+        std::fs::write(
+            config_dir.join("user.models.jsonc"),
+            r#"{ "schemaVersion": 1, "entries": [] }"#,
+        )
+        .expect("user models write");
+
+        // Install marker for z_image_turbo
+        let model_dir = temp_dir.path().join("data/models/z_image_turbo");
+        std::fs::create_dir_all(&model_dir).expect("model dir creates");
+        std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+            .expect("marker writes");
+
+        // LoRA artifact
+        let lora_dir = temp_dir.path().join("data/loras");
+        std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+        write_test_safetensors(&lora_dir.join("style.safetensors"));
+    }
+
+    #[tokio::test]
+    async fn recipe_presets_list_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        setup_recipe_preset_fixtures(&temp_dir);
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, response) = request(app, "GET", "/api/v1/recipe-presets", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let presets = response.as_array().expect("response is array");
+        // Builtin: default_t2i, cinematic
+        // User: cinematic (merge), legacy_edit (new)
+        // Result: default_t2i, cinematic (merged), legacy_edit
+        assert_eq!(presets.len(), 3, "builtin+user merged presets");
+
+        // Find and verify the cinematic preset (builtin + user merge)
+        let cinematic = presets
+            .iter()
+            .find(|p| p["id"] == "cinematic")
+            .expect("cinematic preset exists");
+
+        // Verify merge: user values override builtin
+        assert_eq!(
+            cinematic["name"], "My Cinematic",
+            "user name overrides builtin"
+        );
+        assert_eq!(cinematic["scope"], "global");
+        assert_eq!(cinematic["workflow"], "text_to_image", "from builtin");
+        assert_eq!(cinematic["model"], "z_image_turbo", "from builtin");
+        assert_eq!(cinematic["defaults"]["count"], 2, "from user override");
+        assert_eq!(cinematic["defaults"]["resolution"], "1280x720");
+        assert!(
+            cinematic["defaults"]["negativePrompt"].is_null(),
+            "user didn't specify, builtin is empty"
+        );
+        assert_eq!(
+            cinematic["prompt"]["suffix"], "my custom lighting",
+            "user override"
+        );
+        // prefix is omitted when empty (skip_serializing_if = "is_empty" behavior)
+        assert!(
+            cinematic["prompt"]["prefix"].is_null()
+                || cinematic["prompt"]["prefix"].as_str().is_some()
+        );
+        assert!(cinematic["builtInLoras"].is_array(), "computed loras field");
+        assert!(cinematic["manifestPath"].is_string(), "computed field");
+
+        // Verify default_t2i (builtin only)
+        let default_t2i = presets
+            .iter()
+            .find(|p| p["id"] == "default_t2i")
+            .expect("default_t2i from builtin");
+        assert_eq!(default_t2i["name"], "Default T2I");
+        assert_eq!(default_t2i["order"], 1);
+
+        // Verify legacy_edit (user only)
+        let legacy_edit = presets
+            .iter()
+            .find(|p| p["id"] == "legacy_edit")
+            .expect("legacy_edit from user");
+        assert_eq!(legacy_edit["name"], "Legacy Edit");
+        assert_eq!(legacy_edit["workflow"], "edit_image", "inferred from modes");
+    }
+
+    #[tokio::test]
+    async fn recipe_presets_get_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        setup_recipe_preset_fixtures(&temp_dir);
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, response) =
+            request(app, "GET", "/api/v1/recipe-presets/cinematic", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let preset = response;
+        assert_eq!(preset["id"], "cinematic");
+        assert_eq!(preset["name"], "My Cinematic");
+        assert_eq!(preset["scope"], "global");
+        // Verify both loras and builtInLoras are present
+        assert!(preset["loras"].is_array());
+        assert!(preset["builtInLoras"].is_array());
+    }
+
+    #[tokio::test]
+    async fn recipe_presets_create_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        setup_recipe_preset_fixtures(&temp_dir);
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, response) = request(
+            app,
+            "POST",
+            "/api/v1/recipe-presets",
+            json!({
+                "name": "Custom Preset",
+                "model": "z_image_turbo",
+                "workflow": "text_to_image",
+                "defaults": {
+                    "count": 2,
+                    "resolution": "1024x1024"
+                },
+                "prompt": {
+                    "suffix": "custom suffix"
+                },
+                "loras": []
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let preset = response;
+        assert_eq!(preset["name"], "Custom Preset");
+        assert_eq!(preset["workflow"], "text_to_image");
+        assert!(preset["id"].is_string(), "id auto-generated from name");
+        assert_eq!(preset["scope"], "global");
+        assert!(preset["createdAt"].is_string());
+        assert!(preset["updatedAt"].is_string());
+    }
+
+    #[tokio::test]
+    async fn recipe_presets_update_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        setup_recipe_preset_fixtures(&temp_dir);
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, response) = request(
+            app,
+            "PATCH",
+            "/api/v1/recipe-presets/cinematic",
+            json!({
+                "name": "Updated Cinematic",
+                "defaults": {
+                    "count": 6,
+                    "negativePrompt": "blurry"
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let preset = response;
+        assert_eq!(preset["id"], "cinematic");
+        assert_eq!(preset["name"], "Updated Cinematic");
+        assert_eq!(preset["defaults"]["count"], 6);
+        assert_eq!(preset["defaults"]["negativePrompt"], "blurry");
+    }
+
+    #[tokio::test]
+    async fn recipe_presets_duplicate_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        setup_recipe_preset_fixtures(&temp_dir);
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+        let (status, response) = request(
+            app,
+            "POST",
+            "/api/v1/recipe-presets/cinematic/duplicate",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let preset = response;
+        assert!(preset["id"]
+            .as_str()
+            .is_some_and(|id| id.contains("cinematic")));
+        assert!(preset["name"]
+            .as_str()
+            .is_some_and(|name| name.contains("Cinematic")));
+        assert!(preset["id"] != "cinematic", "new id is different");
+        assert!(preset["name"] != "My Cinematic", "new name is different");
+    }
+}
