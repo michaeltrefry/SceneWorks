@@ -5936,6 +5936,91 @@ def test_z_image_adapter_fails_fast_when_pipeline_stays_on_cpu_with_offload_fall
         )
 
 
+def test_edit_run_pipeline_threads_project_path(tmp_path, monkeypatch):
+    """Regression: ZImage/Qwen ._run_pipeline must accept project_path.
+
+    sc-1678's resolver-threading refactor left project_path referenced inside the
+    edit_image branch (load_source_image(project_path, request)) without making it
+    a parameter — a latent NameError that only fires at real img2img inference,
+    which the mocked suite never exercises. KolorsDiffusersAdapter is the reference
+    pattern. This guards both the signature and the live edit-branch call site.
+    """
+    import inspect
+
+    # Signature guard: project_path must precede the optional cancel_requested,
+    # because every call site passes it positionally.
+    for adapter_cls in (ZImageDiffusersAdapter, QwenImageAdapter):
+        params = list(inspect.signature(adapter_cls._run_pipeline).parameters)
+        assert "project_path" in params, f"{adapter_cls.__name__}._run_pipeline must accept project_path"
+        assert params.index("project_path") < params.index("cancel_requested")
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        def __call__(self, **kwargs):
+            self.last_kwargs = kwargs
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+
+    seen_paths: list[Path] = []
+
+    def fake_load_source_image(project_path, _request):
+        seen_paths.append(project_path)
+        return FakeImage()
+
+    monkeypatch.setattr("scene_worker.image_adapters.load_source_image", fake_load_source_image)
+
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+
+    # Runtime guard: invoke the edit_image branch directly (gpu_id="cpu" keeps
+    # device selection off real torch) so project_path resolves at the exact line
+    # that raised NameError instead of crashing.
+    for adapter, model in ((ZImageDiffusersAdapter(), "z_image_edit"), (QwenImageAdapter(), "qwen_image_edit")):
+        seen_paths.clear()
+        request = image_request_from_job(
+            {
+                "payload": {
+                    "projectId": "project-1",
+                    "mode": "edit_image",
+                    "model": model,
+                    "prompt": "repaint the sky",
+                    "sourceAssetId": "asset-source",
+                    "width": 16,
+                    "height": 16,
+                    "count": 1,
+                }
+            }
+        )
+        result = adapter._run_pipeline(
+            SimpleNamespace(gpu_id="cpu"),
+            FakePipe(),
+            request,
+            7,
+            project_path,
+        )
+        assert seen_paths == [project_path], f"{adapter.id} edit branch must call load_source_image(project_path, ...)"
+        assert result is FakeOutput.images[0]
+
+
 # --- Cancellation: JobCancelMonitor watchdog + per-step interrupt ---------------
 
 

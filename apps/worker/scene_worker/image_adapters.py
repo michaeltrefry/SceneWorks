@@ -916,7 +916,7 @@ class ZImageDiffusersAdapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_pipeline(settings, pipe, request, seed, cancel_requested=cancel_requested)
+                image = self._run_pipeline(settings, pipe, request, seed, project_path, cancel_requested=cancel_requested)
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -1088,6 +1088,7 @@ class ZImageDiffusersAdapter:
         pipe: Any,
         request: ImageRequest,
         seed: int,
+        project_path: Path,
         cancel_requested: CancelCallback | None = None,
     ) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -1218,7 +1219,7 @@ class QwenImageAdapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_pipeline(settings, pipe, request, seed, cancel_requested=cancel_requested)
+                image = self._run_pipeline(settings, pipe, request, seed, project_path, cancel_requested=cancel_requested)
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -1372,6 +1373,7 @@ class QwenImageAdapter:
         pipe: Any,
         request: ImageRequest,
         seed: int,
+        project_path: Path,
         cancel_requested: CancelCallback | None = None,
     ) -> Image.Image:
         torch = importlib.import_module("torch")
