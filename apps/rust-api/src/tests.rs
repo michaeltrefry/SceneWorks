@@ -5788,6 +5788,94 @@ fn parent_pid_to_watch_rejects_init_and_invalid_values() {
     env::remove_var("SCENEWORKS_PARENT_PID");
 }
 
+#[tokio::test]
+async fn credentials_routes_store_redact_and_delete() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let settings = test_settings(&temp);
+
+    // Save a credential; PUT returns the updated, redacted listing.
+    let (status, body) = request(
+        create_app(settings.clone()).expect("app creates"),
+        "PUT",
+        "/api/v1/credentials",
+        json!({ "host": "https://Civitai.com", "label": "Civit.ai", "scheme": "query", "token": "secret-key" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list = body.as_array().expect("array body");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["host"], "civitai.com"); // normalized
+    assert_eq!(list[0]["label"], "Civit.ai");
+    assert_eq!(list[0]["scheme"], "query");
+    assert_eq!(list[0]["present"], true);
+    assert!(
+        list[0].get("token").is_none(),
+        "listing must not include the token"
+    );
+    assert!(
+        !body.to_string().contains("secret-key"),
+        "token leaked in the response"
+    );
+
+    // A separate GET is likewise redacted.
+    let (status, body) = request(
+        create_app(settings.clone()).expect("app creates"),
+        "GET",
+        "/api/v1/credentials",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.to_string().contains("secret-key"));
+
+    // An empty token is rejected.
+    let (status, _) = request(
+        create_app(settings.clone()).expect("app creates"),
+        "PUT",
+        "/api/v1/credentials",
+        json!({ "host": "huggingface.co", "token": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Delete returns the now-empty listing.
+    let (status, body) = request(
+        create_app(settings).expect("app creates"),
+        "DELETE",
+        "/api/v1/credentials/civitai.com",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.as_array().expect("array body").is_empty());
+}
+
+#[tokio::test]
+async fn credentials_routes_require_the_access_token() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut settings = test_settings(&temp);
+    settings.access_token = "s3cret".to_owned();
+
+    let (status, _) = request(
+        create_app(settings.clone()).expect("app creates"),
+        "GET",
+        "/api/v1/credentials",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = request_with_headers(
+        create_app(settings).expect("app creates"),
+        "GET",
+        "/api/v1/credentials",
+        Value::Null,
+        &[("x-sceneworks-token", "s3cret")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// Snapshot tests for recipe presets JSON round-trip parity.
 /// These tests capture the endpoint responses before and after the Value→typed-contract conversion.
 /// The conversion must preserve JSON structure, field order, null vs absent, and number formats.

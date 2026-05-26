@@ -105,6 +105,42 @@ pub(crate) fn parse_credentials_env(raw: &str) -> Vec<WorkerCredential> {
         .collect()
 }
 
+/// Merge two credential sets keyed by host, with `env` overriding `file` per host.
+/// Desktop injects credentials via the env (from the keychain); server/Docker reads
+/// the config-dir file store; an operator env override wins over the file.
+fn merge_credentials(
+    file_credentials: Vec<WorkerCredential>,
+    env_credentials: Vec<WorkerCredential>,
+) -> Vec<WorkerCredential> {
+    let mut by_host: std::collections::HashMap<String, WorkerCredential> =
+        std::collections::HashMap::new();
+    for credential in file_credentials {
+        by_host.insert(credential.host.clone(), credential);
+    }
+    for credential in env_credentials {
+        by_host.insert(credential.host.clone(), credential);
+    }
+    by_host.into_values().collect()
+}
+
+/// Worker credentials from the server/Docker file store (`<config>/credentials.json`)
+/// overlaid with the `SCENEWORKS_CREDENTIALS` env (desktop injection / operator
+/// override). Same parser for both (the file carries an extra `label` the worker
+/// ignores). Picked up at startup, so changing credentials needs a worker restart —
+/// consistent with the desktop, which already re-injects on restart.
+fn load_worker_credentials(config_dir: &Path) -> Vec<WorkerCredential> {
+    let file = config_dir.join(sceneworks_core::credentials::CREDENTIALS_FILENAME);
+    let file_credentials = std::fs::read_to_string(&file)
+        .ok()
+        .map(|body| parse_credentials_env(&body))
+        .unwrap_or_default();
+    let env_credentials = std::env::var("SCENEWORKS_CREDENTIALS")
+        .ok()
+        .map(|raw| parse_credentials_env(&raw))
+        .unwrap_or_default();
+    merge_credentials(file_credentials, env_credentials)
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub api_url: String,
@@ -136,6 +172,7 @@ pub struct Settings {
 impl Settings {
     pub fn from_env() -> Self {
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
+        let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
         Self {
             api_url: env_string("SCENEWORKS_API_URL", DEFAULT_API_URL),
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
@@ -143,7 +180,7 @@ impl Settings {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
             data_dir: env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir),
-            config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
+            config_dir: config_dir.clone(),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
             gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),
             is_child_worker: std::env::var("SCENEWORKS_WORKER_CHILD")
@@ -171,10 +208,7 @@ impl Settings {
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
-            credentials: std::env::var("SCENEWORKS_CREDENTIALS")
-                .ok()
-                .map(|raw| parse_credentials_env(&raw))
-                .unwrap_or_default(),
+            credentials: load_worker_credentials(&config_dir),
             max_lora_url_bytes: env_u64_any(
                 &["SCENEWORKS_MAX_LORA_URL_BYTES"],
                 DEFAULT_MAX_LORA_URL_BYTES,

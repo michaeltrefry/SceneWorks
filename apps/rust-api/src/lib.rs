@@ -94,6 +94,8 @@ mod loras;
 use loras::*;
 mod recipe_presets;
 use recipe_presets::*;
+mod credentials;
+use credentials::*;
 
 const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/health",
@@ -573,6 +575,11 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
+        .route(
+            "/api/v1/credentials",
+            get(list_credentials).put(set_credential),
+        )
+        .route("/api/v1/credentials/:host", delete(delete_credential))
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/:model_id", delete(delete_model))
         .route(

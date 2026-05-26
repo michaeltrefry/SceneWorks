@@ -920,6 +920,32 @@ fn credential_for_host_matches_case_insensitively() {
     assert!(credential_for_host(&settings, "").is_none());
 }
 
+#[test]
+fn worker_credentials_env_overrides_file_per_host() {
+    // Server reads the config-dir file store; an operator's SCENEWORKS_CREDENTIALS
+    // env wins per host, and file-only hosts survive.
+    let file = parse_credentials_env(
+        r#"{ "civitai.com": { "token": "file-civitai", "scheme": "query" },
+            "huggingface.co": { "token": "file-hf" } }"#,
+    );
+    let env = parse_credentials_env(
+        r#"{ "civitai.com": { "token": "env-civitai", "scheme": "bearer" } }"#,
+    );
+    let merged = super::merge_credentials(file, env);
+    assert_eq!(merged.len(), 2);
+    let civitai = merged
+        .iter()
+        .find(|credential| credential.host == "civitai.com")
+        .expect("civitai credential");
+    assert_eq!(civitai.token, "env-civitai");
+    assert_eq!(civitai.scheme, CredentialScheme::Bearer);
+    let hugging_face = merged
+        .iter()
+        .find(|credential| credential.host == "huggingface.co")
+        .expect("hf credential");
+    assert_eq!(hugging_face.token, "file-hf");
+}
+
 #[tokio::test]
 async fn source_url_follows_redirect_and_strips_auth_across_hosts() {
     let temp = tempdir().expect("tempdir creates");

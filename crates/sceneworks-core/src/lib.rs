@@ -2,6 +2,7 @@ pub mod app_paths;
 pub mod asset_index;
 pub mod character_store;
 pub mod contracts;
+pub mod credentials;
 pub mod jobs_store;
 pub mod lora_family;
 pub mod lora_url;

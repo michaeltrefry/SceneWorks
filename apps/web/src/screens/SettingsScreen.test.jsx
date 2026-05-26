@@ -103,3 +103,71 @@ describe("SettingsScreen service credentials", () => {
     expect(invoke).toHaveBeenCalledWith("delete_credential", { host: "civitai.com" });
   });
 });
+
+describe("SettingsScreen server (REST) mode", () => {
+  let container;
+  let root;
+  let apiFetch;
+  let SettingsScreen;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    delete window.__TAURI__;
+    apiFetch = vi.fn(async (_path, _token, options) => {
+      if (options?.method === "PUT") {
+        return [{ host: "civitai.com", label: "Civit.ai", scheme: "query", present: true }];
+      }
+      if (options?.method === "DELETE") {
+        return [];
+      }
+      return [{ host: "huggingface.co", label: "Hugging Face", scheme: "bearer", present: true }];
+    });
+    vi.resetModules();
+    vi.doMock("../api.js", () => ({
+      apiFetch,
+      isAbortError: () => false,
+      API_BASE_URL: "",
+      eventUrl: () => "",
+    }));
+    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    vi.doUnmock("../api.js");
+    vi.restoreAllMocks();
+  });
+
+  async function render() {
+    await act(async () => {
+      root.render(<SettingsScreen />);
+    });
+    await act(async () => {});
+  }
+
+  it("lists credentials over REST and hides the desktop-only cards", async () => {
+    await render();
+    expect(apiFetch).toHaveBeenCalledWith("/api/v1/credentials", expect.anything());
+    expect(container.textContent).toContain("huggingface.co");
+    expect(container.textContent).not.toContain("Data directory");
+    expect(container.textContent).not.toContain("Detected GPU");
+  });
+
+  it("saves a credential via PUT to the API", async () => {
+    await render();
+    await changeField(container.querySelector('[aria-label="Credential host"]'), "civitai.com");
+    await changeField(container.querySelector('[aria-label="Credential token"]'), "key123");
+    await click(container.querySelector(".settings-credential-form button"));
+    expect(apiFetch).toHaveBeenCalledWith(
+      "/api/v1/credentials",
+      expect.anything(),
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
+});
