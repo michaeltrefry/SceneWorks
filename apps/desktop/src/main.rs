@@ -26,8 +26,9 @@ fn main() {
             settings::set_data_dir,
             settings::choose_data_dir,
             settings::reveal_in_os,
-            settings::hf_token_present,
-            settings::set_hf_token,
+            settings::list_credentials,
+            settings::set_credential,
+            settings::delete_credential,
             settings::restart_worker,
             settings::get_gpu_info,
         ])

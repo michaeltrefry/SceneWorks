@@ -218,7 +218,25 @@ pub(crate) async fn download_source_url(
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let total_bytes = lora_source_content_length(&client, source_url).await?;
+
+    // Attach a stored credential matching the source host. Bearer tokens ride an
+    // Authorization header (dropped on cross-host redirects below); query tokens
+    // are baked into the request URL and never carried onto a redirect target.
+    let credential = credential_for_host(context.settings, url.host_str().unwrap_or_default());
+    let request_url = match credential {
+        Some(cred) if cred.scheme == CredentialScheme::Query => {
+            let mut authed = url.clone();
+            authed.query_pairs_mut().append_pair("token", &cred.token);
+            authed.to_string()
+        }
+        _ => source_url.to_owned(),
+    };
+    let bearer = match credential {
+        Some(cred) if cred.scheme == CredentialScheme::Bearer => Some(cred.token.as_str()),
+        _ => None,
+    };
+
+    let total_bytes = lora_source_content_length(&client, &request_url, bearer).await?;
     if total_bytes.is_some_and(|total| total > max_bytes) {
         return Err(WorkerError::InvalidPayload(format!(
             "{source_label} sourceUrl exceeds the {} limit",
@@ -229,16 +247,15 @@ pub(crate) async fn download_source_url(
     if total_bytes.is_some_and(|total| total > 0 && existing_bytes == total) {
         return Ok(());
     }
-    let mut request = client.get(source_url);
-    if existing_bytes > 0 {
-        request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
-    }
-    let mut response = request.send().await?;
-    if response.status().is_redirection() {
-        return Err(WorkerError::InvalidPayload(
-            "LoRA sourceUrl redirects are not allowed".to_owned(),
-        ));
-    }
+    let range_header = (existing_bytes > 0).then(|| format!("bytes={existing_bytes}-"));
+    let mut response = send_source_url_with_redirects(
+        &client,
+        context.settings,
+        &request_url,
+        bearer,
+        range_header.as_deref(),
+    )
+    .await?;
     if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
         let range_total = response
             .headers()
@@ -319,22 +336,114 @@ pub(crate) async fn download_source_url(
     Ok(())
 }
 
+/// Maximum redirect hops to follow on an authenticated source-URL download.
+const MAX_SOURCE_URL_REDIRECTS: usize = 5;
+
+/// The stored credential whose host matches `host` (case-insensitive exact match),
+/// or `None` when nothing matches.
+pub(crate) fn credential_for_host<'a>(
+    settings: &'a Settings,
+    host: &str,
+) -> Option<&'a WorkerCredential> {
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    settings
+        .credentials
+        .iter()
+        .find(|credential| credential.host == host)
+}
+
+/// GET `initial_url`, manually following up to `MAX_SOURCE_URL_REDIRECTS` hops
+/// (the download client uses `Policy::none()` so we control each hop). Every
+/// redirect target is re-validated for SSRF (scheme + host/DNS) before being
+/// fetched, and the bearer `Authorization` header is dropped on any cross-host
+/// hop so a token never leaks to a CDN. Returns the final non-redirect response
+/// without `error_for_status`, so the caller can still inspect
+/// `RANGE_NOT_SATISFIABLE`.
+async fn send_source_url_with_redirects(
+    client: &reqwest::Client,
+    settings: &Settings,
+    initial_url: &str,
+    bearer: Option<&str>,
+    range_header: Option<&str>,
+) -> WorkerResult<reqwest::Response> {
+    let mut current_url = initial_url.to_owned();
+    let mut current_host = reqwest::Url::parse(&current_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+    let mut bearer = bearer.map(str::to_owned);
+    for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
+        let mut request = client.get(&current_url);
+        if let Some(token) = &bearer {
+            request = request.bearer_auth(token);
+        }
+        if let Some(range) = range_header {
+            request = request.header(header::RANGE, range);
+        }
+        let response = request.send().await?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "sourceUrl redirect was missing a Location header".to_owned(),
+                )
+            })?;
+        let base = reqwest::Url::parse(&current_url)
+            .map_err(|_| WorkerError::InvalidPayload("sourceUrl was invalid".to_owned()))?;
+        let next = base.join(location).map_err(|_| {
+            WorkerError::InvalidPayload("sourceUrl redirect target was invalid".to_owned())
+        })?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err(WorkerError::InvalidPayload(
+                "sourceUrl redirect must use http or https".to_owned(),
+            ));
+        }
+        // Re-run SSRF validation against the redirect target before following it.
+        validate_lora_url_dns(settings, &next).await?;
+        let next_host = next.host_str().map(str::to_ascii_lowercase);
+        if next_host != current_host {
+            // Cross-host redirect: never carry the bearer token to a new origin.
+            bearer = None;
+        }
+        current_host = next_host;
+        current_url = next.to_string();
+    }
+    Err(WorkerError::InvalidPayload(
+        "sourceUrl exceeded the redirect limit".to_owned(),
+    ))
+}
+
 pub(crate) async fn lora_source_content_length(
     client: &reqwest::Client,
-    source_url: &str,
+    request_url: &str,
+    bearer: Option<&str>,
 ) -> WorkerResult<Option<u64>> {
-    let response = client.head(source_url).send().await?;
+    let mut request = client.head(request_url);
+    if let Some(token) = bearer {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
     if response.status().is_success() {
         return Ok(response.content_length().filter(|value| *value > 0));
     }
+    // A redirecting or auth-gated download endpoint (e.g. Civit.ai) can't report a
+    // size via HEAD; fall back to the streamed GET response's content length.
     if response.status().is_redirection() {
-        return Err(WorkerError::InvalidPayload(
-            "LoRA sourceUrl redirects are not allowed".to_owned(),
-        ));
+        return Ok(None);
     }
     if matches!(
         response.status(),
-        StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED | StatusCode::FORBIDDEN
+        StatusCode::METHOD_NOT_ALLOWED
+            | StatusCode::NOT_IMPLEMENTED
+            | StatusCode::FORBIDDEN
+            | StatusCode::UNAUTHORIZED
     ) {
         return Ok(None);
     }

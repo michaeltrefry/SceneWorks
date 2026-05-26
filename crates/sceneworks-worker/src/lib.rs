@@ -54,6 +54,57 @@ const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = 2.0;
 const PERSON_TRACK_MAX_SAMPLES: usize = 24;
 const PERSON_TRACK_X_DRIFT: f64 = 0.018;
 
+/// How a stored download credential authenticates to its host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialScheme {
+    /// `Authorization: Bearer <token>`.
+    Bearer,
+    /// `?token=<token>` query parameter.
+    Query,
+}
+
+/// A per-host download credential injected via `SCENEWORKS_CREDENTIALS`, matched
+/// against LoRA/model `sourceUrl` hosts.
+#[derive(Debug, Clone)]
+pub struct WorkerCredential {
+    pub host: String,
+    pub token: String,
+    pub scheme: CredentialScheme,
+}
+
+/// Parse the `SCENEWORKS_CREDENTIALS` env value: a JSON object mapping host to
+/// `{ "token": "...", "scheme": "bearer" | "query" }`. Empty entries are skipped,
+/// an unrecognized/absent scheme defaults to bearer, and invalid JSON yields none.
+pub(crate) fn parse_credentials_env(raw: &str) -> Vec<WorkerCredential> {
+    #[derive(serde::Deserialize)]
+    struct RawCredential {
+        token: String,
+        #[serde(default)]
+        scheme: Option<String>,
+    }
+    let parsed: std::collections::HashMap<String, RawCredential> =
+        serde_json::from_str(raw).unwrap_or_default();
+    parsed
+        .into_iter()
+        .filter_map(|(host, credential)| {
+            let host = host.trim().to_ascii_lowercase();
+            let token = credential.token.trim().to_owned();
+            if host.is_empty() || token.is_empty() {
+                return None;
+            }
+            let scheme = match credential.scheme.as_deref() {
+                Some("query") => CredentialScheme::Query,
+                _ => CredentialScheme::Bearer,
+            };
+            Some(WorkerCredential {
+                host,
+                token,
+                scheme,
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub api_url: String,
@@ -68,6 +119,9 @@ pub struct Settings {
     pub shutdown_timeout_seconds: u64,
     pub huggingface_base_url: String,
     pub huggingface_token: Option<String>,
+    /// Per-host download credentials from `SCENEWORKS_CREDENTIALS`, matched against
+    /// LoRA/model `sourceUrl` hosts. HF auth still flows through `huggingface_token`.
+    pub credentials: Vec<WorkerCredential>,
     pub max_lora_url_bytes: u64,
     pub max_model_url_bytes: u64,
     pub allow_private_lora_urls: bool,
@@ -117,6 +171,10 @@ impl Settings {
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
+            credentials: std::env::var("SCENEWORKS_CREDENTIALS")
+                .ok()
+                .map(|raw| parse_credentials_env(&raw))
+                .unwrap_or_default(),
             max_lora_url_bytes: env_u64_any(
                 &["SCENEWORKS_MAX_LORA_URL_BYTES"],
                 DEFAULT_MAX_LORA_URL_BYTES,
