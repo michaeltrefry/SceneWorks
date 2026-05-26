@@ -123,8 +123,9 @@ worker that already reports the requested model as warm before falling back to
 FIFO order. Explicit GPU selections and utility jobs keep their normal FIFO
 claim order.
 The Rust worker image installs Debian Bookworm `ffmpeg`; host-mode Rust workers
-use the `ffmpeg` found on `PATH`. Set `HF_TOKEN` when downloading from gated
-Hugging Face repositories.
+use the `ffmpeg` found on `PATH`. To download from gated/authenticated repos
+(e.g. gated Hugging Face models, Civit.ai), add a token in the app — see
+[Service Credentials](#service-credentials-api-tokens) below.
 
 ## Local Access Control
 
@@ -156,6 +157,42 @@ and extend `SCENEWORKS_CORS_ORIGINS` with LAN hostnames or IP origins when the
 web app is opened from another machine.
 
 For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
+
+## Service Credentials (API tokens)
+
+Some model and LoRA downloads need an API token: gated Hugging Face repos (e.g.
+FLUX.1 [dev]), Civit.ai, or any other authenticated source. SceneWorks stores
+these as a generic, **host-keyed** credential — `{ host, label, scheme, token }`
+— and attaches the matching one (as a `Bearer` header or a `?token=` query
+parameter) when a download's URL host matches. Adding a new service needs no
+code change.
+
+**Where to add tokens:** open **Settings → Service credentials** and add the
+host (e.g. `huggingface.co`), an optional label, the scheme (`bearer` or
+`query`), and the token. Gated models on the **Models** screen show a notice
+with a button that jumps straight here. Tokens are write-only — the UI never
+displays a saved token again, only that one is present. Credential changes take
+effect on the next worker restart.
+
+**Where credentials live:**
+
+- **Desktop:** the per-user OS keychain — Windows Credential Manager (DPAPI),
+  macOS Keychain, or the Linux Secret Service. Nothing SceneWorks-managed holds
+  an encryption key; the OS guards the secret per user account.
+- **Server / Docker:** a `0600` JSON file, `credentials.json`, in the config
+  dir (`/sceneworks/config` in Compose), managed over the authenticated REST API
+  (`/api/v1/credentials`). There is no app-level encryption on the server — a key
+  would have to live beside the data — so the protection is the restricted file
+  mode plus your orchestrator's secret handling (Docker/Kubernetes secrets,
+  host file permissions). Keep the config volume off shared/world-readable paths.
+
+**Environment overrides (server):** the worker reads `credentials.json` and
+overlays the optional `SCENEWORKS_CREDENTIALS` env var, a JSON map
+`{ "host": { "token": "…", "scheme": "bearer|query" } }`; the env value **wins
+per host**, so operators can inject secrets from a vault without writing the
+file. Hugging Face keeps its dedicated path: set `HF_TOKEN` for gated HF repos
+(the same variable `huggingface_hub` reads). Both are picked up at worker
+startup.
 
 ## LoRA Training
 

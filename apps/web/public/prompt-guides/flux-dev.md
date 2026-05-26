@@ -4,7 +4,7 @@
 
 Highest-quality FLUX text-to-image: detailed photography, illustration, concept art, and crisp, legible text. [dev] is the guided ~28-step variant — slower than [schnell] but with finer detail and guidance control.
 
-> **License:** FLUX.1 [dev] is distributed under the FLUX.1 [dev] Non-Commercial License — generations are for non-commercial use only. It is a gated Hugging Face download (accept the license and configure an HF token first). For commercial use, choose FLUX.1 [schnell] (Apache-2.0).
+> **License:** FLUX.1 [dev] is distributed under the FLUX.1 [dev] Non-Commercial License — generations are for non-commercial use only. It is a gated Hugging Face download (accept the license and add a Hugging Face token under Settings → Service credentials first). For commercial use, choose FLUX.1 [schnell] (Apache-2.0).
 
 ## Prompt Shape
 

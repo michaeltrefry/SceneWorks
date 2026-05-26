@@ -95,7 +95,12 @@ services:
       # a long download. Only applies in dedicated cpu mode.
       SCENEWORKS_UTILITY_WORKERS: ${SCENEWORKS_UTILITY_WORKERS:-4}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
+      # Download credentials. The rust-worker reads `credentials.json` (written by
+      # the API's Settings -> Service credentials screen) from the mounted config
+      # volume below. HF_TOKEN and SCENEWORKS_CREDENTIALS are optional overrides
+      # for headless deployments and win per host over that file.
       HF_TOKEN: ${HF_TOKEN:-}
+      SCENEWORKS_CREDENTIALS: ${SCENEWORKS_CREDENTIALS:-}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
       HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
