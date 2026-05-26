@@ -1102,6 +1102,19 @@ pub struct ModelManifestEntry {
     pub limits: JsonObject,
     pub lora_compatibility: JsonObject,
     pub ui: JsonObject,
+    /// Machine-readable signal that the download is gated and needs a credential
+    /// (e.g. an accepted license + token) before it can be fetched. The Models
+    /// screen uses this to point the user at the credential screen (sc-1898).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gated: bool,
+    /// Credential host the gated download requires (e.g. `huggingface.co`). When
+    /// omitted the catalog derives it from the download provider/source URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_host: Option<String>,
+    /// Optional license/model-card URL the user must accept (surfaced as a
+    /// "Review license" link next to the gated notice).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_url: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -1276,6 +1289,69 @@ mod tests {
         assert!(request.is_disabled());
         assert_eq!(request.factor, 2);
         assert_eq!(request.engine, "real-esrgan");
+    }
+
+    #[test]
+    fn non_gated_model_entry_omits_gated_fields() {
+        // The common case: a non-gated entry must not gain `gated`/`credentialHost`/
+        // `licenseUrl` keys on serialize (keeps existing manifests/fixtures stable).
+        let entry: ModelManifestEntry = serde_json::from_value(json!({
+            "id": "z_image_turbo",
+            "name": "Z-Image-Turbo",
+            "family": "z-image",
+            "type": "image",
+            "adapter": "z_image_diffusers",
+            "capabilities": ["text_to_image"],
+            "downloads": [{ "provider": "huggingface", "repo": "Tongyi-MAI/Z-Image-Turbo", "files": [] }],
+            "paths": {},
+            "defaults": {},
+            "limits": {},
+            "loraCompatibility": {},
+            "ui": {}
+        }))
+        .expect("entry parses");
+
+        assert!(!entry.gated);
+        assert_eq!(entry.credential_host, None);
+        let encoded = serde_json::to_value(&entry).expect("entry serializes");
+        let object = encoded.as_object().expect("object");
+        assert!(!object.contains_key("gated"));
+        assert!(!object.contains_key("credentialHost"));
+        assert!(!object.contains_key("licenseUrl"));
+    }
+
+    #[test]
+    fn gated_model_entry_round_trips() {
+        let value = json!({
+            "id": "flux_dev",
+            "name": "FLUX.1 [dev]",
+            "family": "flux",
+            "type": "image",
+            "adapter": "flux_diffusers",
+            "capabilities": ["text_to_image"],
+            "downloads": [{ "provider": "huggingface", "repo": "black-forest-labs/FLUX.1-dev", "files": [] }],
+            "paths": {},
+            "defaults": {},
+            "limits": {},
+            "loraCompatibility": {},
+            "ui": {},
+            "gated": true,
+            "credentialHost": "huggingface.co",
+            "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.1-dev"
+        });
+        let entry: ModelManifestEntry =
+            serde_json::from_value(value.clone()).expect("gated entry parses");
+
+        assert!(entry.gated);
+        assert_eq!(entry.credential_host.as_deref(), Some("huggingface.co"));
+        assert_eq!(
+            entry.license_url.as_deref(),
+            Some("https://huggingface.co/black-forest-labs/FLUX.1-dev")
+        );
+        assert_eq!(
+            serde_json::to_value(entry).expect("gated entry serializes"),
+            value
+        );
     }
 
     #[test]

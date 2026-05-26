@@ -1,5 +1,7 @@
 use super::*;
 
+use sceneworks_core::credentials::normalize_host;
+
 const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "utility"];
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 
@@ -728,6 +730,28 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
             "removable".to_owned(),
             Value::Bool(user_managed || installed),
         );
+        // Gated-model signal (sc-1898): a machine-readable `gated` flag plus the
+        // credential host the download requires, so the Models screen can route the
+        // user to the credential screen before a download will succeed. The host
+        // honors an explicit manifest `credentialHost` and otherwise derives from
+        // the download provider/source URL; `licenseUrl` passes through untouched.
+        let gated = object
+            .get("gated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        object.insert("gated".to_owned(), Value::Bool(gated));
+        if gated {
+            let credential_host = object
+                .get("credentialHost")
+                .and_then(Value::as_str)
+                .map(normalize_host)
+                .filter(|host| !host.is_empty())
+                .or_else(|| derive_credential_host(object));
+            object.insert(
+                "credentialHost".to_owned(),
+                credential_host.map(Value::String).unwrap_or(Value::Null),
+            );
+        }
         // macOS Model Manager: MLX availability + conversion status for models that
         // declare an `mlx` variant. Additive fields the web/Docker build ignores; the
         // probes are cheap and portable, so a const `cfg!` check gates them rather
@@ -854,6 +878,37 @@ pub(crate) fn model_download(model: &Value) -> Option<Value> {
         }
     }
     fallback.cloned()
+}
+
+/// Best-effort credential host for a gated model when the manifest entry doesn't
+/// set `credentialHost` explicitly: an explicit per-download `credentialHost`,
+/// else the well-known host for the provider (`huggingface` ⇒ `huggingface.co`),
+/// else the host of a `sourceUrl`. Normalized (scheme/path stripped, lower-cased)
+/// to match how credentials are keyed in the store.
+fn derive_credential_host(model: &serde_json::Map<String, Value>) -> Option<String> {
+    let downloads = model.get("downloads")?.as_array()?;
+    for download in downloads {
+        if let Some(host) = download
+            .get("credentialHost")
+            .and_then(Value::as_str)
+            .map(normalize_host)
+            .filter(|host| !host.is_empty())
+        {
+            return Some(host);
+        }
+        if download.get("provider").and_then(Value::as_str) == Some("huggingface") {
+            return Some("huggingface.co".to_owned());
+        }
+        if let Some(host) = download
+            .get("sourceUrl")
+            .and_then(Value::as_str)
+            .map(normalize_host)
+            .filter(|host| !host.is_empty())
+        {
+            return Some(host);
+        }
+    }
+    None
 }
 
 pub(crate) fn is_supported_model_download(download: &Value) -> bool {
@@ -1077,4 +1132,52 @@ pub(crate) fn model_manifest_installed_path(model: &Value, data_dir: &FsPath) ->
     } else {
         data_dir.join(path)
     })
+}
+
+#[cfg(test)]
+mod gated_credential_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn map(value: Value) -> serde_json::Map<String, Value> {
+        value.as_object().expect("object").clone()
+    }
+
+    #[test]
+    fn derives_huggingface_host_from_provider() {
+        let model = map(json!({
+            "downloads": [{ "provider": "huggingface", "repo": "black-forest-labs/FLUX.1-dev", "files": [] }]
+        }));
+        assert_eq!(
+            derive_credential_host(&model).as_deref(),
+            Some("huggingface.co")
+        );
+    }
+
+    #[test]
+    fn prefers_explicit_download_credential_host() {
+        let model = map(json!({
+            "downloads": [{ "provider": "civitai", "credentialHost": "https://Civitai.com/", "sourceUrl": "https://civitai.com/api/x" }]
+        }));
+        assert_eq!(
+            derive_credential_host(&model).as_deref(),
+            Some("civitai.com")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_source_url_host() {
+        let model = map(json!({
+            "downloads": [{ "provider": "url", "sourceUrl": "https://models.example.com/path/file.safetensors" }]
+        }));
+        assert_eq!(
+            derive_credential_host(&model).as_deref(),
+            Some("models.example.com")
+        );
+    }
+
+    #[test]
+    fn no_downloads_yields_none() {
+        assert_eq!(derive_credential_host(&map(json!({}))), None);
+    }
 }

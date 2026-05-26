@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { JobProgressCard } from "../components/JobProgress.jsx";
 import { terminalStatuses } from "../constants.js";
+import { hasPresentCredential, loadCredentials } from "../credentials.js";
 import { extractFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
 
@@ -74,6 +75,37 @@ const MODEL_TYPE_OPTIONS = [
   { value: "video", label: "Video" },
   { value: "utility", label: "Utility" },
 ];
+
+// Gated models (e.g. FLUX.1 [dev]) need an accepted license + a saved credential
+// before a download can succeed. The catalog flags these with `gated`/
+// `credentialHost`/`licenseUrl` (sc-1898). When the matching credential is already
+// present we soften the notice to a ready state; otherwise we point the user at the
+// Settings credential screen. `present` is undefined while presence is still
+// unknown (e.g. the credential list hasn't loaded) — we still show the link then.
+function GatedModelNotice({ host, licenseUrl, present, onOpenSettings }) {
+  const hostLabel = host || "the required service";
+  return (
+    <div className={present ? "model-gated-notice ready" : "model-gated-notice"}>
+      <p className={present ? "inline-success" : "inline-warning"}>
+        {present
+          ? `Credential for ${hostLabel} saved — ready to download.`
+          : `Gated download. Add a ${hostLabel} token, then accept the model's license before downloading.`}
+      </p>
+      <div className="model-gated-actions">
+        {present ? null : (
+          <button type="button" onClick={onOpenSettings}>
+            Add token in Settings
+          </button>
+        )}
+        {licenseUrl ? (
+          <a href={licenseUrl} target="_blank" rel="noreferrer noopener">
+            Review license
+          </a>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 function referencedPresetNames(recipePresets, kind, id) {
   return recipePresets
@@ -165,6 +197,10 @@ export function ModelManagerScreen() {
   // their memory tier. Browser/Docker builds have no Tauri bridge and skip this.
   const isDesktop = typeof window !== "undefined" && Boolean(window.__TAURI__);
   const [unifiedMemoryGb, setUnifiedMemoryGb] = useState(null);
+  // Gated-model credential presence (sc-1898): only fetched when the catalog has a
+  // gated model, so non-gated deployments make no extra credential request.
+  const [credentials, setCredentials] = useState([]);
+  const hasGatedModel = models.some((model) => model.gated);
   const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
 
   useEffect(() => {
@@ -194,6 +230,28 @@ export function ModelManagerScreen() {
       cancelled = true;
     };
   }, [isDesktop]);
+
+  useEffect(() => {
+    if (!hasGatedModel) {
+      return undefined;
+    }
+    let cancelled = false;
+    loadCredentials()
+      .then((list) => {
+        if (!cancelled) {
+          setCredentials(Array.isArray(list) ? list : []);
+        }
+      })
+      // Presence unknown (e.g. not authenticated yet) — the notice still links to Settings.
+      .catch(() => {
+        if (!cancelled) {
+          setCredentials([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasGatedModel]);
 
   function downloadJobsFor(model) {
     return jobs.filter((job) => job.type === "model_download" && job.payload?.modelId === model.id);
@@ -383,6 +441,8 @@ export function ModelManagerScreen() {
             (job) => terminalStatuses.has(job.status) && job.status !== "completed",
           );
           const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
+          const gated = Boolean(model.gated);
+          const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
           return (
             <article className="model-card" key={model.id}>
               <div>
@@ -396,6 +456,14 @@ export function ModelManagerScreen() {
                 </span>
               ) : null}
               <p>{model.ui?.description ?? model.family ?? model.id}</p>
+              {gated && !installed ? (
+                <GatedModelNotice
+                  host={model.credentialHost}
+                  licenseUrl={model.licenseUrl}
+                  present={credentialPresent}
+                  onOpenSettings={() => setActiveView("Settings")}
+                />
+              ) : null}
               <dl>
                 <div>
                   <dt>Family</dt>

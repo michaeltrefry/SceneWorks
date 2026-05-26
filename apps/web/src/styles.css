@@ -2982,6 +2982,22 @@ label {
   gap: 8px;
 }
 
+.model-gated-notice {
+  display: grid;
+  gap: 8px;
+}
+
+.model-gated-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.model-gated-actions a {
+  font-size: 13px;
+}
+
 .mlx-status {
   display: grid;
   gap: 8px;

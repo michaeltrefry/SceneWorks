@@ -1,55 +1,17 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { apiFetch } from "../api.js";
+import {
+  SCHEME_LABELS,
+  credentialsIsDesktop as isDesktop,
+  loadCredentials,
+  removeCredentialRequest,
+  saveCredential,
+} from "../credentials.js";
 
 // The data-dir / GPU / worker / wizard controls are desktop-only (backed by Tauri
-// commands in the shell). Service credentials work in both deployments: the desktop
-// stores them in the OS keychain via Tauri, and the server/Docker build manages them
-// over the authed REST API (sc-1893).
-const isDesktop = typeof window !== "undefined" && !!window.__TAURI__;
+// commands in the shell). Service credentials work in both deployments and route
+// through the shared ../credentials.js transport (keychain on desktop, authed REST
+// on the server). The remaining commands here are desktop-only Tauri invokes.
 const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
-
-const SCHEME_LABELS = {
-  bearer: "Bearer header",
-  query: "Query token",
-};
-
-// Server mode authenticates with the same access token the rest of the app uses.
-function serverToken() {
-  return (
-    (typeof window !== "undefined" &&
-      window.localStorage.getItem("sceneworks-token")) ||
-    ""
-  );
-}
-
-async function loadCredentials() {
-  if (isDesktop) {
-    return (await invoke("list_credentials")) ?? [];
-  }
-  return (await apiFetch("/api/v1/credentials", serverToken())) ?? [];
-}
-
-// Returns the updated, redacted credential list (both transports yield it).
-async function saveCredential({ host, label, scheme, token }) {
-  if (isDesktop) {
-    await invoke("set_credential", { host, label, scheme, token });
-    return loadCredentials();
-  }
-  return apiFetch("/api/v1/credentials", serverToken(), {
-    method: "PUT",
-    body: JSON.stringify({ host, label, scheme, token }),
-  });
-}
-
-async function removeCredentialRequest(host) {
-  if (isDesktop) {
-    await invoke("delete_credential", { host });
-    return loadCredentials();
-  }
-  return apiFetch(`/api/v1/credentials/${encodeURIComponent(host)}`, serverToken(), {
-    method: "DELETE",
-  });
-}
 
 export function SettingsScreen() {
   const [settings, setSettings] = useState(null);
