@@ -5578,6 +5578,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    // Selecting a LoRA reveals its weight slider, defaulting to the LoRA weight (0.8).
+    const weightSlider = container.querySelector(".lora-weight-row input[type=range]");
+    expect(weightSlider).toBeTruthy();
+    expect(container.querySelector(".lora-weight-value").textContent).toBe("0.80");
+    await changeField(weightSlider, "0.5");
+
     const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
     expect(generate.disabled).toBe(false);
 
@@ -5588,7 +5594,7 @@ describe("SceneWorks app shell", () => {
     expect(createVideoJob).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "ltx_2_3",
-        loras: expect.arrayContaining([expect.objectContaining({ id: "ltx_style" })]),
+        loras: [expect.objectContaining({ id: "ltx_style", weight: 0.5 })],
       }),
     );
   });

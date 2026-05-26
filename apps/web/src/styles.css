@@ -4496,6 +4496,36 @@ label {
   min-width: 0;
 }
 
+.lora-choice-item {
+  display: grid;
+  gap: 6px;
+}
+
+.lora-weight-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 2px;
+}
+
+.lora-weight-row > span:first-child {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.lora-weight-row input[type="range"] {
+  width: 100%;
+}
+
+.lora-weight-value {
+  min-width: 34px;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
 .editable-lora-choice {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;

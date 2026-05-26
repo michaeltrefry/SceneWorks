@@ -40,6 +40,7 @@ import {
   clearPresetDefault,
   loraLooksLikeIcLora,
   loraMatchesModel,
+  loraWeight,
   noPresetId,
   rememberPresetDefault,
   serializeLora,
@@ -114,6 +115,7 @@ export function VideoStudio() {
   const [quantization, setQuantization] = useState("auto");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
+  const [loraWeights, setLoraWeights] = useState({});
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? ltxVideoModelId);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
@@ -227,6 +229,19 @@ export function VideoStudio() {
       }
       return [...ids, lora.id];
     });
+  }
+
+  // Per-LoRA strength: the override map falls back to the LoRA's default weight.
+  // Order of application is intentionally not exposed — the worker combines
+  // adapters additively (set_adapters / dequant-to-bf16 merge), so order has no
+  // effect on output.
+  function effectiveLoraWeight(lora) {
+    const override = loraWeights[lora.id];
+    return Number.isFinite(override) ? override : loraWeight(lora);
+  }
+
+  function setLoraWeight(id, value) {
+    setLoraWeights((current) => ({ ...current, [id]: value }));
   }
 
   useEffect(() => {
@@ -441,7 +456,7 @@ export function VideoStudio() {
         sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
         personTrackId: mode === "replace_person" ? personTrackId || null : null,
         replacementMode: mode === "replace_person" ? replacementMode : "face_only",
-        loras: selectedLoras.map((lora) => serializeLora(lora)),
+        loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         advanced: {
           resolution,
           durationHint,
@@ -951,21 +966,39 @@ export function VideoStudio() {
                         {compatibleLoras.map((lora) => {
                           const checked = selectedLoraIds.includes(lora.id);
                           const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
+                          const weight = effectiveLoraWeight(lora);
                           return (
-                            <label className={checked ? "lora-choice active" : "lora-choice"} key={lora.id}>
-                              <input
-                                checked={checked}
-                                disabled={userLimitReached}
-                                onChange={() => toggleLora(lora)}
-                                type="checkbox"
-                              />
-                              <span>
-                                <strong>{lora.name ?? lora.id}</strong>
-                                <small>
-                                  {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
-                                </small>
-                              </span>
-                            </label>
+                            <div className="lora-choice-item" key={lora.id}>
+                              <label className={checked ? "lora-choice active" : "lora-choice"}>
+                                <input
+                                  checked={checked}
+                                  disabled={userLimitReached}
+                                  onChange={() => toggleLora(lora)}
+                                  type="checkbox"
+                                />
+                                <span>
+                                  <strong>{lora.name ?? lora.id}</strong>
+                                  <small>
+                                    {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
+                                  </small>
+                                </span>
+                              </label>
+                              {checked ? (
+                                <div className="lora-weight-row">
+                                  <span>Weight</span>
+                                  <input
+                                    aria-label={`${lora.name ?? lora.id} weight`}
+                                    max="2"
+                                    min="0"
+                                    onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
+                                    step="0.05"
+                                    type="range"
+                                    value={weight}
+                                  />
+                                  <span className="lora-weight-value">{weight.toFixed(2)}</span>
+                                </div>
+                              ) : null}
+                            </div>
                           );
                         })}
                       </div>
