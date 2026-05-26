@@ -861,6 +861,68 @@
       }
     },
     {
+      "id": "svd",
+      "name": "Stable Video Diffusion",
+      "family": "svd",
+      "type": "video",
+      "adapter": "svd_video",
+      "capabilities": ["image_to_video"],
+      // SVD is image-conditioned only — it animates a source image and ignores
+      // any text prompt. The Video Studio keys off this to drop the prompt
+      // requirement (the prompt field stays hidden/optional).
+      "promptless": true,
+      "downloads": [
+        {
+          // Diffusers checkpoint (img2vid-XT): UNet + VAE + CLIP image encoder.
+          // Stability AI Community License — commercial use free under $1M annual
+          // revenue, ungated (no HF token). Worker loads the fp16 variant.
+          "provider": "huggingface",
+          "repo": "stabilityai/stable-video-diffusion-img2vid-xt",
+          "files": [],
+          "estimatedSizeBytes": 9560000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/stabilityai/stable-video-diffusion-img2vid-xt"
+      },
+      "defaults": {
+        "duration": 4,
+        "fps": 7,
+        "resolution": "1024x576",
+        "quality": "balanced"
+      },
+      "limits": {
+        // SVD-XT emits a fixed ~25-frame burst; "duration" only sets playback
+        // pacing (export fps), so the duration choice is single-valued.
+        "durations": [4],
+        "recommendedMaxDuration": 4,
+        "hardMaxDuration": 4,
+        "fps": [6, 7, 8, 10, 12, 25],
+        "resolutions": ["1024x576", "576x1024"]
+      },
+      "loraCompatibility": {
+        // No SVD LoRA ecosystem (generation-only); declare the family so the
+        // picker never offers cross-architecture LoRAs (per sc-1927).
+        "families": ["svd"],
+        "types": []
+      },
+      "ui": {
+        "label": "Stable Video Diffusion",
+        "description": "Stability AI Stable Video Diffusion (img2vid-XT) — animates a single source image into a short ~25-frame clip; image-conditioned only, no text prompt. Stability AI Community License: commercial use free under $1M annual revenue (paid Enterprise above), ungated. ~9.5GB fp16; motion strength + conditioning fps tunable in advanced settings.",
+        "recommendedFor": ["image_to_video"],
+        "durationHint": "Produces a fixed ~25-frame clip from one image; adjust playback fps for pacing.",
+        "promptGuide": {
+          "title": "Stable Video Diffusion Guide",
+          "path": "/prompt-guides/svd.md",
+          "sources": [
+            { "label": "SVD img2vid-XT model card", "url": "https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt" },
+            { "label": "Stability AI Community License", "url": "https://stability.ai/community-license-agreement" },
+            { "label": "Diffusers SVD pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/svd" }
+          ]
+        }
+      }
+    },
+    {
       "id": "wan_2_2",
       "name": "Wan2.2",
       "family": "wan-video",

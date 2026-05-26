@@ -313,9 +313,12 @@ export function VideoStudio() {
   // Don't let Replace Person queue a job the readiness endpoint says no live
   // worker can run — that would sit unclaimable instead of honoring the gate.
   const replaceReady = mode !== "replace_person" || personReadiness?.replace?.ready !== false;
+  // Image-conditioned models (e.g. Stable Video Diffusion) take no text prompt;
+  // they animate the source image, so don't gate submission on prompt text.
+  const promptless = Boolean(selectedModel?.promptless);
   const canSubmit = Boolean(
     activeProject &&
-      prompt.trim() &&
+      (promptless || prompt.trim()) &&
       supportsMode &&
       implementedMode &&
       hasInputs &&
@@ -448,7 +451,11 @@ export function VideoStudio() {
               className="prompt-input"
               onChange={(event) => setPrompt(event.target.value)}
               onKeyDown={onPromptKeyDown}
-              placeholder="Describe the motion — what moves, where the camera goes, how it feels…"
+              placeholder={
+                promptless
+                  ? "No prompt needed — this model animates the source image. Pick a first frame below and generate."
+                  : "Describe the motion — what moves, where the camera goes, how it feels…"
+              }
               value={prompt}
             />
             <button className="prompt-cta" disabled={generateDisabled} type="submit">

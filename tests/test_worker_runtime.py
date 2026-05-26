@@ -4342,6 +4342,121 @@ def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
         raise AssertionError("Unknown video adapter override should fail loudly.")
 
 
+def test_create_video_adapter_routes_svd_to_diffusers(monkeypatch):
+    # SVD is a diffusers pipeline (not the native LTX stack), so it routes to the
+    # generic DiffusersVideoAdapter. Force the non-MPS path so MLX eligibility
+    # (which SVD is not part of) doesn't shadow the assertion on Apple Silicon.
+    monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
+    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: False)
+    adapter = create_video_adapter({"payload": {"model": "svd", "mode": "image_to_video"}})
+    assert adapter.__class__.__name__ == "DiffusersVideoAdapter"
+
+
+def test_svd_video_model_target_defaults():
+    target = VIDEO_MODEL_TARGETS["svd"]
+    assert target["adapter"] == "svd_video"
+    assert target["family"] == "svd"
+    # Image-conditioned only — no text_to_video or timeline modes.
+    assert target["capabilities"] == ["image_to_video"]
+    assert target["repo"] == "stabilityai/stable-video-diffusion-img2vid-xt"
+    assert target["variant"] == "fp16"
+    # Fixed-length clip defined by the checkpoint.
+    assert target["numFrames"] == 25
+
+
+def test_svd_num_frames_is_fixed_regardless_of_duration():
+    adapter = DiffusersVideoAdapter()
+    # Duration/fps would imply 60 frames for a 6s clip, but SVD emits its fixed
+    # 25-frame burst regardless.
+    request = video_request_from_job(
+        {"id": "job-svd", "payload": {"projectId": "p", "mode": "image_to_video", "model": "svd", "duration": 6, "fps": 10}}
+    )
+    assert adapter._num_frames(request) == 25
+
+
+def test_svd_pipeline_class_resolves_stable_video_diffusion():
+    adapter = DiffusersVideoAdapter()
+    target = VIDEO_MODEL_TARGETS["svd"]
+    request = video_request_from_job({"id": "j", "payload": {"projectId": "p", "mode": "image_to_video", "model": "svd"}})
+    fake_diffusers = SimpleNamespace(StableVideoDiffusionPipeline="SVD_PIPE_CLASS")
+    assert adapter._pipeline_class(fake_diffusers, request, target) == "SVD_PIPE_CLASS"
+    # Missing pipeline class fails loudly rather than silently mis-routing.
+    try:
+        adapter._pipeline_class(SimpleNamespace(), request, target)
+    except RuntimeError as exc:
+        assert "StableVideoDiffusionPipeline" in str(exc)
+    else:
+        raise AssertionError("SVD must require StableVideoDiffusionPipeline.")
+
+
+def test_svd_pipeline_kwargs_build_image_conditioning_without_prompt(monkeypatch):
+    # The SVD branch of _pipeline_kwargs animates the source image with motion
+    # controls and passes NO prompt/height/width/guidance (unlike Wan/LTX).
+    adapter = DiffusersVideoAdapter()
+    target = VIDEO_MODEL_TARGETS["svd"]
+
+    class FakeGen:
+        def manual_seed(self, _seed):
+            return self
+
+    fake_torch = SimpleNamespace(Generator=lambda _device: FakeGen())
+    monkeypatch.setattr(
+        "scene_worker.video_adapters.importlib.import_module",
+        lambda name: fake_torch if name == "torch" else importlib.import_module(name),
+    )
+    monkeypatch.setattr("scene_worker.video_adapters.select_torch_device", lambda *_a, **_k: "cpu")
+
+    class FakeImage:
+        def resize(self, _size):
+            return "RESIZED_IMAGE"
+
+    class FakePipe:
+        # filter_call_kwargs keeps only named params, so this signature gates
+        # which kwargs survive — proving the SVD branch produces these and no prompt.
+        def __call__(
+            self,
+            *,
+            image=None,
+            num_frames=None,
+            num_inference_steps=None,
+            decode_chunk_size=None,
+            motion_bucket_id=None,
+            fps=None,
+            noise_aug_strength=None,
+            generator=None,
+        ):
+            return None
+
+    request = video_request_from_job(
+        {
+            "id": "job-svd",
+            "payload": {
+                "projectId": "p",
+                "mode": "image_to_video",
+                "model": "svd",
+                "advanced": {"motionBucketId": 90, "conditioningFps": 6},
+            },
+        }
+    )
+    kwargs = adapter._pipeline_kwargs(
+        pipe=FakePipe(),
+        project_path=Path("/tmp/project"),
+        request=request,
+        target=target,
+        first_image=FakeImage(),
+        last_image=None,
+        seed=7,
+        num_frames=25,
+    )
+    assert kwargs["image"] == "RESIZED_IMAGE"
+    assert kwargs["num_frames"] == 25
+    assert kwargs["motion_bucket_id"] == 90
+    assert kwargs["fps"] == 6
+    assert kwargs["noise_aug_strength"] == 0.02
+    assert "prompt" not in kwargs
+    assert "guidance_scale" not in kwargs
+
+
 def test_mlx_routing_is_mode_aware_on_mps(monkeypatch):
     # On an MPS host the MLX adapter only handles text_to_video / image_to_video;
     # every other mode must stay on the PyTorch path or it fails in ensure_models.

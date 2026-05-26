@@ -5720,6 +5720,65 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("lets a promptless video model (SVD) submit without a text prompt", async () => {
+    const createVideoJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+            characters: [],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob,
+            deleteAsset: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            rememberLocalGenerationJob: () => {},
+            setPreviewAsset: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [],
+            requestedGpu: "auto",
+            selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "svd",
+                name: "Stable Video Diffusion",
+                type: "video",
+                family: "svd",
+                capabilities: ["image_to_video"],
+                promptless: true,
+                defaults: { duration: 4, fps: 7, resolution: "1024x576", quality: "balanced" },
+                limits: { durations: [4], fps: [6, 7, 8], resolutions: ["1024x576", "576x1024"] },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    // The prompt field advertises that no prompt is needed for promptless models.
+    const promptField = container.querySelector("textarea[aria-label='Prompt']");
+    expect(promptField.placeholder).toContain("No prompt needed");
+
+    // With a source image selected and an empty prompt, Render clip is enabled
+    // and submits (a text-prompted model would be blocked here).
+    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    expect(generate.disabled).toBe(false);
+    await act(async () => {
+      generate.click();
+    });
+    expect(createVideoJob).toHaveBeenCalled();
+  });
+
   it("filters video presets by mode and selected model", async () => {
     root = createRoot(container);
     await act(async () => {

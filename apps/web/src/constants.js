@@ -198,6 +198,26 @@ export const fallbackModels = [
     },
   },
   {
+    id: "svd",
+    name: "Stable Video Diffusion",
+    type: "video",
+    capabilities: ["image_to_video"],
+    // Image-conditioned only — no text prompt (Video Studio drops the prompt requirement).
+    promptless: true,
+    defaults: { duration: 4, fps: 7, resolution: "1024x576", quality: "balanced" },
+    limits: {
+      durations: [4],
+      recommendedMaxDuration: 4,
+      fps: [6, 7, 8, 10, 12, 25],
+      resolutions: ["1024x576", "576x1024"],
+    },
+    ui: {
+      description: "Stable Video Diffusion (img2vid-XT) — animates a source image into a short ~25-frame clip; no text prompt. Stability AI Community License (commercial free under $1M revenue, ungated).",
+      durationHint: "Fixed ~25-frame clip from one image; adjust playback fps for pacing.",
+      promptGuide: { title: "Stable Video Diffusion Guide", path: "/prompt-guides/svd.md" },
+    },
+  },
+  {
     id: "wan_2_2",
     name: "Wan2.2",
     type: "video",

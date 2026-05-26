@@ -223,6 +223,7 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "sdxl" => Some("sdxl_diffusers"),
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
+        "svd" => Some("svd_video"),
         _ => None,
     }
 }
@@ -255,6 +256,9 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
             "video_bridge",
             "replace_person",
         ],
+        // Stable Video Diffusion is image-conditioned only (no text prompt) and
+        // does not support the timeline/replacement modes.
+        ("video", "svd") => vec!["image_to_video"],
         _ => Vec::new(),
     }
 }
@@ -847,6 +851,16 @@ mod tests {
         assert_eq!(
             model_capabilities_for_type_and_family("image", "sdxl"),
             vec!["text_to_image", "edit_image", "style_variations"],
+        );
+    }
+
+    #[test]
+    fn svd_family_maps_to_svd_video_adapter_and_image_to_video_only() {
+        assert_eq!(model_adapter_for_family("svd"), Some("svd_video"));
+        // SVD is image-conditioned only — no text-to-video or timeline modes.
+        assert_eq!(
+            model_capabilities_for_type_and_family("video", "svd"),
+            vec!["image_to_video"],
         );
     }
 

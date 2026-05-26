@@ -281,6 +281,27 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
         "noImageEncoder": True,
         "durationHint": "A14B is heavier than 5B; keep clips at 5s or less. Native cadence is 16fps.",
     },
+    # Stable Video Diffusion (img2vid-XT): image-conditioned only, no text prompt.
+    # Runs through DiffusersVideoAdapter (StableVideoDiffusionPipeline). Emits a
+    # fixed ~25-frame burst, so num_frames is model-fixed (not duration-derived);
+    # motion_bucket_id / conditioning fps / noise_aug_strength drive the motion.
+    "svd": {
+        "label": "Stable Video Diffusion",
+        "family": "svd",
+        "adapter": "svd_video",
+        "repo": "stabilityai/stable-video-diffusion-img2vid-xt",
+        "variant": "fp16",
+        "capabilities": ["image_to_video"],
+        "recommendedMaxDuration": 4,
+        "hardMaxDuration": 4,
+        "steps": {"fast": 15, "balanced": 25, "best": 30},
+        "numFrames": 25,
+        "motionBucketId": 127,
+        "condFps": 7,
+        "noiseAugStrength": 0.02,
+        "decodeChunkSize": 8,
+        "durationHint": "Animates one source image into a fixed ~25-frame clip; no text prompt.",
+    },
 }
 
 
@@ -2222,6 +2243,10 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         self._evict_pipeline(torch)
         pipeline_class = self._pipeline_class(diffusers, request, target)
         kwargs: dict[str, Any] = {"torch_dtype": dtype}
+        # SVD-XT ships fp16-variant weights; request the variant so from_pretrained
+        # loads the half-precision files instead of the full-precision default.
+        if target.get("variant"):
+            kwargs["variant"] = target["variant"]
 
         if target["adapter"] == "wan_video":
             vae_class = getattr(diffusers, "AutoencoderKLWan", None)
@@ -2270,6 +2295,15 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         )
 
     def _pipeline_class(self, diffusers: Any, request: VideoRequest, target: dict[str, Any]) -> Any:
+        if target["adapter"] == "svd_video":
+            pipeline_class = getattr(diffusers, "StableVideoDiffusionPipeline", None)
+            if pipeline_class is None:
+                raise RuntimeError(
+                    "The installed diffusers package does not expose StableVideoDiffusionPipeline; "
+                    "install a diffusers build with Stable Video Diffusion support."
+                )
+            return pipeline_class
+
         if target["adapter"] == "wan_video":
             if request.mode == "text_to_video":
                 return getattr(diffusers, "WanPipeline")
@@ -2294,6 +2328,8 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         return f"{self._repo_for_request(request, target)}:{self._pipeline_kind(request, target)}"
 
     def _pipeline_kind(self, request: VideoRequest, target: dict[str, Any]) -> str:
+        if target["adapter"] == "svd_video":
+            return "image"
         if target["adapter"] == "wan_video":
             if request.mode == "text_to_video":
                 return "text"
@@ -2327,11 +2363,16 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
 
     def _num_frames(self, request: VideoRequest) -> int:
         raw_frames = max(1, int(round(request.duration * request.fps)))
-        adapter = model_target(request.model)["adapter"]
+        target = model_target(request.model)
+        adapter = target["adapter"]
         if adapter == "ltx_video":
             return ltx_frame_count(raw_frames)
         if adapter == "wan_video":
             return max(5, raw_frames - ((raw_frames - 1) % 4))
+        if adapter == "svd_video":
+            # SVD emits a fixed-length clip defined by the checkpoint (XT = 25);
+            # duration only paces playback, so it never drives the frame count.
+            return safe_int(request.advanced.get("numFrames"), int(target.get("numFrames", 25)), 1, 25)
         return raw_frames
 
     def _pipeline_kwargs(
@@ -2349,6 +2390,33 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         torch = importlib.import_module("torch")
         device = select_torch_device(torch)
         generator = torch.Generator("cuda" if device == "cuda" else "cpu").manual_seed(seed)
+        if target["adapter"] == "svd_video":
+            # StableVideoDiffusionPipeline takes no prompt/height/width/guidance: it
+            # animates the source image, conditioned on motion strength + fps. The
+            # output size follows the input image, so we resize it to the request.
+            try:
+                noise_aug = float(
+                    request.advanced.get("noiseAugStrength", target.get("noiseAugStrength", 0.02))
+                )
+            except (TypeError, ValueError):
+                noise_aug = float(target.get("noiseAugStrength", 0.02))
+            svd_kwargs: dict[str, Any] = {
+                "image": first_image.resize((request.width, request.height)) if first_image is not None else None,
+                "num_frames": num_frames,
+                "num_inference_steps": self._num_inference_steps(request, target),
+                "decode_chunk_size": safe_int(
+                    request.advanced.get("decodeChunkSize"), int(target.get("decodeChunkSize", 8)), 1, 64
+                ),
+                "motion_bucket_id": safe_int(
+                    request.advanced.get("motionBucketId"), int(target.get("motionBucketId", 127)), 1, 255
+                ),
+                "fps": safe_int(
+                    request.advanced.get("conditioningFps"), int(target.get("condFps", 7)), 1, 30
+                ),
+                "noise_aug_strength": noise_aug,
+                "generator": generator,
+            }
+            return filter_call_kwargs(pipe, svd_kwargs)
         kwargs: dict[str, Any] = {
             "prompt": request.prompt,
             "negative_prompt": request.negative_prompt or default_negative_prompt(target),
