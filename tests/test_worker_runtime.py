@@ -1130,7 +1130,8 @@ def test_kolors_model_target_defaults():
     kolors = MODEL_TARGETS["kolors"]
     assert kolors["adapter"] == "kolors_diffusers"
     assert kolors["family"] == "kolors"
-    assert kolors["supportsEdit"] is False
+    # Unified checkpoint does both T2I (KolorsPipeline) and img2img edit.
+    assert kolors["supportsEdit"] is True
     # Real CFG (not distilled): guidance 5.0, ~25 steps, ChatGLM3 max_seq_len 256.
     assert kolors["steps"] == 25
     assert kolors["guidanceScale"] == 5.0
@@ -1167,26 +1168,16 @@ def test_kolors_max_sequence_length_default_and_override():
     assert adapter._max_sequence_length(SimpleNamespace(advanced={"maxSequenceLength": 4096}), kolors) == 256
 
 
-def test_kolors_rejects_image_edit():
-    job = {
-        "id": "job_kolors_edit",
-        "payload": {
-            "projectId": "project_x",
-            "mode": "edit_image",
-            "model": "kolors",
-            "prompt": "a cat",
-        },
-    }
-    noop = lambda *args, **kwargs: None  # noqa: E731
-    try:
-        KolorsDiffusersAdapter().generate(
-            settings=None, job=job, request=image_request_from_job(job), project_path=None,
-            progress=noop, cancel_requested=lambda: False,
-        )
-    except RuntimeError as exc:
-        assert "does not support image editing" in str(exc)
-    else:
-        raise AssertionError("Kolors T2I (sc-1838) must reject edit_image; img2img is sc-1839.")
+def test_kolors_supports_edit():
+    # Kolors is a unified checkpoint: KolorsPipeline (T2I) + KolorsImg2ImgPipeline (edit).
+    assert model_supports_edit("kolors") is True
+
+
+def test_create_image_adapter_routes_kolors_edit():
+    # Edit jobs route to the same adapter; the adapter switches pipeline by mode.
+    adapter = create_image_adapter({"payload": {"model": "kolors", "mode": "edit_image"}})
+    assert adapter.__class__.__name__ == "KolorsDiffusersAdapter"
+    assert adapter.id == "kolors_diffusers"
 
 
 def test_create_image_adapter_routes_sensenova_u1():

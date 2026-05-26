@@ -312,8 +312,8 @@ MODEL_TARGETS = {
     "kolors": {
         "label": "Kolors",
         "family": "kolors",
-        # img2img (KolorsImg2ImgPipeline) is sc-1839; T2I only here.
-        "supportsEdit": False,
+        # Unified checkpoint: KolorsPipeline (T2I) + KolorsImg2ImgPipeline (edit).
+        "supportsEdit": True,
         # Real CFG (not distilled): model card recommends guidance ~5.0, ~25 steps
         # with DPMSolverMultistep (Karras). ChatGLM3 text encoder max_seq_len 256.
         "steps": 25,
@@ -1696,30 +1696,28 @@ class KolorsDiffusersAdapter:
     checkpoint ships EulerDiscreteScheduler; we switch to DPMSolverMultistep with
     Karras sigmas per the model card for the recommended ~25-step config.
 
-    Text-to-image only; img2img (KolorsImg2ImgPipeline) is a follow-up (sc-1839).
+    Supports text-to-image (KolorsPipeline) and img2img editing
+    (KolorsImg2ImgPipeline) on the same checkpoint, switched by request.mode.
     """
 
     id = "kolors_diffusers"
 
     def __init__(self) -> None:
         self._text_pipe: Any | None = None
-        self._text_repo: str | None = None
+        self._img2img_pipe: Any | None = None
+        self._loaded_repo: str | None = None
         self._loaded_model: str | None = None
         self._loaded_lora_states: dict[str, LoraPipelineState] = {}
 
     def loaded_models(self) -> list[str]:
-        return sorted({value for value in (self._text_repo, self._loaded_model) if value})
+        return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
 
     def unload(self) -> bool:
-        """Free the resident pipeline so another family can load (cross-adapter
+        """Free any resident pipeline so another family can load (cross-adapter
         eviction). Returns True if it actually freed something."""
-        if self._text_pipe is None:
+        if self._text_pipe is None and self._img2img_pipe is None:
             return False
-        self._text_pipe = None
-        self._text_repo = None
-        self._loaded_model = None
-        self._loaded_lora_states.clear()
-        self._empty_cuda_cache(importlib.import_module("torch"))
+        self._evict_pipelines(importlib.import_module("torch"))
         return True
 
     def generate(
@@ -1732,12 +1730,13 @@ class KolorsDiffusersAdapter:
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
     ) -> dict[str, Any]:
+        if request.mode == "edit_image" and not model_supports_edit(request.model):
+            raise RuntimeError(f"{request.model} does not support image editing.")
         model_target = MODEL_TARGETS.get(request.model, {})
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a Kolors Diffusers target.")
-        if request.mode == "edit_image":
-            raise RuntimeError(f"{request.model} does not support image editing.")
 
+        use_img2img = request.mode == "edit_image"
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
         emit_worker_event(
@@ -1750,7 +1749,7 @@ class KolorsDiffusersAdapter:
         emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
-        label = model_target["label"]
+        label = f"{model_target['label']} edit" if use_img2img else model_target["label"]
 
         def image_at_index(index: int) -> Image.Image:
             seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
@@ -1771,7 +1770,9 @@ class KolorsDiffusersAdapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_pipeline(settings, pipe, request, seed, cancel_requested=cancel_requested)
+                image = self._run_pipeline(
+                    settings, pipe, request, seed, project_path, cancel_requested=cancel_requested
+                )
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -1825,8 +1826,10 @@ class KolorsDiffusersAdapter:
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        use_img2img = request.mode == "edit_image"
         cpu_offload = bool(request.advanced.get("cpuOffload", False))
-        if self._text_pipe is not None and self._text_repo == repo:
+        cached_pipe = self._img2img_pipe if use_img2img else self._text_pipe
+        if cached_pipe is not None and self._loaded_repo == repo:
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
             emit_worker_event(
@@ -1836,24 +1839,34 @@ class KolorsDiffusersAdapter:
                 model=request.model,
                 repo=repo,
                 device=device,
-                componentDevices=pipeline_component_devices(self._text_pipe),
+                componentDevices=pipeline_component_devices(cached_pipe),
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
-            return self._text_pipe
-        if self._text_pipe is not None:
-            self._text_pipe = None
-            self._text_repo = None
-            self._empty_cuda_cache(torch)
-            self._forget_loaded_loras("text")
+            return cached_pipe
 
-        pipeline_class = getattr(diffusers, "KolorsPipeline", None)
+        # Hold only one pipeline per repo: evict the other mode (or a stale repo)
+        # before loading so we don't keep two ~16GB Kolors pipelines resident.
+        if self._loaded_repo and self._loaded_repo != repo:
+            self._evict_pipelines(torch)
+        elif use_img2img and self._text_pipe is not None:
+            self._text_pipe = None
+            self._forget_loaded_loras("text")
+            self._empty_cuda_cache(torch)
+        elif not use_img2img and self._img2img_pipe is not None:
+            self._img2img_pipe = None
+            self._forget_loaded_loras("img2img")
+            self._empty_cuda_cache(torch)
+
+        pipeline_name = "KolorsImg2ImgPipeline" if use_img2img else "KolorsPipeline"
+        pipeline_class = getattr(diffusers, pipeline_name, None)
         if pipeline_class is None:
             raise RuntimeError(
-                "The installed diffusers package does not expose KolorsPipeline. "
+                f"The installed diffusers package does not expose {pipeline_name}. "
                 "Install diffusers >= 0.30 for Kolors support."
             )
 
-        progress("loading_model", "loading_model", 0.2, f"Loading {model_target['label']} model files.")
+        cache_action = "Loading cached" if huggingface_repo_cache_exists(repo) else "Downloading"
+        progress("loading_model", "loading_model", 0.2, f"{cache_action} {model_target['label']} model files.")
         emit_worker_event(
             "image_pipeline_load_start",
             jobId=job_id,
@@ -1862,9 +1875,9 @@ class KolorsDiffusersAdapter:
             repo=repo,
             device=device,
             dtype=str(dtype),
-            useImg2img=False,
+            useImg2img=use_img2img,
             cpuOffload=cpu_offload,
-            cached=huggingface_repo_cache_exists(repo),
+            cached=cache_action == "Loading cached",
         )
         pipe = pipeline_class.from_pretrained(repo, torch_dtype=dtype)
         # Kolors-diffusers ships EulerDiscreteScheduler; the model card recommends
@@ -1907,10 +1920,21 @@ class KolorsDiffusersAdapter:
             componentDevices=component_devices,
             gpuMemory=gpu_memory_snapshot(torch, device),
         )
-        self._text_pipe = pipe
-        self._text_repo = repo
+        if use_img2img:
+            self._img2img_pipe = pipe
+        else:
+            self._text_pipe = pipe
+        self._loaded_repo = repo
         self._loaded_model = request.model
         return pipe
+
+    def _evict_pipelines(self, torch: Any) -> None:
+        self._text_pipe = None
+        self._img2img_pipe = None
+        self._loaded_repo = None
+        self._loaded_model = None
+        self._loaded_lora_states.clear()
+        self._empty_cuda_cache(torch)
 
     def _empty_cuda_cache(self, torch: Any) -> None:
         release_inference_memory(torch)
@@ -1921,6 +1945,7 @@ class KolorsDiffusersAdapter:
         pipe: Any,
         request: ImageRequest,
         seed: int,
+        project_path: Path,
         cancel_requested: CancelCallback | None = None,
     ) -> Image.Image:
         torch = importlib.import_module("torch")
@@ -1940,6 +1965,11 @@ class KolorsDiffusersAdapter:
             "max_sequence_length": self._max_sequence_length(request, model_target),
             "generator": generator,
         }
+        if request.mode == "edit_image":
+            # KolorsImg2ImgPipeline blends a source image; strength controls how
+            # far the result moves from it (0 = unchanged, 1 = full re-generation).
+            kwargs["image"] = load_source_image(project_path, request)
+            kwargs["strength"] = float(request.advanced.get("strength", 0.6))
         step_callback = cancel_step_callback(pipe, cancel_requested)
         if step_callback is not None:
             kwargs["callback_on_step_end"] = step_callback
@@ -1949,13 +1979,14 @@ class KolorsDiffusersAdapter:
         return output.images[0].convert("RGB")
 
     def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
+        key = "img2img" if request.mode == "edit_image" else "text"
         model_target = MODEL_TARGETS.get(request.model, {})
-        self._loaded_lora_states["text"] = apply_loras_to_pipeline(
+        self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
             request.loras,
             adapter_id=self.id,
             model_family=model_target.get("family"),
-            previous_state=self._loaded_lora_states.get("text"),
+            previous_state=self._loaded_lora_states.get(key),
         )
 
     def _forget_loaded_loras(self, key: str) -> None:
