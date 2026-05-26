@@ -63,6 +63,21 @@ def create_upscaler_engine(engine: str | None = None) -> UpscalerEngine:
 class RealESRGANUpscaler:
     id = "real_esrgan"
 
+    def __init__(self) -> None:
+        # Cache the loaded network per (weights, factor) so a multi-image batch
+        # loads the weights once. device/dtype are stable within a batch (the
+        # asset writer holds one engine instance per job), so they ride along.
+        self._models: dict[tuple[str, int], tuple[Any, str, Any]] = {}
+
+    def load(self, job: UpscaleJob, settings: Any) -> str:
+        """Load + cache the network for ``job`` and return the resolved device.
+
+        Lets a caller preload (and surface load telemetry) before the first
+        image, then reuse the cached network across the rest of the batch.
+        """
+        _model, device, _dtype = self._prepare(importlib.import_module("torch"), job, settings)
+        return device
+
     def upscale(
         self,
         image: Image.Image,
@@ -70,18 +85,8 @@ class RealESRGANUpscaler:
         job: UpscaleJob,
         settings: Any,
     ) -> Image.Image:
-        if job.factor not in {2, 4}:
-            raise RuntimeError("Real-ESRGAN upscaling supports only 2x and 4x factors.")
-        if not job.weights_path.exists():
-            raise RuntimeError(f"Real-ESRGAN weights are missing: {job.weights_path}")
-
         torch = importlib.import_module("torch")
-        from .image_adapters import activate_torch_device, select_torch_device, select_torch_dtype
-
-        device = select_torch_device(torch, getattr(settings, "gpu_id", None))
-        activate_torch_device(torch, device)
-        dtype = select_torch_dtype(torch, device, None)
-        model = self._load_model(torch, job.weights_path, factor=job.factor, device=device, dtype=dtype)
+        model, device, dtype = self._prepare(torch, job, settings)
         return self._upscale_with_model(
             torch,
             model,
@@ -92,6 +97,26 @@ class RealESRGANUpscaler:
             tile_size=job.tile_size,
             tile_pad=job.tile_pad,
         )
+
+    def _prepare(self, torch: Any, job: UpscaleJob, settings: Any) -> tuple[Any, str, Any]:
+        if job.factor not in {2, 4}:
+            raise RuntimeError("Real-ESRGAN upscaling supports only 2x and 4x factors.")
+        if not job.weights_path.exists():
+            raise RuntimeError(f"Real-ESRGAN weights are missing: {job.weights_path}")
+        cache_key = (str(job.weights_path), job.factor)
+        cached = self._models.get(cache_key)
+        if cached is not None:
+            return cached
+
+        from .image_adapters import activate_torch_device, select_torch_device, select_torch_dtype
+
+        device = select_torch_device(torch, getattr(settings, "gpu_id", None))
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, None)
+        model = self._load_model(torch, job.weights_path, factor=job.factor, device=device, dtype=dtype)
+        prepared = (model, device, dtype)
+        self._models[cache_key] = prepared
+        return prepared
 
     def _load_model(
         self,

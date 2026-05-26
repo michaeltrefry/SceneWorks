@@ -40,6 +40,7 @@ from .lora_adapters import (
     validate_lora_compatibility,
 )
 from .settings import WorkerSettings
+from .upscalers import RealESRGANUpscaler, UpscaleJob
 
 
 Image.MAX_IMAGE_PIXELS = 64_000_000
@@ -671,15 +672,11 @@ REAL_ESRGAN_MODEL_SPECS: dict[int, dict[str, Any]] = {
         "name": "RealESRGAN_x2plus",
         "repo": "nateraw/real-esrgan",
         "file": "RealESRGAN_x2plus.pth",
-        "scale": 2,
-        "num_block": 23,
     },
     4: {
         "name": "RealESRGAN_x4plus",
         "repo": "nateraw/real-esrgan",
         "file": "RealESRGAN_x4plus.pth",
-        "scale": 4,
-        "num_block": 23,
     },
 }
 
@@ -713,7 +710,13 @@ class RealEsrganUpscaler:
     def __init__(self, *, settings: WorkerSettings | None = None, job_id: str | None = None) -> None:
         self._settings = settings
         self._job_id = job_id
-        self._upsamplers: dict[int, Any] = {}
+        # Pure-PyTorch RRDBNet runner: reconstructs the network and loads the
+        # real x2/x4 weights directly, so the image worker never imports
+        # basicsr/realesrgan (-> cv2) or the torchvision compat shim (-> av).
+        # That pairing is what triggered the macOS duplicate-AV-class warning
+        # (sc-1919). The engine caches the loaded network per factor.
+        self._engine = RealESRGANUpscaler()
+        self._jobs: dict[int, UpscaleJob] = {}
 
     def upscale(
         self,
@@ -724,44 +727,28 @@ class RealEsrganUpscaler:
     ) -> Image.Image:
         if cancel_requested():
             raise InterruptedError("Image generation canceled by user.")
-        upsampler = self._load_upsampler(request)
-        numpy = importlib.import_module("numpy")
-        bgr = numpy.array(image.convert("RGB"))[:, :, ::-1]
-        output, _mode = upsampler.enhance(bgr, outscale=request.upscale.factor)
+        job = self._resolve_job(request)
+        output = self._engine.upscale(image, job=job, settings=self._settings)
         if cancel_requested():
             raise InterruptedError("Image generation canceled by user.")
-        rgb = output[:, :, ::-1]
-        return Image.fromarray(rgb).convert("RGB")
+        return output
 
-    def _load_upsampler(self, request: ImageRequest) -> Any:
+    def _resolve_job(self, request: ImageRequest) -> UpscaleJob:
         factor = request.upscale.factor
-        cached = self._upsamplers.get(factor)
+        cached = self._jobs.get(factor)
         if cached is not None:
             return cached
         spec = REAL_ESRGAN_MODEL_SPECS.get(factor)
         if spec is None:
             raise RuntimeError("Real-ESRGAN upscale factor must be 2 or 4.")
-        try:
-            ensure_realesrgan_torchvision_compat()
-            arch = importlib.import_module("basicsr.archs.rrdbnet_arch")
-            realesrgan = importlib.import_module("realesrgan")
-            torch = importlib.import_module("torch")
-        except Exception as exc:  # noqa: BLE001 - convert optional dependency failures.
-            raise RuntimeError(
-                "Real-ESRGAN upscaling requires the optional worker packages "
-                "`realesrgan` and `basicsr` to be installed."
-            ) from exc
-        device = select_torch_device(torch, self._settings.gpu_id if self._settings else None)
-        model = arch.RRDBNet(
-            num_in_ch=3,
-            num_out_ch=3,
-            num_feat=64,
-            num_block=spec["num_block"],
-            num_grow_ch=32,
-            scale=spec["scale"],
-        )
         model_path = self._resolve_model_path(request, spec)
-        half = bool(device.startswith("cuda") and not request.advanced.get("upscaleFullPrecision", False))
+        job = UpscaleJob(
+            factor=factor,
+            weights_path=model_path,
+            engine="real_esrgan",
+            tile_size=safe_int(request.advanced.get("upscaleTile"), 0, 0, 2048),
+            tile_pad=safe_int(request.advanced.get("upscaleTilePad"), 10, 0, 256),
+        )
         emit_worker_event(
             "image_upscaler_load_start",
             jobId=self._job_id,
@@ -769,20 +756,9 @@ class RealEsrganUpscaler:
             factor=factor,
             model=spec["name"],
             modelPath=str(model_path),
-            device=device,
-            half=half,
         )
-        upsampler = realesrgan.RealESRGANer(
-            scale=spec["scale"],
-            model_path=str(model_path),
-            model=model,
-            tile=safe_int(request.advanced.get("upscaleTile"), 0, 0, 2048),
-            tile_pad=safe_int(request.advanced.get("upscaleTilePad"), 10, 0, 256),
-            pre_pad=safe_int(request.advanced.get("upscalePrePad"), 0, 0, 256),
-            half=half,
-            device=device,
-        )
-        self._upsamplers[factor] = upsampler
+        device = self._engine.load(job, self._settings)
+        self._jobs[factor] = job
         emit_worker_event(
             "image_upscaler_load_complete",
             jobId=self._job_id,
@@ -791,7 +767,7 @@ class RealEsrganUpscaler:
             model=spec["name"],
             device=device,
         )
-        return upsampler
+        return job
 
     def _resolve_model_path(self, request: ImageRequest, spec: dict[str, Any]) -> Path:
         explicit = (
@@ -990,16 +966,6 @@ class AuraSrUpscaler:
             return {}
         resource = aura_sr.get("x4") or aura_sr.get("4") or {}
         return resource if isinstance(resource, dict) else {}
-
-
-def ensure_realesrgan_torchvision_compat() -> None:
-    if "torchvision.transforms.functional_tensor" in sys.modules:
-        return
-    try:
-        functional = importlib.import_module("torchvision.transforms.functional")
-    except Exception:
-        return
-    sys.modules.setdefault("torchvision.transforms.functional_tensor", functional)
 
 
 class ZImageDiffusersAdapter:
