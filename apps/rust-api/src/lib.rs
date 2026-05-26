@@ -458,6 +458,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             get(list_training_datasets).post(create_training_dataset),
         )
         .route(
+            "/api/v1/projects/:project_id/training/uploads",
+            post(upload_training_dataset_item),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id",
             get(get_training_dataset)
                 .patch(update_training_dataset)

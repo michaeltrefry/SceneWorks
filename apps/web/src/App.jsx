@@ -10,7 +10,7 @@ import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { DocumentStudio } from "./screens/DocumentStudio.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
-import { TrainingStudio } from "./screens/TrainingStudio.jsx";
+import { TrainingDataSetsLibrary, TrainingStudio } from "./screens/TrainingStudio.jsx";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { EditorScreen } from "./screens/EditorScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
@@ -120,6 +120,7 @@ const navSections = [
     label: "Library",
     items: [
       { id: "Library", label: "Assets", icon: Icon.Library },
+      { id: "LibraryDataSets", label: "Data Sets", icon: Icon.Train },
       { id: "Characters", icon: Icon.Character },
       { id: "Presets", icon: Icon.Preset },
       { id: "Models", icon: Icon.Model },
@@ -136,6 +137,7 @@ const navSections = [
 
 const viewTitles = {
   Library: { title: "Assets", blurb: "Browse stills and clips across all your projects." },
+  LibraryDataSets: { title: "Data Sets", blurb: "Create and caption training datasets." },
   Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
   Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
   Document: { title: "Document Studio", blurb: "Generate interleaved text-image documents — guides, storyboards, tutorials." },
@@ -421,6 +423,7 @@ export function App() {
     refreshTrainingDatasets,
     loadTrainingDataset,
     createTrainingDataset,
+    uploadTrainingDatasetItem,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
@@ -1308,6 +1311,7 @@ export function App() {
     refreshTrainingDatasets,
     loadTrainingDataset,
     createTrainingDataset,
+    uploadTrainingDatasetItem,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
@@ -1459,6 +1463,10 @@ export function App() {
           <>
         {activeView === "Library" ? (
           <LibraryScreen />
+        ) : null}
+
+        {activeView === "LibraryDataSets" ? (
+          <TrainingDataSetsLibrary />
         ) : null}
 
         {activeView === "Image" ? (

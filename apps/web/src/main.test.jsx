@@ -16,7 +16,7 @@ import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
-import { TrainingStudio } from "./screens/TrainingStudio.jsx";
+import { TrainingDataSetsLibrary, TrainingStudio } from "./screens/TrainingStudio.jsx";
 import { AppContext } from "./context/AppContext.js";
 import { qualityChoices, GPU_REQUIRED_JOB_TYPES, errorStatuses } from "./jobTypes.js";
 
@@ -107,6 +107,7 @@ function withTrainingStudioContext(p) {
       refreshTrainingDatasets: p.onRefreshDatasets ? () => p.onRefreshDatasets() : () => {},
       loadTrainingDataset: p.loadDataset,
       createTrainingDataset: p.createDataset,
+      uploadTrainingDatasetItem: p.uploadDatasetItem,
       updateTrainingDataset: p.updateDataset,
       batchRenameTrainingDataset: p.batchRenameDataset,
       writeTrainingDatasetCaptionSidecars: p.writeCaptionSidecars,
@@ -118,6 +119,39 @@ function withTrainingStudioContext(p) {
       trainingTargetsError: p.trainingTargetsError,
     },
     <TrainingStudio />,
+  );
+}
+
+function withTrainingDataSetsLibraryContext(p) {
+  return withAppContext(
+    {
+      activeProject: p.activeProject,
+      authenticated: p.authenticated,
+      assets: p.assets,
+      gpuOptions: p.gpuOptions,
+      jobs: p.jobs,
+      setPreviewAsset: p.onPreview ?? (() => {}),
+      importAsset: p.importAsset,
+      trainingDatasets: p.datasets,
+      trainingDatasetsProjectId: p.activeProject?.id,
+      trainingDatasetsError: p.datasetsError,
+      loadingTrainingDatasets: p.loadingDatasets,
+      refreshTrainingDatasets: p.onRefreshDatasets ? () => p.onRefreshDatasets() : () => {},
+      loadTrainingDataset: p.loadDataset,
+      createTrainingDataset: p.createDataset,
+      uploadTrainingDatasetItem: p.uploadDatasetItem,
+      updateTrainingDataset: p.updateDataset,
+      batchRenameTrainingDataset: p.batchRenameDataset,
+      writeTrainingDatasetCaptionSidecars: p.writeCaptionSidecars,
+      createTrainingDatasetCaptionJob: p.createCaptionJob,
+      createTrainingJob: p.createTrainingJob,
+      trainingPresets: { presets: p.trainingPresets },
+      trainingPresetsError: p.trainingPresetsError,
+      trainingTargets: { targets: p.trainingTargets },
+      trainingTargetsError: p.trainingTargetsError,
+      setActiveView: p.setActiveView,
+    },
+    <TrainingDataSetsLibrary />,
   );
 }
 
@@ -599,12 +633,13 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Training Studio");
-    expect(container.textContent).toContain("Portrait Set");
     expect(container.textContent).toContain("Configure Job");
+    expect(container.textContent).toContain("Data Sets");
+    expect(container.textContent).not.toContain("Rename & Caption");
     expect([...container.querySelectorAll("button")].some((button) => /queue training/i.test(button.textContent))).toBe(false);
   });
 
-  it("supports keyboard navigation across Training Studio tabs", async () => {
+  it("keeps Training Studio focused on selecting existing datasets", async () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
@@ -616,21 +651,11 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const datasetTab = container.querySelector("#training-tab-dataset");
-    datasetTab.focus();
-
-    await act(async () => {
-      datasetTab.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    });
-
-    expect(container.querySelector("#training-tab-rename-caption").getAttribute("aria-selected")).toBe("true");
-
-    await act(async () => {
-      container.querySelector("#training-tab-rename-caption").dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
-    });
-
     expect(container.querySelector("#training-tab-configure").getAttribute("aria-selected")).toBe("true");
     expect(container.textContent).toContain("A dry run validates the Rust-resolved training plan");
+    expect(container.querySelector("#training-tab-dataset")).toBeNull();
+    expect(container.querySelector("#training-tab-rename-caption")).toBeNull();
+    expect(container.textContent).not.toContain("Import images & captions");
   });
 
   it("creates a training dataset from selected image assets", async () => {
@@ -644,7 +669,7 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
           createDataset,
@@ -678,17 +703,22 @@ describe("SceneWorks app shell", () => {
       version: 1,
       items: payload.items,
     }));
-    const importAsset = vi.fn(async (file) => ({ id: "asset-mira", displayName: file.name }));
+    const uploadDatasetItem = vi.fn(async (file) => ({
+      id: "dataset-upload-mira",
+      datasetOnly: true,
+      displayName: file.name,
+      file: { path: "training/uploads/mira.png", mimeType: "image/png" },
+    }));
 
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets: [{ id: "asset-mira", type: "image", displayName: "mira.png", file: { path: "assets/images/mira.png", mimeType: "image/png" } }],
           createDataset,
           datasets: [],
-          importAsset,
+          uploadDatasetItem,
         }),
       );
     });
@@ -702,8 +732,8 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // Only the image is uploaded as an asset; the .txt is parsed locally.
-    expect(importAsset).toHaveBeenCalledTimes(1);
+    // Only the image is uploaded to dataset-owned staging; the .txt is parsed locally.
+    expect(uploadDatasetItem).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain("Imported 1 image with 1 caption");
 
     await changeField(field(container, "Dataset name"), "Mira Set");
@@ -716,7 +746,7 @@ describe("SceneWorks app shell", () => {
         name: "Mira Set",
         items: [
           expect.objectContaining({
-            assetId: "asset-mira",
+            path: "training/uploads/mira.png",
             caption: expect.objectContaining({ text: "a portrait of mira", source: "imported" }),
           }),
         ],
@@ -745,7 +775,7 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets,
           datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
@@ -802,7 +832,7 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
           datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }],
@@ -847,7 +877,7 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
           datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
@@ -915,7 +945,7 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
           batchRenameDataset,
@@ -931,9 +961,6 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
-    await act(async () => {
-      container.querySelector("#training-tab-rename-caption").click();
-    });
     await changeField(field(container, "Item ID"), "item_0007");
     await changeField(field(container, "File stem"), "mira_0007");
     await changeField(field(container, "Display name"), "mira_0007.png");
@@ -995,7 +1022,7 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
           createCaptionJob,
@@ -1010,9 +1037,6 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
-    await act(async () => {
-      container.querySelector("#training-tab-rename-caption").click();
-    });
     expect(field(container, "Caption prompt").value).toContain("Write a long detailed description for this image.");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
@@ -1072,7 +1096,7 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets: [
             {
@@ -1094,9 +1118,6 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
-    await act(async () => {
-      container.querySelector("#training-tab-rename-caption").click();
-    });
     await changeField(field(container, "Method"), "metadata");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Captions").click();
@@ -1148,7 +1169,7 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        withTrainingStudioContext({
+        withTrainingDataSetsLibraryContext({
           activeProject: { id: "project-a", name: "Project A" },
           assets: [
             { id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } },
@@ -1165,9 +1186,6 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
-    await act(async () => {
-      container.querySelector("#training-tab-rename-caption").click();
-    });
     expect(field(container, "Trigger words").value).toBe("Portrait Set");
     expect(field(container, "Character Name").value).toBe("Portrait Set");
     await changeField(field(container, "Trigger words"), "miraStyle, portraitSet");
@@ -1184,7 +1202,7 @@ describe("SceneWorks app shell", () => {
     });
   });
 
-  it("defaults the training trigger phrase from sidebar trigger words until edited", async () => {
+  it("defaults the training trigger phrase from the selected dataset name until edited", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",
       name: "Portrait Set",
@@ -1213,33 +1231,12 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await act(async () => {
-      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
-    });
+    await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
-    await act(async () => {
-      container.querySelector("#training-tab-configure").click();
-    });
     expect(field(container, "Trigger phrase").value).toBe("Portrait Set");
 
-    await act(async () => {
-      container.querySelector("#training-tab-rename-caption").click();
-    });
-    await changeField(field(container, "Trigger words"), "miraStyle, portraitSet");
-    await act(async () => {
-      container.querySelector("#training-tab-configure").click();
-    });
-    expect(field(container, "Trigger phrase").value).toBe("miraStyle, portraitSet");
-
     await changeField(field(container, "Trigger phrase"), "manualTrigger");
-    await act(async () => {
-      container.querySelector("#training-tab-rename-caption").click();
-    });
-    await changeField(field(container, "Trigger words"), "otherTrigger");
-    await act(async () => {
-      container.querySelector("#training-tab-configure").click();
-    });
-
+    expect(container.querySelector("#training-tab-rename-caption")).toBeNull();
     expect(field(container, "Trigger phrase").value).toBe("manualTrigger");
   });
 

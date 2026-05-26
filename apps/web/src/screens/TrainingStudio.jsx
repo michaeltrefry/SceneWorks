@@ -7,9 +7,7 @@ import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
 import { terminalStatuses } from "../constants.js";
 import { formatSeconds, percent } from "../formatting.js";
 
-const tabs = [
-  { id: "dataset", label: "Dataset", title: "Dataset intake", status: "Rust dataset store" },
-  { id: "rename-caption", label: "Rename & Caption", title: "Rename and caption pass", status: "Needs valid dataset" },
+const trainingTabs = [
   { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
 ];
 const defaultGpuOptions = ["auto"];
@@ -332,7 +330,7 @@ function renameCaptionDrafts(dataset) {
     displayName: item.displayName ?? imageAssetName(item),
     captionText: item.caption?.text ?? "",
     captionSource: item.caption?.source ?? "manual",
-    assetId: item.assetId ?? "",
+    assetId: datasetItemSelectionKey(dataset, item, index),
     path: item.path ?? "",
   }));
 }
@@ -352,8 +350,58 @@ function renameFieldsDirty(drafts, dataset) {
   });
 }
 
-function normalizeDatasetAssetIds(dataset) {
-  return (dataset?.items ?? []).map((item) => item.assetId).filter(Boolean);
+function datasetItemSelectionKey(dataset, item, index = 0) {
+  return item?.assetId || `dataset-item:${dataset?.id ?? "draft"}:${item?.id ?? index}`;
+}
+
+function datasetItemProjectPath(dataset, item) {
+  const path = String(item?.path ?? "").replaceAll("\\", "/");
+  if (!dataset?.id || !path) {
+    return "";
+  }
+  return `training/datasets/${dataset.id}/${path}`;
+}
+
+function datasetOwnedAssets(dataset, projectId, catalogAssets = []) {
+  const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
+  return (dataset?.items ?? [])
+    .map((item, index) => {
+      if (item.assetId && catalogIds.has(item.assetId)) {
+        return null;
+      }
+      const path = datasetItemProjectPath(dataset, item);
+      if (!path) {
+        return null;
+      }
+      const id = datasetItemSelectionKey(dataset, item, index);
+      return {
+        id,
+        assetId: item.assetId ?? null,
+        datasetOwned: true,
+        projectId,
+        type: "image",
+        displayName: item.displayName ?? imageAssetName(item),
+        file: {
+          path,
+          mimeType: `image/${String(path).split(".").pop() || "png"}`,
+          width: item.width ?? null,
+          height: item.height ?? null,
+        },
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeDatasetAssetIds(dataset, catalogAssets = []) {
+  const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
+  return (dataset?.items ?? [])
+    .map((item, index) => {
+      if (item.assetId && catalogIds.has(item.assetId)) {
+        return item.assetId;
+      }
+      return datasetItemSelectionKey(dataset, item, index);
+    })
+    .filter(Boolean);
 }
 
 function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) {
@@ -363,7 +411,9 @@ function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) {
   const disabledItems = selectedAssets.filter((asset) => asset.status?.rejected || asset.status?.trashed).length + missingAssets;
   const names = selectedAssets.map((asset) => imageAssetName(asset).toLowerCase());
   const duplicateFilenames = names.filter((name, index) => names.indexOf(name) !== index).length;
-  const captionsByAssetId = new Map((activeDataset?.items ?? []).map((item) => [item.assetId, captionText(item)]));
+  const captionsByAssetId = new Map(
+    (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), captionText(item)]),
+  );
   const missingCaptions = selectedAssetIds.filter((id) => !captionsByAssetId.get(id)).length;
   const valid = selectedAssetIds.length > 0 && disabledItems === 0;
 
@@ -377,18 +427,20 @@ function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) {
 }
 
 function datasetPayload({ activeDataset, assetsById, importedCaptions = {}, name, selectedAssetIds }) {
-  const itemsByAssetId = new Map((activeDataset?.items ?? []).map((item) => [item.assetId, item]));
+  const itemsByAssetId = new Map(
+    (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item]),
+  );
   return {
     name: name.trim(),
     modality: "image",
     items: selectedAssetIds
-      .map((assetId) => {
-        const asset = assetsById.get(assetId);
+      .map((selectionId) => {
+        const asset = assetsById.get(selectionId);
         if (!asset) {
           return null;
         }
-        const previous = itemsByAssetId.get(assetId);
-        const imported = importedCaptions[assetId];
+        const previous = itemsByAssetId.get(selectionId);
+        const imported = importedCaptions[selectionId];
         let caption;
         if (imported) {
           // An imported .txt sidecar takes precedence over a carried-forward
@@ -405,8 +457,9 @@ function datasetPayload({ activeDataset, assetsById, importedCaptions = {}, name
             triggerWords: previous.caption.triggerWords ?? [],
           };
         }
+        const source = asset.datasetOwned || asset.datasetOnly ? { path: asset.file?.path } : { assetId: asset.id };
         return {
-          assetId,
+          ...source,
           displayName: asset.displayName ?? imageAssetName(asset),
           caption,
         };
@@ -781,7 +834,12 @@ function TrainingLiveProgress({ jobs, projectId }) {
   );
 }
 
-export function TrainingStudio() {
+export function TrainingDataSetsLibrary() {
+  return <TrainingStudio mode="datasets" />;
+}
+
+export function TrainingStudio({ mode = "training" } = {}) {
+  const datasetLibraryMode = mode === "datasets";
   const {
     activeProject,
     authenticated = true,
@@ -797,6 +855,7 @@ export function TrainingStudio() {
     refreshTrainingDatasets,
     loadTrainingDataset,
     createTrainingDataset,
+    uploadTrainingDatasetItem,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
@@ -806,13 +865,14 @@ export function TrainingStudio() {
     trainingPresetsError = "",
     trainingTargets: trainingTargetsCatalog,
     trainingTargetsError = "",
+    setActiveView,
   } = useAppContext();
   const datasets = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
   const datasetsError = trainingDatasetsError;
   const loadingDatasets = loadingTrainingDatasets;
   const onPreview = setPreviewAsset;
   const onRefreshDatasets = () => refreshTrainingDatasets(activeProject?.id);
-  const importAsset = (file) => importAssetRaw(file, { throwOnError: true });
+  const uploadDatasetItem = uploadTrainingDatasetItem ?? ((file) => importAssetRaw(file, { throwOnError: true }));
   const loadDataset = loadTrainingDataset;
   const createDataset = createTrainingDataset;
   const updateDataset = updateTrainingDataset;
@@ -821,13 +881,15 @@ export function TrainingStudio() {
   const createCaptionJob = createTrainingDatasetCaptionJob;
   const trainingPresets = trainingPresetsCatalog?.presets ?? [];
   const trainingTargets = trainingTargetsCatalog?.targets ?? [];
-  const [activeTab, setActiveTab] = useState("dataset");
+  const workflowTabs = datasetLibraryMode ? [] : trainingTabs;
+  const [activeTab, setActiveTab] = useState(datasetLibraryMode ? "dataset" : "configure");
   const [activeDataset, setActiveDataset] = useState(null);
   const [datasetError, setDatasetError] = useState("");
   const [datasetMessage, setDatasetMessage] = useState("");
   const [draftName, setDraftName] = useState("");
   const [busyDatasetId, setBusyDatasetId] = useState("");
   const [importingAssets, setImportingAssets] = useState(false);
+  const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Captions parsed from .txt sidecars during import, keyed by imported asset id.
@@ -855,10 +917,28 @@ export function TrainingStudio() {
   const configBasisRef = useRef("");
   const tabRefs = useRef({});
 
-  const activeIndex = tabs.findIndex((tab) => tab.id === activeTab);
-  const active = tabs[activeIndex] ?? tabs[0];
+  const activeIndex = workflowTabs.findIndex((tab) => tab.id === activeTab);
+  const active = workflowTabs[activeIndex] ?? { id: activeTab, title: datasetLibraryMode ? "Dataset management" : "Configure training job" };
   const datasetSummary = useMemo(() => summarizeDatasets(datasets), [datasets]);
-  const imageAssets = useMemo(() => assets.filter((asset) => assetCanRenderAsImage(asset)), [assets]);
+  const datasetAssets = useMemo(
+    () => datasetOwnedAssets(activeDataset, activeProject?.id, assets),
+    [activeDataset, activeProject?.id, assets],
+  );
+  const imageAssets = useMemo(() => {
+    const merged = [
+      ...assets.filter((asset) => assetCanRenderAsImage(asset)),
+      ...uploadedDatasetAssets,
+      ...datasetAssets,
+    ];
+    const seen = new Set();
+    return merged.filter((asset) => {
+      if (!asset?.id || seen.has(asset.id)) {
+        return false;
+      }
+      seen.add(asset.id);
+      return true;
+    });
+  }, [assets, datasetAssets, uploadedDatasetAssets]);
   const assetsById = useMemo(() => new Map(imageAssets.map((asset) => [asset.id, asset])), [imageAssets]);
   const unavailableAssetIds = useMemo(
     () => selectedAssetIds.filter((assetId) => !assetsById.has(assetId)),
@@ -868,7 +948,7 @@ export function TrainingStudio() {
     () => datasetHealth({ activeDataset, imageAssets, selectedAssetIds }),
     [activeDataset, imageAssets, selectedAssetIds],
   );
-  const originalAssetIds = useMemo(() => normalizeDatasetAssetIds(activeDataset), [activeDataset]);
+  const originalAssetIds = useMemo(() => normalizeDatasetAssetIds(activeDataset, assets), [activeDataset, assets]);
   const dirty =
     Boolean(activeDataset) &&
     (draftName.trim() !== activeDataset.name ||
@@ -949,6 +1029,7 @@ export function TrainingStudio() {
     setDatasetMessage("");
     setDraftName("");
     setSelectedAssetIds([]);
+    setUploadedDatasetAssets([]);
     setSelectedDatasetId("");
     setRenamePrefix("");
     setCaptionTriggerWords("");
@@ -963,6 +1044,10 @@ export function TrainingStudio() {
     setConfigTriggerFollowsCaptions(true);
     configBasisRef.current = "";
   }, [activeProject?.id]);
+
+  useEffect(() => {
+    setActiveTab(datasetLibraryMode ? "dataset" : "configure");
+  }, [datasetLibraryMode]);
 
   useEffect(() => {
     const datasetTriggerPhrase = triggerPhraseFromText(activeDataset?.name);
@@ -1034,7 +1119,10 @@ export function TrainingStudio() {
   }, [gpuOptionsKey]);
 
   function focusTab(index) {
-    const next = tabs[(index + tabs.length) % tabs.length];
+    if (!workflowTabs.length) {
+      return;
+    }
+    const next = workflowTabs[(index + workflowTabs.length) % workflowTabs.length];
     setActiveTab(next.id);
     window.requestAnimationFrame(() => tabRefs.current[next.id]?.focus());
   }
@@ -1073,7 +1161,7 @@ export function TrainingStudio() {
       const dataset = await loadDataset(datasetId);
       setActiveDataset(dataset);
       setDraftName(dataset?.name ?? "");
-      setSelectedAssetIds(normalizeDatasetAssetIds(dataset));
+      setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
       setSelectedDatasetId(dataset?.id ?? datasetId);
     } catch (err) {
       setDatasetError(err.message);
@@ -1100,6 +1188,7 @@ export function TrainingStudio() {
     setDatasetMessage("");
     setDraftName("");
     setSelectedAssetIds([]);
+    setUploadedDatasetAssets([]);
     setSelectedDatasetId("");
   }
 
@@ -1236,9 +1325,11 @@ export function TrainingStudio() {
       const imported = [];
       const captionsByAssetId = {};
       for (const file of imageFiles) {
-        const asset = await importAsset(file);
+        const asset = await uploadDatasetItem(file);
         if (asset?.id) {
+          asset.datasetOnly = true;
           imported.push(asset.id);
+          setUploadedDatasetAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
           const caption = captionByStem.get(uploadFileStem(file.name));
           if (caption) {
             captionsByAssetId[asset.id] = { source: "imported", text: caption };
@@ -1286,7 +1377,8 @@ export function TrainingStudio() {
         : await createDataset(payload);
       setActiveDataset(dataset);
       setDraftName(dataset?.name ?? draftName.trim());
-      setSelectedAssetIds(normalizeDatasetAssetIds(dataset));
+      setUploadedDatasetAssets([]);
+      setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
       setSelectedDatasetId(dataset?.id ?? "");
       setDatasetMessage(activeDataset ? "Dataset changes saved" : "Dataset created");
     } catch (err) {
@@ -1336,7 +1428,7 @@ export function TrainingStudio() {
       const nextDataset = result?.dataset ?? dataset;
       setActiveDataset(nextDataset);
       setDraftName(nextDataset?.name ?? draftName);
-      setSelectedAssetIds(normalizeDatasetAssetIds(nextDataset));
+      setSelectedAssetIds(normalizeDatasetAssetIds(nextDataset, assets));
       setSelectedDatasetId(nextDataset?.id ?? activeDataset.id);
       if (useJoyCaption && (captionSettings.recaption || missingDraftCaptions > 0)) {
         const job = await createCaptionJob(activeDataset.id, trainingCaptionJobPayload(captionSettings));
@@ -1386,10 +1478,12 @@ export function TrainingStudio() {
       <div className="training-studio-shell">
         <div className="training-summary-band">
           <div className="section-heading">
-            <p className="eyebrow">Training Studio</p>
-            <h2>Native LoRA training workflow</h2>
+            <p className="eyebrow">{datasetLibraryMode ? "Library" : "Training Studio"}</p>
+            <h2>{datasetLibraryMode ? "Data Sets" : "Native LoRA training workflow"}</h2>
             <p className="view-copy">
-              Build datasets, normalize captions, and prepare a Rust-owned training plan before any ML runtime work begins.
+              {datasetLibraryMode
+                ? "Create training datasets, manage imported dataset images, and normalize captions in one place."
+                : "Select an existing dataset and prepare a Rust-owned training plan before any ML runtime work begins."}
             </p>
           </div>
           <div className="training-metrics" aria-label="Training workspace summary">
@@ -1407,14 +1501,14 @@ export function TrainingStudio() {
             </div>
           </div>
         </div>
-        <TrainingLiveProgress jobs={activeTrainingJobs} projectId={activeProject?.id} />
+        {datasetLibraryMode ? null : <TrainingLiveProgress jobs={activeTrainingJobs} projectId={activeProject?.id} />}
 
         {!authenticated ? (
           <div className="training-empty-state" role="status">
             <Icon.Train size={24} />
             <div>
               <strong>Pairing required</strong>
-              <span>Unlock SceneWorks to load project training datasets.</span>
+              <span>Unlock SceneWorks to load project datasets.</span>
             </div>
           </div>
         ) : !activeProject ? (
@@ -1427,8 +1521,9 @@ export function TrainingStudio() {
           </div>
         ) : (
           <>
+            {workflowTabs.length ? (
             <div className="training-tabs" role="tablist" aria-label="Training workflow">
-              {tabs.map((tab) => (
+              {workflowTabs.map((tab) => (
                 <button
                   aria-controls={activeTab === tab.id ? `training-panel-${tab.id}` : undefined}
                   aria-selected={activeTab === tab.id}
@@ -1449,14 +1544,15 @@ export function TrainingStudio() {
                 </button>
               ))}
             </div>
+            ) : null}
 
             <section
-              aria-labelledby={`training-tab-${active.id}`}
+              aria-labelledby={workflowTabs.length ? `training-tab-${active.id}` : undefined}
               className="training-panel"
               id={`training-panel-${active.id}`}
               role="tabpanel"
             >
-              {activeTab === "dataset" ? (
+              {datasetLibraryMode || activeTab === "dataset" ? (
                 <>
                   <div className="training-panel-head">
                     <div>
@@ -1587,7 +1683,7 @@ export function TrainingStudio() {
                 </>
               ) : null}
 
-              {activeTab === "rename-caption" ? (
+              {datasetLibraryMode || activeTab === "rename-caption" ? (
                 <>
                   <div className="training-panel-head">
                     <div>
@@ -1868,7 +1964,13 @@ export function TrainingStudio() {
                       <p className="eyebrow">Configure Job</p>
                       <h3>{active.title}</h3>
                     </div>
-                    <span className="training-status-pill">{configReady ? "Ready" : "Needs input"}</span>
+                    <div className="training-head-actions">
+                      <button className="secondary-action" onClick={() => setActiveView?.("LibraryDataSets")} type="button">
+                        <Icon.Library size={14} />
+                        Data Sets
+                      </button>
+                      <span className="training-status-pill">{configReady ? "Ready" : "Needs input"}</span>
+                    </div>
                   </div>
                   {trainingTargetsError ? <p className="inline-warning">{trainingTargetsError}</p> : null}
                   {trainingPresetsError ? <p className="inline-warning">{trainingPresetsError}</p> : null}

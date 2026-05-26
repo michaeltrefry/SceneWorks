@@ -1080,6 +1080,96 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
 }
 
 #[tokio::test]
+async fn training_dataset_uploads_are_dataset_owned_not_assets() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Dataset Upload Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+    let (status, upload) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/training/uploads"),
+        "DatasetOnly.PNG",
+        "image/png",
+        b"dataset-only-png",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(upload["datasetOnly"], true);
+    let staged_path = upload["file"]["path"]
+        .as_str()
+        .expect("staged path")
+        .to_owned();
+    assert!(staged_path.starts_with("training/uploads/"));
+
+    let (status, listed_assets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed_assets.as_array().expect("asset list").len(), 0);
+
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Dataset-owned import",
+            "items": [{
+                "path": staged_path,
+                "displayName": "DatasetOnly.PNG",
+                "caption": { "text": "dataset only portrait" }
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(dataset["items"][0]["assetId"].is_null());
+    assert_eq!(dataset["items"][0]["path"], "images/item_0001.png");
+    let dataset_id = dataset["id"].as_str().expect("dataset id");
+    assert_eq!(
+        std::fs::read(
+            project_path
+                .join("training")
+                .join("datasets")
+                .join(dataset_id)
+                .join("images")
+                .join("item_0001.png")
+        )
+        .expect("dataset-owned image copied"),
+        b"dataset-only-png"
+    );
+
+    let (status, listed_assets_after_dataset) = request(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        listed_assets_after_dataset
+            .as_array()
+            .expect("asset list after dataset")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn create_training_job_resolves_plan_and_queues_lora_train() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);

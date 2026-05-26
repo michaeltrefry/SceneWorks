@@ -60,6 +60,18 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     return created;
   }
 
+  async function uploadTrainingDatasetItem(file, projectId = activeProject?.id) {
+    if (!projectId) {
+      throw new Error("Create or open a project first.");
+    }
+    const form = new FormData();
+    form.append("file", file);
+    return apiFetch(`/api/v1/projects/${projectId}/training/uploads`, token, {
+      method: "POST",
+      body: form,
+    });
+  }
+
   async function updateTrainingDataset(datasetId, payload, projectId = activeProject?.id) {
     if (!projectId || !datasetId) {
       throw new Error("Select a training dataset first.");
@@ -145,6 +157,7 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     refreshTrainingDatasets,
     loadTrainingDataset,
     createTrainingDataset,
+    uploadTrainingDatasetItem,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     writeTrainingDatasetCaptionSidecars,

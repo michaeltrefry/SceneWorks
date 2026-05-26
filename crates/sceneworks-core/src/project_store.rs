@@ -47,6 +47,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "recipes",
     "timelines",
     "training/datasets",
+    "training/uploads",
     "trash",
     "cache",
 ];
@@ -190,6 +191,13 @@ pub struct ProjectStore {
     lock: Mutex<()>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainingDatasetUpload {
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub source_path: PathBuf,
+}
+
 impl ProjectStore {
     pub fn new(data_dir: impl Into<PathBuf>, app_version: impl Into<String>) -> Self {
         Self {
@@ -294,6 +302,67 @@ impl ProjectStore {
     ) -> ProjectStoreResult<TrainingDataset> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).create_dataset(project_id, input)
+    }
+
+    pub fn upload_training_dataset_item(
+        &self,
+        project_id: &str,
+        upload: TrainingDatasetUpload,
+    ) -> ProjectStoreResult<Value> {
+        if fs::metadata(&upload.source_path)?.len() == 0 {
+            return Err(ProjectStoreError::BadRequest(
+                "Uploaded file is empty".to_owned(),
+            ));
+        }
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let upload_dir = project_path.join("training").join("uploads");
+        fs::create_dir_all(&upload_dir)?;
+
+        let guessed_mime = guess_mime_from_filename(&upload.filename);
+        let content_type = upload
+            .content_type
+            .as_deref()
+            .filter(|value| !value.is_empty() && *value != "application/octet-stream")
+            .map(str::to_owned)
+            .or(guessed_mime)
+            .unwrap_or_else(|| "application/octet-stream".to_owned());
+        if !content_type.starts_with("image/") {
+            return Err(ProjectStoreError::BadRequest(
+                "Only image dataset uploads are supported".to_owned(),
+            ));
+        }
+
+        let upload_id = format!("dataset_upload_{}", random_hex(16)?);
+        let extension = upload_extension(&upload.filename, &content_type);
+        let suffix = &upload_id[upload_id.len().saturating_sub(8)..];
+        let filename = format!(
+            "{}-{suffix}{extension}",
+            safe_filename(&upload.filename, &upload_id)
+        );
+        let media_path = upload_dir.join(filename);
+        move_or_copy_file(&upload.source_path, &media_path)?;
+        let media_rel = relative_string(&project_path, &media_path)?;
+        let display_name = Path::new(&upload.filename)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("dataset-upload")
+            .to_owned();
+
+        Ok(json!({
+            "id": upload_id,
+            "projectId": project_id,
+            "datasetOnly": true,
+            "type": "image",
+            "displayName": display_name,
+            "file": {
+                "path": media_rel,
+                "mimeType": content_type,
+                "width": Value::Null,
+                "height": Value::Null
+            },
+            "url": format!("/api/v1/projects/{project_id}/files/{media_rel}")
+        }))
     }
 
     pub fn get_training_dataset(

@@ -33,6 +33,40 @@ pub(crate) async fn create_training_dataset(
     Ok((StatusCode::CREATED, Json(dataset)))
 }
 
+pub(crate) async fn upload_training_dataset_item(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field.file_name().unwrap_or("dataset-upload").to_owned();
+        let content_type = field.content_type().map(str::to_owned);
+        let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+        let source_path = temp_path.clone();
+        let upload = sceneworks_core::project_store::TrainingDatasetUpload {
+            filename,
+            content_type,
+            source_path,
+        };
+        let item = project_call(state, move |store| {
+            store.upload_training_dataset_item(&project_id, upload)
+        })
+        .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp_path);
+        })?;
+        return Ok((StatusCode::CREATED, Json(item)));
+    }
+    Err(ApiError::bad_request("Upload file field is required"))
+}
+
 pub(crate) async fn get_training_dataset(
     State(state): State<AppState>,
     Path((project_id, dataset_id)): Path<(String, String)>,
