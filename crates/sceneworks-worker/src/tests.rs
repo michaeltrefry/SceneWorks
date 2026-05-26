@@ -15,8 +15,9 @@ use tempfile::tempdir;
 
 use super::api_client::ApiClient;
 use super::downloads::{
-    credential_for_host, download_lora_source_url, download_progress_payload, download_snapshot,
-    DownloadContext, DownloadProgress, HuggingFaceSnapshot, SnapshotFile,
+    credential_for_host, download_lora_source_url, download_progress_payload,
+    download_snapshot_into_cache, DownloadContext, DownloadProgress, HuggingFaceSnapshot,
+    SnapshotFile,
 };
 use super::gpu::{
     cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id, parse_nvidia_smi_gpus, visible_gpu_ids,
@@ -606,7 +607,7 @@ async fn download_snapshot_rejects_truncated_file() {
     settings.api_url = base_url.clone();
     let api = ApiClient::new(&settings);
     let client = reqwest::Client::new();
-    let target_dir = temp.path().join("model");
+    let repo_dir = temp.path().join("models--owner--model");
 
     let snapshot = HuggingFaceSnapshot {
         files: vec![SnapshotFile {
@@ -622,7 +623,7 @@ async fn download_snapshot_rejects_truncated_file() {
         Duration::from_secs(3600),
     );
 
-    let error = download_snapshot(
+    let error = download_snapshot_into_cache(
         &DownloadContext {
             api: &api,
             client: &client,
@@ -630,7 +631,8 @@ async fn download_snapshot_rejects_truncated_file() {
             job_id: "job-1",
             cancel_message: "canceled",
         },
-        &target_dir,
+        &repo_dir,
+        "main",
         &snapshot,
         &mut progress,
     )
@@ -638,8 +640,172 @@ async fn download_snapshot_rejects_truncated_file() {
     .expect_err("truncated shard is rejected");
 
     assert!(error.to_string().contains("expected"));
-    // The partial file is removed so a retry re-downloads from scratch.
-    assert!(!target_dir.join("shard.safetensors").exists());
+    // The partial blob is removed so a retry re-downloads, and the snapshot is
+    // never materialized over a corrupt blob.
+    assert!(!repo_dir
+        .join("blobs")
+        .join("etag-shard.safetensors")
+        .exists());
+    assert!(!repo_dir.join("snapshots").exists());
+}
+
+#[tokio::test]
+async fn download_snapshot_writes_hugging_face_cache_layout() {
+    let temp = tempdir().expect("tempdir creates");
+    let base_url = spawn_binary_stub(b"weights!!".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let repo_dir = temp.path().join("models--owner--model");
+
+    let snapshot = HuggingFaceSnapshot {
+        files: vec![SnapshotFile {
+            path: "model.safetensors".to_owned(),
+            size: Some(9),
+            download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+        }],
+    };
+    let mut progress = DownloadProgress::new(
+        "owner/model",
+        0,
+        snapshot.total_bytes(),
+        Duration::from_secs(3600),
+    );
+
+    download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+        },
+        &repo_dir,
+        "main",
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect("snapshot downloads into the hub cache layout");
+
+    // refs/<rev> records the commit reported by the resolve metadata.
+    assert_eq!(
+        tokio::fs::read_to_string(repo_dir.join("refs").join("main"))
+            .await
+            .unwrap(),
+        "stubcommit"
+    );
+    // Content lands in a blob named by etag.
+    assert_eq!(
+        tokio::fs::read(repo_dir.join("blobs").join("etag-model.safetensors"))
+            .await
+            .unwrap(),
+        b"weights!!"
+    );
+    // The snapshot entry resolves to that content (symlink on unix, copy otherwise).
+    assert_eq!(
+        tokio::fs::read(
+            repo_dir
+                .join("snapshots")
+                .join("stubcommit")
+                .join("model.safetensors")
+        )
+        .await
+        .unwrap(),
+        b"weights!!"
+    );
+}
+
+/// Opt-in: hits the real huggingface.co to confirm the cache layout we write
+/// matches what huggingface_hub expects — exercising the live resolve tree, the
+/// metadata HEAD (`ETag` for regular files, `X-Linked-Etag` + a CDN redirect for
+/// LFS files), and `X-Repo-Commit`. Ignored by default so CI/offline runs never
+/// hit the network. Run it with:
+///   cargo test -p sceneworks-worker -- --ignored real_huggingface
+#[tokio::test]
+#[ignore = "network: downloads a tiny public repo from huggingface.co"]
+async fn download_snapshot_into_cache_matches_real_huggingface_layout() {
+    let temp = tempdir().expect("tempdir creates");
+    // Cancel/heartbeat checks go to a benign local stub; the files download from the
+    // real huggingface.co set as the HF base URL.
+    let api_base = spawn_binary_stub(b"ignored".to_vec()).await;
+    let mut settings = test_settings("https://huggingface.co".to_owned(), None);
+    settings.api_url = api_base;
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let repo = "hf-internal-testing/tiny-random-bert";
+    let repo_dir = temp
+        .path()
+        .join("models--hf-internal-testing--tiny-random-bert");
+
+    // A small regular file (config.json, ETag path) plus any safetensors weights
+    // (LFS path) so both header behaviors are exercised.
+    let snapshot = HuggingFaceSnapshot::resolve(
+        &client,
+        &settings,
+        repo,
+        "main",
+        &["config.json".to_owned(), "*.safetensors".to_owned()],
+    )
+    .await
+    .expect("resolves the live repo tree");
+    assert!(
+        snapshot.files.iter().any(|file| file.path == "config.json"),
+        "expected config.json in the resolved tree"
+    );
+
+    let mut progress =
+        DownloadProgress::new(repo, 0, snapshot.total_bytes(), Duration::from_secs(3600));
+    download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "real",
+            cancel_message: "canceled",
+        },
+        &repo_dir,
+        "main",
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect("downloads the live repo into the hub cache layout");
+
+    // refs/main records the real git commit sha (40 hex chars).
+    let commit = tokio::fs::read_to_string(repo_dir.join("refs").join("main"))
+        .await
+        .expect("refs/main written");
+    let commit = commit.trim();
+    assert_eq!(
+        commit.len(),
+        40,
+        "commit should be a 40-char git sha: {commit}"
+    );
+
+    // Every resolved file materializes under snapshots/<commit>/ with its exact
+    // declared size — confirming both the ETag and X-Linked-Etag (LFS) paths.
+    let snapshot_dir = repo_dir.join("snapshots").join(commit);
+    for file in &snapshot.files {
+        let path = snapshot_dir.join(&file.path);
+        let bytes = tokio::fs::read(&path)
+            .await
+            .unwrap_or_else(|_| panic!("{} present in snapshot", file.path));
+        assert!(!bytes.is_empty(), "{} is empty", file.path);
+        if let Some(size) = file.size {
+            assert_eq!(bytes.len() as u64, size, "{} size mismatch", file.path);
+        }
+    }
+    // The blob store is populated (the snapshot entries point into it).
+    assert!(
+        repo_dir
+            .join("blobs")
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false),
+        "blobs/ should hold the downloaded content"
+    );
 }
 
 #[tokio::test]
@@ -1344,13 +1510,29 @@ async fn binary_stub(State(state): State<BinaryStubState>, headers: HeaderMap) -
     response
 }
 
-async fn binary_head_stub(State(state): State<BinaryStubState>) -> Response {
+async fn binary_head_stub(
+    State(state): State<BinaryStubState>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = state.status;
-    response.headers_mut().insert(
+    let headers = response.headers_mut();
+    headers.insert(
         axum::http::header::CONTENT_LENGTH,
         axum::http::HeaderValue::from_str(&state.bytes.len().to_string())
             .expect("content length header"),
+    );
+    // Mirror Hugging Face's resolve metadata so download_snapshot can name blobs by
+    // etag and record the commit (sc-1904).
+    let last_segment = path.rsplit('/').next().unwrap_or("blob");
+    headers.insert(
+        axum::http::header::ETAG,
+        axum::http::HeaderValue::from_str(&format!("\"etag-{last_segment}\""))
+            .expect("etag header"),
+    );
+    headers.insert(
+        "x-repo-commit",
+        axum::http::HeaderValue::from_static("stubcommit"),
     );
     response
 }

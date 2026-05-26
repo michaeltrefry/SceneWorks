@@ -92,6 +92,84 @@ pub(crate) struct DownloadContext<'a> {
     pub(crate) cancel_message: &'a str,
 }
 
+/// Download a single file to `dest` (resumable via HTTP Range), reporting transfer
+/// progress and rejecting a truncated response. `label` names the file in the
+/// size-mismatch error.
+async fn download_file(
+    context: &DownloadContext<'_>,
+    url: &str,
+    dest: &Path,
+    expected_size: Option<u64>,
+    label: &str,
+    progress: &mut DownloadProgress<'_>,
+) -> WorkerResult<()> {
+    let existing_bytes = existing_download_bytes(dest, expected_size).await?;
+    if expected_size.is_some_and(|size| existing_bytes == size) {
+        return Ok(());
+    }
+    let mut request = context.client.get(url);
+    if existing_bytes > 0 {
+        request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
+    }
+    let response = with_hf_auth(context.settings, request).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(WorkerError::Http(response.error_for_status().unwrap_err()));
+    }
+    let appending = existing_bytes > 0 && status == StatusCode::PARTIAL_CONTENT;
+    if existing_bytes > 0 && !appending {
+        progress.discard_started_bytes(existing_bytes);
+    }
+    let mut response = response;
+    let mut output = if appending {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dest)
+            .await?
+    } else {
+        tokio::fs::File::create(dest).await?
+    };
+    let mut interval = tokio::time::interval(progress.report_interval());
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // A tokio interval's first tick is immediate; consume it so the first chunk
+    // doesn't spuriously fire a zero-byte progress report before any transfer.
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            chunk = response.chunk() => {
+                let Some(chunk) = chunk? else {
+                    break;
+                };
+                output.write_all(&chunk).await?;
+                progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+            }
+            _ = interval.tick() => {
+                report_download_progress(context, progress).await?;
+            }
+        }
+    }
+    output.flush().await?;
+    // A truncated transfer (e.g. the server closes the stream at what looks like a
+    // clean EOF) would otherwise be treated as success and the bad file only surface
+    // as an opaque load failure later. When the expected size is known, verify it and
+    // remove the partial so the next attempt re-downloads.
+    if let Some(expected) = expected_size {
+        let written = tokio::fs::metadata(dest).await?.len();
+        if written != expected {
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err(WorkerError::InvalidPayload(format!(
+                "{label} download ended at {} but expected {}",
+                format_bytes(written),
+                format_bytes(expected)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Download a Hugging Face snapshot as a flat file tree under `target_dir`. Used by
+/// the model-import flow, which intentionally populates the app's import store.
 pub(crate) async fn download_snapshot(
     context: &DownloadContext<'_>,
     target_dir: &Path,
@@ -105,69 +183,152 @@ pub(crate) async fn download_snapshot(
         if let Some(parent) = target_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let existing_bytes = existing_download_bytes(&target_path, file.size).await?;
-        if file.size.is_some_and(|size| existing_bytes == size) {
-            continue;
+        download_file(
+            context,
+            &file.download_url,
+            &target_path,
+            file.size,
+            &file.path,
+            progress,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Download a Hugging Face snapshot into the standard hub cache layout under
+/// `repo_dir` (`models--<org>--<name>`): content lands in `blobs/<etag>`, the
+/// checkpoint is materialized as `snapshots/<commit>/<path>` (a relative symlink to
+/// its blob, or a copy where symlinks are unavailable), and `refs/<rev>` records the
+/// commit. This matches `huggingface_hub`, so HF-sourced downloads dedupe with other
+/// tools and the Python loader instead of duplicating into the private app store
+/// (sc-1904).
+pub(crate) async fn download_snapshot_into_cache(
+    context: &DownloadContext<'_>,
+    repo_dir: &Path,
+    revision: &str,
+    snapshot: &HuggingFaceSnapshot,
+    progress: &mut DownloadProgress<'_>,
+) -> WorkerResult<()> {
+    let blobs_dir = repo_dir.join("blobs");
+    tokio::fs::create_dir_all(&blobs_dir).await?;
+    // A no-redirect client so the metadata HEAD reads huggingface.co's headers
+    // (X-Repo-Commit, and X-Linked-Etag for LFS) rather than the CDN's after a
+    // redirect — exactly how huggingface_hub resolves an etag/commit.
+    let meta_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut commit: Option<String> = None;
+    let mut placements: Vec<(String, String)> = Vec::with_capacity(snapshot.files.len());
+
+    for file in &snapshot.files {
+        check_cancel(context.api, context.job_id, context.cancel_message).await?;
+        let head = with_hf_auth(context.settings, meta_client.head(&file.download_url))
+            .send()
+            .await?;
+        if commit.is_none() {
+            commit = header_value(&head, "x-repo-commit");
         }
-        let mut request = context.client.get(&file.download_url);
-        if existing_bytes > 0 {
-            request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
+        let etag = header_value(&head, "x-linked-etag")
+            .or_else(|| header_value(&head, "etag"))
+            .map(|value| normalize_etag(&value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| blob_fallback_name(&file.path));
+        download_file(
+            context,
+            &file.download_url,
+            &blobs_dir.join(&etag),
+            file.size,
+            &file.path,
+            progress,
+        )
+        .await?;
+        placements.push((file.path.clone(), etag));
+    }
+
+    // Materialize the snapshot once every blob is present: refs/<rev> -> commit and
+    // snapshots/<commit>/<path> -> ../../blobs/<etag>.
+    let commit = commit.unwrap_or_else(|| revision.to_owned());
+    let refs_dir = repo_dir.join("refs");
+    tokio::fs::create_dir_all(&refs_dir).await?;
+    tokio::fs::write(refs_dir.join(revision), commit.as_bytes()).await?;
+    let snapshot_dir = repo_dir.join("snapshots").join(&commit);
+    for (relpath, etag) in &placements {
+        let link = safe_join(&snapshot_dir, relpath)?;
+        if let Some(parent) = link.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
-        let response = with_hf_auth(context.settings, request).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(WorkerError::Http(response.error_for_status().unwrap_err()));
+        if tokio::fs::symlink_metadata(&link).await.is_ok() {
+            let _ = tokio::fs::remove_file(&link).await;
         }
-        let appending = existing_bytes > 0 && status == StatusCode::PARTIAL_CONTENT;
-        if existing_bytes > 0 && !appending {
-            progress.discard_started_bytes(existing_bytes);
+        let depth = link
+            .parent()
+            .and_then(|parent| parent.strip_prefix(repo_dir).ok())
+            .map(|relative| relative.components().count())
+            .unwrap_or(2);
+        let mut rel_target = PathBuf::new();
+        for _ in 0..depth {
+            rel_target.push("..");
         }
-        let mut response = response;
-        let mut output = if appending {
-            tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&target_path)
-                .await?
-        } else {
-            tokio::fs::File::create(&target_path).await?
-        };
-        let mut interval = tokio::time::interval(progress.report_interval());
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                chunk = response.chunk() => {
-                    let Some(chunk) = chunk? else {
-                        break;
-                    };
-                    output.write_all(&chunk).await?;
-                    progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                }
-                _ = interval.tick() => {
-                    report_download_progress(context, progress).await?;
-                }
-            }
-        }
-        output.flush().await?;
-        // A truncated transfer (e.g. the server closes the stream at what looks
-        // like a clean EOF) would otherwise be treated as success: the install
-        // marker gets written over a corrupt dir and the bad shard only surfaces
-        // as an opaque load failure later. When the expected size is known,
-        // verify it and remove the partial so the next attempt re-downloads.
-        if let Some(expected) = file.size {
-            let written = tokio::fs::metadata(&target_path).await?.len();
-            if written != expected {
-                let _ = tokio::fs::remove_file(&target_path).await;
-                return Err(WorkerError::InvalidPayload(format!(
-                    "{} download ended at {} but expected {}",
-                    file.path,
-                    format_bytes(written),
-                    format_bytes(expected)
-                )));
-            }
+        rel_target.push("blobs");
+        rel_target.push(etag);
+        if !link_blob(&rel_target, &link).await {
+            tokio::fs::copy(blobs_dir.join(etag), &link).await?;
         }
     }
     Ok(())
+}
+
+fn header_value(response: &reqwest::Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Strip the surrounding quotes and any weak-validator prefix HTTP/HF put around an
+/// ETag, leaving the bare blob name huggingface_hub uses.
+fn normalize_etag(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("W/")
+        .trim_matches('"')
+        .to_owned()
+}
+
+/// Blob name when the server returns no etag (a non-HF stub or an endpoint that
+/// omits ETag): a filesystem-safe rendering of the repo path. Keeps the download
+/// working; only weakens cross-app dedup for that one file.
+fn blob_fallback_name(path: &str) -> String {
+    path.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Create a relative symlink from `link` to its blob, returning whether it
+/// succeeded. Mirrors huggingface_hub: symlink where supported, and the caller
+/// copies instead when this returns false (Windows without privilege).
+async fn link_blob(rel_target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        tokio::fs::symlink(rel_target, link).await.is_ok()
+    }
+    #[cfg(windows)]
+    {
+        tokio::fs::symlink_file(rel_target, link).await.is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (rel_target, link);
+        false
+    }
 }
 
 pub(crate) async fn download_lora_source_url(
