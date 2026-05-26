@@ -588,6 +588,13 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     if normalized.is_empty() {
         return None;
     }
+    // Check chroma before flux: Chroma is FLUX.1-schnell-derived, so a Chroma
+    // LoRA's metadata may name both. Only metadata can distinguish the two — by
+    // tensor keys a Chroma LoRA is identical to a Flux LoRA (same double/single
+    // transformer blocks), so the key-based detector classifies it as `flux`.
+    if normalized.contains("chroma") {
+        return Some("chroma".to_owned());
+    }
     if normalized.contains("flux") {
         return Some("flux".to_owned());
     }
@@ -766,6 +773,23 @@ mod tests {
         });
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("flux"));
+    }
+
+    #[test]
+    fn chroma_metadata_distinguishes_chroma_from_flux_keys() {
+        // Chroma is FLUX.1-schnell-derived: its LoRA tensor keys are identical to
+        // Flux (single/double transformer blocks), so only metadata can mark a
+        // LoRA as chroma. Metadata is checked before keys and chroma before flux.
+        let mut header = header_from_keys(&[
+            "transformer.single_transformer_blocks.0.attn.to_q.lora_A.weight",
+            "transformer.single_transformer_blocks.0.attn.to_q.lora_B.weight",
+            "transformer.transformer_blocks.0.attn.to_q.lora_A.weight",
+        ]);
+        header["__metadata__"] = json!({
+            "modelspec.architecture": "chroma/lora"
+        });
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("chroma"));
     }
 
     #[test]
