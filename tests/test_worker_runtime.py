@@ -1311,6 +1311,8 @@ def test_kolors_model_target_defaults():
     assert kolors["steps"] == 25
     assert kolors["guidanceScale"] == 5.0
     assert kolors["maxSequenceLength"] == 256
+    # fp16-only repo: from_pretrained must request the fp16 variant.
+    assert kolors["variant"] == "fp16"
     assert kolors["repo"] == "Kwai-Kolors/Kolors-diffusers"
 
 

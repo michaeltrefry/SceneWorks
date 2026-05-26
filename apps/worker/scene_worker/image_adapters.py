@@ -319,6 +319,9 @@ MODEL_TARGETS = {
         "steps": 25,
         "guidanceScale": 5.0,
         "maxSequenceLength": 256,
+        # Kolors-diffusers ships fp16-variant weights only (*.fp16.safetensors),
+        # so from_pretrained must request the fp16 variant.
+        "variant": "fp16",
         "repo": "Kwai-Kolors/Kolors-diffusers",
         "adapter": "kolors_diffusers",
     },
@@ -1915,7 +1918,11 @@ class KolorsDiffusersAdapter:
             cpuOffload=cpu_offload,
             cached=cache_action == "Loading cached",
         )
-        pipe = pipeline_class.from_pretrained(repo, torch_dtype=dtype)
+        # fp16-only repo: pass the variant or from_pretrained looks for the
+        # nonexistent default diffusion_pytorch_model.bin and fails (e.g. in vae/).
+        pipe = pipeline_class.from_pretrained(
+            repo, torch_dtype=dtype, variant=model_target.get("variant")
+        )
         # Kolors-diffusers ships EulerDiscreteScheduler; the model card recommends
         # DPMSolverMultistep with Karras sigmas for the ~25-step config.
         scheduler_class = getattr(diffusers, "DPMSolverMultistepScheduler", None)
