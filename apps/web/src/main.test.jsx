@@ -4823,6 +4823,67 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob.mock.calls[0][0]).not.toHaveProperty("stylePreset");
   });
 
+  it("threads the Image Studio upscale controls into enabled image jobs", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image" }],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          presets: [],
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+
+    expect(container.querySelector('.upscale-toggle input[type="checkbox"]').checked).toBe(false);
+    expect(field(container, "Scale").disabled).toBe(true);
+    expect(field(container, "Engine").disabled).toBe(true);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0]).not.toHaveProperty("upscale");
+
+    await act(async () => {
+      container.querySelector('.upscale-toggle input[type="checkbox"]').click();
+    });
+    await changeField(field(container, "Scale"), "4");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        upscale: {
+          enabled: true,
+          factor: 4,
+          engine: "real-esrgan",
+        },
+      }),
+    );
+  });
+
   it("blocks image presets whose managed LoRAs do not match the selected model", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);

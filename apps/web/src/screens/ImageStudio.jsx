@@ -158,6 +158,9 @@ export function ImageStudio() {
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
+  const [upscaleEnabled, setUpscaleEnabled] = useState(false);
+  const [upscaleFactor, setUpscaleFactor] = useState(2);
+  const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -424,6 +427,15 @@ export function ImageStudio() {
         characterLookId: mode === "character_image" ? characterLookId || null : null,
         sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
         loras: selectedLoras.map((lora) => serializeLora(lora)),
+        ...(upscaleEnabled
+          ? {
+              upscale: {
+                enabled: true,
+                factor: upscaleFactor,
+                engine: upscaleEngine,
+              },
+            }
+          : {}),
         advanced: {
           resolution,
         },
@@ -674,6 +686,27 @@ export function ImageStudio() {
                 <label>
                   Seed
                   <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
+                </label>
+                <label className="checkline upscale-toggle">
+                  <input
+                    checked={upscaleEnabled}
+                    onChange={(event) => setUpscaleEnabled(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Upscale
+                </label>
+                <label>
+                  Scale
+                  <select disabled={!upscaleEnabled} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
+                    <option value={2}>2x</option>
+                    <option value={4}>4x</option>
+                  </select>
+                </label>
+                <label>
+                  Engine
+                  <select disabled={!upscaleEnabled} onChange={(event) => setUpscaleEngine(event.target.value)} value={upscaleEngine}>
+                    <option value="real-esrgan">Real-ESRGAN</option>
+                  </select>
                 </label>
                 <label className="prompt-field">
                   Negative prompt

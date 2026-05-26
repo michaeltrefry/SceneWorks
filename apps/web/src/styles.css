@@ -4330,6 +4330,11 @@ label {
   border: 1px solid var(--border);
 }
 
+.advanced-panel .upscale-toggle {
+  min-height: 44px;
+  align-self: end;
+}
+
 .advanced-panel .prompt-field,
 .advanced-panel .lora-picker {
   grid-column: 1 / -1;
