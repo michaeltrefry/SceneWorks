@@ -524,7 +524,10 @@
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
-        "families": ["chroma"],
+        // Chroma is FLUX.1-schnell-derived and shares Flux's transformer layout,
+        // so Flux LoRAs load on Chroma — and Chroma LoRAs without chroma metadata
+        // are detected as `flux` (identical tensor keys). Accept both families.
+        "families": ["chroma", "flux"],
         "types": ["style", "enhance", "character"]
       },
       "ui": {
@@ -564,7 +567,10 @@
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
-        "families": ["chroma"],
+        // Chroma is FLUX.1-schnell-derived and shares Flux's transformer layout,
+        // so Flux LoRAs load on Chroma — and Chroma LoRAs without chroma metadata
+        // are detected as `flux` (identical tensor keys). Accept both families.
+        "families": ["chroma", "flux"],
         "types": ["style", "enhance", "character"]
       },
       "ui": {
@@ -604,7 +610,10 @@
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
-        "families": ["chroma"],
+        // Chroma is FLUX.1-schnell-derived and shares Flux's transformer layout,
+        // so Flux LoRAs load on Chroma — and Chroma LoRAs without chroma metadata
+        // are detected as `flux` (identical tensor keys). Accept both families.
+        "families": ["chroma", "flux"],
         "types": ["style", "enhance", "character"]
       },
       "ui": {
