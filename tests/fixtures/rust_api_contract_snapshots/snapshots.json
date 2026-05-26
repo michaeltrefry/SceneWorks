@@ -1600,6 +1600,49 @@
       "loras": [],
       "mode": "text_to_image",
       "model": "base-model",
+      "modelManifestEntry": {
+        "adapter": "z_image_diffusers",
+        "capabilities": [
+          "text_to_image"
+        ],
+        "defaults": {
+          "height": 1024,
+          "width": 1024
+        },
+        "downloads": [
+          {
+            "estimatedSizeBytes": 536870912,
+            "files": [
+              "*.bin"
+            ],
+            "provider": "huggingface",
+            "repo": "owner/alternate-base-model"
+          },
+          {
+            "default": true,
+            "estimatedSizeBytes": 12884901888,
+            "files": [
+              "*.safetensors"
+            ],
+            "provider": "huggingface",
+            "repo": "owner/base-model"
+          }
+        ],
+        "family": "z-image",
+        "id": "base-model",
+        "limits": {},
+        "loraCompatibility": {
+          "families": [
+            "z-image"
+          ]
+        },
+        "name": "User Model",
+        "paths": {},
+        "type": "image",
+        "ui": {
+          "label": "User"
+        }
+      },
       "negativePrompt": "",
       "projectId": "project_fixture",
       "projectName": "Parity Project",
@@ -1651,6 +1694,49 @@
       "loras": [],
       "mode": "text_to_image",
       "model": "base-model",
+      "modelManifestEntry": {
+        "adapter": "z_image_diffusers",
+        "capabilities": [
+          "text_to_image"
+        ],
+        "defaults": {
+          "height": 1024,
+          "width": 1024
+        },
+        "downloads": [
+          {
+            "estimatedSizeBytes": 536870912,
+            "files": [
+              "*.bin"
+            ],
+            "provider": "huggingface",
+            "repo": "owner/alternate-base-model"
+          },
+          {
+            "default": true,
+            "estimatedSizeBytes": 12884901888,
+            "files": [
+              "*.safetensors"
+            ],
+            "provider": "huggingface",
+            "repo": "owner/base-model"
+          }
+        ],
+        "family": "z-image",
+        "id": "base-model",
+        "limits": {},
+        "loraCompatibility": {
+          "families": [
+            "z-image"
+          ]
+        },
+        "name": "User Model",
+        "paths": {},
+        "type": "image",
+        "ui": {
+          "label": "User"
+        }
+      },
       "negativePrompt": "",
       "projectId": "project_fixture",
       "projectName": "Parity Project",
@@ -1697,6 +1783,49 @@
         "loras": [],
         "mode": "text_to_image",
         "model": "base-model",
+        "modelManifestEntry": {
+          "adapter": "z_image_diffusers",
+          "capabilities": [
+            "text_to_image"
+          ],
+          "defaults": {
+            "height": 1024,
+            "width": 1024
+          },
+          "downloads": [
+            {
+              "estimatedSizeBytes": 536870912,
+              "files": [
+                "*.bin"
+              ],
+              "provider": "huggingface",
+              "repo": "owner/alternate-base-model"
+            },
+            {
+              "default": true,
+              "estimatedSizeBytes": 12884901888,
+              "files": [
+                "*.safetensors"
+              ],
+              "provider": "huggingface",
+              "repo": "owner/base-model"
+            }
+          ],
+          "family": "z-image",
+          "id": "base-model",
+          "limits": {},
+          "loraCompatibility": {
+            "families": [
+              "z-image"
+            ]
+          },
+          "name": "User Model",
+          "paths": {},
+          "type": "image",
+          "ui": {
+            "label": "User"
+          }
+        },
         "negativePrompt": "",
         "projectId": "project_fixture",
         "projectName": "Parity Project",
@@ -1743,6 +1872,49 @@
       "loras": [],
       "mode": "text_to_image",
       "model": "base-model",
+      "modelManifestEntry": {
+        "adapter": "z_image_diffusers",
+        "capabilities": [
+          "text_to_image"
+        ],
+        "defaults": {
+          "height": 1024,
+          "width": 1024
+        },
+        "downloads": [
+          {
+            "estimatedSizeBytes": 536870912,
+            "files": [
+              "*.bin"
+            ],
+            "provider": "huggingface",
+            "repo": "owner/alternate-base-model"
+          },
+          {
+            "default": true,
+            "estimatedSizeBytes": 12884901888,
+            "files": [
+              "*.safetensors"
+            ],
+            "provider": "huggingface",
+            "repo": "owner/base-model"
+          }
+        ],
+        "family": "z-image",
+        "id": "base-model",
+        "limits": {},
+        "loraCompatibility": {
+          "families": [
+            "z-image"
+          ]
+        },
+        "name": "User Model",
+        "paths": {},
+        "type": "image",
+        "ui": {
+          "label": "User"
+        }
+      },
       "negativePrompt": "",
       "projectId": "project_fixture",
       "projectName": "Parity Project",
@@ -2687,6 +2859,49 @@
       "loras": [],
       "mode": "text_to_image",
       "model": "base-model",
+      "modelManifestEntry": {
+        "adapter": "z_image_diffusers",
+        "capabilities": [
+          "text_to_image"
+        ],
+        "defaults": {
+          "height": 1024,
+          "width": 1024
+        },
+        "downloads": [
+          {
+            "estimatedSizeBytes": 536870912,
+            "files": [
+              "*.bin"
+            ],
+            "provider": "huggingface",
+            "repo": "owner/alternate-base-model"
+          },
+          {
+            "default": true,
+            "estimatedSizeBytes": 12884901888,
+            "files": [
+              "*.safetensors"
+            ],
+            "provider": "huggingface",
+            "repo": "owner/base-model"
+          }
+        ],
+        "family": "z-image",
+        "id": "base-model",
+        "limits": {},
+        "loraCompatibility": {
+          "families": [
+            "z-image"
+          ]
+        },
+        "name": "User Model",
+        "paths": {},
+        "type": "image",
+        "ui": {
+          "label": "User"
+        }
+      },
       "negativePrompt": "",
       "projectId": "project_fixture",
       "projectName": "Parity Project",

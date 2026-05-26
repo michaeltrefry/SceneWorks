@@ -136,6 +136,7 @@ export const fallbackModels = [
     capabilities: ["text_to_image", "style_variations"],
     ui: {
       description: "Chroma1-HD — high-resolution text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; true CFG with negative prompts (~40 steps, guidance 3.0). Large-VRAM GPU.",
+      promptGuide: { title: "Chroma1-HD Prompt Guide", path: "/prompt-guides/chroma1-hd.md" },
     },
   },
   {
@@ -145,6 +146,7 @@ export const fallbackModels = [
     capabilities: ["text_to_image", "style_variations"],
     ui: {
       description: "Chroma1-Base — text-to-image foundation tuned for finetuning, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; true CFG with negative prompts (~40 steps, guidance 3.0). Large-VRAM GPU.",
+      promptGuide: { title: "Chroma1-Base Prompt Guide", path: "/prompt-guides/chroma1-base.md" },
     },
   },
   {
@@ -154,6 +156,7 @@ export const fallbackModels = [
     capabilities: ["text_to_image", "style_variations"],
     ui: {
       description: "Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; ~8-step generation, CFG disabled (guidance 1.0, no negative prompt). Large-VRAM GPU.",
+      promptGuide: { title: "Chroma1-Flash Prompt Guide", path: "/prompt-guides/chroma1-flash.md" },
     },
   },
   {

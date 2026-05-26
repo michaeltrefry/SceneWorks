@@ -533,7 +533,16 @@
       "ui": {
         "label": "Chroma1-HD",
         "description": "Lodestones Chroma1-HD — high-resolution text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); true classifier-free guidance with negative prompts (~40 steps, guidance 3.0). Needs a large-VRAM GPU.",
-        "recommendedFor": ["text_to_image", "style_variations"]
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Chroma1-HD Prompt Guide",
+          "path": "/prompt-guides/chroma1-hd.md",
+          "sources": [
+            { "label": "Chroma1-HD model card", "url": "https://huggingface.co/lodestones/Chroma1-HD" },
+            { "label": "Chroma1-Base model card", "url": "https://huggingface.co/lodestones/Chroma1-Base" },
+            { "label": "Diffusers Chroma pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/chroma" }
+          ]
+        }
       }
     },
     {
@@ -576,7 +585,16 @@
       "ui": {
         "label": "Chroma1-Base",
         "description": "Lodestones Chroma1-Base — text-to-image foundation tuned for finetuning, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); true classifier-free guidance with negative prompts (~40 steps, guidance 3.0). Needs a large-VRAM GPU.",
-        "recommendedFor": ["text_to_image", "style_variations"]
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Chroma1-Base Prompt Guide",
+          "path": "/prompt-guides/chroma1-base.md",
+          "sources": [
+            { "label": "Chroma1-Base model card", "url": "https://huggingface.co/lodestones/Chroma1-Base" },
+            { "label": "Chroma1-HD model card", "url": "https://huggingface.co/lodestones/Chroma1-HD" },
+            { "label": "Diffusers Chroma pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/chroma" }
+          ]
+        }
       }
     },
     {
@@ -619,7 +637,16 @@
       "ui": {
         "label": "Chroma1-Flash",
         "description": "Lodestones Chroma1-Flash — fast CFG-baked text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B transformer + T5-XXL text encoder (no CLIP); ~8-step generation with CFG disabled (guidance 1.0, negative prompt ignored). Needs a large-VRAM GPU.",
-        "recommendedFor": ["text_to_image", "style_variations"]
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "promptGuide": {
+          "title": "Chroma1-Flash Prompt Guide",
+          "path": "/prompt-guides/chroma1-flash.md",
+          "sources": [
+            { "label": "Chroma1-Flash model card", "url": "https://huggingface.co/lodestones/Chroma1-Flash" },
+            { "label": "Chroma1-HD model card", "url": "https://huggingface.co/lodestones/Chroma1-HD" },
+            { "label": "Diffusers Chroma pipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/chroma" }
+          ]
+        }
       }
     },
     {
