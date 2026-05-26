@@ -358,6 +358,13 @@ export function FullscreenPreview({
   purgeAsset,
   updateAssetStatus,
 }) {
+  const hasUpscaleVariants = Boolean(asset.variants?.original && asset.variants?.upscaled);
+  const [variantMode, setVariantMode] = React.useState("upscaled");
+  React.useEffect(() => {
+    setVariantMode(asset.variants?.upscaled ? "upscaled" : "original");
+  }, [asset.id, asset.variants?.upscaled?.id]);
+  const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
+
   return (
     <Modal className="preview-modal" label="Asset preview" onClose={onClose}>
       <button className="modal-close" onClick={onClose} type="button">
@@ -373,7 +380,7 @@ export function FullscreenPreview({
           >
             <Icon.ArrowLeft size={18} />
           </button>
-          <AssetMedia asset={asset} />
+          <AssetMedia asset={displayedAsset} />
           <button
             aria-label="Next asset"
             className="preview-nav-button next"
@@ -389,6 +396,24 @@ export function FullscreenPreview({
             <strong>{asset.displayName}</strong>
             <span>{asset.recipe?.model}</span>
           </div>
+          {hasUpscaleVariants ? (
+            <div className="segmented-control compact-segment preview-variant-toggle" aria-label="Image variant">
+              <button
+                className={variantMode === "original" ? "active" : ""}
+                onClick={() => setVariantMode("original")}
+                type="button"
+              >
+                Original
+              </button>
+              <button
+                className={variantMode === "upscaled" ? "active" : ""}
+                onClick={() => setVariantMode("upscaled")}
+                type="button"
+              >
+                Upscaled
+              </button>
+            </div>
+          ) : null}
           <div className="preview-actions">
             <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
               {asset.status?.favorite ? "Saved" : "Favorite"}

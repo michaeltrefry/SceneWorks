@@ -25,6 +25,7 @@ import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { AppContext } from "./context/AppContext.js";
+import { findFoldedAssetById, foldUpscaledAssetVariants } from "./assetVariants.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
 // web/Docker keep the existing first-run project gate. Tauri commands persist the
@@ -500,23 +501,24 @@ export function App() {
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
     [assets, selectedAssetId],
   );
+  const foldedPreviewAssets = useMemo(() => foldUpscaledAssetVariants(assets), [assets]);
   const previewedAsset = useMemo(
-    () => (previewAsset ? assets.find((asset) => asset.id === previewAsset.id) ?? previewAsset : null),
-    [assets, previewAsset],
+    () => (previewAsset ? findFoldedAssetById(foldedPreviewAssets, previewAsset.id) ?? previewAsset : null),
+    [foldedPreviewAssets, previewAsset],
   );
   const previewNavigation = useMemo(() => {
-    if (!previewedAsset || assets.length < 2) {
+    if (!previewedAsset || foldedPreviewAssets.length < 2) {
       return { previous: null, next: null };
     }
-    const currentIndex = assets.findIndex((asset) => asset.id === previewedAsset.id);
+    const currentIndex = foldedPreviewAssets.findIndex((asset) => asset.id === previewedAsset.id);
     if (currentIndex < 0) {
       return { previous: null, next: null };
     }
     return {
-      previous: currentIndex > 0 ? assets[currentIndex - 1] : null,
-      next: currentIndex < assets.length - 1 ? assets[currentIndex + 1] : null,
+      previous: currentIndex > 0 ? foldedPreviewAssets[currentIndex - 1] : null,
+      next: currentIndex < foldedPreviewAssets.length - 1 ? foldedPreviewAssets[currentIndex + 1] : null,
     };
-  }, [assets, previewedAsset]);
+  }, [foldedPreviewAssets, previewedAsset]);
   const latestAssets = useMemo(
     () => assets.filter((asset) => asset.generationSetId === latestGenerationSetId),
     [assets, latestGenerationSetId],

@@ -19,6 +19,8 @@ pub(crate) async fn create_image_job(
         job_payload.remove("recipePresetId");
     }
     apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload).await?;
+    let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
+    job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility(&state, Some(&payload.project_id), &mut job_payload, false)
         .await?;
     if payload.seed.is_none() {

@@ -762,6 +762,63 @@
           ]
         }
       }
+    },
+    {
+      "id": "real_esrgan",
+      "name": "Real-ESRGAN Upscaler",
+      "family": "real-esrgan",
+      "type": "utility",
+      "adapter": "real-esrgan",
+      "capabilities": [],
+      "downloads": [
+        {
+          // Mirrors the upstream Real-ESRGAN release weights in one HF repo so
+          // the existing model_download job can cache both optional upscalers.
+          "provider": "huggingface",
+          "repo": "nateraw/real-esrgan",
+          "files": ["RealESRGAN_x2plus.pth", "RealESRGAN_x4plus.pth"],
+          "estimatedSizeBytes": 134100000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/nateraw/real-esrgan"
+      },
+      "resources": {
+        "imageUpscalers": {
+          "real-esrgan": {
+            "x2": {
+              "repo": "nateraw/real-esrgan",
+              "file": "RealESRGAN_x2plus.pth",
+              "originalUrl": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth"
+            },
+            "x4": {
+              "repo": "nateraw/real-esrgan",
+              "file": "RealESRGAN_x4plus.pth",
+              "originalUrl": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+            }
+          }
+        }
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Real-ESRGAN Upscaler",
+        "description": "Optional pixel-space image upscaling weights used only when Image Studio upscaling is enabled.",
+        "recommendedFor": ["image_upscale"],
+        "promptGuide": {
+          "title": "Real-ESRGAN Upscaling Guide",
+          "path": "/prompt-guides/real-esrgan.md",
+          "sources": [
+            { "label": "Real-ESRGAN GitHub", "url": "https://github.com/xinntao/Real-ESRGAN" },
+            { "label": "Real-ESRGAN paper", "url": "https://arxiv.org/abs/2107.10833" },
+            { "label": "Hugging Face mirror", "url": "https://huggingface.co/nateraw/real-esrgan" }
+          ]
+        }
+      }
     }
   ]
 }

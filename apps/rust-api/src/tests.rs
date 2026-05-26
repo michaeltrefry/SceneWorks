@@ -2205,6 +2205,41 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
 #[tokio::test]
 async fn image_job_route_threads_upscale_contract_when_enabled() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "z_image_turbo",
+              "name": "Z-Image-Turbo",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [],
+              "paths": {},
+              "resources": {
+                "imageUpscalers": {
+                  "real-esrgan": {
+                    "x2": { "repo": "nateraw/real-esrgan", "file": "RealESRGAN_x2plus.pth" },
+                    "x4": { "repo": "nateraw/real-esrgan", "file": "RealESRGAN_x4plus.pth" }
+                  }
+                }
+              },
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": [], "types": [] },
+              "ui": {}
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
     let base_request = json!({
@@ -2223,6 +2258,11 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(base_job["payload"].get("upscale").is_none());
+    assert_eq!(
+        base_job["payload"]["modelManifestEntry"]["resources"]["imageUpscalers"]["real-esrgan"]
+            ["x4"]["file"],
+        json!("RealESRGAN_x4plus.pth")
+    );
 
     let mut disabled_request = base_request.clone();
     disabled_request["upscale"] = json!({ "enabled": false, "factor": 4, "engine": "real-esrgan" });

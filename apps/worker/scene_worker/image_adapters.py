@@ -31,7 +31,7 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import cancel_step_callback, filter_call_kwargs
-from .hf_cache import huggingface_repo_cache_path
+from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
     LoraPipelineState,
     apply_loras_to_pipeline,
@@ -315,6 +315,7 @@ class ImageRequest:
     character_look_id: str | None
     source_asset_id: str | None
     advanced: dict[str, Any]
+    model_manifest_entry: dict[str, Any]
     upscale: UpscaleRequest = field(default_factory=UpscaleRequest)
 
 
@@ -363,6 +364,9 @@ def image_request_from_job(job: dict[str, Any]) -> ImageRequest:
         character_id=payload.get("characterId"),
         character_look_id=payload.get("characterLookId"),
         source_asset_id=payload.get("sourceAssetId"),
+        model_manifest_entry=(
+            payload.get("modelManifestEntry") if isinstance(payload.get("modelManifestEntry"), dict) else {}
+        ),
         upscale=upscale_request_from_payload(payload),
         advanced=payload.get("advanced", {}),
     )
@@ -439,6 +443,58 @@ class ImageAssetWriter:
         }
         asset_writes: list[dict[str, Any]] = []
         upscaler = create_image_upscaler(request, settings=settings, job_id=job_id)
+        expected_asset_count = image_count * (2 if upscaler is not None else 1)
+
+        def append_image_write(
+            *,
+            image: Image.Image,
+            asset_id: str,
+            filename: str,
+            seed: int,
+            index: int,
+            source_asset_id: str | None,
+            raw_adapter_settings: dict[str, Any],
+            display_suffix: str = "",
+            parents: list[str] | None = None,
+            extra: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            media_rel = f"assets/images/{generation_set_id}/{filename}"
+            image.save(project_path / media_rel, "PNG")
+            write = {
+                "assetId": asset_id,
+                "mediaPath": media_rel,
+                "mimeType": "image/png",
+                # True saved pixel dimensions, not the request's. SenseNova-U1 (and
+                # any model that snaps to a trained bucket) saves at a size that
+                # differs from request.width/height.
+                "width": image.width,
+                "height": image.height,
+                "normalizedWidth": request.width,
+                "normalizedHeight": request.height,
+                "count": request.count,
+                "family": model_target["family"],
+                "seed": seed,
+                "index": index,
+                "displayName": f"{request.prompt[:56] or 'Generated image'} #{index + 1}{display_suffix}",
+                "createdAt": created_at,
+                "mode": request.mode,
+                "model": request.model,
+                "adapter": adapter_id,
+                "prompt": request.prompt,
+                "negativePrompt": request.negative_prompt,
+                "loras": request.loras,
+                "stylePreset": request.style_preset,
+                "characterId": request.character_id,
+                "characterLookId": request.character_look_id,
+                "sourceAssetId": source_asset_id,
+                "rawAdapterSettings": raw_adapter_settings,
+            }
+            if parents is not None:
+                write["parents"] = parents
+            if extra is not None:
+                write["extra"] = extra
+            asset_writes.append(write)
+            return write
 
         for index in range(image_count):
             if cancel_requested():
@@ -449,7 +505,19 @@ class ImageAssetWriter:
                 raise InterruptedError("Image generation canceled by user.")
             source_width = image.width
             source_height = image.height
-            upscale_settings: dict[str, Any] | None = None
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            original_asset_id = f"asset_{uuid4().hex}"
+            original_filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
+            append_image_write(
+                image=image,
+                asset_id=original_asset_id,
+                filename=original_filename,
+                seed=seed,
+                index=index,
+                source_asset_id=request.source_asset_id,
+                raw_adapter_settings=dict(raw_settings),
+            )
+
             if upscaler is not None:
                 progress(
                     "running",
@@ -457,59 +525,40 @@ class ImageAssetWriter:
                     image_batch_progress(index, image_count),
                     f"Upscaling image {index + 1} of {image_count}.",
                 )
-                image = upscaler.upscale(image, request=request, cancel_requested=cancel_requested)
+                upscaled_image = upscaler.upscale(image, request=request, cancel_requested=cancel_requested)
                 if cancel_requested():
                     raise InterruptedError("Image generation canceled by user.")
-                upscale_settings = {
+                upscale_settings: dict[str, Any] = {
                     "enabled": True,
                     "engine": upscaler.id,
                     "factor": request.upscale.factor,
                     "sourceWidth": source_width,
                     "sourceHeight": source_height,
-                    "width": image.width,
-                    "height": image.height,
+                    "width": upscaled_image.width,
+                    "height": upscaled_image.height,
                 }
-            asset_raw_settings = dict(raw_settings)
-            if upscale_settings is not None:
-                asset_raw_settings["upscale"] = upscale_settings
-
-            asset_id = f"asset_{uuid4().hex}"
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
-            filename = f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}.png"
-            media_rel = f"assets/images/{generation_set_id}/{filename}"
-            image.save(project_path / media_rel, "PNG")
-
-            asset_writes.append(
-                {
-                    "assetId": asset_id,
-                    "mediaPath": media_rel,
-                    "mimeType": "image/png",
-                    # True saved pixel dimensions, not the request's. SenseNova-U1 (and
-                    # any model that snaps to a trained bucket) saves at a size that
-                    # differs from request.width/height.
-                    "width": image.width,
-                    "height": image.height,
-                    "normalizedWidth": request.width,
-                    "normalizedHeight": request.height,
-                    "count": request.count,
-                    "family": model_target["family"],
-                    "seed": seed,
-                    "index": index,
-                    "displayName": f"{request.prompt[:56] or 'Generated image'} #{index + 1}",
-                    "createdAt": created_at,
-                    "mode": request.mode,
-                    "model": request.model,
-                    "adapter": adapter_id,
-                    "prompt": request.prompt,
-                    "negativePrompt": request.negative_prompt,
-                    "loras": request.loras,
-                    "stylePreset": request.style_preset,
-                    "characterId": request.character_id,
-                    "characterLookId": request.character_look_id,
-                    "sourceAssetId": request.source_asset_id,
-                    "rawAdapterSettings": asset_raw_settings,
-                }
-            )
+                upscaled_raw_settings = dict(raw_settings)
+                upscaled_raw_settings["upscale"] = upscale_settings
+                append_image_write(
+                    image=upscaled_image,
+                    asset_id=f"asset_{uuid4().hex}",
+                    filename=(
+                        f"{date_slug}_{request.model}_{prompt_slug}_{index + 1:04d}"
+                        f"_upscaled_x{request.upscale.factor}.png"
+                    ),
+                    seed=seed,
+                    index=index,
+                    source_asset_id=original_asset_id,
+                    raw_adapter_settings=upscaled_raw_settings,
+                    display_suffix=f" ({request.upscale.factor}x upscaled)",
+                    parents=[original_asset_id],
+                    extra={
+                        "isUpscaled": True,
+                        "upscaledFromAssetId": original_asset_id,
+                        "factor": request.upscale.factor,
+                        "engine": upscaler.id,
+                    },
+                )
             progress(
                 "saving",
                 "saving",
@@ -517,7 +566,7 @@ class ImageAssetWriter:
                 f"Saved image asset {index + 1} of {image_count}.",
                 {
                     "generationSetId": generation_set_id,
-                    "expectedCount": image_count,
+                    "expectedCount": expected_asset_count,
                     "adapter": adapter_id,
                     "model": request.model,
                     "generationSet": generation_set,
@@ -527,7 +576,7 @@ class ImageAssetWriter:
 
         return {
             "generationSetId": generation_set_id,
-            "expectedCount": image_count,
+            "expectedCount": expected_asset_count,
             "adapter": adapter_id,
             "model": request.model,
             "generationSet": generation_set,
@@ -538,13 +587,15 @@ class ImageAssetWriter:
 REAL_ESRGAN_MODEL_SPECS: dict[int, dict[str, Any]] = {
     2: {
         "name": "RealESRGAN_x2plus",
-        "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+        "repo": "nateraw/real-esrgan",
+        "file": "RealESRGAN_x2plus.pth",
         "scale": 2,
         "num_block": 23,
     },
     4: {
         "name": "RealESRGAN_x4plus",
-        "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        "repo": "nateraw/real-esrgan",
+        "file": "RealESRGAN_x4plus.pth",
         "scale": 4,
         "num_block": 23,
     },
@@ -663,22 +714,55 @@ class RealEsrganUpscaler:
             if not path.is_file():
                 raise RuntimeError(f"Real-ESRGAN model file does not exist: {path}")
             return path
-        download_util = importlib.import_module("basicsr.utils.download_util")
-        cache_root = Path(
-            os.getenv("SCENEWORKS_UPSCALER_CACHE_DIR")
-            or os.getenv("SCENEWORKS_CACHE_DIR", "")
-            or Path.home() / ".cache" / "sceneworks"
+        resource = self._manifest_resource(request, request.upscale.factor)
+        repo = str(resource.get("repo") or spec["repo"])
+        file_name = str(resource.get("file") or spec["file"])
+        return self._hf_hub_download(repo, file_name)
+
+    def _hf_hub_download(self, repo: str, file_name: str) -> Path:
+        from huggingface_hub import hf_hub_download
+
+        roots = huggingface_cache_roots(self._settings)
+        first_error: Exception | None = None
+        for cache_root in roots:
+            try:
+                return Path(
+                    hf_hub_download(
+                        repo_id=repo,
+                        filename=file_name,
+                        cache_dir=str(cache_root),
+                        local_files_only=True,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - try the next configured cache root.
+                first_error = exc
+
+        cache_root = roots[0]
+        try:
+            return Path(hf_hub_download(repo_id=repo, filename=file_name, cache_dir=str(cache_root)))
+        except Exception as exc:  # noqa: BLE001 - surface the download context.
+            raise RuntimeError(
+                f"Unable to resolve Real-ESRGAN weight {file_name} from Hugging Face repo {repo}."
+            ) from (first_error or exc)
+
+    @staticmethod
+    def _manifest_resource(request: ImageRequest, factor: int) -> dict[str, Any]:
+        resources = request.model_manifest_entry.get("resources", {})
+        if not isinstance(resources, dict):
+            return {}
+        upscalers = resources.get("imageUpscalers") or resources.get("upscalers")
+        if not isinstance(upscalers, dict):
+            return {}
+        real_esrgan = (
+            upscalers.get("real-esrgan")
+            or upscalers.get("realEsrgan")
+            or upscalers.get("real_esrgan")
+            or {}
         )
-        model_dir = cache_root / "upscalers" / "real-esrgan"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        return Path(
-            download_util.load_file_from_url(
-                url=spec["url"],
-                model_dir=str(model_dir),
-                progress=True,
-                file_name=f"{spec['name']}.pth",
-            )
-        )
+        if not isinstance(real_esrgan, dict):
+            return {}
+        resource = real_esrgan.get(f"x{factor}") or real_esrgan.get(str(factor)) or {}
+        return resource if isinstance(resource, dict) else {}
 
 
 def ensure_realesrgan_torchvision_compat() -> None:

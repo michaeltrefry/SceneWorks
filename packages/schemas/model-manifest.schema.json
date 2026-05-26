@@ -112,6 +112,13 @@
                 }
               }
             }
+          },
+          "resources": {
+            "type": "object",
+            "description": "Named auxiliary files required by an adapter or optional post-process. Resource entries are resolved by repo/file and should be lazy-fetched only when the feature that needs them runs.",
+            "additionalProperties": {
+              "type": "object"
+            }
           }
         }
       }

@@ -2205,7 +2205,7 @@ fn build_generated_asset_sidecar(
         "document" => build_document_sidecar_parts(job_id, fact),
         _ => build_image_sidecar_parts(job_id, fact),
     };
-    json!({
+    let mut asset = json!({
         "schemaVersion": 1,
         "id": get("assetId"),
         "projectId": project_id,
@@ -2217,17 +2217,27 @@ fn build_generated_asset_sidecar(
         "status": { "favorite": false, "rating": 0, "rejected": false, "trashed": false },
         "recipe": recipe,
         "lineage": lineage,
-    })
+    });
+    if let Some(extra) = fact.get("extra") {
+        if let Some(object) = asset.as_object_mut() {
+            object.insert("extra".to_owned(), extra.clone());
+        }
+    }
+    asset
 }
 
 /// `(file, recipe, lineage)` for a generated image asset, matching the worker's
 /// former `build_asset_sidecar` (story 1656).
 fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
     let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
-    let parents = match fact.get("sourceAssetId").and_then(Value::as_str) {
-        Some(source) => vec![Value::String(source.to_owned())],
-        None => Vec::new(),
-    };
+    let parents = fact
+        .get("parents")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| match fact.get("sourceAssetId").and_then(Value::as_str) {
+            Some(source) => vec![Value::String(source.to_owned())],
+            None => Vec::new(),
+        });
     let file = json!({
         "path": get("mediaPath"),
         "mimeType": get("mimeType"),
@@ -2840,6 +2850,34 @@ mod tests {
         let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_y", &fact);
         assert_eq!(asset["type"], json!("video"));
         assert_eq!(asset["file"]["mimeType"], json!("video/mp4"));
+    }
+
+    #[test]
+    fn build_generated_asset_sidecar_preserves_variant_lineage_and_extra() {
+        let fact = json!({
+            "assetId": "asset_upscaled",
+            "mediaPath": "assets/images/genset_x/city_0001_upscaled_x2.png",
+            "mimeType": "image/png",
+            "sourceAssetId": "asset_original",
+            "parents": ["asset_original"],
+            "extra": {
+                "isUpscaled": true,
+                "upscaledFromAssetId": "asset_original",
+                "factor": 2,
+                "engine": "real-esrgan",
+            },
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_x", &fact);
+
+        assert_eq!(asset["lineage"]["sourceAssetId"], json!("asset_original"));
+        assert_eq!(asset["lineage"]["parents"], json!(["asset_original"]));
+        assert_eq!(asset["extra"]["isUpscaled"], json!(true));
+        assert_eq!(
+            asset["extra"]["upscaledFromAssetId"],
+            json!("asset_original")
+        );
+        assert_eq!(asset["extra"]["factor"], json!(2));
+        assert_eq!(asset["extra"]["engine"], json!("real-esrgan"));
     }
 
     #[test]

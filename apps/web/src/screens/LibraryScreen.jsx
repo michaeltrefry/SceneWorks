@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { AssetDetail, AssetGrid } from "../components/assetPanels.jsx";
 import { terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -46,7 +47,7 @@ export function LibraryScreen() {
   const [showRejected, setShowRejected] = useState(false);
   const [assetMode, setAssetMode] = useState("assets");
   const [isImporting, setIsImporting] = useState(false);
-  const visibleAssets = assets.filter((asset) => {
+  const visibleAssets = foldUpscaledAssetVariants(assets.filter((asset) => {
     if (typeFilter !== "all" && asset.type !== typeFilter) {
       return false;
     }
@@ -63,7 +64,7 @@ export function LibraryScreen() {
       return false;
     }
     return true;
-  });
+  }));
 
   async function handleImport(event) {
     const [file] = event.target.files;
