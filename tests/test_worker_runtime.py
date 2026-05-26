@@ -25,6 +25,7 @@ from scene_worker.caption_adapters import (
 from scene_worker.image_adapters import (
     FluxDiffusersAdapter,
     ImageAssetWriter,
+    KolorsDiffusersAdapter,
     LensTurboAdapter,
     MODEL_TARGETS,
     QwenImageAdapter,
@@ -1110,6 +1111,82 @@ def test_flux_adapter_rejects_incompatible_lora_family(tmp_path):
         assert "not compatible with model family flux" in str(exc)
     else:
         raise AssertionError("FLUX.1 must reject a LoRA whose family is not flux.")
+
+
+def test_create_image_adapter_routes_kolors():
+    adapter = create_image_adapter({"payload": {"model": "kolors"}})
+    assert adapter.__class__.__name__ == "KolorsDiffusersAdapter"
+    assert adapter.id == "kolors_diffusers"
+
+
+def test_image_adapter_env_override_selects_kolors(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "kolors_diffusers")
+    # Env override wins even when the payload names a different family's model.
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "KolorsDiffusersAdapter"
+
+
+def test_kolors_model_target_defaults():
+    kolors = MODEL_TARGETS["kolors"]
+    assert kolors["adapter"] == "kolors_diffusers"
+    assert kolors["family"] == "kolors"
+    assert kolors["supportsEdit"] is False
+    # Real CFG (not distilled): guidance 5.0, ~25 steps, ChatGLM3 max_seq_len 256.
+    assert kolors["steps"] == 25
+    assert kolors["guidanceScale"] == 5.0
+    assert kolors["maxSequenceLength"] == 256
+    assert kolors["repo"] == "Kwai-Kolors/Kolors-diffusers"
+
+
+def test_kolors_guidance_scale_uses_per_model_default_and_override():
+    adapter = KolorsDiffusersAdapter()
+    kolors = MODEL_TARGETS["kolors"]
+    # Unlike the guidance-distilled FLUX path, Kolors defaults to real CFG (5.0).
+    assert adapter._guidance_scale(SimpleNamespace(advanced={}), kolors) == 5.0
+    # An explicit request value wins.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": 7.0}), kolors) == 7.0
+    # Unparseable override falls back to the per-model default.
+    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": "x"}), kolors) == 5.0
+
+
+def test_kolors_num_inference_steps_default_and_override():
+    adapter = KolorsDiffusersAdapter()
+    kolors = MODEL_TARGETS["kolors"]
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), kolors) == 25
+    # Explicit override is honored and clamped to [1, 80].
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 30}), kolors) == 30
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 999}), kolors) == 80
+
+
+def test_kolors_max_sequence_length_default_and_override():
+    adapter = KolorsDiffusersAdapter()
+    kolors = MODEL_TARGETS["kolors"]
+    assert adapter._max_sequence_length(SimpleNamespace(advanced={}), kolors) == 256
+    # Override honored, clamped to the ChatGLM3 max of 256.
+    assert adapter._max_sequence_length(SimpleNamespace(advanced={"maxSequenceLength": 128}), kolors) == 128
+    assert adapter._max_sequence_length(SimpleNamespace(advanced={"maxSequenceLength": 4096}), kolors) == 256
+
+
+def test_kolors_rejects_image_edit():
+    job = {
+        "id": "job_kolors_edit",
+        "payload": {
+            "projectId": "project_x",
+            "mode": "edit_image",
+            "model": "kolors",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        KolorsDiffusersAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "does not support image editing" in str(exc)
+    else:
+        raise AssertionError("Kolors T2I (sc-1838) must reject edit_image; img2img is sc-1839.")
 
 
 def test_create_image_adapter_routes_sensenova_u1():

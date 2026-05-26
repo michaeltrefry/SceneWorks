@@ -309,6 +309,19 @@ MODEL_TARGETS = {
         "repo": "black-forest-labs/FLUX.1-dev",
         "adapter": "flux_diffusers",
     },
+    "kolors": {
+        "label": "Kolors",
+        "family": "kolors",
+        # img2img (KolorsImg2ImgPipeline) is sc-1839; T2I only here.
+        "supportsEdit": False,
+        # Real CFG (not distilled): model card recommends guidance ~5.0, ~25 steps
+        # with DPMSolverMultistep (Karras). ChatGLM3 text encoder max_seq_len 256.
+        "steps": 25,
+        "guidanceScale": 5.0,
+        "maxSequenceLength": 256,
+        "repo": "Kwai-Kolors/Kolors-diffusers",
+        "adapter": "kolors_diffusers",
+    },
 }
 
 
@@ -1670,6 +1683,306 @@ class FluxDiffusersAdapter:
         )
 
 
+class KolorsDiffusersAdapter:
+    """Kwai-Kolors Kolors text-to-image via diffusers.KolorsPipeline.
+
+    Mirrors FluxDiffusersAdapter: HF-cache check, device/dtype selection, progress
+    + cancel callbacks, incremental asset writing, and worker events for pipeline
+    load + inference. Runs in the MAIN worker venv (diffusers >= 0.30 + transformers
+    + the bundled ChatGLM3 text encoder) — no sidecar.
+
+    Unlike FLUX, Kolors uses real classifier-free guidance, so it honors the
+    negative prompt and a non-zero guidance_scale (~5.0). The Kolors-diffusers
+    checkpoint ships EulerDiscreteScheduler; we switch to DPMSolverMultistep with
+    Karras sigmas per the model card for the recommended ~25-step config.
+
+    Text-to-image only; img2img (KolorsImg2ImgPipeline) is a follow-up (sc-1839).
+    """
+
+    id = "kolors_diffusers"
+
+    def __init__(self) -> None:
+        self._text_pipe: Any | None = None
+        self._text_repo: str | None = None
+        self._loaded_model: str | None = None
+        self._loaded_lora_states: dict[str, LoraPipelineState] = {}
+
+    def loaded_models(self) -> list[str]:
+        return sorted({value for value in (self._text_repo, self._loaded_model) if value})
+
+    def unload(self) -> bool:
+        """Free the resident pipeline so another family can load (cross-adapter
+        eviction). Returns True if it actually freed something."""
+        if self._text_pipe is None:
+            return False
+        self._text_pipe = None
+        self._text_repo = None
+        self._loaded_model = None
+        self._loaded_lora_states.clear()
+        self._empty_cuda_cache(importlib.import_module("torch"))
+        return True
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        model_target = MODEL_TARGETS.get(request.model, {})
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{request.model} is not a Kolors Diffusers target.")
+        if request.mode == "edit_image":
+            raise RuntimeError(f"{request.model} does not support image editing.")
+
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
+        pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        emit_worker_event(
+            "image_lora_apply_start",
+            jobId=job["id"],
+            adapter=self.id,
+            loraCount=len(request.loras),
+        )
+        self._apply_loras(pipe, request)
+        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        label = model_target["label"]
+
+        def image_at_index(index: int) -> Image.Image:
+            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            progress(
+                "running",
+                "generating",
+                image_batch_progress(index, request.count),
+                format_batch_running_message(label, index, request.count),
+            )
+            emit_worker_event(
+                "image_inference_start",
+                jobId=job["id"],
+                adapter=self.id,
+                model=request.model,
+                imageIndex=index,
+                imageCount=request.count,
+                device=device,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            try:
+                image = self._run_pipeline(settings, pipe, request, seed, cancel_requested=cancel_requested)
+            except Exception as exc:
+                emit_worker_event(
+                    "image_inference_failed",
+                    jobId=job["id"],
+                    adapter=self.id,
+                    imageIndex=index,
+                    error=str(exc),
+                    errorType=exc.__class__.__name__,
+                )
+                raise
+            emit_worker_event(
+                "image_inference_complete",
+                jobId=job["id"],
+                adapter=self.id,
+                imageIndex=index,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return image
+
+        return ImageAssetWriter().write_incremental_outputs(
+            request=request,
+            project_path=project_path,
+            image_count=request.count,
+            image_at_index=image_at_index,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={
+                **request.advanced,
+                "repo": self._repo_for_request(request, model_target),
+                "numInferenceSteps": self._num_inference_steps(request, model_target),
+                "guidanceScale": self._guidance_scale(request, model_target),
+                "maxSequenceLength": self._max_sequence_length(request, model_target),
+                "realModelInference": True,
+            },
+        )
+
+    def _load_pipeline(
+        self,
+        settings: WorkerSettings,
+        request: ImageRequest,
+        model_target: dict[str, Any],
+        progress: ProgressCallback,
+        *,
+        job_id: str,
+    ) -> Any:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+        repo = self._repo_for_request(request, model_target)
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        cpu_offload = bool(request.advanced.get("cpuOffload", False))
+        if self._text_pipe is not None and self._text_repo == repo:
+            self._loaded_model = request.model
+            progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
+            emit_worker_event(
+                "image_pipeline_cache_hit",
+                jobId=job_id,
+                adapter=self.id,
+                model=request.model,
+                repo=repo,
+                device=device,
+                componentDevices=pipeline_component_devices(self._text_pipe),
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return self._text_pipe
+        if self._text_pipe is not None:
+            self._text_pipe = None
+            self._text_repo = None
+            self._empty_cuda_cache(torch)
+            self._forget_loaded_loras("text")
+
+        pipeline_class = getattr(diffusers, "KolorsPipeline", None)
+        if pipeline_class is None:
+            raise RuntimeError(
+                "The installed diffusers package does not expose KolorsPipeline. "
+                "Install diffusers >= 0.30 for Kolors support."
+            )
+
+        progress("loading_model", "loading_model", 0.2, f"Loading {model_target['label']} model files.")
+        emit_worker_event(
+            "image_pipeline_load_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            device=device,
+            dtype=str(dtype),
+            useImg2img=False,
+            cpuOffload=cpu_offload,
+            cached=huggingface_repo_cache_exists(repo),
+        )
+        pipe = pipeline_class.from_pretrained(repo, torch_dtype=dtype)
+        # Kolors-diffusers ships EulerDiscreteScheduler; the model card recommends
+        # DPMSolverMultistep with Karras sigmas for the ~25-step config.
+        scheduler_class = getattr(diffusers, "DPMSolverMultistepScheduler", None)
+        if scheduler_class is not None and getattr(pipe, "scheduler", None) is not None:
+            pipe.scheduler = scheduler_class.from_config(pipe.scheduler.config, use_karras_sigmas=True)
+        emit_worker_event(
+            "image_pipeline_load_complete",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            componentDevices=pipeline_component_devices(pipe),
+        )
+        offload_enabled = cpu_offload and hasattr(pipe, "enable_model_cpu_offload")
+        if offload_enabled:
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
+        # VAE tiling keeps high-resolution decodes within memory.
+        vae = getattr(pipe, "vae", None)
+        if vae is not None and hasattr(vae, "enable_tiling"):
+            vae.enable_tiling()
+        elif hasattr(pipe, "enable_vae_tiling"):
+            pipe.enable_vae_tiling()
+        component_devices = verify_pipeline_on_device(
+            pipe,
+            requested_device=device,
+            model_label=model_target["label"],
+            allow_offload=offload_enabled,
+        )
+        emit_worker_event(
+            "image_pipeline_on_device",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            requestedDevice=device,
+            cpuOffload=offload_enabled,
+            componentDevices=component_devices,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+        self._text_pipe = pipe
+        self._text_repo = repo
+        self._loaded_model = request.model
+        return pipe
+
+    def _empty_cuda_cache(self, torch: Any) -> None:
+        release_inference_memory(torch)
+
+    def _run_pipeline(
+        self,
+        settings: WorkerSettings,
+        pipe: Any,
+        request: ImageRequest,
+        seed: int,
+        cancel_requested: CancelCallback | None = None,
+    ) -> Image.Image:
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
+        model_target = MODEL_TARGETS[request.model]
+        kwargs = {
+            "prompt": request.prompt,
+            # Kolors uses real classifier-free guidance, so the negative prompt
+            # is honored (unlike the guidance-distilled FLUX path).
+            "negative_prompt": request.negative_prompt,
+            "height": request.height,
+            "width": request.width,
+            "num_inference_steps": self._num_inference_steps(request, model_target),
+            "guidance_scale": self._guidance_scale(request, model_target),
+            "max_sequence_length": self._max_sequence_length(request, model_target),
+            "generator": generator,
+        }
+        step_callback = cancel_step_callback(pipe, cancel_requested)
+        if step_callback is not None:
+            kwargs["callback_on_step_end"] = step_callback
+        output = pipe(**filter_call_kwargs(pipe, kwargs))
+        if cancel_requested is not None and cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+        return output.images[0].convert("RGB")
+
+    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
+        model_target = MODEL_TARGETS.get(request.model, {})
+        self._loaded_lora_states["text"] = apply_loras_to_pipeline(
+            pipe,
+            request.loras,
+            adapter_id=self.id,
+            model_family=model_target.get("family"),
+            previous_state=self._loaded_lora_states.get("text"),
+        )
+
+    def _forget_loaded_loras(self, key: str) -> None:
+        self._loaded_lora_states.pop(key, None)
+
+    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
+        return request.advanced.get("modelRepo") or model_target["repo"]
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
+        default = model_target.get("guidanceScale", 5.0)
+        try:
+            return float(request.advanced.get("guidanceScale", default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _max_sequence_length(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(
+            request.advanced.get("maxSequenceLength"),
+            model_target.get("maxSequenceLength", 256),
+            1,
+            256,
+        )
+
+
 # Lens trains on two base resolutions crossed with nine aspect ratios and expects
 # `base_resolution` + `aspect_ratio` rather than free width/height. These mirror
 # scene_worker/_vendor/lens/resolution.py so we can snap a SceneWorks W×H request
@@ -2893,6 +3206,7 @@ def create_image_adapter(
     | LensTurboAdapter
     | SenseNovaU1Adapter
     | FluxDiffusersAdapter
+    | KolorsDiffusersAdapter
 ):
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
@@ -2906,6 +3220,7 @@ def create_image_adapter(
         LensTurboAdapter.id,
         SenseNovaU1Adapter.id,
         FluxDiffusersAdapter.id,
+        KolorsDiffusersAdapter.id,
     }:
         raise RuntimeError(f"Unsupported SCENEWORKS_IMAGE_ADAPTER value: {requested}.")
     if requested == ZImageDiffusersAdapter.id:
@@ -2918,6 +3233,8 @@ def create_image_adapter(
         return adapters.get("sensenova_u1") if adapters else SenseNovaU1Adapter()
     if requested == FluxDiffusersAdapter.id:
         return adapters.get("flux_diffusers") if adapters else FluxDiffusersAdapter()
+    if requested == KolorsDiffusersAdapter.id:
+        return adapters.get("kolors_diffusers") if adapters else KolorsDiffusersAdapter()
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
@@ -2929,6 +3246,8 @@ def create_image_adapter(
         return adapters.get("sensenova_u1") if adapters else SenseNovaU1Adapter()
     if model_target.get("adapter") == FluxDiffusersAdapter.id:
         return adapters.get("flux_diffusers") if adapters else FluxDiffusersAdapter()
+    if model_target.get("adapter") == KolorsDiffusersAdapter.id:
+        return adapters.get("kolors_diffusers") if adapters else KolorsDiffusersAdapter()
     return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
 
 
