@@ -62,7 +62,7 @@ function defaultCharacterPrompt(character) {
 }
 import {
   loraMatchesModel,
-  loraWeight,
+  serializeLora,
   clearPresetDefault,
   noPresetId,
   rememberPresetDefault,
@@ -234,32 +234,6 @@ export function ImageStudio() {
     if (option && !option.factors.includes(upscaleFactor)) {
       setUpscaleFactor(option.factors[0]);
     }
-  }
-
-  function serializeLora(lora, override = {}) {
-    return {
-      id: lora.id,
-      name: lora.name ?? lora.id,
-      scope: lora.scope ?? "global",
-      weight: Number.isFinite(Number(override.weight)) ? Number(override.weight) : loraWeight(lora),
-      triggerWords: lora.triggerWords ?? [],
-      compatibility: lora.compatibility ?? {},
-      family: lora.family ?? null,
-      families: lora.families ?? null,
-      compatibleFamilies: lora.compatibleFamilies ?? null,
-      modelFamilies: lora.modelFamilies ?? null,
-      installedPath: lora.installedPath ?? null,
-      sourcePath: lora.sourcePath ?? null,
-      source: lora.source ?? null,
-      // `installedPath` points at the LoRA directory; for trained LoRAs that
-      // directory also holds step checkpoints, so the worker must be told the
-      // exact adapter file. Forward the manifest's declared `files`/`file` —
-      // without them the worker falls back to the first .safetensors on disk and
-      // can load an early checkpoint instead of the final adapter.
-      files: lora.files ?? null,
-      file: lora.file ?? null,
-      presetManaged: Boolean(lora.presetManaged),
-    };
   }
 
   useEffect(() => {

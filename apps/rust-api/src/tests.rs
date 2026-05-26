@@ -2737,6 +2737,142 @@ async fn generation_job_routes_reject_incompatible_loras() {
 }
 
 #[tokio::test]
+async fn video_jobs_expand_recipe_presets_server_side() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "vid-model",
+              "name": "Vid Model",
+              "family": "wan-video",
+              "type": "video",
+              "adapter": "wan_video",
+              "capabilities": ["text_to_video", "image_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["wan-video"] },
+              "ui": { "label": "Vid" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "motion-lora",
+              "name": "Motion LoRA",
+              "family": "wan-video",
+              "triggerWords": ["motion"],
+              "compatibility": { "families": ["wan-video"] },
+              "source": { "provider": "local", "path": "loras/motion.safetensors" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("user loras writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "dream_motion",
+              "name": "Dream Motion",
+              "workflow": "text_to_video",
+              "model": "vid-model",
+              "defaults": { "duration": 8, "fps": 30, "resolution": "1280x720", "quality": "best", "negativePrompt": "jitter" },
+              "prompt": { "prefix": "cinematic", "suffix": "smooth camera motion" },
+              "loras": [{ "id": "motion-lora", "weight": 0.5 }]
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    write_test_safetensors(&lora_dir.join("motion.safetensors"));
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Video Preset Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, video_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "model": "vid-model",
+            "recipePresetId": "dream_motion"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // Prompt prefix/suffix are folded in server-side around the raw client
+    // prompt — the regression that motivated this path.
+    assert_eq!(
+        video_job["payload"]["prompt"],
+        "cinematic, a fox runs, smooth camera motion"
+    );
+    // Render defaults come from the preset.
+    assert_eq!(video_job["payload"]["duration"], 8);
+    assert_eq!(video_job["payload"]["fps"], 30);
+    assert_eq!(video_job["payload"]["width"], 1280);
+    assert_eq!(video_job["payload"]["height"], 720);
+    assert_eq!(video_job["payload"]["quality"], "best");
+    assert_eq!(video_job["payload"]["negativePrompt"], "jitter");
+    // Preset LoRA merged in (client sent none) and stamped under advanced.
+    assert_eq!(video_job["payload"]["loras"][0]["id"], "motion-lora");
+    assert_eq!(
+        video_job["payload"]["advanced"]["recipePresetId"],
+        "dream_motion"
+    );
+}
+
+#[tokio::test]
 async fn model_and_lora_routes_match_manifest_behavior() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

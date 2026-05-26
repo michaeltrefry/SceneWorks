@@ -5437,6 +5437,128 @@ describe("SceneWorks app shell", () => {
     expect(createVideoJob).not.toHaveBeenCalled();
   });
 
+  it("surfaces compatible LoRAs in the Video Studio picker and sends the selection to the job", async () => {
+    const createVideoJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+            characters: [],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob,
+            deleteAsset: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [
+              { id: "ltx_style", name: "LTX Style", family: "ltx-video", scope: "global", installState: "installed" },
+              { id: "z_glow", name: "Z Glow", family: "z-image", scope: "global", installState: "installed" },
+            ],
+            setPreviewAsset: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [],
+            rememberLocalGenerationJob: () => {},
+            requestedGpu: "auto",
+            selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "ltx_2_3",
+                name: "LTX",
+                type: "video",
+                family: "ltx-video",
+                capabilities: ["image_to_video"],
+                defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+                loraCompatibility: { families: ["ltx-video"] },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+    await settle();
+
+    // Only the ltx-video LoRA is compatible; the z-image one is filtered out.
+    expect(container.textContent).toContain("LTX Style");
+    expect(container.textContent).not.toContain("Z Glow");
+
+    const loraCheckbox = container.querySelector(".lora-choice-list input[type=checkbox]");
+    await act(async () => {
+      loraCheckbox.click();
+    });
+    await settle();
+
+    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    expect(generate.disabled).toBe(false);
+
+    await act(async () => {
+      generate.click();
+    });
+
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "ltx_2_3",
+        loras: expect.arrayContaining([expect.objectContaining({ id: "ltx_style" })]),
+      }),
+    );
+  });
+
+  it("always exposes the preset selector in the Video Studio even with no presets", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            characters: [],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob: () => {},
+            deleteAsset: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [],
+            requestedGpu: "auto",
+            selectedAsset: null,
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "ltx_2_3",
+                name: "LTX",
+                type: "video",
+                family: "ltx-video",
+                capabilities: ["image_to_video", "text_to_video"],
+                defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+                loraCompatibility: { families: ["ltx-video"] },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+
+    expect(container.textContent).toContain("Style preset");
+    const noneChip = [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent === "None");
+    expect(noneChip).toBeTruthy();
+  });
+
   it("keeps Qwen selected when applying a Qwen image preset", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
@@ -5710,14 +5832,19 @@ describe("SceneWorks app shell", () => {
         quality: "best",
         negativePrompt: "jitter",
         recipePresetId: "dream_motion",
-        loras: [expect.objectContaining({ id: "video_motion", weight: 0.8, presetManaged: true })],
+        // Preset prompt prefix/suffix and preset LoRAs are now folded in
+        // server-side from recipePresetId, so the client sends the raw prompt
+        // and only its own picker selections (none here).
+        prompt: "Camera slowly pushes in while the scene comes alive",
+        loras: [],
         advanced: expect.objectContaining({
-          recipePresetName: "Dream Motion",
-          recipePresetPrompt: { suffix: "smooth camera motion" },
           resolution: "1280x720",
         }),
       }),
     );
+    const submittedAdvanced = createVideoJob.mock.calls[0][0].advanced;
+    expect(submittedAdvanced).not.toHaveProperty("recipePresetName");
+    expect(submittedAdvanced).not.toHaveProperty("recipePresetPrompt");
   });
 
   it("lets a promptless video model (SVD) submit without a text prompt", async () => {

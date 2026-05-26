@@ -1715,8 +1715,8 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if !(1..=60).contains(&payload.fps) {
         return Err(ApiError::bad_request("fps must be between 1 and 60"));
     }
-    validate_dimension(payload.width, "width", 1920)?;
-    validate_dimension(payload.height, "height", 1920)?;
+    validate_dimension(payload.width, "width", MAX_VIDEO_DIMENSION)?;
+    validate_dimension(payload.height, "height", MAX_VIDEO_DIMENSION)?;
     match payload.mode.as_str() {
         "image_to_video" if payload.source_asset_id.is_none() => Err(ApiError::bad_request(
             "Image to Video requires a source image.",
@@ -1756,6 +1756,10 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
 /// governed by manifest `limits.resolutions` + the UI. Covers SenseNova-U1's
 /// largest trained bucket (3456) with headroom; video uses its own lower cap.
 const MAX_IMAGE_DIMENSION: u32 = 4096;
+
+/// Upper bound for video width/height — a lower backstop than images, matching
+/// the cap enforced when validating a video job request.
+const MAX_VIDEO_DIMENSION: u32 = 1920;
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
     if !(256..=max).contains(&value) {

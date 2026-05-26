@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
@@ -39,8 +39,10 @@ function formatPlaybackTime(seconds) {
 import {
   clearPresetDefault,
   loraLooksLikeIcLora,
+  loraMatchesModel,
   noPresetId,
   rememberPresetDefault,
+  serializeLora,
 } from "../presetUtils.js";
 import {
   onPromptKeyDown,
@@ -110,6 +112,8 @@ export function VideoStudio() {
   const [distilledVariant, setDistilledVariant] = useState("1.1");
   const [precision, setPrecision] = useState("fp8");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [selectedLoraIds, setSelectedLoraIds] = useState([]);
+  const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
   const [model, setModel] = useState(videoModels[0]?.id ?? ltxVideoModelId);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   const [duration, setDuration] = useState(selectedModel?.defaults?.duration ?? 6);
@@ -164,6 +168,60 @@ export function VideoStudio() {
   });
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
+  const compatibleLoras = useMemo(() => loras.filter((lora) => {
+    if (lora.presetManaged) {
+      return false;
+    }
+    if (lora.installState === "missing") {
+      return false;
+    }
+    if (showIncompatibleLoras) {
+      return true;
+    }
+    return loraMatchesModel(lora, selectedModel);
+  }), [loras, selectedModel, showIncompatibleLoras]);
+  const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
+  const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
+  const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
+  const selectedLoraValidationResult = useMemo(() => {
+    const incompatible = selectedLoras.filter((lora) => !loraMatchesModel(lora, selectedModel)).map((lora) => lora.name ?? lora.id);
+    return {
+      incompatible,
+      ok: incompatible.length === 0,
+    };
+  }, [selectedLoras, selectedModel]);
+  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
+  const loraEmptyMessage = !selectedModel
+    ? "No model selected"
+    : hasPendingCompatibleLoras
+      ? "No installed compatible LoRAs. Imports appear after the Queue completes."
+      : showIncompatibleLoras
+        ? "No installed LoRAs in the library."
+        : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
+
+  useEffect(() => {
+    setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
+  }, [compatibleLoraKey]);
+
+  useEffect(() => {
+    if (selectedLoraValidationResult.incompatible.length && !advancedOpen) {
+      setAdvancedOpen(true);
+    }
+  }, [advancedOpen, selectedLoraValidationResult.incompatible.length]);
+
+  function toggleLora(lora) {
+    setSelectedLoraIds((ids) => {
+      if (ids.includes(lora.id)) {
+        return ids.filter((id) => id !== lora.id);
+      }
+      const selected = ids.map((id) => compatibleLoras.find((item) => item.id === id)).filter(Boolean);
+      const userCount = selected.filter((item) => item.scope !== "builtin").length;
+      if (lora.scope !== "builtin" && userCount >= 2) {
+        return ids;
+      }
+      return [...ids, lora.id];
+    });
+  }
 
   useEffect(() => {
     if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
@@ -323,6 +381,7 @@ export function VideoStudio() {
       implementedMode &&
       hasInputs &&
       presetValidationResult.ok &&
+      selectedLoraValidationResult.ok &&
       (!requiresLtxIcLora || hasLtxIcLora) &&
       replaceReady,
   );
@@ -376,13 +435,11 @@ export function VideoStudio() {
         sourceClipAssetId: ["extend_clip", "replace_person"].includes(mode) ? sourceClipAssetId || null : null,
         personTrackId: mode === "replace_person" ? personTrackId || null : null,
         replacementMode: mode === "replace_person" ? replacementMode : "face_only",
-        loras: presetLoraDetails.filter((lora) => !lora.missing),
+        loras: selectedLoras.map((lora) => serializeLora(lora)),
         advanced: {
           resolution,
           durationHint,
           motion,
-          recipePresetName: selectedPreset?.name ?? null,
-          recipePresetPrompt: selectedPreset?.prompt ?? null,
           selectedPersonTrack: selectedTrack ?? null,
           replacementModeLabel: replacementModeLabels[replacementMode],
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
@@ -673,6 +730,11 @@ export function VideoStudio() {
 
             {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
             <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
+            {selectedLoraValidationResult.incompatible.length ? (
+              <p className="inline-warning">
+                Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
+              </p>
+            ) : null}
           </div>
 
           <div className="video-rail">
@@ -693,30 +755,28 @@ export function VideoStudio() {
                 </select>
               </label>
 
-              {availablePresets.length ? (
-                <div className="style-preset-strip">
-                  <span className="style-preset-label">Style preset</span>
-                  <div className="preset-chips">
+              <div className="style-preset-strip">
+                <span className="style-preset-label">Style preset</span>
+                <div className="preset-chips">
+                  <button
+                    className={!selectedPreset ? "preset-chip active" : "preset-chip"}
+                    onClick={() => setSelectedPresetId(noPresetId)}
+                    type="button"
+                  >
+                    None
+                  </button>
+                  {availablePresets.map((preset) => (
                     <button
-                      className={!selectedPreset ? "preset-chip active" : "preset-chip"}
-                      onClick={() => setSelectedPresetId(noPresetId)}
+                      className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                      key={preset.id}
+                      onClick={() => setSelectedPresetId(preset.id)}
                       type="button"
                     >
-                      None
+                      {preset.name ?? preset.id}
                     </button>
-                    {availablePresets.map((preset) => (
-                      <button
-                        className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
-                        key={preset.id}
-                        onClick={() => setSelectedPresetId(preset.id)}
-                        type="button"
-                      >
-                        {preset.name ?? preset.id}
-                      </button>
-                    ))}
-                  </div>
+                  ))}
                 </div>
-              ) : null}
+              </div>
 
               <label>
                 Quality
@@ -852,6 +912,46 @@ export function VideoStudio() {
                     Negative prompt
                     <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
                   </label>
+                  <section className="lora-picker" aria-label="LoRA selection">
+                    <div>
+                      <strong>LoRAs</strong>
+                      <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
+                    </div>
+                    <label className="checkline">
+                      <input
+                        checked={showIncompatibleLoras}
+                        onChange={(event) => setShowIncompatibleLoras(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Show incompatible
+                    </label>
+                    {compatibleLoras.length ? (
+                      <div className="lora-choice-list">
+                        {compatibleLoras.map((lora) => {
+                          const checked = selectedLoraIds.includes(lora.id);
+                          const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
+                          return (
+                            <label className={checked ? "lora-choice active" : "lora-choice"} key={lora.id}>
+                              <input
+                                checked={checked}
+                                disabled={userLimitReached}
+                                onChange={() => toggleLora(lora)}
+                                type="checkbox"
+                              />
+                              <span>
+                                <strong>{lora.name ?? lora.id}</strong>
+                                <small>
+                                  {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
+                                </small>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
+                    )}
+                  </section>
                   {characterId ? (
                     <div className="guidance-strip">
                       <strong>Character reference</strong>
