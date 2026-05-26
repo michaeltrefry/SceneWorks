@@ -784,6 +784,25 @@ def test_mlx_wan_user_loras_resolved_to_path_strength_tuples(tmp_path):
     assert MlxVideoAdapter()._wan_user_loras(request) == [(str(lora_file), 0.7)]
 
 
+def test_mlx_local_dir_prefers_env_override_then_data_dir(tmp_path, monkeypatch):
+    adapter = MlxVideoAdapter()
+    adapter._settings = SimpleNamespace(data_dir=tmp_path)
+    monkeypatch.delenv("SCENEWORKS_MLX_WAN14B_T2V_DIR", raising=False)
+    # Nothing on disk -> no local dir.
+    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") is None
+    # A converted dir under <data>/models/mlx/<model> counts once it has config.json.
+    data_dir = tmp_path / "models" / "mlx" / "wan_2_2_t2v_14b"
+    data_dir.mkdir(parents=True)
+    (data_dir / "config.json").write_text("{}")
+    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") == str(data_dir)
+    # The env override takes precedence over the data dir.
+    override = tmp_path / "override"
+    override.mkdir()
+    (override / "config.json").write_text("{}")
+    monkeypatch.setenv("SCENEWORKS_MLX_WAN14B_T2V_DIR", str(override))
+    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") == str(override)
+
+
 def test_mlx_ltx_stages_loras_in_contextvar_only_when_present(tmp_path, monkeypatch):
     lora_file = tmp_path / "ltx_style.safetensors"
     lora_file.write_bytes(b"lora")
@@ -4634,6 +4653,108 @@ def test_svd_pipeline_kwargs_build_image_conditioning_without_prompt(monkeypatch
     assert kwargs["noise_aug_strength"] == 0.02
     assert "prompt" not in kwargs
     assert "guidance_scale" not in kwargs
+
+
+_A14B_QUANT_ENTRY = {
+    "quantization": {
+        "defaults": {"mps": "gguf-q8_0", "cuda": "gguf-q4_k_m"},
+        "variants": {
+            "gguf-q8_0": {
+                "format": "gguf",
+                "label": "GGUF Q8_0",
+                "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+                "transformerFile": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf",
+                "transformer2File": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q8_0.gguf",
+            },
+            "gguf-q4_k_m": {
+                "format": "gguf",
+                "label": "GGUF Q4_K_M",
+                "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+                "transformerFile": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q4_K_M.gguf",
+                "transformer2File": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf",
+            },
+        },
+    }
+}
+
+
+def _wan_quant_request(advanced=None, manifest=None):
+    return video_request_from_job(
+        {
+            "id": "j",
+            "payload": {
+                "projectId": "p",
+                "mode": "text_to_video",
+                "model": "wan_2_2_t2v_14b",
+                "advanced": advanced or {},
+                "modelManifestEntry": _A14B_QUANT_ENTRY if manifest is None else manifest,
+            },
+        }
+    )
+
+
+def test_diffusers_wan_gguf_quant_variant_selection():
+    adapter = DiffusersVideoAdapter()
+    # Explicit selection wins regardless of platform default.
+    explicit = adapter._gguf_quant_variant(_wan_quant_request({"quantization": "gguf-q4_k_m"}), "mps")
+    assert explicit["id"] == "gguf-q4_k_m"
+    assert explicit["transformerFile"].endswith("HighNoise-Q4_K_M.gguf")
+    assert explicit["transformer2File"].endswith("LowNoise-Q4_K_M.gguf")
+    # Auto / empty falls back to the per-platform default: Q8_0 on MPS, Q4_K_M on CUDA.
+    assert adapter._gguf_quant_variant(_wan_quant_request({}), "mps")["id"] == "gguf-q8_0"
+    assert adapter._gguf_quant_variant(_wan_quant_request({"quantization": "auto"}), "cuda")["id"] == "gguf-q4_k_m"
+    # No default for the platform (cpu) -> unquantized.
+    assert adapter._gguf_quant_variant(_wan_quant_request({}), "cpu") is None
+    # Explicit opt-out keywords -> unquantized.
+    assert adapter._gguf_quant_variant(_wan_quant_request({"quantization": "none"}), "mps") is None
+    assert adapter._gguf_quant_variant(_wan_quant_request({"quantization": "full"}), "cuda") is None
+    # No quantization block in the manifest entry -> unquantized.
+    assert adapter._gguf_quant_variant(_wan_quant_request({}, manifest={}), "mps") is None
+
+
+def test_diffusers_wan_gguf_injects_high_and_low_experts(monkeypatch):
+    adapter = DiffusersVideoAdapter()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeTransformer:
+        @staticmethod
+        def from_single_file(path, **kwargs):
+            calls.append((path, kwargs))
+            return f"T[{path}]"
+
+    fake_diffusers = SimpleNamespace(
+        WanTransformer3DModel=FakeTransformer,
+        GGUFQuantizationConfig=lambda **kwargs: ("QCFG", kwargs),
+    )
+    monkeypatch.setattr(adapter, "_resolve_gguf_file", lambda repo, file_name: f"/cache/{repo}/{file_name}")
+
+    # A14B: both experts injected (high -> transformer, low -> transformer_2).
+    kwargs: dict[str, Any] = {}
+    variant = {
+        "id": "gguf-q8_0",
+        "format": "gguf",
+        "repo": "R",
+        "transformerFile": "hi.gguf",
+        "transformer2File": "lo.gguf",
+    }
+    adapter._inject_gguf_experts(fake_diffusers, kwargs, "diffusers/repo", variant, "DT")
+    assert kwargs["transformer"] == "T[/cache/R/hi.gguf]"
+    assert kwargs["transformer_2"] == "T[/cache/R/lo.gguf]"
+    # The diffusers repo is the config source; compute dtype threads to from_single_file.
+    assert calls[0][1]["config"] == "diffusers/repo"
+    assert calls[0][1]["torch_dtype"] == "DT"
+
+    # 5B dense (single transformer): no transformer_2.
+    dense_kwargs: dict[str, Any] = {}
+    adapter._inject_gguf_experts(
+        fake_diffusers, dense_kwargs, "diffusers/repo", {"format": "gguf", "repo": "R", "transformerFile": "only.gguf"}, "DT"
+    )
+    assert dense_kwargs["transformer"] == "T[/cache/R/only.gguf]"
+    assert "transformer_2" not in dense_kwargs
+
+    # Missing diffusers classes fail loudly rather than silently skipping quantization.
+    with pytest.raises(RuntimeError, match="GGUF support"):
+        adapter._inject_gguf_experts(SimpleNamespace(), {}, "repo", variant, "DT")
 
 
 def test_mlx_routing_is_mode_aware_on_mps(monkeypatch):

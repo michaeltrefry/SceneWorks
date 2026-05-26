@@ -152,21 +152,34 @@ pub(crate) async fn create_model_convert_job(
         .get("mlx")
         .and_then(Value::as_object)
         .ok_or_else(|| ApiError::bad_request("Model has no MLX variant to convert"))?;
-    if !mlx
+    let requires_conversion = mlx
         .get("requiresConversion")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let quantize = payload.quantize_bits.is_some();
+    // Two sources: models that require conversion read the native diffusers
+    // checkpoint (convertSourceRepo); turnkey MLX models (a pre-converted bf16
+    // `repo`) have nothing to convert, but can still be quantized in place from
+    // that repo (`--quantize-only`), so a quant request on a turnkey model is valid.
+    let (source_repo, quantize_only) = if requires_conversion {
+        let repo = mlx
+            .get("convertSourceRepo")
+            .and_then(Value::as_str)
+            .filter(|repo| !repo.trim().is_empty())
+            .ok_or_else(|| ApiError::bad_request("MLX conversion source repo is not configured"))?;
+        (repo.to_owned(), false)
+    } else if quantize {
+        let repo = mlx
+            .get("repo")
+            .and_then(Value::as_str)
+            .filter(|repo| !repo.trim().is_empty())
+            .ok_or_else(|| ApiError::bad_request("Model has no MLX repo to quantize"))?;
+        (repo.to_owned(), true)
+    } else {
         return Err(ApiError::bad_request(
             "Model does not require MLX conversion",
         ));
-    }
-    let source_repo = mlx
-        .get("convertSourceRepo")
-        .and_then(Value::as_str)
-        .filter(|repo| !repo.trim().is_empty())
-        .ok_or_else(|| ApiError::bad_request("MLX conversion source repo is not configured"))?
-        .to_owned();
+    };
     let output_dir = state
         .settings
         .data_dir
@@ -191,6 +204,15 @@ pub(crate) async fn create_model_convert_job(
         Value::String(output_dir.display().to_string()),
     );
     job_payload.insert("dtype".to_owned(), Value::String("bfloat16".to_owned()));
+    if quantize_only {
+        job_payload.insert("quantizeOnly".to_owned(), Value::Bool(true));
+    }
+    if let Some(bits) = payload.quantize_bits {
+        job_payload.insert("quantizeBits".to_owned(), Value::from(bits));
+    }
+    if let Some(group_size) = payload.quantize_group_size {
+        job_payload.insert("quantizeGroupSize".to_owned(), Value::from(group_size));
+    }
 
     let job = create_generation_job(
         state,

@@ -500,6 +500,13 @@ pub(crate) struct ModelDownloadRequest {
 pub(crate) struct ModelConvertRequest {
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+    /// MLX quantization bit width (4 or 8). When set, the convert job quantizes the
+    /// MLX weights; absent leaves them at the requested float dtype.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quantize_bits: Option<u32>,
+    /// MLX quantization group size (defaults to 64 in the convert tool when unset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quantize_group_size: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
