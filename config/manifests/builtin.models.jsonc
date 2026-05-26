@@ -1032,6 +1032,60 @@
           ]
         }
       }
+    },
+    {
+      "id": "aura_sr_v2",
+      "name": "AuraSR v2 Upscaler",
+      "family": "aura-sr",
+      "type": "utility",
+      "adapter": "aura-sr",
+      "capabilities": [],
+      "downloads": [
+        {
+          // AuraSR v2 weights are Apache-2.0 on Hugging Face. The older
+          // fal/AuraSR checkpoint is CC-BY-SA-4.0 and is intentionally not used.
+          "provider": "huggingface",
+          "repo": "fal/AuraSR-v2",
+          "files": ["model.safetensors", "config.json", "LICENSE.md", "README.md"],
+          "estimatedSizeBytes": 2470000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/fal/AuraSR-v2"
+      },
+      "resources": {
+        "imageUpscalers": {
+          "aura-sr": {
+            "x4": {
+              "repo": "fal/AuraSR-v2",
+              "file": "model.safetensors",
+              "license": "Apache-2.0",
+              "licenseUrl": "https://huggingface.co/fal/AuraSR-v2/blob/main/LICENSE.md",
+              "originalUrl": "https://huggingface.co/fal/AuraSR-v2"
+            }
+          }
+        }
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "AuraSR v2 Upscaler",
+        "description": "Optional Apache-2.0 GigaGAN-style 4x image upscaling weights used only when Image Studio AuraSR upscaling is enabled.",
+        "recommendedFor": ["image_upscale"],
+        "promptGuide": {
+          "title": "AuraSR Upscaling Guide",
+          "path": "/prompt-guides/aura-sr.md",
+          "sources": [
+            { "label": "AuraSR v2 model card", "url": "https://huggingface.co/fal/AuraSR-v2" },
+            { "label": "AuraSR v2 announcement", "url": "https://blog.fal.ai/aurasr-v2/" },
+            { "label": "AuraSR GitHub", "url": "https://github.com/fal-ai/aura-sr" }
+          ]
+        }
+      }
     }
   ]
 }

@@ -683,6 +683,13 @@ REAL_ESRGAN_MODEL_SPECS: dict[int, dict[str, Any]] = {
     },
 }
 
+AURA_SR_MODEL_SPEC: dict[str, Any] = {
+    "name": "AuraSR-v2",
+    "repo": "fal/AuraSR-v2",
+    "file": "model.safetensors",
+    "scale": 4,
+}
+
 
 def create_image_upscaler(
     request: ImageRequest,
@@ -695,6 +702,8 @@ def create_image_upscaler(
     engine = request.upscale.engine.strip().lower()
     if engine in {"real-esrgan", "realesrgan", "real_esrgan"}:
         return RealEsrganUpscaler(settings=settings, job_id=job_id)
+    if engine in {"aura-sr", "aurasr", "aura_sr"}:
+        return AuraSrUpscaler(settings=settings, job_id=job_id)
     raise RuntimeError(f"Unsupported image upscale engine: {request.upscale.engine}.")
 
 
@@ -844,6 +853,142 @@ class RealEsrganUpscaler:
         if not isinstance(real_esrgan, dict):
             return {}
         resource = real_esrgan.get(f"x{factor}") or real_esrgan.get(str(factor)) or {}
+        return resource if isinstance(resource, dict) else {}
+
+
+class AuraSrUpscaler:
+    id = "aura-sr"
+
+    def __init__(self, *, settings: WorkerSettings | None = None, job_id: str | None = None) -> None:
+        self._settings = settings
+        self._job_id = job_id
+        self._model: Any | None = None
+
+    def upscale(
+        self,
+        image: Image.Image,
+        *,
+        request: ImageRequest,
+        cancel_requested: CancelCallback,
+    ) -> Image.Image:
+        if cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+        if request.upscale.factor != AURA_SR_MODEL_SPEC["scale"]:
+            raise RuntimeError("AuraSR upscaling supports only 4x output.")
+        model = self._load_model(request)
+        max_batch_size = safe_int(request.advanced.get("auraSrMaxBatchSize"), 8, 1, 64)
+        use_overlap = request.advanced.get("auraSrOverlap", request.advanced.get("upscaleOverlap", True)) is not False
+        if use_overlap and hasattr(model, "upscale_4x_overlapped"):
+            output = model.upscale_4x_overlapped(image.convert("RGB"), max_batch_size=max_batch_size)
+        else:
+            output = model.upscale_4x(image.convert("RGB"), max_batch_size=max_batch_size)
+        if cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+        return output.convert("RGB")
+
+    def _load_model(self, request: ImageRequest) -> Any:
+        if self._model is not None:
+            return self._model
+        try:
+            torch = importlib.import_module("torch")
+            aura_sr = importlib.import_module("aura_sr")
+        except Exception as exc:  # noqa: BLE001 - convert optional dependency failures.
+            raise RuntimeError(
+                "AuraSR upscaling requires the optional worker package `aura-sr` to be installed."
+            ) from exc
+
+        device = select_torch_device(torch, self._settings.gpu_id if self._settings else None)
+        activate_torch_device(torch, device)
+        model_path = self._resolve_model_path(request)
+        emit_worker_event(
+            "image_upscaler_load_start",
+            jobId=self._job_id,
+            engine=self.id,
+            factor=request.upscale.factor,
+            model=AURA_SR_MODEL_SPEC["name"],
+            modelPath=str(model_path),
+            device=device,
+        )
+        self._model = aura_sr.AuraSR.from_pretrained(str(model_path), use_safetensors=True)
+        upsampler = getattr(self._model, "upsampler", None)
+        if upsampler is not None and hasattr(upsampler, "to"):
+            upsampler.to(device)
+        if upsampler is not None and hasattr(upsampler, "eval"):
+            upsampler.eval()
+        emit_worker_event(
+            "image_upscaler_load_complete",
+            jobId=self._job_id,
+            engine=self.id,
+            factor=request.upscale.factor,
+            model=AURA_SR_MODEL_SPEC["name"],
+            device=device,
+        )
+        return self._model
+
+    def _resolve_model_path(self, request: ImageRequest) -> Path:
+        explicit = (
+            request.advanced.get("upscaleModelPath")
+            or request.advanced.get("auraSrModelPath")
+            or os.getenv("SCENEWORKS_AURASR_MODEL_PATH")
+        )
+        if explicit:
+            path = Path(str(explicit)).expanduser()
+            if path.is_dir():
+                path = path / str(AURA_SR_MODEL_SPEC["file"])
+            if not path.is_file():
+                raise RuntimeError(f"AuraSR model file does not exist: {path}")
+            config_path = path.with_name("config.json")
+            if not config_path.is_file():
+                raise RuntimeError(f"AuraSR config file does not exist next to model file: {config_path}")
+            return path
+        resource = self._manifest_resource(request)
+        repo = str(resource.get("repo") or AURA_SR_MODEL_SPEC["repo"])
+        file_name = str(resource.get("file") or AURA_SR_MODEL_SPEC["file"])
+        return self._hf_snapshot_file(repo, file_name)
+
+    def _hf_snapshot_file(self, repo: str, file_name: str) -> Path:
+        from huggingface_hub import snapshot_download
+
+        allow_patterns = [file_name, "config.json", "LICENSE.md", "README.md"]
+        roots = huggingface_cache_roots(self._settings)
+        first_error: Exception | None = None
+        for cache_root in roots:
+            try:
+                snapshot_dir = Path(
+                    snapshot_download(
+                        repo_id=repo,
+                        allow_patterns=allow_patterns,
+                        cache_dir=str(cache_root),
+                        local_files_only=True,
+                    )
+                )
+                return snapshot_dir / file_name
+            except Exception as exc:  # noqa: BLE001 - try the next configured cache root.
+                first_error = exc
+
+        cache_root = roots[0]
+        try:
+            snapshot_dir = Path(
+                snapshot_download(repo_id=repo, allow_patterns=allow_patterns, cache_dir=str(cache_root))
+            )
+            return snapshot_dir / file_name
+        except Exception as exc:  # noqa: BLE001 - surface the download context.
+            raise RuntimeError(f"Unable to resolve AuraSR weight {file_name} from Hugging Face repo {repo}.") from (
+                first_error or exc
+            )
+
+    @staticmethod
+    def _manifest_resource(request: ImageRequest) -> dict[str, Any]:
+        resources = request.model_manifest_entry.get("resources", {})
+        if not isinstance(resources, dict):
+            return {}
+        upscalers = resources.get("imageUpscalers") or resources.get("upscalers")
+        if not isinstance(upscalers, dict):
+            return {}
+        aura_sr = upscalers.get("aura-sr") or upscalers.get("auraSr") or upscalers.get("aura_sr") or {}
+        if not isinstance(aura_sr, dict):
+            return {}
+        resource = aura_sr.get("x4") or aura_sr.get("4") or {}
         return resource if isinstance(resource, dict) else {}
 
 

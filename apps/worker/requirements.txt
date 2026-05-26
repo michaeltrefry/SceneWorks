@@ -22,3 +22,4 @@ safetensors>=0.6
 prodigyopt>=1.1,<2
 diffusers @ git+https://github.com/huggingface/diffusers.git
 realesrgan>=0.3,<0.4
+aura-sr>=0.0.4,<0.1

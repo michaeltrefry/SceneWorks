@@ -47,6 +47,10 @@ import { errorStatuses } from "../jobTypes.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
+const UPSCALE_ENGINES = [
+  { id: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
+  { id: "aura-sr", label: "AuraSR", factors: [4] },
+];
 
 function formatResolutionLabel(value) {
   const [width, height] = String(value).split("x");
@@ -182,6 +186,14 @@ export function ImageStudio() {
       setCount(4);
     }
     setMode(nextMode);
+  }
+
+  function handleUpscaleEngineChange(nextEngine) {
+    setUpscaleEngine(nextEngine);
+    const option = UPSCALE_ENGINES.find((candidate) => candidate.id === nextEngine);
+    if (option && !option.factors.includes(upscaleFactor)) {
+      setUpscaleFactor(option.factors[0]);
+    }
   }
 
   function serializeLora(lora, override = {}) {
@@ -781,14 +793,21 @@ export function ImageStudio() {
                 <label>
                   Scale
                   <select disabled={!upscaleEnabled} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
-                    <option value={2}>2x</option>
-                    <option value={4}>4x</option>
+                    {(UPSCALE_ENGINES.find((engine) => engine.id === upscaleEngine)?.factors ?? [2, 4]).map((factor) => (
+                      <option key={factor} value={factor}>
+                        {factor}x
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <label>
                   Engine
-                  <select disabled={!upscaleEnabled} onChange={(event) => setUpscaleEngine(event.target.value)} value={upscaleEngine}>
-                    <option value="real-esrgan">Real-ESRGAN</option>
+                  <select disabled={!upscaleEnabled} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
+                    {UPSCALE_ENGINES.map((engine) => (
+                      <option key={engine.id} value={engine.id}>
+                        {engine.label}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <label className="prompt-field">

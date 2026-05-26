@@ -55,6 +55,8 @@ def create_upscaler_engine(engine: str | None = None) -> UpscalerEngine:
     engine_id = (engine or "real_esrgan").strip().lower().replace("-", "_")
     if engine_id in {"real_esrgan", "realesrgan"}:
         return RealESRGANUpscaler()
+    if engine_id in {"aura_sr", "aurasr"}:
+        return AuraSRUpscaler()
     raise RuntimeError(f"Unsupported upscaler engine: {engine}.")
 
 
@@ -125,6 +127,38 @@ class RealESRGANUpscaler:
         tile_pad: int,
     ) -> Image.Image:
         return _run_tiled(torch, model, image, factor=factor, device=device, dtype=dtype, tile_size=tile_size, tile_pad=tile_pad)
+
+
+class AuraSRUpscaler:
+    id = "aura_sr"
+
+    def upscale(
+        self,
+        image: Image.Image,
+        *,
+        job: UpscaleJob,
+        settings: Any,
+    ) -> Image.Image:
+        if job.factor != 4:
+            raise RuntimeError("AuraSR upscaling supports only 4x output.")
+        if not job.weights_path.exists():
+            raise RuntimeError(f"AuraSR weights are missing: {job.weights_path}")
+
+        torch = importlib.import_module("torch")
+        aura_sr = importlib.import_module("aura_sr")
+        from .image_adapters import activate_torch_device, select_torch_device
+
+        device = select_torch_device(torch, getattr(settings, "gpu_id", None))
+        activate_torch_device(torch, device)
+        model = aura_sr.AuraSR.from_pretrained(str(job.weights_path), use_safetensors=True)
+        upsampler = getattr(model, "upsampler", None)
+        if upsampler is not None and hasattr(upsampler, "to"):
+            upsampler.to(device)
+        if upsampler is not None and hasattr(upsampler, "eval"):
+            upsampler.eval()
+        if job.tile_pad > 0 and hasattr(model, "upscale_4x_overlapped"):
+            return model.upscale_4x_overlapped(image.convert("RGB"))
+        return model.upscale_4x(image.convert("RGB"))
 
 
 def _load_state_dict(torch: Any, weights_path: Path) -> dict[str, Any]:

@@ -23,6 +23,7 @@ from scene_worker.caption_adapters import (
     normalize_processor_resample,
 )
 from scene_worker.image_adapters import (
+    AuraSrUpscaler,
     ChromaDiffusersAdapter,
     FluxDiffusersAdapter,
     ImageAssetWriter,
@@ -54,6 +55,7 @@ from scene_worker.image_adapters import (
     verify_pipeline_on_device,
 )
 from scene_worker.upscalers import (
+    AuraSRUpscaler,
     RealESRGANUpscaler,
     TileSlice,
     UpscaleJob,
@@ -1721,6 +1723,22 @@ def test_create_image_upscaler_rejects_unknown_engine():
         create_image_upscaler(request)
 
 
+def test_create_image_upscaler_accepts_aurasr_engine():
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "p",
+                "upscale": {"enabled": True, "factor": 4, "engine": "aura-sr"},
+            }
+        }
+    )
+
+    upscaler = create_image_upscaler(request, settings=SimpleNamespace(gpu_id="cpu"))
+
+    assert isinstance(upscaler, AuraSrUpscaler)
+    assert upscaler.id == "aura-sr"
+
+
 def test_real_esrgan_resolves_manifest_weight_through_hf_cache(monkeypatch, tmp_path):
     calls: list[dict[str, object]] = []
     resolved_path = tmp_path / "RealESRGAN_x2plus.pth"
@@ -1769,6 +1787,73 @@ def test_real_esrgan_resolves_manifest_weight_through_hf_cache(monkeypatch, tmp_
     assert calls[0]["cache_dir"] == str(settings.data_dir / "cache" / "huggingface" / "hub")
     assert calls[0]["local_files_only"] is True
     assert calls[-1].get("local_files_only") is not True
+
+
+def test_aurasr_resolves_manifest_snapshot_through_hf_cache(monkeypatch, tmp_path):
+    calls: list[dict[str, object]] = []
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    (snapshot_dir / "model.safetensors").write_bytes(b"weights")
+    (snapshot_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("local_files_only"):
+            raise RuntimeError("cache miss")
+        return str(snapshot_dir)
+
+    fake_hub = ModuleType("huggingface_hub")
+    fake_hub.snapshot_download = fake_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HF_HOME", raising=False)
+
+    settings = SimpleNamespace(data_dir=tmp_path / "data", gpu_id="cpu")
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "p",
+                "upscale": {"enabled": True, "factor": 4, "engine": "aura-sr"},
+                "modelManifestEntry": {
+                    "resources": {
+                        "imageUpscalers": {
+                            "aura-sr": {
+                                "x4": {"repo": "example/aura-sr", "file": "model.safetensors"}
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    )
+
+    path = AuraSrUpscaler(settings=settings)._resolve_model_path(request)
+
+    assert path == snapshot_dir / "model.safetensors"
+    assert calls[0]["repo_id"] == "example/aura-sr"
+    assert calls[0]["allow_patterns"] == ["model.safetensors", "config.json", "LICENSE.md", "README.md"]
+    assert calls[0]["cache_dir"] == str(settings.data_dir / "cache" / "huggingface" / "hub")
+    assert calls[0]["local_files_only"] is True
+    assert calls[-1].get("local_files_only") is not True
+
+
+def test_aurasr_upscaler_rejects_non_4x_request(monkeypatch):
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "p",
+                "upscale": {"enabled": True, "factor": 2, "engine": "aura-sr"},
+            }
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="supports only 4x"):
+        AuraSrUpscaler(settings=SimpleNamespace(gpu_id="cpu")).upscale(
+            Image.new("RGB", (2, 2), "white"),
+            request=request,
+            cancel_requested=lambda: False,
+        )
 
 
 def test_image_asset_writer_retains_original_and_adds_upscaled_variant(monkeypatch, tmp_path):
@@ -5673,6 +5758,23 @@ def test_upscaler_engine_selection_is_import_safe_without_torch(monkeypatch):
     assert imported == []
 
 
+def test_aurasr_engine_selection_is_import_safe_without_torch(monkeypatch):
+    imported: list[str] = []
+
+    def fail_torch_import(name):
+        imported.append(name)
+        if name == "torch":
+            raise AssertionError("torch must not be imported while selecting an upscaler")
+        return importlib.import_module(name)
+
+    monkeypatch.setattr("scene_worker.upscalers.importlib.import_module", fail_torch_import)
+
+    engine = create_upscaler_engine("aura-sr")
+
+    assert isinstance(engine, AuraSRUpscaler)
+    assert imported == []
+
+
 def test_upscaler_tile_slices_cover_edges_without_overlap_gaps():
     assert tile_slices(5, 3, 2) == [
         TileSlice(0, 0, 2, 2),
@@ -5740,6 +5842,63 @@ def test_real_esrgan_upscale_lazily_imports_torch_and_reuses_device_helpers(tmp_
         "dtype": "float32",
         "tile_size": 64,
         "tile_pad": 4,
+    }
+
+
+def test_aurasr_upscale_lazily_imports_torch_and_uses_local_weight_file(tmp_path, monkeypatch):
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"stub")
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+
+    class FakeTorch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+        class backends:
+            mps = None
+
+    seen: dict[str, Any] = {}
+
+    class FakeAuraModel:
+        def upscale_4x_overlapped(self, image, max_batch_size=16, weight_type="checkboard"):
+            seen.update({"method": "overlapped", "max_batch_size": max_batch_size, "weight_type": weight_type})
+            return image.resize((image.width * 4, image.height * 4))
+
+    class FakeAuraSR:
+        @staticmethod
+        def from_pretrained(model_id, use_safetensors=True):
+            seen.update({"model_id": model_id, "use_safetensors": use_safetensors})
+            return FakeAuraModel()
+
+    fake_aura_module = SimpleNamespace(AuraSR=FakeAuraSR)
+    imports: list[str] = []
+
+    def fake_import_module(name):
+        imports.append(name)
+        if name == "torch":
+            return FakeTorch
+        if name == "aura_sr":
+            return fake_aura_module
+        return importlib.import_module(name)
+
+    monkeypatch.setattr("scene_worker.upscalers.importlib.import_module", fake_import_module)
+
+    result = AuraSRUpscaler().upscale(
+        Image.new("RGB", (3, 4), "white"),
+        job=UpscaleJob(factor=4, weights_path=weights, tile_pad=16),
+        settings=SimpleNamespace(gpu_id="cpu"),
+    )
+
+    assert result.size == (12, 16)
+    assert imports == ["torch", "aura_sr"]
+    assert seen == {
+        "model_id": str(weights),
+        "use_safetensors": True,
+        "method": "overlapped",
+        "max_batch_size": 16,
+        "weight_type": "checkboard",
     }
 
 
