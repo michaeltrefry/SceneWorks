@@ -611,7 +611,9 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             raise RuntimeError(f"{target['label']} native pipelines currently support {supported}.")
         if request.duration > target["hardMaxDuration"]:
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
-        validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
+        validate_lora_compatibility(
+            request.loras, model_family=target["family"], adapter_id=self.id, model_id=request.model
+        )
         self._ltx_lora_specs(request)
         if request.mode == "replace_person" and not self._mock_inference_enabled(request):
             self._validate_replacement_inputs(request)
@@ -1703,7 +1705,9 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             raise RuntimeError(f"{target['label']} MLX adapter currently supports {supported}.")
         if request.duration > target["hardMaxDuration"]:
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
-        validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
+        validate_lora_compatibility(
+            request.loras, model_family=target["family"], adapter_id=self.id, model_id=request.model
+        )
         if not _mlx_available():
             raise RuntimeError(
                 "MLX video generation requires optional worker dependencies. "
@@ -2291,6 +2295,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             request.loras,
             adapter_id=target["adapter"],
             model_family=target.get("family"),
+            model_id=request.model,
             previous_state=self._loaded_lora_state,
         )
 

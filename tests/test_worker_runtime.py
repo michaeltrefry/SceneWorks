@@ -176,6 +176,16 @@ class FakeTargetedLoraPipe(FakeLoraPipe):
         self.deleted.append(names)
 
 
+class FakeMoeLoraPipe(FakeLoraPipe):
+    """Two-expert (A14B) pipe: has a transformer_2 and records whether each
+    load_lora_weights call targeted it (load_into_transformer_2=True)."""
+
+    transformer_2 = object()
+
+    def load_lora_weights(self, path, adapter_name=None, **kwargs):
+        self.loaded.append((path, adapter_name, bool(kwargs.get("load_into_transformer_2", False))))
+
+
 class FakeSingleLoraPipe:
     def __init__(self):
         self.loaded = []
@@ -494,6 +504,80 @@ def test_lora_loader_applies_weights_and_reuses_cached_state(tmp_path):
     assert [path for path, _name in pipe.loaded] == [str(first), str(second)]
     assert pipe.set_calls == [(list(state.adapter_names), [0.5, 0.8])]
     assert pipe.unloaded == 0
+
+
+def test_wan_moe_lora_loads_low_noise_into_transformer_2(tmp_path):
+    # A trained Wan A14B MoE LoRA is a dir with a high/low pair (sc-1953). The
+    # high-noise half loads into the transformer, the low-noise half into
+    # transformer_2 via diffusers' load_into_transformer_2 (sc-1955).
+    moe = tmp_path / "lora_moe"
+    moe.mkdir()
+    (moe / "char.high_noise.safetensors").write_bytes(b"lora")
+    (moe / "char.low_noise.safetensors").write_bytes(b"lora")
+    lora = {
+        "id": "char",
+        "installedPath": str(moe),
+        "families": ["wan-video"],
+        "baseModel": "wan_2_2_t2v_14b",
+        "weight": 0.8,
+    }
+
+    specs = normalize_lora_specs([lora])
+    assert specs[0].path.endswith("char.high_noise.safetensors")
+    assert specs[0].secondary_path.endswith("char.low_noise.safetensors")
+
+    pipe = FakeMoeLoraPipe()
+    apply_loras_to_pipeline(
+        pipe, [lora], adapter_id="wan_video", model_family="wan-video", model_id="wan_2_2_t2v_14b"
+    )
+    assert len(pipe.loaded) == 2
+    high_path, high_name, high_t2 = pipe.loaded[0]
+    low_path, low_name, low_t2 = pipe.loaded[1]
+    assert high_path.endswith("char.high_noise.safetensors") and high_t2 is False
+    assert low_path.endswith("char.low_noise.safetensors") and low_t2 is True
+    # Both experts share the same adapter name so set_adapters activates both.
+    assert high_name == low_name
+
+
+def test_wan_moe_lora_on_dense_pipe_skips_second_expert(tmp_path):
+    # A MoE LoRA on a pipe without transformer_2 loads only the high-noise half
+    # (base-model gating blocks this combo upstream, but it must not crash).
+    moe = tmp_path / "lora_moe2"
+    moe.mkdir()
+    (moe / "char.high_noise.safetensors").write_bytes(b"lora")
+    (moe / "char.low_noise.safetensors").write_bytes(b"lora")
+    pipe = FakeLoraPipe()  # dense: no transformer_2
+    apply_loras_to_pipeline(
+        pipe,
+        [{"id": "char", "installedPath": str(moe), "families": ["wan-video"]}],
+        adapter_id="wan_video",
+        model_family="wan-video",
+        model_id="wan_2_2",
+    )
+    assert len(pipe.loaded) == 1
+    assert pipe.loaded[0][0].endswith("char.high_noise.safetensors")
+
+
+def test_validate_lora_compatibility_gates_wan_base_model():
+    wan_5b = {"id": "l", "families": ["wan-video"], "baseModel": "wan_2_2"}
+    # A 5B LoRA on a 14B model is rejected (both family wan-video, incompatible arch).
+    with pytest.raises(RuntimeError, match="not interchangeable"):
+        validate_lora_compatibility(
+            [wan_5b], model_family="wan-video", adapter_id="wan_video", model_id="wan_2_2_t2v_14b"
+        )
+    # Exact base-model match passes.
+    validate_lora_compatibility(
+        [wan_5b], model_family="wan-video", adapter_id="wan_video", model_id="wan_2_2"
+    )
+    # No recorded baseModel -> family gating only (legacy/imported), no rejection.
+    validate_lora_compatibility(
+        [{"id": "l2", "families": ["wan-video"]}],
+        model_family="wan-video",
+        adapter_id="wan_video",
+        model_id="wan_2_2_t2v_14b",
+    )
+    # No model_id -> base-model gate is inert (back-compat with other call sites).
+    validate_lora_compatibility([wan_5b], model_family="wan-video", adapter_id="wan_video")
 
 
 def test_lora_loader_clears_previous_adapters_between_jobs(tmp_path):

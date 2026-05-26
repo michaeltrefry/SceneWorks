@@ -1115,6 +1115,10 @@ fn serialize_job_lora(lora: &Value, selected_lora: &Value, lora_id: &str) -> Val
         "families": preferred_lora_value(selected_lora, lora, "families"),
         "compatibleFamilies": preferred_lora_value(selected_lora, lora, "compatibleFamilies"),
         "modelFamilies": preferred_lora_value(selected_lora, lora, "modelFamilies"),
+        // The specific base model the LoRA was trained for (e.g. wan_2_2 vs
+        // wan_2_2_t2v_14b). The worker gates Wan 5B-vs-14B on this since both share
+        // family `wan-video`. Absent for LoRAs that don't record one.
+        "baseModel": preferred_lora_value(selected_lora, lora, "baseModel"),
         "triggerWords": preferred_lora_array(selected_lora, lora, "triggerWords"),
         "compatibility": preferred_lora_object(selected_lora, lora, "compatibility"),
         "icLora": preferred_lora_value(selected_lora, lora, "icLora"),
