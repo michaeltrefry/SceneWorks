@@ -762,6 +762,28 @@ def test_lora_compatibility_guard_accepts_normalized_family_aliases():
     )
 
 
+def test_lora_compatibility_chroma_accepts_flux_but_not_vice_versa():
+    # Chroma accepts flux LoRAs (FLUX.1-schnell-derived, identical keys). sc-1832.
+    validate_lora_compatibility(
+        [{"id": "flux_style", "compatibility": {"families": ["flux"]}}],
+        model_family="chroma",
+        adapter_id="diffusers_test",
+    )
+    # ...and chroma-tagged LoRAs.
+    validate_lora_compatibility(
+        [{"id": "chroma_style", "compatibility": {"families": ["chroma"]}}],
+        model_family="chroma",
+        adapter_id="diffusers_test",
+    )
+    # The relationship is one-directional: a Flux model rejects a chroma LoRA.
+    with pytest.raises(RuntimeError, match="not compatible with model family flux"):
+        validate_lora_compatibility(
+            [{"id": "chroma_style", "compatibility": {"families": ["chroma"]}}],
+            model_family="flux",
+            adapter_id="diffusers_test",
+        )
+
+
 def test_lora_weight_defaults_on_unparseable_values():
     assert lora_weight({"weight": "not-a-number"}) == 0.8
 
@@ -1219,8 +1241,32 @@ def test_chroma_adapter_applies_chroma_lora(tmp_path):
     assert pipe.set_calls == [(list(state.adapter_names), [0.7])]
 
 
-def test_chroma_adapter_rejects_incompatible_lora_family(tmp_path):
+def test_chroma_adapter_applies_flux_lora(tmp_path):
+    # Chroma is FLUX.1-schnell-derived: Flux LoRAs (and Chroma LoRAs detected as
+    # flux by their identical tensor keys) load on Chroma. sc-1832.
     lora = tmp_path / "flux_style.safetensors"
+    lora.write_bytes(b"lora")
+    pipe = FakeLoraPipe()
+    adapter = ChromaDiffusersAdapter()
+    request = SimpleNamespace(
+        model="chroma1_hd",
+        loras=[
+            {
+                "id": "flux_style",
+                "installedPath": str(lora),
+                "weight": 0.8,
+                "compatibility": {"families": ["flux"]},
+            }
+        ],
+    )
+    adapter._apply_loras(pipe, request)
+    state = adapter._loaded_lora_states["text"]
+    assert [path for path, _name in pipe.loaded] == [str(lora)]
+    assert pipe.set_calls == [(list(state.adapter_names), [0.8])]
+
+
+def test_chroma_adapter_rejects_incompatible_lora_family(tmp_path):
+    lora = tmp_path / "qwen_style.safetensors"
     lora.write_bytes(b"lora")
     pipe = FakeLoraPipe()
     adapter = ChromaDiffusersAdapter()
@@ -1228,9 +1274,9 @@ def test_chroma_adapter_rejects_incompatible_lora_family(tmp_path):
         model="chroma1_base",
         loras=[
             {
-                "id": "flux_style",
+                "id": "qwen_style",
                 "installedPath": str(lora),
-                "compatibility": {"families": ["flux"]},
+                "compatibility": {"families": ["qwen-image"]},
             }
         ],
     )
@@ -1239,7 +1285,7 @@ def test_chroma_adapter_rejects_incompatible_lora_family(tmp_path):
     except RuntimeError as exc:
         assert "not compatible with model family chroma" in str(exc)
     else:
-        raise AssertionError("Chroma1 must reject a LoRA whose family is not chroma.")
+        raise AssertionError("Chroma1 must reject a LoRA whose family is neither chroma nor flux.")
 
 
 def test_create_image_adapter_routes_kolors():

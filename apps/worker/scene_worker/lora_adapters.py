@@ -52,6 +52,24 @@ def normalize_lora_family(family: Any) -> str:
     return str(family or "").strip().lower().replace("_", "-")
 
 
+# Architecture families a model can load LoRAs from in addition to its own.
+# Chroma is FLUX.1-schnell-derived and keeps Flux's transformer-block layout, so
+# Flux LoRAs load on Chroma — and Chroma LoRAs that carry no chroma metadata are
+# classified as `flux` by the key-based detector (the keys are identical). The
+# relationship is one-directional: a Flux model does not accept chroma LoRAs.
+EXTRA_COMPATIBLE_LORA_FAMILIES: dict[str, set[str]] = {
+    "chroma": {"flux"},
+}
+
+
+def accepted_lora_families(model_family: Any) -> set[str]:
+    """The set of LoRA families a model of ``model_family`` can load."""
+    normalized = normalize_lora_family(model_family)
+    if not normalized:
+        return set()
+    return {normalized} | EXTRA_COMPATIBLE_LORA_FAMILIES.get(normalized, set())
+
+
 def lora_families(lora: dict[str, Any]) -> list[str]:
     compatibility = lora.get("compatibility") if isinstance(lora.get("compatibility"), dict) else {}
     values = next(
@@ -102,7 +120,8 @@ def lora_looks_like_ic_lora(lora: dict[str, Any]) -> bool:
 
 def validate_lora_compatibility(loras: list[dict[str, Any]], *, model_family: str | None, adapter_id: str) -> None:
     normalized_model_family = normalize_lora_family(model_family)
-    if not loras or not normalized_model_family:
+    accepted = accepted_lora_families(model_family)
+    if not loras or not accepted:
         return
     for index, item in enumerate(loras):
         lora = item if isinstance(item, dict) else {"id": str(item)}
@@ -110,7 +129,10 @@ def validate_lora_compatibility(loras: list[dict[str, Any]], *, model_family: st
         families = lora_families(lora)
         if not families:
             continue
-        if normalized_model_family not in families:
+        # Accept when any of the LoRA's declared families is one the model can
+        # load. For a single-family model this is exactly "model_family in families";
+        # chroma additionally accepts flux (see EXTRA_COMPATIBLE_LORA_FAMILIES).
+        if accepted.isdisjoint(families):
             raise RuntimeError(
                 f"LoRA {lora_id} is not compatible with model family {normalized_model_family} for {adapter_id}."
             )
