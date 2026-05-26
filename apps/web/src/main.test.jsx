@@ -5437,6 +5437,86 @@ describe("SceneWorks app shell", () => {
     expect(createVideoJob).not.toHaveBeenCalled();
   });
 
+  it("offers a Wan A14B quantization selector and threads the choice into the video job (sc-1982)", async () => {
+    const createVideoJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            characters: [],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob,
+            deleteAsset: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [],
+            rememberLocalGenerationJob: () => {},
+            requestedGpu: "auto",
+            selectedAsset: null,
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            videoModels: [
+              {
+                id: "wan_2_2_t2v_14b",
+                name: "Wan2.2 14B (T2V)",
+                type: "video",
+                family: "wan-video",
+                capabilities: ["text_to_video"],
+                defaults: { duration: 5, fps: 16, resolution: "832x480", quality: "balanced" },
+                limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480"] },
+                loraCompatibility: { families: ["wan-video"] },
+                quantization: {
+                  defaults: { mps: "gguf-q8_0", cuda: "gguf-q4_k_m" },
+                  variants: {
+                    "gguf-q8_0": { format: "gguf", label: "GGUF Q8_0 (near-lossless)" },
+                    "gguf-q4_k_m": { format: "gguf", label: "GGUF Q4_K_M (smallest)" },
+                  },
+                },
+              },
+            ],
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll(".mode-control button")].find((button) => button.textContent === "Text → Video").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+    });
+
+    const quantSelect = field(container, "Quantization");
+    expect(quantSelect).toBeTruthy();
+    const optionLabels = [...quantSelect.querySelectorAll("option")].map((option) => option.textContent);
+    expect(optionLabels).toContain("GGUF Q8_0 (near-lossless)");
+    expect(optionLabels).toContain("GGUF Q4_K_M (smallest)");
+    expect(optionLabels[0]).toContain("Auto");
+
+    await changeField(quantSelect, "gguf-q4_k_m");
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+    });
+
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "wan_2_2_t2v_14b",
+        advanced: expect.objectContaining({ quantization: "gguf-q4_k_m" }),
+      }),
+    );
+  });
+
   it("surfaces compatible LoRAs in the Video Studio picker and sends the selection to the job", async () => {
     const createVideoJob = vi.fn();
     root = createRoot(container);

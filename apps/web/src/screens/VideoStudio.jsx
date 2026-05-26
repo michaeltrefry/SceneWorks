@@ -111,6 +111,7 @@ export function VideoStudio() {
   const [ltxPipeline, setLtxPipeline] = useState("auto");
   const [distilledVariant, setDistilledVariant] = useState("1.1");
   const [precision, setPrecision] = useState("fp8");
+  const [quantization, setQuantization] = useState("auto");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [selectedLoraIds, setSelectedLoraIds] = useState([]);
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(false);
@@ -140,6 +141,11 @@ export function VideoStudio() {
   const presetDefaultSnapshots = useRef({});
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
+  // GGUF quantization variants the torch adapter can load (sc-1982). Declared in
+  // the model manifest's `quantization.variants`; "auto" defers to the worker's
+  // per-platform default (Q8_0 on MPS, Q4_K_M on CUDA).
+  const quantVariants = Object.entries(selectedModel?.quantization?.variants ?? {});
+  const supportsQuantization = quantVariants.length > 0;
   const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "replace_person"].includes(mode);
   const {
     availablePresets,
@@ -443,6 +449,7 @@ export function VideoStudio() {
           selectedPersonTrack: selectedTrack ?? null,
           replacementModeLabel: replacementModeLabels[replacementMode],
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
+          ...(supportsQuantization && quantization !== "auto" ? { quantization } : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -871,6 +878,20 @@ export function VideoStudio() {
                         </select>
                       </label>
                     </>
+                  ) : null}
+                  {supportsQuantization ? (
+                    <label>
+                      Quantization
+                      <select onChange={(event) => setQuantization(event.target.value)} value={quantization}>
+                        <option value="auto">Auto (per-platform default)</option>
+                        {quantVariants.map(([id, variant]) => (
+                          <option key={id} value={id}>
+                            {variant?.label ?? id}
+                          </option>
+                        ))}
+                        <option value="none">Full precision (unquantized)</option>
+                      </select>
+                    </label>
                   ) : null}
                   <label>
                     GPU

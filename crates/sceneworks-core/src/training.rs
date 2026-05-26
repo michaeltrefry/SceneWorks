@@ -402,6 +402,9 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sdxl_lora_target(),
             lens_turbo_lora_target(),
             ltx_video_lora_target(),
+            wan_lora_target(),
+            wan_t2v_14b_lora_target(),
+            wan_i2v_14b_lora_target(),
         ],
         extra: ExtraFields::new(),
     }
@@ -411,6 +414,9 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
 pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let target = z_image_turbo_lora_target();
     let sdxl_target = sdxl_lora_target();
+    let wan_target = wan_lora_target();
+    let wan_t2v_14b_target = wan_t2v_14b_lora_target();
+    let wan_i2v_14b_target = wan_i2v_14b_lora_target();
     TrainingPresetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
         presets: vec![
@@ -595,6 +601,107 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 40
                 })),
             ),
+            wan_preset(
+                &wan_target,
+                "wan_lora.character.adamw.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character stills on Wan2.2-TI2V-5B.",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            wan_preset(
+                &wan_target,
+                "wan_lora.character.adamw.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw", "conservative"),
+                |mut config| {
+                    config.rank = 16;
+                    config.alpha = 16;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            wan_preset(
+                &wan_target,
+                "wan_lora.style.adamw.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw", "balanced"),
+                |mut config| {
+                    config.steps = 2000;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-step style LoRA defaults for look and motion-free texture transfer.",
+                    "order": 30
+                })),
+            ),
+            wan_preset(
+                &wan_t2v_14b_target,
+                "wan_t2v_14b_lora.character.adamw.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for character stills on Wan2.2 14B T2V (both noise experts).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            wan_preset(
+                &wan_t2v_14b_target,
+                "wan_t2v_14b_lora.style.adamw.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw", "balanced"),
+                |mut config| {
+                    config.steps = 2000;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-step style LoRA for Wan2.2 14B T2V.",
+                    "order": 20
+                })),
+            ),
+            wan_preset(
+                &wan_i2v_14b_target,
+                "wan_i2v_14b_lora.character.adamw.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for character stills on Wan2.2 14B I2V (both noise experts).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            wan_preset(
+                &wan_i2v_14b_target,
+                "wan_i2v_14b_lora.style.adamw.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw", "balanced"),
+                |mut config| {
+                    config.steps = 2000;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-step style LoRA for Wan2.2 14B I2V.",
+                    "order": 20
+                })),
+            ),
         ],
         extra: ExtraFields::new(),
     }
@@ -697,6 +804,45 @@ where
     config
         .advanced
         .insert("weightDecay".to_owned(), json!(0.0001));
+    TrainingPreset {
+        id: id.to_owned(),
+        version: 1,
+        target_id: target.id.clone(),
+        name: name.to_owned(),
+        recommended_for: recommended_for
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        optimizer: optimizer.to_owned(),
+        quality_preset: quality_preset.to_owned(),
+        config,
+        ui,
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Build a Wan2.2 video LoRA preset. The video-specific advanced knobs
+/// (flow-matching sampling, caching, gradient checkpointing, numFrames) live on
+/// the target defaults, so the preset only overrides the optimizer + quality
+/// label and whatever the `mutate` closure tweaks (rank/steps/LR).
+fn wan_preset<F>(
+    target: &TrainingTarget,
+    id: &str,
+    name: &str,
+    recommended_for: &[&str],
+    optimizer_quality: (&str, &str),
+    mutate: F,
+    ui: JsonObject,
+) -> TrainingPreset
+where
+    F: FnOnce(TrainingConfig) -> TrainingConfig,
+{
+    let (optimizer, quality_preset) = optimizer_quality;
+    let mut config = mutate(target.defaults.clone());
+    config.optimizer = optimizer.to_owned();
+    config
+        .advanced
+        .insert("qualityPreset".to_owned(), json!(quality_preset));
     TrainingPreset {
         id: id.to_owned(),
         version: 1,
@@ -949,6 +1095,193 @@ fn ltx_video_lora_target() -> TrainingTarget {
         })),
         extra: ExtraFields::new(),
     }
+}
+
+/// Wan2.2-TI2V-5B video LoRA training, applied at inference to the Wan video
+/// models.
+///
+/// Like the LTX video LoRA it trains from a still-image dataset (each item
+/// encodes to a single Wan-VAE latent frame, `numFrames: 1`), but the `wan_lora`
+/// kernel is torch/diffusers — CUDA *and* Apple-Silicon MPS — not MLX: a
+/// flow-matching velocity loop on the `WanTransformer3DModel` attention
+/// projections (`to_q`/`to_k`/`to_v`/`to_out.0`). On MPS it runs in fp32 (Wan's
+/// Conv3d patch embedding has no bf16 Metal kernel; the kernel forces it). The
+/// output registers as a `wan-video` family LoRA the Wan video adapter loads at
+/// generation. This dense 5B target is the base the 14B (A14B MoE) trainer
+/// extends for the two-expert (high/low-noise) case.
+fn wan_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "wan_lora".to_owned(),
+        name: "Wan2.2 Video LoRA".to_owned(),
+        modality: TrainingModality::Video,
+        output_kind: TrainingOutputKind::Lora,
+        family: "wan-video".to_owned(),
+        base_model: "wan_2_2".to_owned(),
+        base_model_repo: Some("Wan-AI/Wan2.2-TI2V-5B-Diffusers".to_owned()),
+        kernel: "wan_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 32,
+            alpha: 32,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 1500,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 512,
+            save_every: 250,
+            seed: 42,
+            // torch AdamW: cross-platform (CUDA + MPS). adamw8bit is CUDA-only
+            // (bitsandbytes) and falls back to AdamW elsewhere, so the default
+            // stays plain adamw like the LTX video target.
+            optimizer: "adamw".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                // Flow-matching noise sampling (see the Z-Image target). Video uses
+                // a neutral balanced bias rather than the high-noise bias the
+                // distilled image models prefer.
+                "timestepType": "sigmoid",
+                "timestepBias": "balanced",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // Still-image training: each item encodes to a single latent frame
+                // (mirrors the LTX video LoRA). The kernel keeps the Wan-VAE 5D
+                // latent shape so a future clip dataset can pass numFrames > 1.
+                "numFrames": 1,
+                // Wan transformer attention projections (attn1/attn2 to_q/k/v + the
+                // attention output projection), matching the diffusers Wan LoRA.
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+                // In-training video sampling is not implemented for the first cut
+                // (per-step Wan video gen is expensive), so previews stay off.
+                "sampleEvery": 0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 4000],
+            "resolutions": [512, 768],
+            "batchSize": [1, 2],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Wan2.2 Video LoRA",
+            "description": "Train a Wan2.2 video LoRA from still images (Wan2.2-TI2V-5B). Runs on CUDA and Apple Silicon (MPS).",
+            "recommendedFor": ["character", "style"],
+            "datasetModality": "image"
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Shared builder for the Wan2.2 A14B (MoE) video LoRA targets (T2V + I2V).
+///
+/// A14B is a two-expert mixture: a high-noise expert (`transformer`) and a
+/// low-noise expert (`transformer_2`), so the `wan_moe_lora` kernel trains a
+/// separate LoRA on each, split at the pipeline `boundary_ratio` (0.875), and
+/// saves two `wan-video` family files. Same diffusers flow-matching recipe as the
+/// dense 5B `wan_lora` target (still-image dataset, fp32 on MPS), but the A14B
+/// bf16 base is GPU-only (~56GB of transformers); the Q8_0 GGUF base path fits
+/// memory-bound hosts. `base_model` records the specific A14B variant so the
+/// inference loader gates the LoRA to the matching model (not the 5B).
+fn wan_moe_lora_target(
+    id: &str,
+    name: &str,
+    base_model: &str,
+    base_model_repo: &str,
+    description: &str,
+) -> TrainingTarget {
+    TrainingTarget {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        modality: TrainingModality::Video,
+        output_kind: TrainingOutputKind::Lora,
+        family: "wan-video".to_owned(),
+        base_model: base_model.to_owned(),
+        base_model_repo: Some(base_model_repo.to_owned()),
+        kernel: "wan_moe_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 32,
+            alpha: 32,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 1500,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 512,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "timestepType": "sigmoid",
+                "timestepBias": "balanced",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                "numFrames": 1,
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+                "sampleEvery": 0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 4000],
+            "resolutions": [512, 768],
+            "batchSize": [1, 2],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": name,
+            "description": description,
+            "recommendedFor": ["character", "style"],
+            "datasetModality": "image"
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+fn wan_t2v_14b_lora_target() -> TrainingTarget {
+    wan_moe_lora_target(
+        "wan_t2v_14b_lora",
+        "Wan2.2 14B T2V Video LoRA",
+        "wan_2_2_t2v_14b",
+        "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts; GPU-only at bf16 (Q8_0 GGUF base fits smaller hosts).",
+    )
+}
+
+fn wan_i2v_14b_lora_target() -> TrainingTarget {
+    wan_moe_lora_target(
+        "wan_i2v_14b_lora",
+        "Wan2.2 14B I2V Video LoRA",
+        "wan_2_2_i2v_14b",
+        "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts; GPU-only at bf16 (Q8_0 GGUF base fits smaller hosts).",
+    )
 }
 
 /// Generic SDXL-UNet image LoRA training, applied at inference to the SDXL base

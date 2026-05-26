@@ -718,6 +718,33 @@ mod tests {
     }
 
     #[test]
+    fn detects_diffusers_wan_video() {
+        // The `wan_lora` trainer (epic 1949 sc-1952) saves diffusers-format keys
+        // via WanPipeline.save_lora_weights: `transformer.blocks.<n>.attn1|attn2.to_*`
+        // (not the native `self_attn`/`cross_attn`/`ffn` names). These must still
+        // detect as wan-video so the inference loader gates them correctly.
+        let mut keys = Vec::new();
+        for block in 0..30 {
+            for module in [
+                "attn1.to_q",
+                "attn1.to_k",
+                "attn1.to_v",
+                "attn1.to_out.0",
+                "attn2.to_q",
+                "attn2.to_k",
+                "attn2.to_v",
+                "attn2.to_out.0",
+            ] {
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_A.weight"));
+                keys.push(format!("transformer.blocks.{block}.{module}.lora_B.weight"));
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("wan-video"));
+    }
+
+    #[test]
     fn detects_flux() {
         let mut keys = Vec::new();
         for block in 0..19 {

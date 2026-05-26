@@ -96,8 +96,12 @@ from scene_worker.training_adapters import (
     LtxMlxLoraTrainer,
     SdxlLoraTrainer,
     TrainingKernelError,
+    WanLoraTrainer,
+    WanMoeLoraTrainer,
     ZImageLoraTrainer,
     _SdxlLoraBackend,
+    _WanLoraBackend,
+    _WanMoeLoraBackend,
     _ZImageLoraBackend,
     _build_mlx_lr_schedule,
     _build_mlx_optimizer,
@@ -170,6 +174,16 @@ class FakeTargetedLoraPipe(FakeLoraPipe):
 
     def delete_adapters(self, names):
         self.deleted.append(names)
+
+
+class FakeMoeLoraPipe(FakeLoraPipe):
+    """Two-expert (A14B) pipe: has a transformer_2 and records whether each
+    load_lora_weights call targeted it (load_into_transformer_2=True)."""
+
+    transformer_2 = object()
+
+    def load_lora_weights(self, path, adapter_name=None, **kwargs):
+        self.loaded.append((path, adapter_name, bool(kwargs.get("load_into_transformer_2", False))))
 
 
 class FakeSingleLoraPipe:
@@ -492,6 +506,80 @@ def test_lora_loader_applies_weights_and_reuses_cached_state(tmp_path):
     assert pipe.unloaded == 0
 
 
+def test_wan_moe_lora_loads_low_noise_into_transformer_2(tmp_path):
+    # A trained Wan A14B MoE LoRA is a dir with a high/low pair (sc-1953). The
+    # high-noise half loads into the transformer, the low-noise half into
+    # transformer_2 via diffusers' load_into_transformer_2 (sc-1955).
+    moe = tmp_path / "lora_moe"
+    moe.mkdir()
+    (moe / "char.high_noise.safetensors").write_bytes(b"lora")
+    (moe / "char.low_noise.safetensors").write_bytes(b"lora")
+    lora = {
+        "id": "char",
+        "installedPath": str(moe),
+        "families": ["wan-video"],
+        "baseModel": "wan_2_2_t2v_14b",
+        "weight": 0.8,
+    }
+
+    specs = normalize_lora_specs([lora])
+    assert specs[0].path.endswith("char.high_noise.safetensors")
+    assert specs[0].secondary_path.endswith("char.low_noise.safetensors")
+
+    pipe = FakeMoeLoraPipe()
+    apply_loras_to_pipeline(
+        pipe, [lora], adapter_id="wan_video", model_family="wan-video", model_id="wan_2_2_t2v_14b"
+    )
+    assert len(pipe.loaded) == 2
+    high_path, high_name, high_t2 = pipe.loaded[0]
+    low_path, low_name, low_t2 = pipe.loaded[1]
+    assert high_path.endswith("char.high_noise.safetensors") and high_t2 is False
+    assert low_path.endswith("char.low_noise.safetensors") and low_t2 is True
+    # Both experts share the same adapter name so set_adapters activates both.
+    assert high_name == low_name
+
+
+def test_wan_moe_lora_on_dense_pipe_skips_second_expert(tmp_path):
+    # A MoE LoRA on a pipe without transformer_2 loads only the high-noise half
+    # (base-model gating blocks this combo upstream, but it must not crash).
+    moe = tmp_path / "lora_moe2"
+    moe.mkdir()
+    (moe / "char.high_noise.safetensors").write_bytes(b"lora")
+    (moe / "char.low_noise.safetensors").write_bytes(b"lora")
+    pipe = FakeLoraPipe()  # dense: no transformer_2
+    apply_loras_to_pipeline(
+        pipe,
+        [{"id": "char", "installedPath": str(moe), "families": ["wan-video"]}],
+        adapter_id="wan_video",
+        model_family="wan-video",
+        model_id="wan_2_2",
+    )
+    assert len(pipe.loaded) == 1
+    assert pipe.loaded[0][0].endswith("char.high_noise.safetensors")
+
+
+def test_validate_lora_compatibility_gates_wan_base_model():
+    wan_5b = {"id": "l", "families": ["wan-video"], "baseModel": "wan_2_2"}
+    # A 5B LoRA on a 14B model is rejected (both family wan-video, incompatible arch).
+    with pytest.raises(RuntimeError, match="not interchangeable"):
+        validate_lora_compatibility(
+            [wan_5b], model_family="wan-video", adapter_id="wan_video", model_id="wan_2_2_t2v_14b"
+        )
+    # Exact base-model match passes.
+    validate_lora_compatibility(
+        [wan_5b], model_family="wan-video", adapter_id="wan_video", model_id="wan_2_2"
+    )
+    # No recorded baseModel -> family gating only (legacy/imported), no rejection.
+    validate_lora_compatibility(
+        [{"id": "l2", "families": ["wan-video"]}],
+        model_family="wan-video",
+        adapter_id="wan_video",
+        model_id="wan_2_2_t2v_14b",
+    )
+    # No model_id -> base-model gate is inert (back-compat with other call sites).
+    validate_lora_compatibility([wan_5b], model_family="wan-video", adapter_id="wan_video")
+
+
 def test_lora_loader_clears_previous_adapters_between_jobs(tmp_path):
     first = tmp_path / "style.safetensors"
     second = tmp_path / "detail.safetensors"
@@ -694,6 +782,25 @@ def test_mlx_wan_user_loras_resolved_to_path_strength_tuples(tmp_path):
         )
     )
     assert MlxVideoAdapter()._wan_user_loras(request) == [(str(lora_file), 0.7)]
+
+
+def test_mlx_local_dir_prefers_env_override_then_data_dir(tmp_path, monkeypatch):
+    adapter = MlxVideoAdapter()
+    adapter._settings = SimpleNamespace(data_dir=tmp_path)
+    monkeypatch.delenv("SCENEWORKS_MLX_WAN14B_T2V_DIR", raising=False)
+    # Nothing on disk -> no local dir.
+    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") is None
+    # A converted dir under <data>/models/mlx/<model> counts once it has config.json.
+    data_dir = tmp_path / "models" / "mlx" / "wan_2_2_t2v_14b"
+    data_dir.mkdir(parents=True)
+    (data_dir / "config.json").write_text("{}")
+    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") == str(data_dir)
+    # The env override takes precedence over the data dir.
+    override = tmp_path / "override"
+    override.mkdir()
+    (override / "config.json").write_text("{}")
+    monkeypatch.setenv("SCENEWORKS_MLX_WAN14B_T2V_DIR", str(override))
+    assert adapter._local_mlx_dir("wan_2_2_t2v_14b", "SCENEWORKS_MLX_WAN14B_T2V_DIR") == str(override)
 
 
 def test_mlx_ltx_stages_loras_in_contextvar_only_when_present(tmp_path, monkeypatch):
@@ -3299,9 +3406,96 @@ def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
 def test_create_training_kernel_resolves_known_and_rejects_unknown():
     assert isinstance(create_training_kernel("z_image_lora"), ZImageLoraTrainer)
     assert isinstance(create_training_kernel("sdxl_lora"), SdxlLoraTrainer)
+    assert isinstance(create_training_kernel("wan_lora"), WanLoraTrainer)
+    assert isinstance(create_training_kernel("wan_moe_lora"), WanMoeLoraTrainer)
     assert isinstance(create_training_kernel("lens_lora"), LensLoraTrainer)
     with pytest.raises(TrainingKernelError, match="No training kernel"):
         create_training_kernel("not_a_kernel")
+
+
+def test_wan_lora_trainer_reuses_zimage_orchestration_with_wan_backend():
+    # WanLoraTrainer subclasses ZImageLoraTrainer (shared staged orchestration)
+    # and only swaps the kernel id + the torch Wan backend it builds. The 14B MoE
+    # trainer (sc-1953) extends this for the two-expert case.
+    trainer = create_training_kernel("wan_lora")
+    assert isinstance(trainer, ZImageLoraTrainer)
+    assert trainer.kernel_id == "wan_lora"
+    backend = trainer._create_backend()
+    assert isinstance(backend, _WanLoraBackend)
+    assert backend.kernel_id == "wan_lora"
+    # Implements the full TrainingBackend protocol.
+    for method in (
+        "load",
+        "prepare_dataset",
+        "train_step",
+        "save_checkpoint",
+        "generate_samples",
+        "save_final",
+        "cleanup",
+        "loaded_models",
+    ):
+        assert callable(getattr(backend, method)), method
+
+
+def test_wan_lora_backend_read_run_config_uses_wan_target_modules():
+    # The Rust wan_lora target declares the Wan transformer attention modules; the
+    # kernel reads them straight from the plan's advanced config.
+    plan = {
+        "config": {
+            "rank": 32,
+            "steps": 1500,
+            "advanced": {"loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"]},
+        }
+    }
+    config = read_run_config(plan)
+    assert list(config.lora_target_modules) == ["to_q", "to_k", "to_v", "to_out.0"]
+
+
+def test_wan_moe_lora_trainer_extends_wan_backend():
+    # WanMoeLoraTrainer subclasses the dense Wan trainer's backend for the A14B
+    # two-expert case; it shares the orchestration and only swaps the backend.
+    trainer = create_training_kernel("wan_moe_lora")
+    assert isinstance(trainer, ZImageLoraTrainer)
+    assert trainer.kernel_id == "wan_moe_lora"
+    backend = trainer._create_backend()
+    assert isinstance(backend, _WanMoeLoraBackend)
+    assert isinstance(backend, _WanLoraBackend)
+    assert backend.kernel_id == "wan_moe_lora"
+    for method in ("load", "prepare_dataset", "train_step", "save_final", "cleanup"):
+        assert callable(getattr(backend, method)), method
+
+
+def test_wan_moe_lora_backend_parses_gguf_quant_spec_and_boundary():
+    backend = _WanMoeLoraBackend()
+    # Default boundary (A14B = 0.875) before any load.
+    assert backend._boundary == 0.875
+    # A complete gguf baseQuantization advanced block parses into an expert spec.
+    gguf = read_run_config(
+        {
+            "config": {
+                "advanced": {
+                    "baseQuantization": {
+                        "format": "gguf",
+                        "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+                        "highNoiseFile": "HighNoise/hi.gguf",
+                        "lowNoiseFile": "LowNoise/lo.gguf",
+                    }
+                }
+            }
+        }
+    )
+    spec = backend._quant_spec(gguf)
+    assert spec == {
+        "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+        "highNoiseFile": "HighNoise/hi.gguf",
+        "lowNoiseFile": "LowNoise/lo.gguf",
+    }
+    # No quant block -> bf16 path (None); an incomplete block is ignored.
+    assert backend._quant_spec(read_run_config({"config": {"advanced": {}}})) is None
+    incomplete = read_run_config(
+        {"config": {"advanced": {"baseQuantization": {"format": "gguf", "repo": "R"}}}}
+    )
+    assert backend._quant_spec(incomplete) is None
 
 
 def test_sdxl_lora_trainer_reuses_zimage_orchestration_with_sdxl_backend():
@@ -4318,6 +4512,10 @@ def test_explicit_seed_uses_reproducible_ladder():
 
 def test_video_adapter_override_aliases_and_unknown_values(monkeypatch):
     monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
+    # Pin the non-MPS (CUDA/CI) routing so MLX eligibility on Apple Silicon doesn't
+    # shadow the alias assertions — ltx_2_3/wan route to MlxVideoAdapter on MPS
+    # (matches test_create_video_adapter_routes_svd_to_diffusers).
+    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: False)
     assert create_video_adapter({"payload": {"model": "ltx_2_3"}}).__class__.__name__ == "LtxPipelinesVideoAdapter"
     assert create_video_adapter({"payload": {"model": "wan_2_2"}}).__class__.__name__ == "DiffusersVideoAdapter"
     assert create_video_adapter({"payload": {"model": "wan_2_2_t2v_14b"}}).__class__.__name__ == "DiffusersVideoAdapter"
@@ -4455,6 +4653,108 @@ def test_svd_pipeline_kwargs_build_image_conditioning_without_prompt(monkeypatch
     assert kwargs["noise_aug_strength"] == 0.02
     assert "prompt" not in kwargs
     assert "guidance_scale" not in kwargs
+
+
+_A14B_QUANT_ENTRY = {
+    "quantization": {
+        "defaults": {"mps": "gguf-q8_0", "cuda": "gguf-q4_k_m"},
+        "variants": {
+            "gguf-q8_0": {
+                "format": "gguf",
+                "label": "GGUF Q8_0",
+                "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+                "transformerFile": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf",
+                "transformer2File": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q8_0.gguf",
+            },
+            "gguf-q4_k_m": {
+                "format": "gguf",
+                "label": "GGUF Q4_K_M",
+                "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+                "transformerFile": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q4_K_M.gguf",
+                "transformer2File": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf",
+            },
+        },
+    }
+}
+
+
+def _wan_quant_request(advanced=None, manifest=None):
+    return video_request_from_job(
+        {
+            "id": "j",
+            "payload": {
+                "projectId": "p",
+                "mode": "text_to_video",
+                "model": "wan_2_2_t2v_14b",
+                "advanced": advanced or {},
+                "modelManifestEntry": _A14B_QUANT_ENTRY if manifest is None else manifest,
+            },
+        }
+    )
+
+
+def test_diffusers_wan_gguf_quant_variant_selection():
+    adapter = DiffusersVideoAdapter()
+    # Explicit selection wins regardless of platform default.
+    explicit = adapter._gguf_quant_variant(_wan_quant_request({"quantization": "gguf-q4_k_m"}), "mps")
+    assert explicit["id"] == "gguf-q4_k_m"
+    assert explicit["transformerFile"].endswith("HighNoise-Q4_K_M.gguf")
+    assert explicit["transformer2File"].endswith("LowNoise-Q4_K_M.gguf")
+    # Auto / empty falls back to the per-platform default: Q8_0 on MPS, Q4_K_M on CUDA.
+    assert adapter._gguf_quant_variant(_wan_quant_request({}), "mps")["id"] == "gguf-q8_0"
+    assert adapter._gguf_quant_variant(_wan_quant_request({"quantization": "auto"}), "cuda")["id"] == "gguf-q4_k_m"
+    # No default for the platform (cpu) -> unquantized.
+    assert adapter._gguf_quant_variant(_wan_quant_request({}), "cpu") is None
+    # Explicit opt-out keywords -> unquantized.
+    assert adapter._gguf_quant_variant(_wan_quant_request({"quantization": "none"}), "mps") is None
+    assert adapter._gguf_quant_variant(_wan_quant_request({"quantization": "full"}), "cuda") is None
+    # No quantization block in the manifest entry -> unquantized.
+    assert adapter._gguf_quant_variant(_wan_quant_request({}, manifest={}), "mps") is None
+
+
+def test_diffusers_wan_gguf_injects_high_and_low_experts(monkeypatch):
+    adapter = DiffusersVideoAdapter()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeTransformer:
+        @staticmethod
+        def from_single_file(path, **kwargs):
+            calls.append((path, kwargs))
+            return f"T[{path}]"
+
+    fake_diffusers = SimpleNamespace(
+        WanTransformer3DModel=FakeTransformer,
+        GGUFQuantizationConfig=lambda **kwargs: ("QCFG", kwargs),
+    )
+    monkeypatch.setattr(adapter, "_resolve_gguf_file", lambda repo, file_name: f"/cache/{repo}/{file_name}")
+
+    # A14B: both experts injected (high -> transformer, low -> transformer_2).
+    kwargs: dict[str, Any] = {}
+    variant = {
+        "id": "gguf-q8_0",
+        "format": "gguf",
+        "repo": "R",
+        "transformerFile": "hi.gguf",
+        "transformer2File": "lo.gguf",
+    }
+    adapter._inject_gguf_experts(fake_diffusers, kwargs, "diffusers/repo", variant, "DT")
+    assert kwargs["transformer"] == "T[/cache/R/hi.gguf]"
+    assert kwargs["transformer_2"] == "T[/cache/R/lo.gguf]"
+    # The diffusers repo is the config source; compute dtype threads to from_single_file.
+    assert calls[0][1]["config"] == "diffusers/repo"
+    assert calls[0][1]["torch_dtype"] == "DT"
+
+    # 5B dense (single transformer): no transformer_2.
+    dense_kwargs: dict[str, Any] = {}
+    adapter._inject_gguf_experts(
+        fake_diffusers, dense_kwargs, "diffusers/repo", {"format": "gguf", "repo": "R", "transformerFile": "only.gguf"}, "DT"
+    )
+    assert dense_kwargs["transformer"] == "T[/cache/R/only.gguf]"
+    assert "transformer_2" not in dense_kwargs
+
+    # Missing diffusers classes fail loudly rather than silently skipping quantization.
+    with pytest.raises(RuntimeError, match="GGUF support"):
+        adapter._inject_gguf_experts(SimpleNamespace(), {}, "repo", variant, "DT")
 
 
 def test_mlx_routing_is_mode_aware_on_mps(monkeypatch):
@@ -5241,6 +5541,21 @@ def test_native_ltx_text_to_video_uses_ltx_pipeline_and_writes_mp4(monkeypatch, 
     monkeypatch.setattr("scene_worker.video_adapters.importlib.import_module", fake_import_module)
     adapter = LtxPipelinesVideoAdapter()
     monkeypatch.setattr(adapter, "_dependencies_available", lambda *_args: True)
+    # Pin the CUDA gating recipe so the fp8 default is exercised deterministically.
+    # On a host with torch+MPS installed the gating would disable fp8 (it only
+    # assumes CUDA when torch is absent, e.g. the CI parity job), so without this
+    # the fp8-cast assertion below is host-dependent.
+    monkeypatch.setattr(
+        adapter,
+        "_ltx_device_gating",
+        lambda: {
+            "device": None,
+            "disable_fp8": False,
+            "force_offload_none": False,
+            "fp32_audio": False,
+            "guard_cuda_sync": False,
+        },
+    )
     job = {
         "id": "job-real-ltx",
         "payload": {

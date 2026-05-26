@@ -115,6 +115,22 @@ fn merge_model_manifest_entry_handles_single_or_missing_sources() {
 }
 
 #[test]
+fn model_convert_request_parses_optional_mlx_quant_fields() {
+    // The convert endpoint accepts optional camelCase quant knobs (sc-1982); the
+    // worker reads the same field names off the job payload, so the contract must
+    // hold. Absent fields default to None (unquantized bf16 conversion).
+    let bare: super::ModelConvertRequest = serde_json::from_value(json!({})).expect("bare body");
+    assert_eq!(bare.quantize_bits, None);
+    assert_eq!(bare.quantize_group_size, None);
+
+    let quant: super::ModelConvertRequest =
+        serde_json::from_value(json!({"quantizeBits": 4, "quantizeGroupSize": 64}))
+            .expect("quant body");
+    assert_eq!(quant.quantize_bits, Some(4));
+    assert_eq!(quant.quantize_group_size, Some(64));
+}
+
+#[test]
 fn repo_slug_functions_match_cross_language_contract() {
     // story 1667: these repo->dir slug ops are duplicated in the Python
     // worker and the Rust CPU worker; repo_slugs.json is the shared contract

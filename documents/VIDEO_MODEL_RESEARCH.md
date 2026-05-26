@@ -33,6 +33,10 @@ Use `ltx_2_3` as the first SceneWorks video target, with Wan2.2 present as the n
 - Wan2.2 has official T2V, I2V, TI2V, and S2V model entries with 480P/720P support.
 - Wan2.2 is valuable as a fallback and later adapter because it has broad video modes and Diffusers/ComfyUI ecosystem support.
 - Keep Wan-aware UI guidance conservative: shorter clips around 5-7 seconds are recommended until local looping behavior is validated against the exact runtime.
+- **Quantized A14B inference (sc-1982).** A14B is GPU-heavy at bf16 (~56GB of transformers), so the manifest declares quantization variants and Video Studio exposes a **Quantization** selector (Advanced panel). Two paths:
+  - **GGUF (torch adapter, cross-platform):** the two experts load via `WanTransformer3DModel.from_single_file(..., quantization_config=GGUFQuantizationConfig(...))` (high-noise → `transformer`, low-noise → `transformer_2`) from `QuantStack/Wan2.2-{T2V,I2V}-A14B-GGUF`. The 5B (TI2V) has a single-transformer GGUF too. Defaults are per-platform: **Q8_0 on MPS** (trivial dequant, ~3× slower vs ~13× for k-quants — and the GGUF path runs fp32 on MPS because Wan's Conv3d has no bf16 Metal kernel), **Q4_K_M on CUDA** (smallest, fused kernel). `auto` follows the default; `none` forces the unquantized base.
+  - **MLX-Q4 (preferred on Mac):** the `model_convert` job accepts `quantizeBits`/`quantizeGroupSize` (and a `--quantize-only` pass for turnkey bf16 MLX repos), and the MLX adapter prefers a locally-converted/quantized dir over the turnkey download. ~3.7× faster + ~2.6× less memory than GGUF-on-MPS in the sc-1950 spike (84s / 41GB peak), fitting a 64GB Mac.
+  - Quantized experts still accept trained per-expert LoRAs (validated for GGUF in sc-1950; MLX via `loras_high`/`loras_low`). Weights are Apache-2.0.
 
 ## Sources
 

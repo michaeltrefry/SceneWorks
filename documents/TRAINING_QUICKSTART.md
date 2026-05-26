@@ -258,6 +258,65 @@ their extra training passes.
 > `training_lora_weight_norm` event — a growing `loraBNorm` across checkpoints
 > confirms the adapter is learning.
 
+> **Wan2.2 video LoRA (`wan_lora`, `wan_moe_lora`):** train a *video* LoRA for
+> the Wan2.2 family — applied at generation in **Video Studio** under the
+> `wan-video` family. Unlike the MLX-only LTX kernel, these are torch/diffusers
+> kernels that run on **CUDA *and* Apple-Silicon MPS**. Like the LTX video LoRA
+> they train from a **still-image dataset** (each item encodes to a single
+> Wan-VAE latent frame, `numFrames: 1`; the 5D latent shape is kept so a future
+> clip dataset can pass `numFrames > 1`). The loop is flow-matching velocity on
+> the `WanTransformer3DModel` attention projections
+> (`to_q`/`to_k`/`to_v`/`to_out.0`); the target is **`noise - latents`** (Wan
+> feeds the transformer output to the scheduler without negation — the opposite
+> of Z-Image). Wan is **not** step-distilled, so there is **no de-distill
+> adapter**. Defaults: rank 32 / alpha 32 / lr 1e-4 / 1500 steps / 512px / plain
+> `adamw` (cross-platform; `adamw8bit` is CUDA-only and falls back), balanced
+> sigmoid timestep sampling, MSE loss; in-training previews are **off**
+> (`sampleEvery: 0`) because per-step Wan video gen is too expensive for the
+> first cut. **Wan2.2 weights are Apache-2.0 (commercial-OK, ungated).**
+>
+> **Apple Silicon needs fp32.** Wan's Conv3d patch embedding has no bf16 Metal
+> kernel, so the kernel forces fp32 on MPS (CUDA training stays bf16). This
+> inflates end-to-end memory well beyond the quantized weights.
+>
+> Two size targets, three base models:
+>
+> - **`wan_lora` — Wan2.2-TI2V-5B** (`wan_2_2`,
+>   `Wan-AI/Wan2.2-TI2V-5B-Diffusers`): the dense 5B. A single transformer →
+>   one LoRA file. MPS-feasible (~32 GB peak in the spike).
+> - **`wan_moe_lora` — A14B MoE** (`wan_t2v_14b_lora` →
+>   `Wan-AI/Wan2.2-T2V-A14B-Diffusers`; `wan_i2v_14b_lora` →
+>   `Wan-AI/Wan2.2-I2V-A14B-Diffusers`): A14B is a **two-expert mixture** — a
+>   high-noise expert (`transformer`) and a low-noise expert (`transformer_2`),
+>   split at the pipeline `boundary_ratio` (0.875). The kernel trains a
+>   **separate LoRA on each expert** (alternating per step, each sampling
+>   timesteps only within its band) and saves **two files**,
+>   `<name>.high_noise.safetensors` + `<name>.low_noise.safetensors`. The
+>   inference loader applies high→`transformer`, low→`transformer_2`.
+>
+> The bf16 A14B base (~56 GB of transformers) is GPU-only. To train it on a
+> memory-bound host (e.g. a 128 GB Mac), point the base at a **Q8_0 GGUF**
+> quantized expert pair via `config.advanced.baseQuantization`:
+>
+> ```json
+> { "baseQuantization": { "format": "gguf",
+>     "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+>     "highNoiseFile": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf",
+>     "lowNoiseFile":  "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q8_0.gguf" } }
+> ```
+>
+> A LoRA trains fine on a GGUF-quantized base — PEFT attaches to the dequantizing
+> `GGUFLinear` layers, gradients flow, and the saved adapter applies to the full
+> base at inference. (`gguf>=0.10.0` must be installed in the worker venv.)
+>
+> **5B and 14B are different architectures** despite the shared `wan-video`
+> family — the 5B uses the Wan2.2-VAE (48 latent channels), the A14B uses the
+> Wan2.1-VAE (16 channels) — so a LoRA is **not** interchangeable between them.
+> The trained adapter records its `baseModel`, and the inference loader gates by
+> exact base-model match (family alone is insufficient). Watch the worker
+> `training_lora_weight_norm` event — a growing `loraBNorm` across checkpoints
+> confirms the adapter is learning (for MoE, both experts report).
+
 ## 5. Where the output goes
 
 On a successful real run the adapter is registered as a normal SceneWorks LoRA:

@@ -611,7 +611,9 @@ class LtxPipelinesVideoAdapter(ProceduralVideoAdapter):
             raise RuntimeError(f"{target['label']} native pipelines currently support {supported}.")
         if request.duration > target["hardMaxDuration"]:
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
-        validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
+        validate_lora_compatibility(
+            request.loras, model_family=target["family"], adapter_id=self.id, model_id=request.model
+        )
         self._ltx_lora_specs(request)
         if request.mode == "replace_person" and not self._mock_inference_enabled(request):
             self._validate_replacement_inputs(request)
@@ -1703,7 +1705,9 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             raise RuntimeError(f"{target['label']} MLX adapter currently supports {supported}.")
         if request.duration > target["hardMaxDuration"]:
             raise RuntimeError(f"{target['label']} is limited to {target['hardMaxDuration']}s clips in this adapter.")
-        validate_lora_compatibility(request.loras, model_family=target["family"], adapter_id=self.id)
+        validate_lora_compatibility(
+            request.loras, model_family=target["family"], adapter_id=self.id, model_id=request.model
+        )
         if not _mlx_available():
             raise RuntimeError(
                 "MLX video generation requires optional worker dependencies. "
@@ -1937,15 +1941,42 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         from huggingface_hub import hf_hub_download, snapshot_download
 
         if model == "wan_2_2_t2v_14b":
-            model_dir = snapshot_download("AITRADER/Wan2.2-T2V-A14B-mlx-bf16")
             base = "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"
             hi = hf_hub_download("lightx2v/Wan2.2-Lightning", f"{base}/high_noise_model.safetensors")
             lo = hf_hub_download("lightx2v/Wan2.2-Lightning", f"{base}/low_noise_model.safetensors")
-            # Lightning distill: 4 steps, CFG baked in (guide_scale=1.0).
+            # Prefer a locally-converted/quantized MLX dir (e.g. an MLX-Q4 produced by
+            # a quantize-only convert job) over the turnkey bf16 repo; the Lightning
+            # distill LoRA applies to both. 4 steps, CFG baked in (guide_scale=1.0).
+            local_dir = self._local_mlx_dir(model, "SCENEWORKS_MLX_WAN14B_T2V_DIR")
+            model_dir = local_dir or snapshot_download("AITRADER/Wan2.2-T2V-A14B-mlx-bf16")
             return {"model_dir": model_dir, "loras_high": [(hi, 1.0)], "loras_low": [(lo, 1.0)], "steps": 4, "guide_scale": 1.0}
 
         # Conversion-dependent tiers: resolve a locally-converted MLX dir.
         env = {"wan_2_2": "SCENEWORKS_MLX_WAN5B_DIR", "wan_2_2_i2v_14b": "SCENEWORKS_MLX_WAN14B_I2V_DIR"}.get(model)
+        local_dir = self._local_mlx_dir(model, env)
+        if local_dir is not None:
+            # 5B runs full steps (config default); I2V-14B uses its distill LoRA.
+            return {"model_dir": local_dir, "loras_high": None, "loras_low": None, "steps": None, "guide_scale": None}
+        target_dir = (
+            Path(self._settings.data_dir) / "models" / "mlx" / model
+            if self._settings is not None
+            else Path("<data>/models/mlx") / model
+        )
+        raise RuntimeError(
+            f"{model_target(model)['label']} has no pre-converted MLX weights. Convert the native "
+            f"checkpoint with `python -m mlx_video.convert_wan` into {target_dir}"
+            + (f" (or set ${env})" if env else "")
+            + ". Tracked by sc-1504 / sc-1506."
+        )
+
+    def _local_mlx_dir(self, model: str, env: str | None) -> str | None:
+        """Return a locally-converted MLX dir for `model` if one exists.
+
+        Checks an optional env override first, then the app-managed
+        `<data>/models/mlx/<model>` (where the convert job writes). A dir counts only
+        when it holds a `config.json`. Lets a locally-quantized (MLX-Q4) conversion
+        transparently supersede a turnkey bf16 download.
+        """
         candidates: list[Path] = []
         override = os.environ.get(env, "").strip() if env else ""
         if override:
@@ -1954,15 +1985,8 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             candidates.append(Path(self._settings.data_dir) / "models" / "mlx" / model)
         for path in candidates:
             if (path / "config.json").exists():
-                # 5B runs full steps (config default); I2V-14B uses its distill LoRA.
-                return {"model_dir": str(path), "loras_high": None, "loras_low": None, "steps": None, "guide_scale": None}
-        target_dir = candidates[-1] if candidates else Path("<data>/models/mlx") / model
-        raise RuntimeError(
-            f"{model_target(model)['label']} has no pre-converted MLX weights. Convert the native "
-            f"checkpoint with `python -m mlx_video.convert_wan` into {target_dir}"
-            + (f" (or set ${env})" if env else "")
-            + ". Tracked by sc-1504 / sc-1506."
-        )
+                return str(path)
+        return None
 
     def _wan_user_loras(self, request: VideoRequest) -> list[tuple[str, float]]:
         """User-supplied LoRAs as (path, strength) tuples for the Wan MLX generator.
@@ -2249,19 +2273,28 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             kwargs["variant"] = target["variant"]
 
         if target["adapter"] == "wan_video":
+            quant_variant = self._gguf_quant_variant(request, device)
+            # GGUF experts dequantize through Wan's Conv3d patch embedding, which has
+            # no bf16 Metal kernel, so the quantized MPS path runs the whole pipeline
+            # (VAE + transformers) in fp32; CUDA keeps the requested dtype.
+            component_dtype = torch.float32 if (quant_variant and device == "mps") else dtype
+            if quant_variant:
+                kwargs["torch_dtype"] = component_dtype
             vae_class = getattr(diffusers, "AutoencoderKLWan", None)
             if vae_class is not None:
-                kwargs["vae"] = vae_class.from_pretrained(repo, subfolder="vae", torch_dtype=dtype)
+                kwargs["vae"] = vae_class.from_pretrained(repo, subfolder="vae", torch_dtype=component_dtype)
             if request.mode != "text_to_video" and not target.get("noImageEncoder"):
                 transformers = importlib.import_module("transformers")
                 image_encoder_class = getattr(transformers, "CLIPVisionModel", None)
                 if image_encoder_class is not None:
                     try:
-                        kwargs["image_encoder"] = image_encoder_class.from_pretrained(repo, subfolder="image_encoder", torch_dtype=dtype)
+                        kwargs["image_encoder"] = image_encoder_class.from_pretrained(repo, subfolder="image_encoder", torch_dtype=component_dtype)
                     except (OSError, ValueError):
                         # Repos that condition on VAE latents instead of CLIP (e.g. Wan2.2 A14B)
                         # ship no image_encoder subfolder; the pipeline loads any components it needs.
                         pass
+            if quant_variant:
+                self._inject_gguf_experts(diffusers, kwargs, repo, quant_variant, component_dtype)
 
         pipe = pipeline_class.from_pretrained(repo, **kwargs)
         if bool(request.advanced.get("cpuOffload", False)) and hasattr(pipe, "enable_model_cpu_offload"):
@@ -2291,6 +2324,7 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
             request.loras,
             adapter_id=target["adapter"],
             model_family=target.get("family"),
+            model_id=request.model,
             previous_state=self._loaded_lora_state,
         )
 
@@ -2325,7 +2359,76 @@ class DiffusersVideoAdapter(VideoGenerationAdapter):
         return getattr(diffusers, "LTXImageToVideoPipeline")
 
     def _pipeline_key(self, request: VideoRequest, target: dict[str, Any]) -> str:
-        return f"{self._repo_for_request(request, target)}:{self._pipeline_kind(request, target)}"
+        quant = ""
+        if target["adapter"] == "wan_video":
+            variant = self._gguf_quant_variant(request, select_torch_device(importlib.import_module("torch")))
+            if variant:
+                quant = f":gguf={variant['id']}"
+        return f"{self._repo_for_request(request, target)}:{self._pipeline_kind(request, target)}{quant}"
+
+    def _gguf_quant_variant(self, request: VideoRequest, device: str) -> dict[str, Any] | None:
+        """Resolve the selected GGUF quantization variant for a Wan model.
+
+        Variants are declared in the model manifest's `quantization` block (threaded
+        in via `modelManifestEntry`). `advanced.quantization` selects one by id; the
+        empty/`auto` value falls back to the per-platform default (Q8_0 on MPS — its
+        trivial dequant is ~3x slower vs ~13x for k-quants — Q4_K_M on CUDA). `none`
+        / `full` force the unquantized base. Returns None when no variant applies.
+        """
+        quant = request.model_manifest_entry.get("quantization")
+        if not isinstance(quant, dict):
+            return None
+        variants = quant.get("variants")
+        if not isinstance(variants, dict):
+            return None
+        selected = str(request.advanced.get("quantization", "") or "").strip().lower()
+        if selected in ("", "auto"):
+            platform = "cuda" if device == "cuda" else "mps" if device == "mps" else "cpu"
+            defaults = quant.get("defaults") if isinstance(quant.get("defaults"), dict) else {}
+            selected = str(defaults.get(platform, "") or "").strip().lower()
+        if selected in ("", "none", "full"):
+            return None
+        variant = variants.get(selected)
+        if not isinstance(variant, dict) or str(variant.get("format", "")).lower() != "gguf":
+            return None
+        return {"id": selected, **variant}
+
+    def _inject_gguf_experts(
+        self, diffusers: Any, kwargs: dict[str, Any], repo: str, variant: dict[str, Any], compute_dtype: Any
+    ) -> None:
+        """Load the GGUF-quantized transformer(s) and inject them into the pipeline kwargs.
+
+        A14B is a two-expert mixture (high-noise `transformer` + low-noise
+        `transformer_2`); the 5B dense model declares only `transformerFile`. Both
+        load through `WanTransformer3DModel.from_single_file` with the diffusers repo
+        as the config source (the GGUF carries weights only, not the model config).
+        """
+        transformer_class = getattr(diffusers, "WanTransformer3DModel", None)
+        quant_config_class = getattr(diffusers, "GGUFQuantizationConfig", None)
+        if transformer_class is None or quant_config_class is None:
+            raise RuntimeError(
+                "The installed diffusers package does not expose WanTransformer3DModel / "
+                "GGUFQuantizationConfig; install a build with GGUF support to run quantized Wan."
+            )
+
+        def load_expert(file_name: str) -> Any:
+            return transformer_class.from_single_file(
+                self._resolve_gguf_file(variant["repo"], file_name),
+                quantization_config=quant_config_class(compute_dtype=compute_dtype),
+                config=repo,
+                subfolder="transformer",
+                torch_dtype=compute_dtype,
+            )
+
+        kwargs["transformer"] = load_expert(str(variant["transformerFile"]))
+        secondary = variant.get("transformer2File")
+        if secondary:
+            kwargs["transformer_2"] = load_expert(str(secondary))
+
+    def _resolve_gguf_file(self, repo: str, file_name: str) -> str:
+        from huggingface_hub import hf_hub_download
+
+        return hf_hub_download(repo, file_name)
 
     def _pipeline_kind(self, request: VideoRequest, target: dict[str, Any]) -> str:
         if target["adapter"] == "svd_video":

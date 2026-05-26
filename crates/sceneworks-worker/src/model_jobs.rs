@@ -203,6 +203,12 @@ pub(crate) async fn run_model_convert_job(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("bfloat16")
         .to_owned();
+    // Optional MLX quantization. `quantizeOnly` quantizes an already-converted bf16
+    // MLX dir (turnkey models); otherwise quantization rides on the native->MLX
+    // conversion. `bits`/`group-size` are validated by the convert tool's choices.
+    let quantize_only = payload_bool(&job.payload, "quantizeOnly");
+    let quantize_bits = job.payload.get("quantizeBits").and_then(Value::as_u64);
+    let quantize_group_size = job.payload.get("quantizeGroupSize").and_then(Value::as_u64);
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -278,7 +284,8 @@ pub(crate) async fn run_model_convert_job(
     )
     .await?;
 
-    let mut child = Command::new(&python)
+    let mut command = Command::new(&python);
+    command
         .arg("-m")
         .arg("mlx_video.convert_wan")
         .arg("--checkpoint-dir")
@@ -288,7 +295,19 @@ pub(crate) async fn run_model_convert_job(
         .arg("--dtype")
         .arg(&dtype)
         .arg("--model-version")
-        .arg("auto")
+        .arg("auto");
+    if quantize_only {
+        command.arg("--quantize-only");
+    } else if quantize_bits.is_some() {
+        command.arg("--quantize");
+    }
+    if let Some(bits) = quantize_bits {
+        command.arg("--bits").arg(bits.to_string());
+    }
+    if let Some(group_size) = quantize_group_size {
+        command.arg("--group-size").arg(group_size.to_string());
+    }
+    let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

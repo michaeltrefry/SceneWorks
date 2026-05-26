@@ -442,6 +442,310 @@
         "description": "768px preset for tighter-VRAM SDXL training.",
         "order": 40
       }
+    },
+    {
+      "id": "wan_lora.character.adamw.balanced",
+      "version": 1,
+      "targetId": "wan_lora",
+      "name": "Character balanced",
+      "recommendedFor": ["character"],
+      "optimizer": "adamw",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 32,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
+          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+          "sampleEvery": 0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "ui": {
+        "description": "Balanced first run for 12-25 clean character stills on Wan2.2-TI2V-5B.",
+        "default": true,
+        "order": 10
+      }
+    },
+    {
+      "id": "wan_lora.character.adamw.conservative",
+      "version": 1,
+      "targetId": "wan_lora",
+      "name": "Character conservative",
+      "recommendedFor": ["character"],
+      "optimizer": "adamw",
+      "qualityPreset": "conservative",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.00005,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
+          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+          "sampleEvery": 0,
+          "qualityPreset": "conservative",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "ui": {
+        "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+        "order": 20
+      }
+    },
+    {
+      "id": "wan_lora.style.adamw.balanced",
+      "version": 1,
+      "targetId": "wan_lora",
+      "name": "Style balanced",
+      "recommendedFor": ["style"],
+      "optimizer": "adamw",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 32,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
+          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+          "sampleEvery": 0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "ui": {
+        "description": "Higher-step style LoRA defaults for look and motion-free texture transfer.",
+        "order": 30
+      }
+    },
+    {
+      "id": "wan_t2v_14b_lora.character.adamw.balanced",
+      "version": 1,
+      "targetId": "wan_t2v_14b_lora",
+      "name": "Character balanced",
+      "recommendedFor": ["character"],
+      "optimizer": "adamw",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 32,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
+          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+          "sampleEvery": 0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "ui": {
+        "description": "Balanced first run for character stills on Wan2.2 14B T2V (both noise experts).",
+        "default": true,
+        "order": 10
+      }
+    },
+    {
+      "id": "wan_t2v_14b_lora.style.adamw.balanced",
+      "version": 1,
+      "targetId": "wan_t2v_14b_lora",
+      "name": "Style balanced",
+      "recommendedFor": ["style"],
+      "optimizer": "adamw",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 32,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
+          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+          "sampleEvery": 0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "ui": {
+        "description": "Higher-step style LoRA for Wan2.2 14B T2V.",
+        "order": 20
+      }
+    },
+    {
+      "id": "wan_i2v_14b_lora.character.adamw.balanced",
+      "version": 1,
+      "targetId": "wan_i2v_14b_lora",
+      "name": "Character balanced",
+      "recommendedFor": ["character"],
+      "optimizer": "adamw",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 32,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
+          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+          "sampleEvery": 0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "ui": {
+        "description": "Balanced first run for character stills on Wan2.2 14B I2V (both noise experts).",
+        "default": true,
+        "order": 10
+      }
+    },
+    {
+      "id": "wan_i2v_14b_lora.style.adamw.balanced",
+      "version": 1,
+      "targetId": "wan_i2v_14b_lora",
+      "name": "Style balanced",
+      "recommendedFor": ["style"],
+      "optimizer": "adamw",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 32,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
+          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+          "sampleEvery": 0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "ui": {
+        "description": "Higher-step style LoRA for Wan2.2 14B I2V.",
+        "order": 20
+      }
     }
   ]
 }

@@ -21,6 +21,10 @@ class LoraSpec:
     path: str
     weight: float
     adapter_name: str
+    # Wan A14B MoE LoRAs are saved as a pair (`<name>.high_noise` + `<name>.low_noise`).
+    # `path` is the high-noise file (applied to the transformer); `secondary_path`,
+    # when set, is the low-noise file applied to the pipeline's transformer_2.
+    secondary_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -36,7 +40,13 @@ def lora_cache_key(loras: list[dict[str, Any]]) -> str:
 
 def lora_cache_key_for_specs(specs: list[LoraSpec]) -> str:
     canonical = [
-        {"id": spec.id, "path": spec.path, "weight": spec.weight}
+        {
+            "id": spec.id,
+            "path": spec.path,
+            "weight": spec.weight,
+            # Only emit when present so non-MoE keys stay byte-identical to before.
+            **({"secondary": spec.secondary_path} if spec.secondary_path else {}),
+        }
         for spec in sorted(specs, key=lambda item: (item.id, item.path, item.weight))
     ]
     payload = json.dumps(canonical, separators=(",", ":"), sort_keys=True)
@@ -118,7 +128,28 @@ def lora_looks_like_ic_lora(lora: dict[str, Any]) -> bool:
     return "ic-lora" in text or "ltx-2-3-ic-" in text
 
 
-def validate_lora_compatibility(loras: list[dict[str, Any]], *, model_family: str | None, adapter_id: str) -> None:
+def lora_base_model(lora: dict[str, Any]) -> str | None:
+    """The specific base model a LoRA was trained for (e.g. wan_2_2,
+    wan_2_2_t2v_14b), or None for LoRAs that don't record one."""
+    value = lora.get("baseModel") or lora.get("base_model")
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+# Families whose members share an architecture family but NOT a LoRA-compatible
+# architecture, so a matching family is not enough — the trained base model must
+# also match. Wan is the case: wan_2_2 (5B, 48 latent ch) and wan_2_2_*_14b (A14B,
+# 16 ch) are both family `wan-video` but cross-applying a LoRA garbles output.
+_BASE_MODEL_GATED_FAMILIES = {"wan-video"}
+
+
+def validate_lora_compatibility(
+    loras: list[dict[str, Any]],
+    *,
+    model_family: str | None,
+    adapter_id: str,
+    model_id: str | None = None,
+) -> None:
     normalized_model_family = normalize_lora_family(model_family)
     accepted = accepted_lora_families(model_family)
     if not loras or not accepted:
@@ -136,6 +167,16 @@ def validate_lora_compatibility(loras: list[dict[str, Any]], *, model_family: st
             raise RuntimeError(
                 f"LoRA {lora_id} is not compatible with model family {normalized_model_family} for {adapter_id}."
             )
+        # Base-model gating for families where the family alone is insufficient
+        # (Wan 5B vs 14B). A LoRA that records its trained base model only applies
+        # to that exact model; LoRAs without one fall back to family gating.
+        if model_id and not _BASE_MODEL_GATED_FAMILIES.isdisjoint(families):
+            base = lora_base_model(lora)
+            if base and base != model_id:
+                raise RuntimeError(
+                    f"LoRA {lora_id} was trained for base model {base}, not {model_id}; "
+                    f"Wan 5B and 14B LoRAs are not interchangeable."
+                )
 
 
 def normalize_lora_specs(loras: list[dict[str, Any]]) -> list[LoraSpec]:
@@ -160,9 +201,26 @@ def normalize_lora_specs(loras: list[dict[str, Any]]) -> list[LoraSpec]:
                 path=path_text,
                 weight=lora_weight(lora),
                 adapter_name=safe_adapter_name(lora_id, path_text),
+                secondary_path=wan_moe_low_noise_sibling(path),
             )
         )
     return specs
+
+
+# Wan A14B MoE trainer (sc-1953) saves a pair: `<stem>.high_noise.safetensors`
+# (resolved as the primary, applied to the transformer) and a `.low_noise` sibling
+# applied to transformer_2. Match the `.high_noise.` infix so single-file LoRAs
+# (5B, image families) are unaffected.
+_WAN_MOE_HIGH_NOISE_RE = re.compile(r"\.high_noise\.safetensors$", re.IGNORECASE)
+
+
+def wan_moe_low_noise_sibling(primary: Path) -> str | None:
+    """Return the `.low_noise` sibling of a Wan MoE high-noise LoRA file, or None
+    when the resolved file is not the high-noise half of a two-expert pair."""
+    if not _WAN_MOE_HIGH_NOISE_RE.search(primary.name):
+        return None
+    sibling = primary.with_name(_WAN_MOE_HIGH_NOISE_RE.sub(".low_noise.safetensors", primary.name))
+    return str(sibling) if sibling.is_file() else None
 
 
 def apply_loras_to_pipeline(
@@ -171,10 +229,13 @@ def apply_loras_to_pipeline(
     *,
     adapter_id: str,
     model_family: str | None = None,
+    model_id: str | None = None,
     previous_state: LoraPipelineState | None = None,
 ) -> LoraPipelineState:
     previous_state = previous_state or LoraPipelineState()
-    validate_lora_compatibility(loras, model_family=model_family, adapter_id=adapter_id)
+    validate_lora_compatibility(
+        loras, model_family=model_family, adapter_id=adapter_id, model_id=model_id
+    )
     specs = normalize_lora_specs(loras)
     key = lora_cache_key_for_specs(specs)
     if key == previous_state.key:
@@ -203,6 +264,16 @@ def apply_loras_to_pipeline(
     for spec in specs_to_load:
         try:
             pipe.load_lora_weights(spec.path, adapter_name=spec.adapter_name)
+            # Wan A14B MoE: also load the low-noise half into the second expert.
+            # diffusers' WanLoraLoaderMixin routes load_into_transformer_2=True to
+            # pipe.transformer_2. Skip if the pipeline has no second expert (a MoE
+            # LoRA on a dense model should be blocked upstream by base-model gating).
+            if spec.secondary_path and getattr(pipe, "transformer_2", None) is not None:
+                pipe.load_lora_weights(
+                    spec.secondary_path,
+                    adapter_name=spec.adapter_name,
+                    load_into_transformer_2=True,
+                )
         except Exception as exc:
             if is_peft_backend_error(exc):
                 raise RuntimeError(peft_backend_message(adapter_id, [spec])) from exc

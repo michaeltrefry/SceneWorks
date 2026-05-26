@@ -957,6 +957,26 @@
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
+      // Optional GGUF-quantized transformer for the torch adapter. The 5B is light
+      // enough to run unquantized, so there is no platform default (auto = full
+      // precision); the variants are opt-in via advanced.quantization. Single dense
+      // transformer (no high/low expert split). Apache-2.0 weights (QuantStack GGUF).
+      "quantization": {
+        "variants": {
+          "gguf-q8_0": {
+            "format": "gguf",
+            "label": "GGUF Q8_0 (near-lossless)",
+            "repo": "QuantStack/Wan2.2-TI2V-5B-GGUF",
+            "transformerFile": "Wan2.2-TI2V-5B-Q8_0.gguf"
+          },
+          "gguf-q4_k_m": {
+            "format": "gguf",
+            "label": "GGUF Q4_K_M (smallest)",
+            "repo": "QuantStack/Wan2.2-TI2V-5B-GGUF",
+            "transformerFile": "Wan2.2-TI2V-5B-Q4_K_M.gguf"
+          }
+        }
+      },
       "mlx": {
         // TI2V-5B has no published MLX repo; the native diffusers checkpoint is
         // converted locally (tracked model_convert job) into <data>/models/mlx/wan_2_2.
@@ -1018,6 +1038,30 @@
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
+      // GGUF-quantized A14B experts for the torch adapter. A14B is GPU-heavy at bf16
+      // (~56GB transformers), so quantization is the default on both platforms: Q8_0
+      // on MPS (trivial dequant, ~3x slower vs ~13x for k-quants), Q4_K_M on CUDA
+      // (smallest, fused kernel). Two experts: high-noise -> transformer, low-noise
+      // -> transformer_2. Apache-2.0 weights (QuantStack GGUF).
+      "quantization": {
+        "defaults": { "mps": "gguf-q8_0", "cuda": "gguf-q4_k_m" },
+        "variants": {
+          "gguf-q8_0": {
+            "format": "gguf",
+            "label": "GGUF Q8_0 (near-lossless)",
+            "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+            "transformerFile": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf",
+            "transformer2File": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q8_0.gguf"
+          },
+          "gguf-q4_k_m": {
+            "format": "gguf",
+            "label": "GGUF Q4_K_M (smallest)",
+            "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+            "transformerFile": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q4_K_M.gguf",
+            "transformer2File": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf"
+          }
+        }
+      },
       "mlx": {
         // Turnkey: pre-converted MLX repo + the lightx2v 4-step Lightning LoRA
         // (downloaded on demand by MlxVideoAdapter at generation time).
@@ -1074,6 +1118,28 @@
       "loraCompatibility": {
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
+      },
+      // GGUF-quantized A14B experts for the torch adapter. Same rationale as the T2V
+      // entry: quantized by default (Q8_0 on MPS, Q4_K_M on CUDA), two experts
+      // (high-noise -> transformer, low-noise -> transformer_2). Apache-2.0 weights.
+      "quantization": {
+        "defaults": { "mps": "gguf-q8_0", "cuda": "gguf-q4_k_m" },
+        "variants": {
+          "gguf-q8_0": {
+            "format": "gguf",
+            "label": "GGUF Q8_0 (near-lossless)",
+            "repo": "QuantStack/Wan2.2-I2V-A14B-GGUF",
+            "transformerFile": "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf",
+            "transformer2File": "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf"
+          },
+          "gguf-q4_k_m": {
+            "format": "gguf",
+            "label": "GGUF Q4_K_M (smallest)",
+            "repo": "QuantStack/Wan2.2-I2V-A14B-GGUF",
+            "transformerFile": "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf",
+            "transformer2File": "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf"
+          }
+        }
       },
       "mlx": {
         // I2V-A14B has no published MLX repo; the native diffusers checkpoint is

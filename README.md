@@ -196,12 +196,14 @@ startup.
 
 ## LoRA Training
 
-SceneWorks can train image LoRAs locally — for Z-Image-Turbo, Stable Diffusion
-XL, and Microsoft Lens (plus LTX-2.3 video LoRAs natively on Apple Silicon):
-build a captioned dataset, validate the plan with a dry run, train on a GPU
-worker, and the result is registered as a normal SceneWorks LoRA selectable in
-Image Studio. The Stable Diffusion XL kernel is the generic SDXL-UNet trainer
-that SDXL-family models (e.g. Kolors) extend.
+SceneWorks can train LoRAs locally — image LoRAs for Z-Image-Turbo, Stable
+Diffusion XL, and Microsoft Lens, plus video LoRAs for LTX-2.3 (Apple Silicon /
+MLX) and Wan2.2 (CUDA *and* Apple Silicon): build a captioned dataset, validate
+the plan with a dry run, train on a GPU worker, and the result is registered as
+a normal SceneWorks LoRA — image LoRAs selectable in Image Studio, video LoRAs
+in Video Studio. The Stable Diffusion XL kernel is the generic SDXL-UNet trainer
+that SDXL-family models (e.g. Kolors) extend; the Wan2.2 A14B kernel trains both
+mixture-of-experts denoisers (high/low-noise) as a per-expert LoRA pair.
 See [documents/TRAINING_QUICKSTART.md](documents/TRAINING_QUICKSTART.md) for a
 step-by-step first run, per-target notes, recommended dataset sizes and captions,
 VRAM/disk notes, where outputs live, and troubleshooting. Training contracts live

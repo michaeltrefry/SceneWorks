@@ -273,6 +273,95 @@ fn ltx_video_target_resolves_image_dataset_into_plan() {
 }
 
 #[test]
+fn builtin_registry_exposes_wan_target() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "wan_lora")
+        .expect("wan_lora target present");
+
+    assert_eq!(target.modality, TrainingModality::Video);
+    assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+    assert_eq!(target.family, "wan-video");
+    assert_eq!(target.base_model, "wan_2_2");
+    assert_eq!(target.kernel, "wan_lora");
+    assert_eq!(target.defaults.rank, 32);
+    assert_eq!(target.defaults.resolution, 512);
+    // Cross-platform torch trainer: plain AdamW (adamw8bit is CUDA-only and falls
+    // back), unlike the MLX LTX target which is also adamw but MPS-only.
+    assert_eq!(target.defaults.optimizer, "adamw");
+    // Wan transformer attention projections drive the LoRA injection.
+    assert_eq!(
+        target.defaults.advanced.get("loraTargetModules"),
+        Some(&serde_json::json!(["to_q", "to_k", "to_v", "to_out.0"]))
+    );
+    // Still-image training: each item encodes to a single Wan-VAE latent frame.
+    assert_eq!(
+        target.defaults.advanced.get("numFrames"),
+        Some(&serde_json::json!(1))
+    );
+    // Not MLX/Apple-Silicon-gated — runs on CUDA and MPS.
+    assert_eq!(target.limits.get("appleSiliconOnly"), None);
+}
+
+#[test]
+fn wan_target_resolves_image_dataset_into_plan() {
+    // Like LTX, the Wan video target consumes the image dataset fixture unchanged.
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "wan_lora")
+        .expect("wan_lora target present");
+
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: "job_wan",
+        target,
+        dataset: &dataset,
+        config: target.defaults.clone(),
+        preset: None,
+        lora_id: "lora_wan_new",
+        base_model_path: "/models/wan".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_wan_new"),
+        file_name: "wan_character.safetensors".to_owned(),
+        created_at: "2026-05-26T00:00:00Z".to_owned(),
+    })
+    .expect("wan plan resolves");
+
+    assert_eq!(plan.plan_version, TRAINING_PLAN_VERSION);
+    assert_eq!(plan.target.kernel, "wan_lora");
+    assert_eq!(plan.target.family, "wan-video");
+    assert_eq!(plan.target.modality, TrainingModality::Video);
+    assert!(!plan.dataset.items.is_empty());
+}
+
+#[test]
+fn builtin_registry_exposes_wan_moe_targets() {
+    let registry = builtin_training_targets();
+    for (id, base_model) in [
+        ("wan_t2v_14b_lora", "wan_2_2_t2v_14b"),
+        ("wan_i2v_14b_lora", "wan_2_2_i2v_14b"),
+    ] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"));
+        assert_eq!(target.modality, TrainingModality::Video);
+        assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+        assert_eq!(target.family, "wan-video");
+        assert_eq!(target.base_model, base_model);
+        // Both A14B variants share the dual-expert MoE kernel.
+        assert_eq!(target.kernel, "wan_moe_lora");
+        assert_eq!(target.defaults.rank, 32);
+        assert_eq!(target.defaults.resolution, 512);
+    }
+}
+
+#[test]
 fn unknown_training_fields_and_values_are_preserved() {
     let mut dataset = load_fixture("dataset.json");
     // Unknown enum value falls back to the string-enum `Unknown` variant.

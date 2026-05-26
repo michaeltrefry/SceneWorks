@@ -685,6 +685,22 @@ pub(crate) fn validate_lora_specs_for_model(
                 "LoRA {lora_id} is not compatible with model {model_id}"
             )));
         }
+        // Base-model gating: for families where a matching family is insufficient
+        // (Wan 5B vs 14B both declare `wan-video` but have incompatible
+        // architectures — 48 vs 16 latent channels), a LoRA that records its
+        // trained base model only loads on that exact model. LoRAs without a
+        // recorded base model fall back to family gating (legacy/imported), so this
+        // never tightens behavior for existing LoRAs.
+        if families.iter().any(|family| family == "wan-video") {
+            if let Some(base_model) = lora_base_model(lora) {
+                if base_model != model_id {
+                    return Err(ApiError::bad_request(format!(
+                        "LoRA {lora_id} was trained for base model {base_model}, not {model_id}; \
+                         Wan 5B and 14B LoRAs are not interchangeable"
+                    )));
+                }
+            }
+        }
         normalized_loras.push(normalized_lora);
     }
     Ok(normalized_loras)
@@ -959,4 +975,62 @@ pub(crate) fn lora_families(lora: &Value) -> Vec<String> {
         &["families", "compatibleFamilies", "modelFamilies"],
         Some("compatibility"),
     )
+}
+
+/// The specific base model a LoRA records it was trained for (e.g. `wan_2_2`,
+/// `wan_2_2_t2v_14b`), or None. Used to gate families where a matching family is
+/// not sufficient (Wan 5B and 14B both declare `wan-video` but have incompatible
+/// architectures). Not normalized like families — model ids are exact strings.
+pub(crate) fn lora_base_model(lora: &Value) -> Option<String> {
+    for key in ["baseModel", "base_model"] {
+        if let Some(value) = lora.get(key).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod base_model_gating_tests {
+    use super::*;
+
+    fn wan_models() -> Vec<Value> {
+        vec![
+            json!({ "id": "wan_2_2", "loraCompatibility": { "families": ["wan-video"] } }),
+            json!({ "id": "wan_2_2_t2v_14b", "loraCompatibility": { "families": ["wan-video"] } }),
+        ]
+    }
+
+    #[test]
+    fn rejects_wan_5b_lora_on_14b_model() {
+        let models = wan_models();
+        let lora = json!({ "id": "char", "families": ["wan-video"], "baseModel": "wan_2_2" });
+        let err =
+            validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
+                .expect_err("5B LoRA must be rejected on the 14B model");
+        assert!(
+            format!("{err:?}").contains("not interchangeable"),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_wan_lora_on_matching_base_model() {
+        let models = wan_models();
+        let lora = json!({ "id": "char", "families": ["wan-video"], "baseModel": "wan_2_2" });
+        validate_lora_specs_for_model(&models, &[], "wan_2_2", &[lora], true, "LoRA")
+            .expect("exact base-model match must pass");
+    }
+
+    #[test]
+    fn lora_without_base_model_falls_back_to_family_gating() {
+        let models = wan_models();
+        // No recorded baseModel (legacy/imported) -> family gating only, no rejection.
+        let lora = json!({ "id": "legacy", "families": ["wan-video"] });
+        validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
+            .expect("family-only LoRA must still pass");
+    }
 }
