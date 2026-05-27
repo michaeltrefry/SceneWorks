@@ -204,10 +204,12 @@ export function ImageStudio() {
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
-  // Character reference (IP-Adapter) — the approved reference image whose identity
-  // Kolors copies across variations. `ipAdapterScale` rides in `advanced`.
+  // Character reference (IP-Adapter / InstantID) — the approved reference image whose
+  // identity is carried across variations. `ipAdapterScale` rides in `advanced`; for
+  // InstantID, `controlnetScale` (IdentityNet landmark lock) rides there too.
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [ipAdapterScale, setIpAdapterScale] = useState(0.6);
+  const [controlnetScale, setControlnetScale] = useState(0.8);
   const [upscaleEnabled, setUpscaleEnabled] = useState(false);
   const [upscaleFactor, setUpscaleFactor] = useState(2);
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
@@ -291,6 +293,18 @@ export function ImageStudio() {
     }
   }, [availableModels, model]);
   const selectedModel = imageModels.find((item) => item.id === model);
+  // Reference-tuning hints declared by the model (ui.*). InstantID raises the
+  // reference-strength default and exposes a second "Identity structure" slider
+  // (controlnetConditioningScale); models without these keys (e.g. Kolors) keep the
+  // single reference-strength slider at the global default.
+  const identityStructure = selectedModel?.ui?.identityStructure;
+  // Reset the reference sliders to the selected model's declared defaults whenever the
+  // model changes, so InstantID starts at its tuned 0.8/0.8 and Kolors at 0.6.
+  useEffect(() => {
+    const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
+    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
+    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
+  }, [model]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
   // the character payload only carries assetIds.
@@ -527,9 +541,14 @@ export function ImageStudio() {
           : {}),
         advanced: {
           resolution,
-          // IP-Adapter reference strength only applies when a character reference is
-          // attached; the worker reads advanced.ipAdapterScale (default 0.6).
+          // IP-Adapter / InstantID reference strength only applies when a character
+          // reference is attached; the worker reads advanced.ipAdapterScale.
           ...(mode === "character_image" && referenceAssetId ? { ipAdapterScale } : {}),
+          // Identity structure (controlnetConditioningScale) is InstantID-only — sent
+          // only when the model exposes the control and a reference is attached.
+          ...(mode === "character_image" && referenceAssetId && identityStructure
+            ? { controlnetConditioningScale: controlnetScale }
+            : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -666,7 +685,7 @@ export function ImageStudio() {
                         ))}
                       </div>
                       <label className="reference-strength">
-                        Reference strength
+                        {identityStructure ? "Identity strength" : "Reference strength"}
                         <input
                           max="1"
                           min="0"
@@ -677,9 +696,27 @@ export function ImageStudio() {
                         />
                         <span>{ipAdapterScale.toFixed(2)}</span>
                       </label>
+                      {identityStructure ? (
+                        <label className="reference-strength">
+                          {identityStructure.label ?? "Identity structure"}
+                          <input
+                            max={identityStructure.max ?? 1}
+                            min={identityStructure.min ?? 0}
+                            onChange={(event) => setControlnetScale(Number(event.target.value))}
+                            step={identityStructure.step ?? 0.05}
+                            type="range"
+                            value={controlnetScale}
+                          />
+                          <span>{controlnetScale.toFixed(2)}</span>
+                        </label>
+                      ) : null}
                       <div className="guidance-strip">
                         <strong>Identity from reference</strong>
-                        <span>Kolors IP-Adapter carries this reference's appearance across every variation. Raise Variations and leave the seed blank to explore different takes.</span>
+                        <span>
+                          {identityStructure
+                            ? "InstantID holds this person's face from the reference while the prompt drives the scene. Identity strength tunes likeness; Identity structure locks face geometry and pose (lower = more pose freedom). Raise Variations and leave the seed blank to explore takes."
+                            : "This reference's identity is carried across every variation. Raise Variations and leave the seed blank to explore different takes."}
+                        </span>
                       </div>
                     </div>
                   ) : (

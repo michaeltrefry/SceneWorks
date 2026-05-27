@@ -5115,6 +5115,85 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("exposes the InstantID Identity structure slider and submits its tuned defaults", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [
+            {
+              id: "char-1",
+              name: "Mira",
+              type: "person",
+              looks: [],
+              approvedReferences: [
+                {
+                  assetId: "ref-1",
+                  approved: true,
+                  asset: {
+                    id: "ref-1",
+                    type: "image",
+                    displayName: "Mira ref",
+                    projectId: "project-1",
+                    file: { path: "assets/images/ref_0001.png", mimeType: "image/png" },
+                  },
+                },
+              ],
+            },
+          ],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            {
+              id: "instantid_realvisxl",
+              name: "InstantID (RealVisXL)",
+              type: "image",
+              family: "sdxl",
+              capabilities: ["character_image"],
+              ui: {
+                referenceStrengthDefault: 0.8,
+                identityStructure: { label: "Identity structure", default: 0.8, min: 0.3, max: 1.0, step: 0.05 },
+              },
+            },
+          ],
+          latestAssets: [],
+          launchRequest: { id: "launch-iid", view: "Image", characterId: "char-1", referenceAssetId: "ref-1", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    // The second (InstantID-only) slider renders; the strength slider is relabeled.
+    expect(container.textContent).toContain("Identity structure");
+    expect(container.textContent).toContain("Identity strength");
+    expect(container.textContent).not.toContain("Reference strength");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    // Tuned InstantID defaults flow through advanced: ipAdapterScale 0.8 (raised from
+    // the global 0.6) + controlnetConditioningScale 0.8 (the IdentityNet lock).
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        referenceAssetId: "ref-1",
+        advanced: { resolution: "1024x1024", ipAdapterScale: 0.8, controlnetConditioningScale: 0.8 },
+      }),
+    );
+  });
+
   it("limits the character image model picker to reference-capable models", async () => {
     root = createRoot(container);
     await act(async () => {

@@ -65,3 +65,31 @@ SceneWorks-local edits to `sensenova_u1/models/neo_unify/modeling_neo_chat.py`:
 
 To update: re-copy `src/sensenova_u1/` from the upstream repo at the desired
 commit, update the commit hash above, and re-apply the local patches.
+
+## instantid
+
+InstantID SDXL face-identity pipeline + the `ip_adapter` support module it
+imports. InstantID preserves a person's identity from one reference image via an
+insightface ArcFace embedding + a 5-point-landmark ControlNet ("IdentityNet"),
+while the prompt drives scene/pose. Selected over IP-Adapter / FaceID in the
+sc-2009 A/B (the only method that held identity AND followed the prompt).
+
+- `pipeline_stable_diffusion_xl_instantid.py`
+  - Source: https://github.com/instantX-research/InstantID (`main`, 2026-05-27)
+  - License: Apache-2.0 (see `LICENSE`)
+  - Imports clean against `diffusers==0.38.0` (no local patches).
+- `ip_adapter/` (`resampler.py`, `utils.py`, `attention_processor.py`; empty
+  `__init__.py` to avoid pulling upstream's diffusers-heavy `ip_adapter.py`)
+  - Source: https://github.com/tencent-ailab/IP-Adapter (`main`, 2026-05-27)
+  - License: Apache-2.0
+- Consumed by: `scene_worker/instantid_adapter.py::InstantIDAdapter`
+- Runs in the MAIN worker venv. Extra deps in `requirements-instantid.txt`
+  (insightface, onnxruntime, onnx, peft, einops). The adapter inserts this dir
+  on `sys.path` (so the pipeline's top-level `from ip_adapter...` resolves) only
+  when an InstantID job runs — all heavy imports are lazy, so registering the
+  adapter is cheap on workers without the extras installed.
+- Models (downloaded on demand): `InstantX/InstantID` (ControlNet + ip-adapter.bin)
+  and the antelopev2 face pack (mirror `DIAMONIK7777/antelopev2`).
+
+To update: re-copy both directories from their upstream repos at the desired
+commit and update the dates above.

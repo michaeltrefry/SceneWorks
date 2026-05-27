@@ -14,7 +14,7 @@ import tempfile
 import warnings
 from pathlib import Path
 from textwrap import wrap
-from typing import Any, Callable, Iterable, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Protocol, TypeVar
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
@@ -41,6 +41,12 @@ from .lora_adapters import (
 )
 from .settings import WorkerSettings
 from .upscalers import RealESRGANUpscaler, UpscaleJob
+
+if TYPE_CHECKING:
+    # instantid_adapter imports from this module, so it can only be referenced for
+    # typing (the runtime instance is created in runtime.py and passed in via the
+    # adapters dict; create_image_adapter lazily imports it for the no-dict path).
+    from .instantid_adapter import InstantIDAdapter
 
 
 Image.MAX_IMAGE_PIXELS = 64_000_000
@@ -384,6 +390,36 @@ MODEL_TARGETS = {
         "variant": "fp16",
         "repo": "stabilityai/stable-diffusion-xl-base-1.0",
         "adapter": "sdxl_diffusers",
+    },
+    "instantid_realvisxl": {
+        "label": "InstantID (RealVisXL)",
+        # SDXL UNet under the hood, so it shares the sdxl LoRA family. Identity is
+        # driven by an insightface ArcFace embedding + a 5-point-landmark ControlNet
+        # ("IdentityNet"), NOT by an SDXL img2img/inpaint path — so it is strictly a
+        # reference-driven character model (no plain text_to_image / edit_image).
+        "family": "sdxl",
+        "supportsEdit": False,
+        # Per the sc-2009 spike: ~30 steps at guidance 5.0; identity holds with
+        # ip_adapter_scale ~0.8 and controlnet_conditioning_scale 0.45 (looser pose)
+        # .. 0.8 (frontal lock). Both ride advanced (ipAdapterScale /
+        # controlnetConditioningScale); the adapter defaults them when absent.
+        "steps": 30,
+        "guidanceScale": 5.0,
+        # RealVisXL ships fp16-variant weights; from_pretrained falls back to the
+        # default precision if the variant is absent (see InstantIDAdapter).
+        "variant": "fp16",
+        # RealVisXL_V5.0: photoreal SDXL finetune (openrail++, commercial-OK) that
+        # solves the "shiny/plastic" look; the sc-2009 A/B winner over base SDXL.
+        "repo": "SG161222/RealVisXL_V5.0",
+        "adapter": "instantid_sdxl",
+        # InstantID IdentityNet ControlNet + ip-adapter image projection. Fetched on
+        # demand by the adapter (mirrors the Kolors IP-Adapter pattern); the
+        # antelopev2 face pack is fetched separately into the insightface root.
+        "instantId": {
+            "repo": "InstantX/InstantID",
+            "controlnetSubfolder": "ControlNetModel",
+            "ipAdapter": "ip-adapter.bin",
+        },
     },
 }
 
@@ -4131,6 +4167,7 @@ def create_image_adapter(
     | KolorsDiffusersAdapter
     | SdxlDiffusersAdapter
     | ChromaDiffusersAdapter
+    | "InstantIDAdapter"
 ):
     payload = job.get("payload", {})
     requested = os.getenv("SCENEWORKS_IMAGE_ADAPTER", payload.get("adapter", "")).strip()
@@ -4138,6 +4175,8 @@ def create_image_adapter(
         requested = ""
     if requested in {"procedural", "procedural_preview"}:
         return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
+    # InstantID lives in instantid_adapter.py (imports from this module), so match by
+    # its string id and lazily import for the no-adapters-dict (test/direct) path.
     if requested and requested not in {
         ZImageDiffusersAdapter.id,
         QwenImageAdapter.id,
@@ -4147,6 +4186,7 @@ def create_image_adapter(
         KolorsDiffusersAdapter.id,
         SdxlDiffusersAdapter.id,
         ChromaDiffusersAdapter.id,
+        "instantid_sdxl",
     }:
         raise RuntimeError(f"Unsupported SCENEWORKS_IMAGE_ADAPTER value: {requested}.")
     if requested == ZImageDiffusersAdapter.id:
@@ -4165,6 +4205,8 @@ def create_image_adapter(
         return adapters.get("sdxl_diffusers") if adapters else SdxlDiffusersAdapter()
     if requested == ChromaDiffusersAdapter.id:
         return adapters.get("chroma_diffusers") if adapters else ChromaDiffusersAdapter()
+    if requested == "instantid_sdxl":
+        return _instantid_adapter(adapters)
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
@@ -4182,7 +4224,20 @@ def create_image_adapter(
         return adapters.get("sdxl_diffusers") if adapters else SdxlDiffusersAdapter()
     if model_target.get("adapter") == ChromaDiffusersAdapter.id:
         return adapters.get("chroma_diffusers") if adapters else ChromaDiffusersAdapter()
+    if model_target.get("adapter") == "instantid_sdxl":
+        return _instantid_adapter(adapters)
     return adapters.get("procedural_preview") if adapters else ProceduralImageAdapter()
+
+
+def _instantid_adapter(adapters: dict[str, object] | None) -> "InstantIDAdapter":
+    """Resolve the registered InstantID adapter, or lazily construct one when no
+    runtime adapters dict is supplied (tests / direct calls). Kept separate to
+    avoid a module-level import cycle (instantid_adapter imports from here)."""
+    if adapters and "instantid_sdxl" in adapters:
+        return adapters["instantid_sdxl"]
+    from .instantid_adapter import InstantIDAdapter
+
+    return InstantIDAdapter()
 
 
 def model_supports_edit(model_id: str) -> bool:

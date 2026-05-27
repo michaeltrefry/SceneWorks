@@ -32,6 +32,7 @@ from .image_adapters import (
     release_image_worker_memory,
     torch_inference_backend_available,
 )
+from .instantid_adapter import InstantIDAdapter
 from .person_adapters import (
     detector_backend_available,
     run_person_detect,
@@ -1258,6 +1259,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
         "kolors_diffusers": KolorsDiffusersAdapter(),
         "sdxl_diffusers": SdxlDiffusersAdapter(),
         "chroma_diffusers": ChromaDiffusersAdapter(),
+        "instantid_sdxl": InstantIDAdapter(),
     }
     max_registration_attempts = 20
 

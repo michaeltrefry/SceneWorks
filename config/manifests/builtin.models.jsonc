@@ -770,6 +770,82 @@
       }
     },
     {
+      "id": "instantid_realvisxl",
+      "name": "InstantID (RealVisXL)",
+      "family": "sdxl",
+      "type": "image",
+      "adapter": "instantid_sdxl",
+      // Reference-driven only: identity comes from an insightface ArcFace embedding
+      // + a 5-point-landmark ControlNet, so there is no text_to_image / edit_image
+      // path. Advertise character_image alone so it appears solely in the "With
+      // character" picker (a clear reference image is required).
+      "capabilities": ["character_image"],
+      "downloads": [
+        {
+          // Photoreal SDXL finetune (UNet + dual CLIP + VAE); the worker loads the
+          // fp16 variant. openrail++ (commercial use OK, ungated). The InstantID
+          // IdentityNet ControlNet + ip-adapter.bin (~4 GiB) and the antelopev2
+          // face pack are fetched on demand by the adapter (mirrors Kolors
+          // IP-Adapter), so they are not listed here.
+          "provider": "huggingface",
+          "repo": "SG161222/RealVisXL_V5.0",
+          "files": [],
+          "estimatedSizeBytes": 7105348096
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SG161222/RealVisXL_V5.0"
+      },
+      "defaults": {
+        // sc-2009 spike: ~30 steps at guidance 5.0; identity scale 0.8, landmark
+        // scale 0.45 (looser pose) .. 0.8 (frontal lock). The reference-strength
+        // slider drives ipAdapterScale; controlnetConditioningScale rides advanced.
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 5.0,
+        "count": 4
+      },
+      "limits": {
+        // Letterboxed to the output aspect before landmark detection, so any SDXL
+        // bucket is safe (no face stretching — the sc-2009 kps-aspect fix).
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        // SDXL UNet, so sdxl-family LoRAs apply (per sc-1927 declare the real
+        // family rather than an empty list, which would match every LoRA).
+        "families": ["sdxl"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "InstantID (RealVisXL)",
+        "description": "Identity-preserving character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on RealVisXL_V5.0 (photoreal SDXL, openrail++ commercial-OK) with InstantID's ArcFace embedding + 5-point-landmark ControlNet — the sc-2009 winner for faithful likeness with scene freedom (vs IP-Adapter resemblance only). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 5.0; ~22GB peak on Apple Silicon. Needs the InstantID weights (~4GB) + antelopev2 face pack, fetched on first use.",
+        "recommendedFor": ["character_image"],
+        // InstantID identity tuning surfaced in the character-image picker. The
+        // reference-strength slider drives ipAdapterScale (default raised to 0.8 for
+        // InstantID vs the global 0.6); identityStructure adds a second slider for
+        // controlnetConditioningScale (IdentityNet/landmark lock — the lever that
+        // measurably trades pose freedom for face-geometry likeness, sc-2009 sweep).
+        "referenceStrengthDefault": 0.8,
+        "identityStructure": {
+          "label": "Identity structure",
+          "default": 0.8,
+          "min": 0.3,
+          "max": 1.0,
+          "step": 0.05
+        },
+        "promptGuide": {
+          "title": "InstantID (RealVisXL) Prompt Guide",
+          "path": "/prompt-guides/instantid-realvisxl.md",
+          "sources": [
+            { "label": "InstantID project", "url": "https://github.com/instantX-research/InstantID" },
+            { "label": "InstantID weights", "url": "https://huggingface.co/InstantX/InstantID" },
+            { "label": "RealVisXL_V5.0 model card", "url": "https://huggingface.co/SG161222/RealVisXL_V5.0" }
+          ]
+        }
+      }
+    },
+    {
       "id": "ltx_2_3",
       "name": "LTX-2.3",
       "family": "ltx-video",

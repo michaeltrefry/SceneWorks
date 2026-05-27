@@ -1,0 +1,16 @@
+# InstantID SDXL face-identity adapter (sc-2009) — optional extras on top of
+# requirements.txt. Install into the MAIN worker venv; deps coexist with the
+# diffusers/torch stack (validated on Apple Silicon, sc-2009 spike).
+#
+#   pip install -r apps/worker/requirements.txt -r apps/worker/requirements-instantid.txt
+#
+# insightface provides the antelopev2 ArcFace face embedding + 5-point landmarks
+# that drive InstantID's IdentityNet ControlNet. onnxruntime runs the face models
+# (standard arm64 wheel works on macOS — no onnxruntime-silicon needed). peft is
+# required by diffusers to load the companion adapter LoRAs; einops by the
+# vendored ip_adapter Resampler.
+insightface>=1.0,<2
+onnxruntime>=1.20
+onnx>=1.20
+peft>=0.17
+einops>=0.8
