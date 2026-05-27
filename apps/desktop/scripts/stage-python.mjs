@@ -19,7 +19,15 @@ mkdirSync(outDir, { recursive: true });
 // requirements-lens.txt feeds the separate Lens sidecar venv (torch 2.11 /
 // transformers 5.8), provisioned alongside the main venv by setup.rs. scene_worker
 // (incl. lens_runner.py + _vendor/lens) is copied wholesale below.
-for (const file of ["requirements.txt", "requirements-ltx.txt", "requirements-mlx.txt", "requirements-lens.txt"]) {
+for (const file of [
+  "requirements.txt",
+  "requirements-ltx.txt",
+  "requirements-mlx.txt",
+  "requirements-lens.txt",
+  // InstantID face-identity extras (insightface/onnxruntime/onnx/peft/einops);
+  // installed into the main venv by setup.rs so the instantid_sdxl adapter runs.
+  "requirements-instantid.txt",
+]) {
   const src = join(workerDir, file);
   if (existsSync(src)) cpSync(src, join(outDir, file));
 }

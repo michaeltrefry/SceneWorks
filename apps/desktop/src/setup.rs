@@ -192,6 +192,27 @@ fn requirements_ltx_path(app: &AppHandle) -> PathBuf {
         .join("requirements-ltx.txt")
 }
 
+/// requirements-instantid.txt location (InstantID face-identity extras:
+/// insightface/onnxruntime/onnx/peft/einops): the bundled resource in a packaged
+/// app, or the repo copy during development. Optional — absent in older worker
+/// checkouts, in which case the InstantID character model is unavailable. Installed
+/// on all platforms (face analysis uses the CPU onnxruntime provider; the SDXL
+/// pipeline runs on CUDA or MPS like the other image adapters).
+fn requirements_instantid_path(app: &AppHandle) -> PathBuf {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources
+            .join("python-src")
+            .join("requirements-instantid.txt");
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("worker")
+        .join("requirements-instantid.txt")
+}
+
 /// requirements-lens.txt location (Microsoft Lens sidecar venv deps): the bundled
 /// resource in a packaged app, or the repo copy during development. Optional —
 /// absent in older worker checkouts, in which case Lens is unavailable.
@@ -483,6 +504,12 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     // torchaudio). Optional: absent in older worker checkouts.
     let requirements_ltx = requirements_ltx_path(app);
     let requirements_ltx_body = std::fs::read_to_string(&requirements_ltx).unwrap_or_default();
+    // InstantID face-identity extras (insightface/onnxruntime/onnx/peft/einops).
+    // Optional: absent in older worker checkouts, in which case the InstantID
+    // character model stays unavailable (the adapter reports a clear error).
+    let requirements_instantid = requirements_instantid_path(app);
+    let requirements_instantid_body =
+        std::fs::read_to_string(&requirements_instantid).unwrap_or_default();
     // Apple Silicon MLX video inference deps — macOS-only; empty body elsewhere so
     // the marker stays stable and the Windows/Linux PyTorch worker is untouched.
     #[cfg(target_os = "macos")]
@@ -493,7 +520,7 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let requirements_mlx_body = String::new();
     let marker = marker_path();
     let expected = format!(
-        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# mlx\n{requirements_mlx_body}"
+        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# mlx\n{requirements_mlx_body}\n# instantid\n{requirements_instantid_body}"
     );
 
     if python.exists() {
@@ -549,6 +576,12 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if requirements_mlx.exists() {
         requirement_files.push(requirements_mlx.clone());
+    }
+    // InstantID extras resolve cleanly alongside the pinned torch/diffusers stack
+    // (validated on the torch 2.8 / diffusers 0.39 worker venv) — add them to the
+    // same single uv pass so the dependency set stays ABI-consistent.
+    if requirements_instantid.exists() {
+        requirement_files.push(requirements_instantid.clone());
     }
     run_uv(app, pip_install_args(&python, &requirement_files)).await?;
 

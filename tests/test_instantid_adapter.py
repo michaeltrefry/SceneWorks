@@ -136,3 +136,13 @@ def test_dispatch_accepts_instantid_adapter_override():
     # SCENEWORKS_IMAGE_ADAPTER=instantid_sdxl must be an accepted explicit override.
     job = {"id": "j", "payload": {"model": "z_image_turbo", "adapter": "instantid_sdxl"}}
     assert isinstance(create_image_adapter(job, None), InstantIDAdapter)
+
+
+def test_missing_extras_raises_actionable_error(instantid_model, monkeypatch):
+    # When the optional extras are absent, generate() must fail with an install hint
+    # (not a raw ModuleNotFoundError mid-run). Simulate insightface being missing.
+    monkeypatch.setattr(
+        "importlib.util.find_spec", lambda name: None if name == "insightface" else object()
+    )
+    with pytest.raises(RuntimeError, match="requirements-instantid.txt"):
+        _generate(_job(instantid_model, referenceAssetId="ref-x"))

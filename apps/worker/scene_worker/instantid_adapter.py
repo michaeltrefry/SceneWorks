@@ -20,6 +20,7 @@ Key constraints (from the sc-2009 spike):
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,23 @@ def _ensure_antelopev2() -> Path:
             data = Path(path).read_bytes()
             (dest / name).write_bytes(data)
     return root
+
+
+def _require_instantid_extras() -> None:
+    """Fail fast with an actionable message when the optional InstantID extras are
+    not installed (rather than a raw ModuleNotFoundError mid-generation). insightface
+    + onnxruntime drive the face embedding/landmarks; einops is used by the vendored
+    Resampler. See requirements-instantid.txt."""
+    missing = [
+        mod for mod in ("insightface", "onnxruntime", "einops") if importlib.util.find_spec(mod) is None
+    ]
+    if missing:
+        raise RuntimeError(
+            "InstantID needs extra dependencies that are not installed in this worker "
+            f"environment: {', '.join(missing)}. Install them with "
+            "`pip install -r apps/worker/requirements-instantid.txt`. In the desktop "
+            "app, restart it to auto-provision the InstantID extras."
+        )
 
 
 def _import_instantid() -> tuple[Any, Any]:
@@ -315,6 +333,7 @@ class InstantIDAdapter:
             raise RuntimeError(f"{request.model} does not support image editing.")
         if not request.reference_asset_id:
             raise RuntimeError("InstantID generation requires a character reference image.")
+        _require_instantid_extras()
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (InstantID).")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
