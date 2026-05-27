@@ -408,9 +408,13 @@ class InstantIDAdapter:
         angle_set = bool(request.advanced.get("angleSet"))
         angles = [a for a in ANGLE_SET_ORDER if a in VIEW_ANGLE_KPS] if angle_set else []
         total = len(angles) if angle_set else request.count
+        # Every angle in a set shares ONE seed so the noise-derived attributes InstantID
+        # does NOT lock (hair, wardrobe, lighting) stay consistent across the turnaround —
+        # only the pose (kps) changes. Plain batches keep per-image seeds for variety.
+        set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
 
         def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            seed = set_seed if angle_set else resolve_seed(request.seed, request.prompt, index, request.seeds)
             angle = angles[index] if angle_set else None
             progress(
                 "running",

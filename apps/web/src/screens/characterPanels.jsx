@@ -405,9 +405,14 @@ export function CharacterAngleSet({
     setReferenceAssetId(approvedReferences[0]?.assetId ?? "");
   }, [characterId, approvedReferences]);
   React.useEffect(() => {
-    setPrompt(`${selectedCharacter?.name || "the character"}, neutral expression, plain background, photorealistic`);
+    // Seed with the character's appearance notes (InstantID preserves the face but NOT
+    // hair/wardrobe, so describe them here for a consistent turnaround) + tight framing.
+    const appearance = (selectedCharacter?.description ?? "").trim() || selectedCharacter?.name || "the character";
+    setPrompt(
+      `${appearance}, head and shoulders, neutral expression, consistent outfit, plain grey background, face clearly visible, sharp focus, photorealistic`,
+    );
     setStatus("");
-  }, [characterId, selectedCharacter?.name]);
+  }, [characterId, selectedCharacter?.name, selectedCharacter?.description]);
 
   if (!angleModel || !selectedCharacter) {
     return null;
@@ -452,7 +457,9 @@ export function CharacterAngleSet({
         characterId,
         referenceAssetId,
         prompt: prompt.trim(),
-        negativePrompt: "plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, overprocessed, deformed, multiple people",
+        negativePrompt:
+          "hat, hood, hoodie, scarf, holding object, paper, hands near face, covering face, occluded face, cropped, " +
+          "multiple people, plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, deformed, blurry",
         // angleSet makes the worker emit one image per pack angle regardless of count;
         // count must satisfy the API's 1-8 guard, so send 1 (the worker overrides it).
         count: 1,
