@@ -130,6 +130,7 @@ from scene_worker.video_adapters import (
     VIDEO_MODEL_TARGETS,
     VendorPatchDriftError,
     _PENDING_LTX_LORAS,
+    _PENDING_LTX_LORA_PLAN,
     _require_patch_target,
     character_reference_images,
     create_video_adapter,
@@ -841,7 +842,7 @@ def test_mlx_ltx_stages_loras_in_contextvar_only_when_present(tmp_path, monkeypa
     lora_file.write_bytes(b"lora")
     adapter = MlxVideoAdapter()
     monkeypatch.setattr("scene_worker.video_adapters._install_ltx_lora_patch", lambda: None)
-    monkeypatch.setattr(adapter, "_ltx_lora_module_map", lambda specs: {"transformer_blocks.0.attn": [("w", specs[0].weight)]})
+    monkeypatch.setattr(adapter, "_load_lora_map", lambda configs: {"transformer_blocks.0.attn": [("w", configs[0][1])]})
     progress_calls: list[tuple] = []
 
     def progress(*args, **kwargs):
@@ -859,14 +860,88 @@ def test_mlx_ltx_stages_loras_in_contextvar_only_when_present(tmp_path, monkeypa
             [{"id": "ltx_style", "installedPath": str(lora_file), "weight": 0.6, "family": "ltx-video"}],
         )
     )
-    token = adapter._apply_ltx_loras(lora_request, progress)
+    reset = adapter._apply_ltx_loras(lora_request, progress)
     try:
-        assert token is not None
+        assert reset is not None
+        ctxvar, token = reset
+        # A plain user LoRA is constant strength → merge map (not the per-pass plan).
+        assert ctxvar is _PENDING_LTX_LORAS
         assert _PENDING_LTX_LORAS.get() == {"transformer_blocks.0.attn": [("w", 0.6)]}
+        assert _PENDING_LTX_LORA_PLAN.get() is None
         assert progress_calls  # merge progress emitted
     finally:
-        _PENDING_LTX_LORAS.reset(token)
+        ctxvar.reset(token)
     assert _PENDING_LTX_LORAS.get() is None
+
+
+def _eros_distill_job(advanced=None, loras=None):
+    entry = {
+        "mlx": {"autoDistillLora": {"stage1Strength": 1.0, "stage2Strength": 0.4}},
+        "resources": {
+            "distilledLora": {
+                "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+                "file": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
+            }
+        },
+    }
+    return {
+        "id": "job",
+        "payload": {
+            "projectId": "proj",
+            "model": "ltx_2_3_eros",
+            "mode": "text_to_video",
+            "loras": loras or [],
+            "advanced": advanced or {},
+            "modelManifestEntry": entry,
+        },
+    }
+
+
+def test_mlx_ltx_eros_auto_injects_distill_lora_per_pass(tmp_path, monkeypatch):
+    distill = tmp_path / "condsafe.safetensors"
+    distill.write_bytes(b"lora")
+    monkeypatch.setattr("scene_worker.video_adapters._install_ltx_lora_patch", lambda: None)
+    monkeypatch.setattr(
+        "scene_worker.video_adapters.huggingface_cached_resource_file",
+        lambda settings, repo, file_name: distill,
+    )
+    monkeypatch.setattr(
+        MlxVideoAdapter, "_load_lora_map", lambda self, configs: {path: [("w", strength)] for path, strength in configs}
+    )
+    adapter = MlxVideoAdapter()
+
+    # 10Eros auto-injects its manifest distill LoRA at per-pass strengths (1.0 base / 0.4 upscale).
+    specs = adapter._collect_ltx_lora_specs(video_request_from_job(_eros_distill_job()))
+    assert specs == [(str(distill), 1.0, 0.4)]
+
+    # Differing stage strengths route to the per-pass plan (LoRALinear wrappers + boundary drop).
+    reset = adapter._apply_ltx_loras(video_request_from_job(_eros_distill_job()), lambda *a, **k: None)
+    try:
+        ctxvar, token = reset
+        assert ctxvar is _PENDING_LTX_LORA_PLAN
+        plan = _PENDING_LTX_LORA_PLAN.get()
+        assert plan["stage1_map"] == {str(distill): [("w", 1.0)]}
+        assert plan["stage2_map"] == {str(distill): [("w", 0.4)]}
+        assert plan["wrappers"] == {}
+        assert _PENDING_LTX_LORAS.get() is None
+    finally:
+        ctxvar.reset(token)
+
+    # Opt-out and per-stage strength overrides.
+    assert adapter._resolve_distill_lora(video_request_from_job(_eros_distill_job(advanced={"useDistillLora": False}))) is None
+    override = _eros_distill_job(advanced={"distillStage1Strength": 0.8, "distillStage2Strength": 0.3})
+    assert adapter._collect_ltx_lora_specs(video_request_from_job(override)) == [(str(distill), 0.8, 0.3)]
+
+
+def test_mlx_ltx_eros_distill_missing_raises_actionable(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "scene_worker.video_adapters.huggingface_cached_resource_file", lambda settings, repo, file_name: None
+    )
+    adapter = MlxVideoAdapter()
+    adapter._settings = SimpleNamespace(data_dir=tmp_path)
+    request = video_request_from_job(_eros_distill_job())
+    with pytest.raises(RuntimeError, match="requires its distill LoRA"):
+        adapter._resolve_distill_lora(request)
 
 
 def test_lora_compatibility_guard_rejects_mismatched_family_before_load(tmp_path):

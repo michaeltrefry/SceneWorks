@@ -878,6 +878,15 @@
           "files": ["10Eros_v1_bf16.safetensors"],
           "default": true,
           "estimatedSizeBytes": 46139885510
+        },
+        {
+          // Recommended cond_safe distill LoRA. Required runtime component on the MLX
+          // path: it is auto-injected per-pass (see mlx.autoDistillLora) so 10Eros
+          // produces usable text-to-video. Only the cond_safe variant is fetched.
+          "provider": "huggingface",
+          "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+          "files": ["ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"],
+          "estimatedSizeBytes": 662072824
         }
       ],
       "paths": {
@@ -933,7 +942,14 @@
         "minMemoryGb": 31,
         "requiresConversion": true,
         "convertSourceRepo": "TenStrip/LTX2.3-10Eros",
-        "textEncoderRepo": "mlx-community/gemma-3-12b-it-bf16"
+        "textEncoderRepo": "mlx-community/gemma-3-12b-it-bf16",
+        // 10Eros's base is not pre-distilled, so the MLX adapter auto-injects the
+        // cond_safe distill LoRA (resources.distilledLora) at runtime with per-pass
+        // strengths: full on the base sampling pass, reduced on the spatial-upscale /
+        // refine pass (TenStrip's guidance for rank<=72 cond_safe LoRAs). Without it,
+        // text-to-video degrades to noise. Overridable via advanced.useDistillLora /
+        // distillStage1Strength / distillStage2Strength.
+        "autoDistillLora": { "stage1Strength": 1.0, "stage2Strength": 0.4 }
       },
       "ui": {
         "label": "LTX-2.3 10Eros",
