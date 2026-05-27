@@ -1646,39 +1646,89 @@ def write_poster_frame(media_path: Path) -> None:
         poster.unlink(missing_ok=True)
 
 
-# LTX user-LoRA injection. mlx-video-with-audio's turnkey generate_video_with_audio
-# builds the LTX transformer (LTXModel) internally and exposes no loras kwarg, so we
-# wrap LTXModel.load_weights to merge the pending LoRAs (apply_loras_to_model: dequant
-# only the LoRA'd layers to bf16, no requant precision loss, no per-step overhead) right
-# after the quantized weights load — the same primitive the package uses for quantized
-# Wan. The per-generation module map is passed through this ContextVar.
+# LTX LoRA injection. mlx-video-with-audio's turnkey generate_video_with_audio builds
+# the LTX transformer (LTXModel) internally and exposes no loras kwarg, so we wrap
+# LTXModel.load_weights to apply the pending LoRAs right after the quantized weights
+# load. Two modes share the wrap, selected per generation by which ContextVar is set:
+#
+#  - Constant strength (_PENDING_LTX_LORAS, a module->loras map): merge the LoRA into
+#    the layers via the package's apply_loras_to_model (dequant the LoRA'd layers to
+#    bf16, no per-step overhead). Used for stock LTX-2.3 and plain user LoRAs.
+#  - Per-pass strength (_PENDING_LTX_LORA_PLAN, a dict): apply the LoRA as on-the-fly
+#    LoRALinear wrappers at the stage-1 strength, then drop them to the stage-2 strength
+#    at the spatial-upscale boundary (upsample_latents, called exactly once between the
+#    two sampling stages). The turnkey API runs one transformer for BOTH passes, so a
+#    merged/baked LoRA can't vary per pass; wrappers + the boundary hook let a distill
+#    LoRA run strong on the base pass and weak on the upscale/refine pass (TenStrip's
+#    10Eros guidance: ~1.0 first pass, ~0.4 upscale).
 _PENDING_LTX_LORAS: ContextVar[dict[str, Any] | None] = ContextVar("sceneworks_ltx_loras", default=None)
+_PENDING_LTX_LORA_PLAN: ContextVar[dict[str, Any] | None] = ContextVar("sceneworks_ltx_lora_plan", default=None)
 _ltx_lora_patch_installed = False
 
 
+def _wrap_loras_as_linears(model: Any, stage_map: dict[str, Any]) -> dict[str, Any]:
+    """Replace each LoRA-targeted Linear/QuantizedLinear with a LoRALinear wrapper
+    (on-the-fly delta, mutable strength) and return ``{module_key: LoRALinear}`` so the
+    caller can re-scale strengths at the stage boundary. Mirrors apply_loras_to_model's
+    traversal + key normalization but wraps instead of merging (merge is permanent and
+    cannot vary per pass)."""
+    import mlx.nn as nn
+    from mlx_video.lora.apply import LoRALinear, _normalize_lora_key
+
+    module_paths: set[str] = set()
+    for name, _ in model.named_modules():
+        module_paths.add(name)
+        module_paths.add(f"{name}.weight")
+    wrappers: dict[str, Any] = {}
+    for module_key, loras in stage_map.items():
+        normalized = _normalize_lora_key(module_key, module_paths)
+        if normalized.endswith(".weight"):
+            normalized = normalized[: -len(".weight")]
+        parts = normalized.split(".")
+        parent = model
+        try:
+            for part in parts[:-1]:
+                parent = getattr(parent, part) if not part.isdigit() else parent[int(part)]
+            leaf = parts[-1]
+            target = getattr(parent, leaf) if not leaf.isdigit() else parent[int(leaf)]
+        except (AttributeError, IndexError, TypeError):
+            continue
+        if isinstance(target, (nn.Linear, nn.QuantizedLinear)):
+            wrapper = LoRALinear(target, list(loras))
+            if leaf.isdigit():
+                parent[int(leaf)] = wrapper
+            else:
+                setattr(parent, leaf, wrapper)
+            wrappers[module_key] = wrapper
+    return wrappers
+
+
 def _install_ltx_lora_patch() -> None:
-    """Idempotently wrap LTXModel.load_weights to apply the LoRAs in _PENDING_LTX_LORAS
-    after each load. Targets only LTXModel (the text encoder, VAEs, and vocoder are
-    distinct classes), and fires after nn.quantize so the LoRA'd layers are quantized.
+    """Idempotently wrap LTXModel.load_weights (apply pending LoRAs after load) and
+    mlx_video.generate_av.upsample_latents (flip per-pass wrappers to the stage-2
+    strength at the stage boundary). Fires after nn.quantize so merged LoRA'd layers are
+    handled correctly.
 
     Drift guard (sc-1647): targets symbols pinned to mlx-video-with-audio>=0.1.36,<0.2
-    (``requirements-mlx.txt``). The two imports below fail loudly (ImportError) if the
-    package moves ``apply_loras_to_model`` or ``LTXModel``; we additionally assert
-    ``LTXModel.load_weights`` exists and is callable so a rename surfaces as an
-    actionable VendorPatchDriftError instead of a bare AttributeError. Re-validate on
-    any mlx-video-with-audio bump."""
+    (``requirements-mlx.txt``). The imports below fail loudly (ImportError) if the
+    package moves ``apply_loras_to_model`` / ``LoRALinear`` / ``LTXModel`` /
+    ``upsample_latents``; _require_patch_target additionally asserts the wrapped symbols
+    exist and are callable, so a rename surfaces as an actionable VendorPatchDriftError.
+    Re-validate on any mlx-video-with-audio bump."""
     global _ltx_lora_patch_installed
     if _ltx_lora_patch_installed:
         return
+    import mlx_video.generate_av as gav
     from mlx_video.lora import apply_loras_to_model
+    from mlx_video.lora.apply import LoRALinear  # noqa: F401 — presence/drift check
     from mlx_video.models.ltx.ltx import LTXModel
 
+    pin = "mlx-video-with-audio>=0.1.36,<0.2 (requirements-mlx.txt)"
     original_load_weights = _require_patch_target(
-        LTXModel,
-        "load_weights",
-        pin="mlx-video-with-audio>=0.1.36,<0.2 (requirements-mlx.txt)",
-        patch="LTX LoRA load_weights wrap (sc-1647)",
-        require_callable=True,
+        LTXModel, "load_weights", pin=pin, patch="LTX LoRA load_weights wrap (sc-1647)", require_callable=True
+    )
+    original_upsample = _require_patch_target(
+        gav, "upsample_latents", pin=pin, patch="LTX per-pass LoRA upsample boundary (sc-1647)", require_callable=True
     )
     if getattr(original_load_weights, "_sw_lora_wrapped", False):  # guard against double-wrap
         _ltx_lora_patch_installed = True
@@ -1686,6 +1736,15 @@ def _install_ltx_lora_patch() -> None:
 
     def _load_weights_with_loras(self, *args, **kwargs):
         result = original_load_weights(self, *args, **kwargs)
+        plan = _PENDING_LTX_LORA_PLAN.get()
+        if plan is not None:
+            wrappers = _wrap_loras_as_linears(self, plan["stage1_map"])
+            if not wrappers:
+                raise RuntimeError(
+                    "Selected LoRA(s) matched no LTX-2.3 transformer layers — confirm the file is an LTX-video adapter."
+                )
+            plan["wrappers"] = wrappers
+            return result
         pending = _PENDING_LTX_LORAS.get()
         if pending and apply_loras_to_model(self, pending) == 0:
             raise RuntimeError(
@@ -1693,8 +1752,20 @@ def _install_ltx_lora_patch() -> None:
             )
         return result
 
+    def _upsample_with_perpass(*args, **kwargs):
+        plan = _PENDING_LTX_LORA_PLAN.get()
+        if plan is not None:
+            stage2_map = plan["stage2_map"]
+            for module_key, wrapper in plan.get("wrappers", {}).items():
+                stage2 = stage2_map.get(module_key)
+                if stage2 is not None:
+                    wrapper.lora_weights_and_strengths = list(stage2)
+        return original_upsample(*args, **kwargs)
+
     _load_weights_with_loras._sw_lora_wrapped = True
+    _upsample_with_perpass._sw_lora_wrapped = True
     LTXModel.load_weights = _load_weights_with_loras
+    gav.upsample_latents = _upsample_with_perpass
     _ltx_lora_patch_installed = True
 
 
@@ -1869,7 +1940,7 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         temp_path = media_path.with_suffix(".tmp.mp4")
         self.track_temp_output(job["id"], temp_path)
 
-        lora_token = self._apply_ltx_loras(request, progress)
+        lora_reset = self._apply_ltx_loras(request, progress)
         progress("running", "generating", 0.3, f"Generating {num_frames} frames with {target['label']} (MLX).")
         self._loaded_models.update({request.model, model_repo})
         try:
@@ -1892,8 +1963,9 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         except Exception as e:
             raise RuntimeError(f"MLX LTX-2.3 generation failed: {e}")
         finally:
-            if lora_token is not None:
-                _PENDING_LTX_LORAS.reset(lora_token)
+            if lora_reset is not None:
+                lora_ctxvar, lora_token = lora_reset
+                lora_ctxvar.reset(lora_token)
             if tmp_image is not None:
                 tmp_image.unlink(missing_ok=True)
 
@@ -1949,26 +2021,95 @@ class MlxVideoAdapter(VideoGenerationAdapter):
             f"--mlx-path {target_dir} --quantize --q-bits 4`."
         )
 
-    def _apply_ltx_loras(self, request: VideoRequest, progress: ProgressCallback):
-        """Stage user LoRAs for the next LTX generation. Returns a ContextVar token
-        (reset in the caller's finally) or None when there are no LoRAs. The patched
-        LTXModel.load_weights merges the staged map into the transformer."""
-        specs = normalize_lora_specs(request.loras)
-        if not specs:
-            return None
-        progress("loading_model", "loading_model", 0.25, "Applying LoRA to LTX-2.3 transformer.")
-        _install_ltx_lora_patch()
-        return _PENDING_LTX_LORAS.set(self._ltx_lora_module_map(specs))
+    def _collect_ltx_lora_specs(self, request: VideoRequest) -> list[tuple[str, float, float]]:
+        """Collect ``(path, stage1_strength, stage2_strength)`` for every LoRA to apply.
 
-    def _ltx_lora_module_map(self, specs: list[LoraSpec]) -> dict[str, Any]:
+        User-selected LoRAs are constant (stage1 == stage2 == weight). When the model's
+        manifest declares ``mlx.autoDistillLora`` (10Eros), the recommended distill LoRA
+        is auto-injected with per-pass strengths (default 1.0 base pass / 0.4 upscale
+        pass) so the user gets usable output without selecting it and without
+        over-applying it on the upscale/refine pass.
+        """
+        specs: list[tuple[str, float, float]] = [
+            (spec.path, spec.weight, spec.weight) for spec in normalize_lora_specs(request.loras)
+        ]
+        distill = self._resolve_distill_lora(request)
+        if distill is not None:
+            specs.append(distill)
+        return specs
+
+    def _resolve_distill_lora(self, request: VideoRequest) -> tuple[str, float, float] | None:
+        """Resolve the auto-injected per-pass distill LoRA from the manifest, or None.
+
+        Returns ``(path, stage1_strength, stage2_strength)``. Active only when the
+        manifest's ``mlx.autoDistillLora`` block is present and ``advanced.useDistillLora``
+        is not disabled. Raises if declared+enabled but the LoRA file is not available
+        locally — it is a required runtime component for that model (without it 10Eros
+        text-to-video degrades to noise), so failing loud beats silently degrading.
+        """
+        entry = request.model_manifest_entry
+        mlx_cfg = entry.get("mlx") if isinstance(entry.get("mlx"), dict) else {}
+        auto = mlx_cfg.get("autoDistillLora") if isinstance(mlx_cfg, dict) else None
+        if not isinstance(auto, dict):
+            return None
+        if not bool(request.advanced.get("useDistillLora", True)):
+            return None
+        resources = entry.get("resources") if isinstance(entry.get("resources"), dict) else {}
+        resource = resources.get("distilledLora") if isinstance(resources.get("distilledLora"), dict) else {}
+        repo = resource.get("repo")
+        file_name = resource.get("file")
+        settings = self._settings or WorkerSettings()
+        path: str | None = None
+        if repo and file_name:
+            cached = huggingface_cached_resource_file(settings, str(repo), str(file_name))
+            if cached is not None and Path(cached).is_file():
+                path = str(cached)
+            else:
+                local = settings.data_dir / "models" / safe_download_dir(str(repo)) / str(file_name)
+                if local.is_file():
+                    path = str(local)
+        if path is None:
+            raise RuntimeError(
+                f"{model_target(request.model)['label']} requires its distill LoRA "
+                f"({file_name or 'distilledLora'}) for usable output, but it was not found locally. "
+                f"Install the '{repo}' LoRA in Model Manager, or set advanced.useDistillLora=false to skip it."
+            )
+        stage1 = safe_float(request.advanced.get("distillStage1Strength"), float(auto.get("stage1Strength", 1.0)), 0.0, 2.0)
+        stage2 = safe_float(request.advanced.get("distillStage2Strength"), float(auto.get("stage2Strength", 0.4)), 0.0, 2.0)
+        return (path, stage1, stage2)
+
+    def _load_lora_map(self, configs: list[tuple[str, float]]) -> dict[str, Any]:
+        """Build a module->[(LoRAWeights, strength)] map from (path, strength) configs
+        via the mlx-video LoRA loader. Isolated so the mlx import stays out of the
+        light-dep callers and tests can stub it. Raises if nothing matched."""
         from mlx_video.lora import LoRAConfig, load_multiple_loras
 
-        module_to_loras = load_multiple_loras([LoRAConfig(path=spec.path, strength=spec.weight) for spec in specs])
-        if not module_to_loras:
+        module_map = load_multiple_loras([LoRAConfig(path=path, strength=strength) for path, strength in configs])
+        if not module_map:
             raise RuntimeError(
                 "Selected LoRA(s) matched no LTX-2.3 transformer layers — confirm the file is an LTX-video adapter."
             )
-        return module_to_loras
+        return module_map
+
+    def _apply_ltx_loras(self, request: VideoRequest, progress: ProgressCallback):
+        """Stage LoRAs for the next LTX generation. Returns ``(contextvar, token)`` to
+        reset in the caller's finally, or None when there are no LoRAs. Builds a per-pass
+        plan (LoRALinear wrappers + stage-boundary strength drop) when any LoRA has
+        differing stage strengths; otherwise a constant merge map."""
+        specs = self._collect_ltx_lora_specs(request)
+        if not specs:
+            return None
+        progress("loading_model", "loading_model", 0.25, "Applying LoRA to the LTX transformer.")
+        _install_ltx_lora_patch()
+        if any(abs(stage1 - stage2) > 1e-6 for _, stage1, stage2 in specs):
+            plan = {
+                "stage1_map": self._load_lora_map([(path, s1) for path, s1, _ in specs]),
+                "stage2_map": self._load_lora_map([(path, s2) for path, _, s2 in specs]),
+                "wrappers": {},
+            }
+            return (_PENDING_LTX_LORA_PLAN, _PENDING_LTX_LORA_PLAN.set(plan))
+        merge_map = self._load_lora_map([(path, s1) for path, s1, _ in specs])
+        return (_PENDING_LTX_LORAS, _PENDING_LTX_LORAS.set(merge_map))
 
     def _first_condition_image(self, project_path: Path, request: VideoRequest) -> Any:
         return self._condition_image(project_path, request.source_asset_id)
