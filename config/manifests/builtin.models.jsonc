@@ -834,6 +834,23 @@
           "max": 1.0,
           "step": 0.05
         },
+        // Canonical head angles the adapter can render from a frontal reference
+        // (sc-2009: the IdentityNet landmarks come from a built-in pack; identity
+        // from the character reference). Selecting one rides advanced.viewAngle and
+        // forces square output. "" / absent = match the reference's own angle.
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
         "promptGuide": {
           "title": "InstantID (RealVisXL) Prompt Guide",
           "path": "/prompt-guides/instantid-realvisxl.md",

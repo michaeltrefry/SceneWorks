@@ -5194,6 +5194,89 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("offers the InstantID View angle picker and submits the chosen angle", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [
+            {
+              id: "char-1",
+              name: "Mira",
+              type: "person",
+              looks: [],
+              approvedReferences: [
+                {
+                  assetId: "ref-1",
+                  approved: true,
+                  asset: {
+                    id: "ref-1",
+                    type: "image",
+                    displayName: "Mira ref",
+                    projectId: "project-1",
+                    file: { path: "assets/images/ref_0001.png", mimeType: "image/png" },
+                  },
+                },
+              ],
+            },
+          ],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            {
+              id: "instantid_realvisxl",
+              name: "InstantID (RealVisXL)",
+              type: "image",
+              family: "sdxl",
+              capabilities: ["character_image"],
+              ui: {
+                referenceStrengthDefault: 0.8,
+                identityStructure: { label: "Identity structure", default: 0.8, min: 0.3, max: 1.0, step: 0.05 },
+                viewAngles: [
+                  { id: "three_quarter_left", label: "Three-quarter left" },
+                  { id: "left_profile", label: "Left profile" },
+                ],
+              },
+            },
+          ],
+          latestAssets: [],
+          launchRequest: { id: "launch-va", view: "Image", characterId: "char-1", referenceAssetId: "ref-1", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    // The dropdown lists "Match reference" plus the model's declared angles.
+    const angleOptions = [...field(container, "View angle").options].map((option) => option.textContent);
+    expect(angleOptions).toContain("Match reference");
+    expect(angleOptions).toContain("Left profile");
+
+    await changeField(field(container, "View angle"), "left_profile");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    // The chosen angle rides advanced.viewAngle for the worker's landmark pack.
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        referenceAssetId: "ref-1",
+        advanced: expect.objectContaining({ viewAngle: "left_profile", ipAdapterScale: 0.8 }),
+      }),
+    );
+  });
+
   it("limits the character image model picker to reference-capable models", async () => {
     root = createRoot(container);
     await act(async () => {

@@ -14,6 +14,10 @@ This is a **reference-driven** model: it only runs in the "With character" flow 
 - **The prompt drives the scene:** setting, action, pose, framing, wardrobe, lighting, and style.
 - **Reference strength** (the slider) controls how hard identity is pinned. Higher = closer likeness but stiffer; lower = more natural and prompt-flexible.
 
+## View Angle
+
+The head angle does **not** come from the prompt — describing "profile" or "looking left" won't rotate the face, because identity pins it toward the reference's angle. Instead use the **View angle** dropdown: front, three-quarter left/right, left/right profile, looking up, looking down, and the four diagonals. Each renders the *same* character at that angle with identity preserved (validated ~0.81–0.89 likeness across all of them). View-angle renders square. Leave it on **Match reference** to keep the reference's own angle. Generating one character across several angles is also how you build a consistent set for training a character LoRA.
+
 ## Choose A Good Reference
 
 Identity quality is set by the reference more than the prompt:

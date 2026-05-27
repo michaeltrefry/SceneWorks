@@ -12,7 +12,12 @@ import pytest
 from PIL import Image
 
 from scene_worker.image_adapters import MODEL_TARGETS, create_image_adapter, image_request_from_job
-from scene_worker.instantid_adapter import InstantIDAdapter, _letterbox
+from scene_worker.instantid_adapter import (
+    VIEW_ANGLE_KPS,
+    InstantIDAdapter,
+    _letterbox,
+    _view_angle_kps,
+)
 
 _TEST_TARGET = {
     "label": "Test InstantID",
@@ -146,3 +151,24 @@ def test_missing_extras_raises_actionable_error(instantid_model, monkeypatch):
     )
     with pytest.raises(RuntimeError, match="requirements-instantid.txt"):
         _generate(_job(instantid_model, referenceAssetId="ref-x"))
+
+
+def test_view_angle_pack_is_well_formed():
+    # The canonical pack covers the 11 shipped angles, all normalized to [0,1].
+    expected = {
+        "front", "three_quarter_left", "three_quarter_right", "left_profile", "right_profile",
+        "up", "down", "up_left", "up_right", "down_left", "down_right",
+    }
+    assert expected <= set(VIEW_ANGLE_KPS)
+    for pts in VIEW_ANGLE_KPS.values():
+        assert len(pts) == 5
+        assert all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in pts)
+    scaled = _view_angle_kps("front", 1024)
+    assert scaled.shape == (5, 2) and float(scaled.max()) <= 1024.0
+    assert _view_angle_kps("nonexistent", 1024) is None
+
+
+def test_view_angle_resolves_only_known_angles():
+    assert InstantIDAdapter._view_angle(SimpleNamespace(advanced={"viewAngle": "left_profile"})) == "left_profile"
+    assert InstantIDAdapter._view_angle(SimpleNamespace(advanced={"viewAngle": "bogus"})) is None
+    assert InstantIDAdapter._view_angle(SimpleNamespace(advanced={})) is None

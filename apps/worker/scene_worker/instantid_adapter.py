@@ -124,6 +124,37 @@ def _letterbox(image: Image.Image, width: int, height: int) -> Image.Image:
     return canvas
 
 
+# Canonical view-angle landmark sets (insightface 5-point kps, order
+# [left_eye, right_eye, nose, mouth_left, mouth_right]), normalized to a SQUARE
+# canvas. sc-2009: extracted from a 9-cell turnaround sheet + full L/R profiles,
+# each validated to hold InstantID identity (cosine 0.81-0.89) at the target angle.
+# The pack supplies the IdentityNet *pose* while the character reference supplies
+# *identity*, so one constant rotates any character to any of these views. View-angle
+# generation outputs square (the kps must share the output aspect — the sc-2009
+# kps-distortion rule), and the reference image is still used for the face embedding.
+VIEW_ANGLE_KPS: dict[str, list[tuple[float, float]]] = {
+    "front": [(0.4460, 0.5227), (0.5755, 0.5166), (0.5106, 0.5947), (0.4653, 0.6660), (0.5630, 0.6613)],
+    "three_quarter_left": [(0.3679, 0.5325), (0.4514, 0.5354), (0.3553, 0.6007), (0.3724, 0.6718), (0.4349, 0.6733)],
+    "three_quarter_right": [(0.5946, 0.4930), (0.6882, 0.4955), (0.6948, 0.5598), (0.6202, 0.6408), (0.6885, 0.6421)],
+    "left_profile": [(0.4373, 0.3527), (0.4925, 0.3445), (0.3927, 0.4662), (0.4853, 0.5599), (0.5240, 0.5517)],
+    "right_profile": [(0.5075, 0.3445), (0.5627, 0.3527), (0.6073, 0.4662), (0.4760, 0.5517), (0.5147, 0.5599)],
+    "up": [(0.4535, 0.4371), (0.5765, 0.4332), (0.5077, 0.4918), (0.4647, 0.5704), (0.5646, 0.5667)],
+    "down": [(0.4457, 0.6231), (0.5848, 0.6228), (0.5174, 0.7337), (0.4726, 0.7771), (0.5645, 0.7770)],
+    "up_left": [(0.3757, 0.4584), (0.4504, 0.4681), (0.3490, 0.4918), (0.3430, 0.5857), (0.3936, 0.5924)],
+    "up_right": [(0.5787, 0.4431), (0.6673, 0.4337), (0.6799, 0.4601), (0.6331, 0.5601), (0.6989, 0.5515)],
+    "down_left": [(0.3344, 0.6464), (0.4363, 0.6282), (0.3749, 0.7418), (0.4090, 0.7905), (0.4662, 0.7762)],
+    "down_right": [(0.5963, 0.6165), (0.6823, 0.6271), (0.6650, 0.7171), (0.5668, 0.7524), (0.6198, 0.7640)],
+}
+
+
+def _view_angle_kps(angle: str, side: int) -> np.ndarray | None:
+    """Scaled (side x side) landmark array for a named view angle, or None if unknown."""
+    points = VIEW_ANGLE_KPS.get(angle)
+    if not points:
+        return None
+    return np.array(points, dtype=np.float32) * float(side)
+
+
 class InstantIDAdapter:
     """Identity-preserving SDXL generation via InstantID (face embedding + IdentityNet)."""
 
@@ -272,6 +303,15 @@ class InstantIDAdapter:
         except (TypeError, ValueError):
             return float(default)
 
+    @staticmethod
+    def _view_angle(request: ImageRequest) -> str | None:
+        """The requested canonical view angle (advanced.viewAngle), or None to take the
+        pose from the reference image's own landmarks (default behavior)."""
+        angle = request.advanced.get("viewAngle")
+        if isinstance(angle, str) and angle in VIEW_ANGLE_KPS:
+            return angle
+        return None
+
     def _run_pipeline(
         self,
         settings: WorkerSettings,
@@ -288,10 +328,22 @@ class InstantIDAdapter:
         model_target = MODEL_TARGETS[request.model]
 
         reference = load_reference_image(project_path, request.reference_asset_id)
-        canvas = _letterbox(reference, request.width, request.height)
-        face = self._largest_face(canvas)
+        view_angle = self._view_angle(request)
+        if view_angle is not None:
+            # View-angle mode: pose from the canonical landmark pack, identity from the
+            # reference embedding. Square canvas so the pack kps share the output aspect
+            # (kps-distortion rule); the requested dims only set the square side.
+            side = max(256, min(request.width, request.height))
+            side -= side % 8
+            face = self._largest_face(_letterbox(reference, side, side))
+            face_kps = draw_kps(Image.new("RGB", (side, side), (0, 0, 0)), _view_angle_kps(view_angle, side))
+            width = height = side
+        else:
+            canvas = _letterbox(reference, request.width, request.height)
+            face = self._largest_face(canvas)
+            face_kps = draw_kps(canvas, face["kps"])
+            width, height = request.width, request.height
         face_emb = face["embedding"]
-        face_kps = draw_kps(canvas, face["kps"])
 
         pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
         generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
@@ -302,8 +354,8 @@ class InstantIDAdapter:
             "image": face_kps,
             "controlnet_conditioning_scale": self._controlnet_scale(request),
             "ip_adapter_scale": self._ip_adapter_scale(request),
-            "width": request.width,
-            "height": request.height,
+            "width": width,
+            "height": height,
             "num_inference_steps": self._num_inference_steps(request, model_target),
             "guidance_scale": self._guidance_scale(request, model_target),
             "generator": generator,

@@ -192,6 +192,20 @@ export const fallbackModels = [
       // InstantID; identityStructure adds the controlnetConditioningScale slider.
       referenceStrengthDefault: 0.8,
       identityStructure: { label: "Identity structure", default: 0.8, min: 0.3, max: 1.0, step: 0.05 },
+      // Canonical head angles (advanced.viewAngle; built-in landmark pack drives pose).
+      viewAngles: [
+        { id: "three_quarter_left", label: "Three-quarter left" },
+        { id: "three_quarter_right", label: "Three-quarter right" },
+        { id: "left_profile", label: "Left profile" },
+        { id: "right_profile", label: "Right profile" },
+        { id: "up", label: "Looking up" },
+        { id: "down", label: "Looking down" },
+        { id: "up_left", label: "Up · left" },
+        { id: "up_right", label: "Up · right" },
+        { id: "down_left", label: "Down · left" },
+        { id: "down_right", label: "Down · right" },
+        { id: "front", label: "Front" },
+      ],
     },
   },
   {

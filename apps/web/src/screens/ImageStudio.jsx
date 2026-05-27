@@ -210,6 +210,8 @@ export function ImageStudio() {
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [ipAdapterScale, setIpAdapterScale] = useState(0.6);
   const [controlnetScale, setControlnetScale] = useState(0.8);
+  // InstantID canonical head angle ("" = match the reference's own angle). Rides advanced.viewAngle.
+  const [viewAngle, setViewAngle] = useState("");
   const [upscaleEnabled, setUpscaleEnabled] = useState(false);
   const [upscaleFactor, setUpscaleFactor] = useState(2);
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
@@ -298,12 +300,16 @@ export function ImageStudio() {
   // (controlnetConditioningScale); models without these keys (e.g. Kolors) keep the
   // single reference-strength slider at the global default.
   const identityStructure = selectedModel?.ui?.identityStructure;
-  // Reset the reference sliders to the selected model's declared defaults whenever the
-  // model changes, so InstantID starts at its tuned 0.8/0.8 and Kolors at 0.6.
+  // Canonical head angles the model can render from a frontal reference (InstantID).
+  const viewAngles = Array.isArray(selectedModel?.ui?.viewAngles) ? selectedModel.ui.viewAngles : null;
+  // Reset the reference tuning to the selected model's declared defaults whenever the
+  // model changes, so InstantID starts at its tuned 0.8/0.8 and Kolors at 0.6, and the
+  // view angle never carries over to a model that doesn't support it.
   useEffect(() => {
     const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
     setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
     setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
+    setViewAngle("");
   }, [model]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
@@ -549,6 +555,11 @@ export function ImageStudio() {
           ...(mode === "character_image" && referenceAssetId && identityStructure
             ? { controlnetConditioningScale: controlnetScale }
             : {}),
+          // View angle (InstantID) — only when a specific angle is chosen; "" means
+          // match the reference's own angle (omit so the worker uses default behavior).
+          ...(mode === "character_image" && referenceAssetId && viewAngles && viewAngle
+            ? { viewAngle }
+            : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -710,11 +721,24 @@ export function ImageStudio() {
                           <span>{controlnetScale.toFixed(2)}</span>
                         </label>
                       ) : null}
+                      {viewAngles ? (
+                        <label className="reference-strength">
+                          View angle
+                          <select onChange={(event) => setViewAngle(event.target.value)} value={viewAngle}>
+                            <option value="">Match reference</option>
+                            {viewAngles.map((angle) => (
+                              <option key={angle.id} value={angle.id}>
+                                {angle.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : null}
                       <div className="guidance-strip">
                         <strong>Identity from reference</strong>
                         <span>
                           {identityStructure
-                            ? "InstantID holds this person's face from the reference while the prompt drives the scene. Identity strength tunes likeness; Identity structure locks face geometry and pose (lower = more pose freedom). Raise Variations and leave the seed blank to explore takes."
+                            ? "InstantID holds this person's face from the reference while the prompt drives the scene. Identity strength tunes likeness; Identity structure locks face geometry. Set a View angle to rotate the head (profiles, up/down, diagonals) with identity preserved. Raise Variations and leave the seed blank to explore takes."
                             : "This reference's identity is carried across every variation. Raise Variations and leave the seed blank to explore different takes."}
                         </span>
                       </div>
