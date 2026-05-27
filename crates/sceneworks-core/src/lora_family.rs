@@ -386,10 +386,12 @@ const SIGNATURES: &[BucketSignature] = &[
     },
     BucketSignature {
         bucket: Bucket::WanVideo,
-        // Wan transformers expose their blocks under `transformer.blocks.<n>.`
-        // (not `transformer.transformer_blocks.`) and use `self_attn`/`cross_attn`/`ffn`
-        // module names. Discriminating against the MMDiT-style key prefix
-        // keeps Wan separate from Qwen/Z-Image.
+        // Diffusers-format Wan LoRAs expose their blocks under
+        // `transformer.blocks.<n>.` (not `transformer.transformer_blocks.`) and
+        // use either the native `self_attn`/`cross_attn`/`ffn` module names or
+        // the diffusers `attn1`/`attn2` names. The `transformer.blocks.` prefix
+        // marker alone scores every key; discriminating against the MMDiT-style
+        // key prefix keeps Wan separate from Qwen/Z-Image.
         require_all_of: &[&["transformer.blocks."]],
         disqualifiers: &[
             "transformer.transformer_blocks.",
@@ -401,6 +403,47 @@ const SIGNATURES: &[BucketSignature] = &[
             ".cross_attn.",
             ".ffn.",
         ],
+    },
+    BucketSignature {
+        bucket: Bucket::WanVideo,
+        // ComfyUI / native Wan checkpoints and LoRAs prefix every block key with
+        // `diffusion_model.blocks.<n>.` and keep the native `self_attn`/
+        // `cross_attn`/`ffn` module names. Requiring both the prefix and a Wan
+        // module marker keeps this from colliding with ComfyUI Flux
+        // (`diffusion_model.double_blocks.` / `diffusion_model.single_blocks.`)
+        // or LTX (`diffusion_model.transformer_blocks.`), none of which contain
+        // the bare `.blocks.` segment.
+        require_all_of: &[
+            &["diffusion_model.blocks."],
+            &[".self_attn.", ".cross_attn.", ".ffn."],
+        ],
+        disqualifiers: &[
+            "transformer.transformer_blocks.",
+            "single_transformer_blocks.",
+            "double_blocks.",
+        ],
+        markers: &[
+            "diffusion_model.blocks.",
+            ".self_attn.",
+            ".cross_attn.",
+            ".ffn.",
+        ],
+    },
+    BucketSignature {
+        bucket: Bucket::WanVideo,
+        // Kohya / musubi-tuner Wan LoRAs flatten the native module path into
+        // underscore-delimited keys: `lora_unet_blocks_<n>_self_attn_q...`.
+        // `lora_unet_blocks_` is Wan-specific — SD/SDXL UNet keys are
+        // `lora_unet_down_blocks_` / `lora_unet_up_blocks_` / `lora_unet_mid_block_`,
+        // never the bare `lora_unet_blocks_`. Disqualifying the SD/SDXL
+        // text-encoder prefixes (which Wan lacks) prevents any collision with the
+        // Sd15/Sdxl signatures, whose text-encoder keys also contain `_self_attn_`.
+        require_all_of: &[
+            &["lora_unet_blocks_"],
+            &["_self_attn_", "_cross_attn_", "_ffn_"],
+        ],
+        disqualifiers: &["lora_te_", "lora_te1_", "lora_te2_"],
+        markers: &["lora_unet_blocks_", "_self_attn_", "_cross_attn_", "_ffn_"],
     },
     BucketSignature {
         bucket: Bucket::LtxVideo,
@@ -737,6 +780,64 @@ mod tests {
             ] {
                 keys.push(format!("transformer.blocks.{block}.{module}.lora_A.weight"));
                 keys.push(format!("transformer.blocks.{block}.{module}.lora_B.weight"));
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("wan-video"));
+    }
+
+    #[test]
+    fn detects_comfyui_native_wan_video() {
+        // ComfyUI / native Wan LoRAs prefix every block with
+        // `diffusion_model.blocks.<n>.` and keep the native self_attn/cross_attn/ffn
+        // module names. These contain `.blocks.` but not `transformer.blocks.`, so
+        // the diffusers Wan signature misses them — the ComfyUI sibling must catch them.
+        let mut keys = Vec::new();
+        for block in 0..30 {
+            for module in [
+                "self_attn.q",
+                "self_attn.k",
+                "self_attn.v",
+                "self_attn.o",
+                "cross_attn.q",
+                "cross_attn.k",
+                "ffn.0",
+                "ffn.2",
+            ] {
+                keys.push(format!(
+                    "diffusion_model.blocks.{block}.{module}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.blocks.{block}.{module}.lora_B.weight"
+                ));
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("wan-video"));
+    }
+
+    #[test]
+    fn detects_kohya_wan_video() {
+        // Kohya / musubi-tuner Wan LoRAs flatten the path into underscore-delimited
+        // keys with a `lora_unet_blocks_<n>_` prefix and no text-encoder keys.
+        let mut keys = Vec::new();
+        for block in 0..30 {
+            for module in [
+                "self_attn_q",
+                "self_attn_k",
+                "self_attn_v",
+                "self_attn_o",
+                "cross_attn_q",
+                "cross_attn_k",
+                "ffn_0",
+                "ffn_2",
+            ] {
+                keys.push(format!(
+                    "lora_unet_blocks_{block}_{module}.lora_down.weight"
+                ));
+                keys.push(format!("lora_unet_blocks_{block}_{module}.lora_up.weight"));
             }
         }
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
