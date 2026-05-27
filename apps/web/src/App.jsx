@@ -68,6 +68,10 @@ function isVideoGenerationJob(job) {
   return ["video_generate", "video_extend", "video_bridge"].includes(job.type);
 }
 
+function isInterleaveJob(job) {
+  return job.type === "image_interleave";
+}
+
 function isLoraImportNotice(message) {
   return String(message ?? "").startsWith("lora import: ");
 }
@@ -389,7 +393,7 @@ export function App() {
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
   const [jobs, setJobs] = useState([]);
-  const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [] });
+  const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], document: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
@@ -559,6 +563,10 @@ export function App() {
   const videoLocalJobs = useMemo(
     () => buildLocalJobStack(localGenerationJobIds.video, jobs, activeProject?.id, isVideoGenerationJob),
     [activeProject?.id, jobs, localGenerationJobIds.video],
+  );
+  const documentLocalJobs = useMemo(
+    () => buildLocalJobStack(localGenerationJobIds.document, jobs, activeProject?.id, isInterleaveJob),
+    [activeProject?.id, jobs, localGenerationJobIds.document],
   );
   const queueCounts = useMemo(() => {
     if (queueSummary?.counts) {
@@ -1064,6 +1072,9 @@ export function App() {
     if (active === "Video" && localIds.video.includes(job.id)) {
       return true;
     }
+    if (active === "Document" && localIds.document.includes(job.id)) {
+      return true;
+    }
     return active === "Models" && job.type === "model_download";
   }
 
@@ -1296,6 +1307,7 @@ export function App() {
     latestVideoAssets,
     videoLocalJobs,
     imageLocalJobs,
+    documentLocalJobs,
     studioLaunch,
     rememberLocalGenerationJob,
     // Person tracks (Video Studio + Replace Person)

@@ -19,6 +19,60 @@ export function onPromptKeyDown(event) {
   }
 }
 
+function jobCreatedMs(job) {
+  const parsed = Date.parse(job?.createdAt ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+// Pick the runs that belong in a studio's live stack from the tracked set, shared
+// by every studio so stacking behaves identically. Runs are kept in the order they
+// arrive (callers order oldest-first, so the active run sits on top and queued runs
+// follow). Rules:
+//   - canceled runs drop immediately (no output to show),
+//   - running and queued runs always stack,
+//   - a finished run slides out the moment a strictly-newer run starts (leaves the
+//     queue), so the next run takes its place,
+//   - a finished run with a run still queued behind it stays on top until that run
+//     starts.
+// `resultRendered(job)` reports whether a lone completed run's output has surfaced
+// elsewhere (e.g. the Image studio's latest-batch grid); when it has, the run
+// collapses out of the stack. Omit it for studios whose output ships in the job
+// result itself (documents), where a lone completed run simply stays as the output.
+export function selectStackedJobs(trackedLocalJobs, resultRendered) {
+  const successorStarted = (job) =>
+    trackedLocalJobs.some(
+      (other) =>
+        other.id !== job.id &&
+        other.status !== "queued" &&
+        other.status !== "canceled" &&
+        jobCreatedMs(other) > jobCreatedMs(job),
+    );
+  const hasPendingSuccessor = (job) =>
+    trackedLocalJobs.some(
+      (other) => other.id !== job.id && other.status !== "canceled" && jobCreatedMs(other) > jobCreatedMs(job),
+    );
+  return trackedLocalJobs.filter((job) => {
+    if (job.status === "canceled") {
+      return false;
+    }
+    if (!terminalStatuses.has(job.status)) {
+      return true;
+    }
+    if (successorStarted(job)) {
+      return false;
+    }
+    if (job.status === "completed") {
+      if (hasPendingSuccessor(job)) {
+        return true;
+      }
+      return resultRendered ? !resultRendered(job) : true;
+    }
+    // Failed/interrupted runs with nothing started behind them stay visible so the
+    // outcome is clear until the user moves on.
+    return true;
+  });
+}
+
 // Shared state/derivations for the Image and Video studios: preset selection and
 // validation, the catalog-driven model/character resets, and the completed-job
 // "keep the progress card until the asset renders" machinery. The studios keep
@@ -95,30 +149,6 @@ export function useGenerationStudio({
     return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
   }
 
-  function jobCreatedMs(job) {
-    const parsed = Date.parse(job?.createdAt ?? "");
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-
-  // A finished run is replaced once a strictly-newer run leaves the queue (i.e.
-  // a worker picked it up). Canceled runs never "start", so they don't bump the
-  // run above them off the stack.
-  function successorStarted(job) {
-    return trackedLocalJobs.some(
-      (other) =>
-        other.id !== job.id &&
-        other.status !== "queued" &&
-        other.status !== "canceled" &&
-        jobCreatedMs(other) > jobCreatedMs(job),
-    );
-  }
-
-  function hasPendingSuccessor(job) {
-    return trackedLocalJobs.some(
-      (other) => other.id !== job.id && other.status !== "canceled" && jobCreatedMs(other) > jobCreatedMs(job),
-    );
-  }
-
   function completedAnchorMs(job) {
     return Date.parse(job.completedAt ?? job.updatedAt ?? "");
   }
@@ -150,39 +180,11 @@ export function useGenerationStudio({
     return () => window.clearTimeout(timer);
   }, [assets, latestAssets, trackedLocalJobs, resultFallbackTick]);
 
-  // The visible stack: every running and queued run, plus the most recent finished
-  // run, ordered (by trackedLocalJobs) oldest-first so the active run sits on top
-  // and queued runs follow. A finished run holds its place — showing its rendered
-  // batch above the pending queue — until the next run actually starts, at which
-  // point that run slides up to replace it. Canceled runs drop immediately.
+  // The visible stack (see selectStackedJobs). A lone completed run collapses once
+  // its batch renders in the latest-batch grid or the SSE-lag window expires, so a
+  // stale progress card never lingers.
   const localJobs = useMemo(
-    () =>
-      trackedLocalJobs.filter((job) => {
-        if (job.status === "canceled") {
-          return false;
-        }
-        // Running and queued runs always stack.
-        if (!terminalStatuses.has(job.status)) {
-          return true;
-        }
-        // A finished run slides out the moment its successor starts.
-        if (successorStarted(job)) {
-          return false;
-        }
-        if (job.status === "completed") {
-          // With a run still queued behind it, keep the completed run (and its
-          // rendered batch) on top until that run starts. Standing alone, collapse
-          // to the plain latest-batch grid once its assets render (or the wait
-          // window expires) so a stale progress card never lingers.
-          if (hasPendingSuccessor(job)) {
-            return true;
-          }
-          return !resultVisible(job) && !completedWaitExpired(job);
-        }
-        // Failed/interrupted runs with nothing started behind them stay visible so
-        // the outcome is clear until the user moves on.
-        return true;
-      }),
+    () => selectStackedJobs(trackedLocalJobs, (job) => resultVisible(job) || completedWaitExpired(job)),
     [assets, latestAssets, trackedLocalJobs, resultFallbackTick],
   );
 

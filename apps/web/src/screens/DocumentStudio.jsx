@@ -8,6 +8,7 @@ import {
   INTERLEAVE_RESOLUTION_OPTIONS,
 } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
+import { selectStackedJobs } from "./generationStudio.jsx";
 
 const MAX_IMAGES_DEFAULT = 6;
 const MAX_IMAGES_LIMIT = 10;
@@ -21,12 +22,9 @@ function formatResolutionLabel(value) {
   return height ? `${width} × ${height}` : value;
 }
 
-function DocumentResult({ job, assets, projectId, onCancel, onOpenQueue }) {
+function documentSegments(job) {
   const segments = job.result?.segments;
-  if (job.status !== "completed" || !Array.isArray(segments) || !segments.length) {
-    return <JobProgressCard job={job} label="Interleaved document" onCancel={onCancel} onOpenQueue={onOpenQueue} />;
-  }
-  return <DocumentView assets={assets} projectId={projectId} segments={segments} />;
+  return Array.isArray(segments) && segments.length ? segments : null;
 }
 
 export function DocumentStudio() {
@@ -34,10 +32,11 @@ export function DocumentStudio() {
     activeProject,
     assets,
     createInterleaveJob,
+    documentLocalJobs = [],
     gpuOptions,
     imageModels,
-    jobs,
     jobAction,
+    rememberLocalGenerationJob,
     setActiveView,
     requestedGpu,
     setRequestedGpu,
@@ -67,9 +66,9 @@ export function DocumentStudio() {
     [assets],
   );
 
-  const latestJob = useMemo(() => {
-    return (jobs ?? []).find((job) => job.type === "image_interleave") ?? null;
-  }, [jobs]);
+  // Running and queued compose runs stack (oldest/active on top, queued below) and
+  // each run streams its output beneath it, mirroring the Image and Video studios.
+  const localJobs = useMemo(() => selectStackedJobs(documentLocalJobs), [documentLocalJobs]);
 
   const ready = Boolean(activeProject) && interleaveModels.length > 0;
   const canSubmit = ready && prompt.trim().length > 0 && !submitting;
@@ -98,7 +97,9 @@ export function DocumentStudio() {
     });
     setSubmitting(false);
     if (job) {
-      onOpenQueue?.();
+      // Stack the run in the studio instead of routing to the Queue, so its output
+      // streams in below the prompt as it composes.
+      rememberLocalGenerationJob?.("document", job);
     }
   }
 
@@ -201,14 +202,21 @@ export function DocumentStudio() {
       </form>
 
       <section className="studio-results">
-        {latestJob ? (
-          <DocumentResult
-            assets={assets ?? []}
-            job={latestJob}
-            onCancel={onCancelJob}
-            onOpenQueue={onOpenQueue}
-            projectId={activeProject?.id}
-          />
+        {localJobs.length ? (
+          <div className="local-job-stack">
+            {localJobs.map((job) => {
+              const segments = job.status === "completed" ? documentSegments(job) : null;
+              return (
+                <article className="local-job-group" key={job.id}>
+                  {segments ? (
+                    <DocumentView assets={assets ?? []} projectId={activeProject?.id} segments={segments} />
+                  ) : (
+                    <JobProgressCard job={job} label="Interleaved document" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                  )}
+                </article>
+              );
+            })}
+          </div>
         ) : (
           <p className="empty-panel">Your generated document will appear here.</p>
         )}

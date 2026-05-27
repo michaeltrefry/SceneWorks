@@ -6906,6 +6906,8 @@ describe("SceneWorks app shell", () => {
     const createInterleaveJob = vi.fn(() =>
       Promise.resolve({ id: "job-il-new", type: "image_interleave", status: "queued" }),
     );
+    const setActiveView = vi.fn();
+    const rememberLocalGenerationJob = vi.fn();
     const imageAsset = {
       id: "img-1",
       type: "image",
@@ -6934,14 +6936,15 @@ describe("SceneWorks app shell", () => {
             activeProject: { id: "project-1", name: "Noir" },
             assets: [imageAsset],
             createInterleaveJob,
+            documentLocalJobs: [completedJob],
             gpuOptions: ["auto"],
             imageModels: [
               { id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "interleave"] },
               { id: "z_image_turbo", name: "Z-Image Turbo", type: "image", capabilities: ["text_to_image"] },
             ],
-            jobs: [completedJob],
             jobAction: () => {},
-            setActiveView: () => {},
+            rememberLocalGenerationJob,
+            setActiveView,
             requestedGpu: "auto",
             setRequestedGpu: () => {},
           },
@@ -6985,6 +6988,69 @@ describe("SceneWorks app shell", () => {
     expect(payload.height).toBe(1152);
     // Unedited system prompt is not sent (worker uses its own default).
     expect(payload.advanced?.systemMessage).toBeUndefined();
+
+    // Submitting stacks the run in the studio rather than routing to the Queue.
+    await settle();
+    expect(rememberLocalGenerationJob).toHaveBeenCalledWith(
+      "document",
+      expect.objectContaining({ id: "job-il-new" }),
+    );
+    expect(setActiveView).not.toHaveBeenCalledWith("Queue");
+  });
+
+  it("DocumentStudio stacks a queued compose run beneath the active document", async () => {
+    const completedJob = {
+      id: "doc-job-done",
+      type: "image_interleave",
+      status: "completed",
+      createdAt: "2026-05-27T10:00:00Z",
+      payload: { prompt: "tea guide" },
+      result: {
+        segments: [
+          { type: "text", text: "Boil the water." },
+          { type: "text", text: "Steep three minutes." },
+        ],
+      },
+    };
+    const queuedJob = {
+      id: "doc-job-queued",
+      type: "image_interleave",
+      status: "queued",
+      createdAt: "2026-05-27T10:01:00Z",
+      payload: { prompt: "coffee guide" },
+      result: {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            createInterleaveJob: () => {},
+            documentLocalJobs: [completedJob, queuedJob],
+            gpuOptions: ["auto"],
+            imageModels: [
+              { id: "sensenova_u1_8b", name: "SenseNova-U1 8B", type: "image", capabilities: ["text_to_image", "interleave"] },
+            ],
+            jobAction: () => {},
+            rememberLocalGenerationJob: () => {},
+            setActiveView: () => {},
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+          },
+          <DocumentStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    // Both runs stack: the finished document plus the queued run's progress card.
+    expect(container.querySelectorAll(".local-job-group").length).toBe(2);
+    expect(container.textContent).toContain("Boil the water.");
+    expect(container.querySelector(".document-view")).not.toBeNull();
+    expect(container.querySelector(".local-job-card.queued")).not.toBeNull();
+    expect(container.textContent).not.toContain("Your generated document will appear here.");
   });
 
   it("AssetDetail reopens a saved document from the Library", async () => {
