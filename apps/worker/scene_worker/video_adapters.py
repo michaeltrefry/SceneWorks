@@ -242,15 +242,13 @@ VIDEO_MODEL_TARGETS: dict[str, dict[str, Any]] = {
     # family and ltx_video adapter as ltx_2_3, so it reuses the native torch pipeline
     # (CUDA) and the MLX path; the bf16 checkpoint shares the official LTX-2.3 key
     # layout. On Apple Silicon the MLX adapter loads a locally-converted Q4 dir.
-    # text_to_video is intentionally omitted: this merge is tuned for image-to-video
-    # and the text-only path produces incoherent output (all modes are conditioned).
     "ltx_2_3_eros": {
         "label": "LTX-2.3 10Eros",
         "family": "ltx-video",
         "adapter": "ltx_video",
         "repo": "TenStrip/LTX2.3-10Eros",
         "fallbackRepo": "Lightricks/LTX-2.3",
-        "capabilities": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+        "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "steps": {"fast": 6, "balanced": 8, "best": 20},

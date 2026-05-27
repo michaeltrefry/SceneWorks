@@ -201,8 +201,7 @@ export const fallbackModels = [
     id: "ltx_2_3_eros",
     name: "LTX-2.3 10Eros",
     type: "video",
-    // I2V-tuned merge; text-to-video omitted (produces incoherent output).
-    capabilities: ["image_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+    capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
     defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],
@@ -211,7 +210,7 @@ export const fallbackModels = [
       resolutions: ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
     },
     ui: {
-      description: "Community LTX-2.3 merge tuned for image-to-video (no text-to-video); uses LTX-video LoRAs.",
+      description: "Community LTX-2.3 merge tuned for image-to-video; uses LTX-video LoRAs.",
       durationHint: "Best at 10s or less for the current workflow.",
       promptGuide: { title: "LTX-2.3 10Eros Prompt Guide", path: "/prompt-guides/ltx-2-3-10eros.md" },
     },

@@ -1,10 +1,10 @@
 # LTX-2.3 10Eros Prompt Guide
 
-10Eros is a community LTX-2.3 merge tuned specifically for image-to-video — it does not do text-to-video (the text-only path produces incoherent output, so it's disabled for this model). It uses the same prompt shape as LTX-2.3, but is more literal: it has low self-reasoning, so motion, scene evolution, and audio must be commanded explicitly. Vague prompts produce static or drifting clips.
+10Eros is a community LTX-2.3 merge tuned for image-to-video. It uses the same prompt shape as LTX-2.3, but is more literal: it has low self-reasoning, so motion, scene evolution, and audio must be commanded explicitly. Vague prompts produce static or drifting clips.
 
 ## Best For
 
-Image-to-video short clips where you can describe the action precisely. Always start from a strong source image; the prompt commands how that image should move.
+Image-to-video and text-to-video short clips where you can describe the action precisely. Start from a strong source image for I2V.
 
 ## Prompt Shape
 

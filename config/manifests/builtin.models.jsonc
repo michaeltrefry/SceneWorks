@@ -866,11 +866,7 @@
       "family": "ltx-video",
       "type": "video",
       "adapter": "ltx_video",
-      // 10Eros is a community merge tuned specifically for image-to-video; the
-      // text-only path runs (same architecture) but produces incoherent output,
-      // so text_to_video is intentionally omitted. All declared modes are
-      // image/video-conditioned.
-      "capabilities": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
       "downloads": [
         {
           "provider": "huggingface",
@@ -941,8 +937,8 @@
       },
       "ui": {
         "label": "LTX-2.3 10Eros",
-        "description": "Community LTX-2.3 merge tuned for image-to-video (no text-to-video). Same family as LTX-2.3 — uses LTX-video LoRAs. Responds to detailed, command-style prompts.",
-        "recommendedFor": ["image_to_video"],
+        "description": "Community LTX-2.3 merge tuned for image-to-video. Same family as LTX-2.3 — uses LTX-video LoRAs. Responds to detailed, command-style prompts.",
+        "recommendedFor": ["image_to_video", "text_to_video"],
         "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow.",
         "promptGuide": {
           "title": "LTX-2.3 10Eros Prompt Guide",
