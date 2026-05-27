@@ -285,7 +285,7 @@ export function CharacterTest({
   // collapsed by default so it never turns the studio into an endless scroll.
   const characterAssets = (latestAssets ?? []).filter(
     (asset) =>
-      asset.characterId === selectedCharacter.id ||
+      asset.recipe?.normalizedSettings?.characterId === selectedCharacter.id ||
       (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === selectedCharacter.id),
   );
   return (
@@ -418,7 +418,7 @@ export function CharacterAngleSet({
   const activeJob = imageLocalJobs.find((job) => job.id === jobId);
   const characterImages = (latestAssets ?? []).filter(
     (asset) =>
-      asset.characterId === characterId ||
+      asset.recipe?.normalizedSettings?.characterId === characterId ||
       (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === characterId),
   );
 
