@@ -56,6 +56,14 @@ SenseNova-U1 is useful for dense text, but it still needs exact instructions. In
 
 For edits, say what to preserve first, then what to change. Keep the edit instruction concrete and ordered.
 
+### Avoid
+
+- Vague one-line prompts for infographics or posters — they under-constrain the layout.
+- Approximate or unquoted text; always quote the exact strings you want rendered.
+- Conflicting or overlapping layout instructions (e.g. "centered" and "left-aligned" for the same element).
+- Cramming too many competing sections into one image; fewer, clearly bounded sections render more reliably.
+- Generic quality tags like `masterpiece` or `best quality`; describe concrete content and structure instead.
+
 ## Example Prompts
 
 `Create a vertical educational infographic titled "RAIN GARDENS AT WORK". Use a clean flat vector style with a blue and green palette. Top section: a city street with rain falling. Middle section: a cutaway soil diagram with arrows labeled "runoff", "plant roots", and "filtered water". Bottom section: three benefit cards reading "Less flooding", "Cleaner rivers", and "More habitat". Large readable sans-serif text, clear margins, no overlapping elements.`

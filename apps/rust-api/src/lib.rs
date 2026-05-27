@@ -96,6 +96,8 @@ mod recipe_presets;
 use recipe_presets::*;
 mod credentials;
 use credentials::*;
+mod prompts;
+use prompts::*;
 
 const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/health",
@@ -584,6 +586,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
+        .route("/api/v1/prompts/refine", post(create_prompt_refine_job))
         .route(
             "/api/v1/credentials",
             get(list_credentials).put(set_credential),

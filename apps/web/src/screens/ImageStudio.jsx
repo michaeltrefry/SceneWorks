@@ -4,6 +4,8 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
+import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
+import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 
 const PROMPT_SUGGESTION_POOL = [
   "Barista pouring espresso, morning light",
@@ -158,6 +160,7 @@ export function ImageStudio() {
     assets,
     characters,
     createImageJob,
+    refinePrompt,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -224,6 +227,7 @@ export function ImageStudio() {
   const [loraWeights, setLoraWeights] = useState(saved.loraWeights ?? {});
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(saved.showIncompatibleLoras ?? false);
   const [submitting, setSubmitting] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const presetDefaultSnapshots = useRef({});
   const editImageAssets = useMemo(
     () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
@@ -300,6 +304,12 @@ export function ImageStudio() {
     }
   }, [availableModels, model]);
   const selectedModel = imageModels.find((item) => item.id === model);
+  // Prompt guide for the selected model; fall back to the generic image guide
+  // when a model declares none, so the button is always useful (sc-1817).
+  const promptGuide = selectedModel?.ui?.promptGuide ?? {
+    title: "Image Prompt Guide",
+    path: "/prompt-guides/generic-image.md",
+  };
   // Reference-tuning hints declared by the model (ui.*). InstantID raises the
   // reference-strength default and exposes a second "Identity structure" slider
   // (controlnetConditioningScale); models without these keys (e.g. Kolors) keep the
@@ -645,11 +655,16 @@ export function ImageStudio() {
                 </button>
               ))}
             </div>
-            {onOpenPresets ? (
-              <button className="hero-link" onClick={onOpenPresets} type="button">
-                <Icon.Folder size={14} /> Saved presets
+            <div className="prompt-hero-links">
+              <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
+                <Icon.Book size={14} /> Prompt guide
               </button>
-            ) : null}
+              {onOpenPresets ? (
+                <button className="hero-link" onClick={onOpenPresets} type="button">
+                  <Icon.Folder size={14} /> Saved presets
+                </button>
+              ) : null}
+            </div>
           </div>
 
           <div className="prompt-input-row">
@@ -666,6 +681,15 @@ export function ImageStudio() {
               {submitting ? "Queueing…" : "Generate"}
             </button>
           </div>
+
+          <RefinePromptControl
+            guidePath={promptGuide.path}
+            modelId={model}
+            onApply={setPromptFromUser}
+            prompt={prompt}
+            refinePrompt={refinePrompt}
+            workflow="image"
+          />
 
           <div className="suggestion-row">
             <span className="suggestion-row-label">Try:</span>
@@ -1047,6 +1071,9 @@ export function ImageStudio() {
           </section>
         </div>
       </form>
+      {guideOpen ? (
+        <PromptGuideModal guide={promptGuide} modelName={selectedModel?.name} onClose={() => setGuideOpen(false)} />
+      ) : null}
     </section>
   );
 }

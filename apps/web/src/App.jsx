@@ -1001,6 +1001,37 @@ export function App() {
     }
   }
 
+  // Refine a prompt via the prompt_refine worker job: POST creates the job, then
+  // poll until it reaches a terminal state and return the rewritten prompt. Project-
+  // independent (no activeProject gate); throws on failure so the studio can surface
+  // the message inline without clobbering the original prompt.
+  async function refinePrompt({ prompt, modelId, workflow, guide }) {
+    const created = await apiFetch("/api/v1/prompts/refine", token, {
+      method: "POST",
+      body: JSON.stringify({ prompt, modelId, workflow, guide }),
+    });
+    const jobId = created?.id;
+    if (!jobId) {
+      throw new Error("Could not start prompt refinement.");
+    }
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const job = await apiFetch(`/api/v1/jobs/${jobId}`, token);
+      if (job.status === "completed") {
+        const refined = job.result?.refinedPrompt;
+        if (!refined) {
+          throw new Error("Refinement returned an empty prompt.");
+        }
+        return refined;
+      }
+      if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
+        throw new Error(job.message || job.error || "Prompt refinement failed.");
+      }
+    }
+    throw new Error("Prompt refinement timed out. Is the refinement runtime running?");
+  }
+
   async function createVqaJob(asset, question, maxNewTokens) {
     if (!activeProject) {
       setError("Create or open a project first.");
@@ -1304,6 +1335,7 @@ export function App() {
     // Generation studios (sc-1651 Phase B batch 3)
     createVideoJob,
     createImageJob,
+    refinePrompt,
     latestVideoAssets,
     videoLocalJobs,
     imageLocalJobs,

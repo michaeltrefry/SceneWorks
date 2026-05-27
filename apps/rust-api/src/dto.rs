@@ -10,6 +10,18 @@ pub(crate) struct JobsQuery {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PromptRefineRequest {
+    pub(crate) prompt: String,
+    pub(crate) model_id: Option<String>,
+    pub(crate) workflow: Option<String>,
+    /// The selected model's Markdown prompt guide, sent by the client so the
+    /// worker can build a guide-aware system prompt without filesystem access to
+    /// the web assets.
+    pub(crate) guide: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AssetsQuery {
     pub(crate) include_rejected: Option<bool>,
     pub(crate) include_trashed: Option<bool>,

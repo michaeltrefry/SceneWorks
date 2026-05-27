@@ -207,6 +207,7 @@ string_enum! {
         LoraImport => "lora_import",
         LoraTrain => "lora_train",
         TrainingCaption => "training_caption",
+        PromptRefine => "prompt_refine",
     }
 }
 
@@ -302,6 +303,11 @@ string_enum! {
         // so a real run only routes to a worker that can actually train. See
         // jobs_store::worker_supports_job and apps/worker/scene_worker/runtime.py.
         LoraTrainExecute => "lora_train_execute",
+        // Prompt refinement (LLM rewrite of a user prompt). A lightweight, non-GPU
+        // job advertised by the Python worker (it only needs an OpenAI-compatible
+        // endpoint, not an inference backend); the Rust utility worker never emits
+        // it. See jobs_store::NON_GPU_JOB_TYPES and apps/worker/scene_worker/runtime.py.
+        PromptRefine => "prompt_refine",
     }
 }
 

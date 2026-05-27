@@ -39,6 +39,7 @@ pub const NON_GPU_JOB_TYPES: &[&str] = &[
     "model_import",
     "model_convert",
     "lora_import",
+    "prompt_refine",
 ];
 pub const MAX_JOB_ATTEMPTS: u32 = 5;
 

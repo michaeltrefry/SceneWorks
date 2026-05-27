@@ -20,7 +20,13 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
 ]);
 
 // Utility job types that run on any worker (no GPU required).
-export const NON_GPU_JOB_TYPES = new Set(["model_download", "model_import", "model_convert", "lora_import"]);
+export const NON_GPU_JOB_TYPES = new Set([
+  "model_download",
+  "model_import",
+  "model_convert",
+  "lora_import",
+  "prompt_refine",
+]);
 
 // Terminal job statuses (no further progress expected).
 export const terminalStatuses = new Set(["completed", "failed", "canceled", "interrupted"]);

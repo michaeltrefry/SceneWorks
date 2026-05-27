@@ -40,6 +40,7 @@ from .person_adapters import (
     segmenter_backend_available,
     tracker_backend_available,
 )
+from .prompt_refine import PromptRefineError, refine_prompt
 from .settings import WorkerSettings
 from .training_adapters import (
     SUPPORTED_TRAINING_PLAN_VERSION,
@@ -86,6 +87,13 @@ VQA_JOB_TYPES = ("image_vqa",)
 # replaced. Keep in sync with contracts.rs::JobType/WorkerCapability,
 # jobs_store::job_requires_gpu, and QueueScreen gpuRequiredJobTypes.
 INTERLEAVE_JOB_TYPES = ("image_interleave",)
+# Prompt refinement (sc-2041): a lightweight, non-GPU job that rewrites a user's
+# prompt via an OpenAI-compatible endpoint. Advertised by every Python worker
+# (it needs no inference backend), so the Rust utility worker — which lacks the
+# capability — never claims it. Keep in sync with
+# crates/sceneworks-core/src/contracts.rs::JobType/WorkerCapability and
+# jobs_store::NON_GPU_JOB_TYPES.
+PROMPT_REFINE_JOB_TYPES = ("prompt_refine",)
 # Every runtime-dispatchable job-type group, in a stable order, for the
 # ``--check`` diagnostic. Derived from the groups above so run_check can't drift
 # out of sync and underreport readiness (sc-1635: VQA + interleave were
@@ -99,6 +107,7 @@ ALL_JOB_TYPES = (
     + CAPTION_JOB_TYPES
     + VQA_JOB_TYPES
     + INTERLEAVE_JOB_TYPES
+    + PROMPT_REFINE_JOB_TYPES
 )
 
 
@@ -127,6 +136,12 @@ class ApiClient:
 def worker_capabilities(gpu: dict) -> list[str]:
     gpu_capabilities = set(gpu["capabilities"])
     capabilities = set(gpu["capabilities"]) - {"placeholder"}
+    # Prompt refinement needs only an OpenAI-compatible endpoint (no inference
+    # backend), so every Python worker advertises it. When the endpoint is
+    # unconfigured the job is still claimed and fails fast with a clear message,
+    # rather than sitting queued forever. The Rust utility worker never advertises
+    # this, so it never claims a refine job.
+    capabilities |= set(PROMPT_REFINE_JOB_TYPES)
     is_gpu_worker = "cpu" not in gpu_capabilities and "gpu" in gpu_capabilities
     if is_gpu_worker:
         # Dry-run plan validation needs no inference backend, so a GPU worker can
@@ -1246,6 +1261,59 @@ def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, jo
             restart_worker_after_oom(settings, job_id)
 
 
+def run_prompt_refine_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    job_id = job["id"]
+    payload = job.get("payload") or {}
+    prompt = (payload.get("prompt") or "").strip()
+    try:
+        heartbeat(api, settings, "busy", job_id)
+        update_job(
+            api,
+            job_id,
+            {"status": "running", "stage": "running", "progress": 0.2, "message": "Refining prompt…"},
+        )
+        refined = refine_prompt(
+            prompt,
+            guide=payload.get("guide"),
+            workflow=payload.get("workflow"),
+            base_url=settings.prompt_refine_base_url,
+            api_key=settings.prompt_refine_api_key,
+            model=settings.prompt_refine_model,
+            timeout=settings.prompt_refine_timeout_seconds,
+            max_tokens=settings.prompt_refine_max_tokens,
+        )
+        update_job(
+            api,
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Prompt refined.",
+                "result": {"originalPrompt": prompt, "refinedPrompt": refined},
+            },
+        )
+    except InterruptedError as exc:
+        update_job(api, job_id, {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)})
+    except PromptRefineError as exc:
+        # Expected, user-facing failures (runtime unconfigured/unreachable, timeout,
+        # empty response) carry a clear message already.
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": str(exc), "error": str(exc)},
+        )
+    except Exception as exc:
+        message, error = friendly_failure("Prompt refinement", exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
+        )
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def run_worker_loop(settings: WorkerSettings) -> None:
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
@@ -1310,6 +1378,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_lora_train_job(api, settings, job)
             elif job["type"] in CAPTION_JOB_TYPES:
                 run_training_caption_worker_job(api, settings, job)
+            elif job["type"] in PROMPT_REFINE_JOB_TYPES:
+                run_prompt_refine_job(api, settings, job)
             else:
                 update_job(
                     api,

@@ -36,6 +36,7 @@ export const Icon = {
   Moon: (p) => <I {...p} d="M21 13.5A9 9 0 1110.5 3a7 7 0 0010.5 10.5z" />,
   Bell: (p) => <I {...p} d="M6 16V11a6 6 0 0112 0v5l2 2H4zM10 20a2 2 0 004 0" />,
   Folder: (p) => <I {...p} d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />,
+  Book: (p) => <I {...p} d="M5 4h11a2 2 0 012 2v14H7a2 2 0 00-2 2zM5 4v16M9 8h6M9 12h5" />,
   ChevDown: (p) => <I {...p} d="M6 9l6 6 6-6" />,
   Sliders: (p) => <I {...p} d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h14M18 18h2M14 4v4M6 10v4M16 16v4" />,
   Play: (p) => <I {...p} fill d="M7 4l13 8-13 8z" />,

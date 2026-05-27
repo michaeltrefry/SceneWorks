@@ -4,6 +4,8 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { JobProgressCard } from "../components/JobProgress.jsx";
+import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
+import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 
 const MOTIONS = [
   "static",
@@ -67,6 +69,7 @@ export function VideoStudio() {
     createPersonDetectionJob,
     createPersonTrackJob,
     createVideoJob,
+    refinePrompt,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -122,7 +125,14 @@ export function VideoStudio() {
   const [loraWeights, setLoraWeights] = useState(saved.loraWeights ?? {});
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(saved.showIncompatibleLoras ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
+  const [guideOpen, setGuideOpen] = useState(false);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  // Prompt guide for the selected model; fall back to the generic video guide
+  // when a model declares none, so the button is always useful (sc-1817).
+  const promptGuide = selectedModel?.ui?.promptGuide ?? {
+    title: "Video Prompt Guide",
+    path: "/prompt-guides/generic-video.md",
+  };
   const [duration, setDuration] = useState(saved.duration ?? selectedModel?.defaults?.duration ?? 6);
   const [resolution, setResolution] = useState(saved.resolution ?? selectedModel?.defaults?.resolution ?? "768x512");
   const [fps, setFps] = useState(saved.fps ?? selectedModel?.defaults?.fps ?? 25);
@@ -556,11 +566,16 @@ export function VideoStudio() {
                 </button>
               ))}
             </div>
-            {onOpenPresets ? (
-              <button className="hero-link" onClick={onOpenPresets} type="button">
-                <Icon.Folder size={14} /> Saved presets
+            <div className="prompt-hero-links">
+              <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
+                <Icon.Book size={14} /> Prompt guide
               </button>
-            ) : null}
+              {onOpenPresets ? (
+                <button className="hero-link" onClick={onOpenPresets} type="button">
+                  <Icon.Folder size={14} /> Saved presets
+                </button>
+              ) : null}
+            </div>
           </div>
 
           <div className="prompt-input-row">
@@ -581,6 +596,17 @@ export function VideoStudio() {
               {submitting ? "Queueing…" : renderLabel}
             </button>
           </div>
+
+          {promptless ? null : (
+            <RefinePromptControl
+              guidePath={promptGuide.path}
+              modelId={model}
+              onApply={setPrompt}
+              prompt={prompt}
+              refinePrompt={refinePrompt}
+              workflow="video"
+            />
+          )}
 
           <div className="motion-row">
             <span className="motion-row-label">Motion:</span>
@@ -1094,6 +1120,9 @@ export function VideoStudio() {
           </div>
         </div>
       </form>
+      {guideOpen ? (
+        <PromptGuideModal guide={promptGuide} modelName={selectedModel?.name} onClose={() => setGuideOpen(false)} />
+      ) : null}
     </section>
   );
 }

@@ -86,8 +86,16 @@ from scene_worker.runtime import (
     resolve_loaded_models,
     run_check,
     run_lora_train_job,
+    run_prompt_refine_job,
     run_video_job,
     worker_capabilities,
+)
+from scene_worker.prompt_refine import (
+    PromptRefineMalformed,
+    PromptRefineUnavailable,
+    build_system_prompt,
+    clean_output,
+    refine_prompt,
 )
 from scene_worker.training_adapters import (
     SUPPORTED_LR_SCHEDULERS,
@@ -203,7 +211,8 @@ class FakePeftBackendErrorPipe:
 def test_cpu_worker_does_not_advertise_gpu_generation_capabilities():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
-    assert capabilities == ["cpu"]
+    # prompt_refine is non-GPU and advertised by every Python worker (sc-2041).
+    assert capabilities == ["cpu", "prompt_refine"]
     assert "placeholder" not in capabilities
 
 
@@ -224,8 +233,9 @@ def test_gpu_worker_without_cuda_torch_does_not_claim_generation_jobs(monkeypatc
     capabilities = worker_capabilities({"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "nvidia"]})
 
     # lora_train dry-run validation needs no inference backend, so it is
-    # advertised even without torch; generation job types are not.
-    assert capabilities == ["gpu", "lora_train", "nvidia"]
+    # advertised even without torch; generation job types are not. prompt_refine
+    # also needs no inference backend (sc-2041).
+    assert capabilities == ["gpu", "lora_train", "nvidia", "prompt_refine"]
     for job_type in ("image_generate", "image_edit", "image_vqa", "video_generate", "training_caption"):
         assert job_type not in capabilities
 
@@ -256,6 +266,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
         "lora_train",
         "lora_train_execute",
         "person_replace",
+        "prompt_refine",
         "training_caption",
         "video_bridge",
         "video_extend",
@@ -279,7 +290,7 @@ def test_gpu_worker_advertises_lora_train_execute_only_with_inference_backend(mo
 def test_python_cpu_worker_does_not_advertise_person_tracking_jobs():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
-    assert capabilities == ["cpu"]
+    assert capabilities == ["cpu", "prompt_refine"]
 
 
 def test_gpu_worker_advertises_real_person_jobs_when_backends_installed(monkeypatch):
@@ -307,7 +318,7 @@ def test_cpu_worker_never_advertises_real_person_jobs_even_with_backends(monkeyp
     monkeypatch.setattr("scene_worker.runtime.detector_backend_available", lambda: True)
     monkeypatch.setattr("scene_worker.runtime.tracker_backend_available", lambda: True)
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
-    assert capabilities == ["cpu"]
+    assert capabilities == ["cpu", "prompt_refine"]
 
 
 def test_python_cpu_child_disables_cuda():
@@ -2777,6 +2788,8 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         # must report them too.
         "image_vqa",
         "image_interleave",
+        # sc-2041: prompt refinement is dispatched on every Python worker.
+        "prompt_refine",
     ]
     assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
 
@@ -7267,3 +7280,133 @@ def test_repo_slug_functions_match_cross_language_contract():
         repo = case["repo"]
         assert safe_download_dir(repo) == case["safeDownloadDir"], f"safe_download_dir drift for {repo!r}"
         assert safe_repo_dir_name(repo) == case["safeRepoDirName"], f"safe_repo_dir_name drift for {repo!r}"
+
+
+# ---- Prompt refinement (sc-2041) ----
+
+
+def _refine_settings(**overrides):
+    base = {
+        "worker_id": "worker-1",
+        "gpu_id": "cpu",
+        "prompt_refine_base_url": "http://localhost:11434/v1",
+        "prompt_refine_api_key": "",
+        "prompt_refine_model": "gemma-heretic",
+        "prompt_refine_timeout_seconds": 60.0,
+        "prompt_refine_max_tokens": 1024,
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _install_fake_openai(monkeypatch, *, content=None, raises=None):
+    module = ModuleType("openai")
+
+    class APITimeoutError(Exception):
+        pass
+
+    class APIConnectionError(Exception):
+        pass
+
+    captured = {}
+
+    class _OpenAI:
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+
+            def create(**call_kwargs):
+                captured["call"] = call_kwargs
+                if raises is not None:
+                    raise raises
+                message = SimpleNamespace(content=content)
+                return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+    module.OpenAI = _OpenAI
+    module.APITimeoutError = APITimeoutError
+    module.APIConnectionError = APIConnectionError
+    monkeypatch.setitem(sys.modules, "openai", module)
+    return captured, APITimeoutError, APIConnectionError
+
+
+def test_build_system_prompt_uses_workflow_medium_and_embeds_guide():
+    image = build_system_prompt("# Z-Image Guide\n\nUse short prompts.", "image")
+    assert "generative image model" in image
+    assert "Z-Image Guide" in image
+
+    video = build_system_prompt(None, "video")
+    assert "generative video model" in video
+    assert "# Model prompt guide" not in video
+
+
+def test_clean_output_strips_reasoning_and_quoting():
+    assert clean_output("<think>plan</think>A vivid sunset over hills.") == "A vivid sunset over hills."
+    assert clean_output('"A vivid sunset over hills."') == "A vivid sunset over hills."
+    assert clean_output("```\nA vivid sunset over hills.\n```") == "A vivid sunset over hills."
+
+
+def test_refine_prompt_raises_when_runtime_unconfigured():
+    with pytest.raises(PromptRefineUnavailable):
+        refine_prompt("a dog", guide=None, workflow="image", base_url="", api_key="", model="")
+
+
+def test_refine_prompt_success_calls_endpoint(monkeypatch):
+    captured, _, _ = _install_fake_openai(monkeypatch, content="A golden retriever in a sunlit park.")
+    out = refine_prompt(
+        "dog in park",
+        guide="# Guide",
+        workflow="image",
+        base_url="http://localhost:11434/v1",
+        api_key="",
+        model="gemma-heretic",
+    )
+    assert out == "A golden retriever in a sunlit park."
+    # Placeholder key supplied when none configured; model + system prompt forwarded.
+    assert captured["init"]["api_key"] == "not-needed"
+    assert captured["call"]["model"] == "gemma-heretic"
+    assert captured["call"]["messages"][0]["role"] == "system"
+
+
+def test_refine_prompt_raises_malformed_on_empty_response(monkeypatch):
+    _install_fake_openai(monkeypatch, content="   ")
+    with pytest.raises(PromptRefineMalformed):
+        refine_prompt(
+            "dog",
+            guide=None,
+            workflow="image",
+            base_url="http://localhost:11434/v1",
+            api_key="",
+            model="gemma-heretic",
+        )
+
+
+def test_run_prompt_refine_job_writes_refined_result(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    monkeypatch.setattr("scene_worker.runtime.refine_prompt", lambda prompt, **kwargs: "Refined: " + prompt)
+    api = _DryRunApi()
+    job = {"id": "job-refine-1", "type": "prompt_refine", "payload": {"prompt": "dog in park", "workflow": "image"}}
+
+    run_prompt_refine_job(api, _refine_settings(), job)
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "completed"
+    assert terminal["result"]["refinedPrompt"] == "Refined: dog in park"
+    assert terminal["result"]["originalPrompt"] == "dog in park"
+
+
+def test_run_prompt_refine_job_reports_runtime_failure(monkeypatch):
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+
+    def _boom(prompt, **kwargs):
+        raise PromptRefineUnavailable("Prompt refinement runtime is not configured.")
+
+    monkeypatch.setattr("scene_worker.runtime.refine_prompt", _boom)
+    api = _DryRunApi()
+    job = {"id": "job-refine-2", "type": "prompt_refine", "payload": {"prompt": "dog", "workflow": "image"}}
+
+    run_prompt_refine_job(api, _refine_settings(prompt_refine_base_url="", prompt_refine_model=""), job)
+
+    terminal = api.progress[-1]
+    assert terminal["status"] == "failed"
+    assert "not configured" in terminal["message"]

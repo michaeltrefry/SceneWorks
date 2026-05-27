@@ -28,6 +28,15 @@ class WorkerSettings:
         # fraction of the card's own capacity so a smaller card isn't blocked forever
         # (see should_skip_claim_low_vram). 0 disables the gate. CPU/MPS are never gated.
         self.min_free_vram_mb = int(os.getenv("SCENEWORKS_MIN_FREE_VRAM_MB", "24000"))
+        # Prompt refinement (sc-2041) calls an OpenAI-compatible chat-completions
+        # endpoint (e.g. a local gemma GGUF served by Ollama/llama.cpp/LM Studio).
+        # Left blank by default; when base_url+model are unset the refine job fails
+        # fast with a clear "runtime not configured" message instead of sitting queued.
+        self.prompt_refine_base_url = os.getenv("PROMPT_REFINE_BASE_URL", "").strip()
+        self.prompt_refine_api_key = os.getenv("PROMPT_REFINE_API_KEY", "").strip()
+        self.prompt_refine_model = os.getenv("PROMPT_REFINE_MODEL", "").strip()
+        self.prompt_refine_timeout_seconds = float(os.getenv("PROMPT_REFINE_TIMEOUT_SECONDS", "60"))
+        self.prompt_refine_max_tokens = int(os.getenv("PROMPT_REFINE_MAX_TOKENS", "1024"))
 
     def for_worker(self, *, worker_id: str, gpu_id: str) -> "WorkerSettings":
         settings = object.__new__(WorkerSettings)
@@ -41,4 +50,9 @@ class WorkerSettings:
         settings.poll_seconds = self.poll_seconds
         settings.min_free_vram_mb = self.min_free_vram_mb
         settings.force_cancel_seconds = self.force_cancel_seconds
+        settings.prompt_refine_base_url = self.prompt_refine_base_url
+        settings.prompt_refine_api_key = self.prompt_refine_api_key
+        settings.prompt_refine_model = self.prompt_refine_model
+        settings.prompt_refine_timeout_seconds = self.prompt_refine_timeout_seconds
+        settings.prompt_refine_max_tokens = self.prompt_refine_max_tokens
         return settings
