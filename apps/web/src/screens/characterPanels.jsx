@@ -391,6 +391,7 @@ export function CharacterAngleSet({
   latestAssets = [],
   imageLocalJobs = [],
   rememberLocalGenerationJob,
+  onPreview,
 }) {
   const angleCount = angleModel?.ui?.viewAngles?.length ?? 0;
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
@@ -523,9 +524,17 @@ export function CharacterAngleSet({
       {activeJob ? <JobProgressCard job={activeJob} label={`Angle set · ${angleCount} views`} /> : null}
       {!activeJob && status ? <p className="inline-warning">{status}</p> : null}
       {characterImages.length ? (
-        <div className="review-grid">
+        <div className="reference-thumb-row">
           {characterImages.map((asset) => (
-            <AssetMedia asset={asset} controls={false} key={asset.id} />
+            <button
+              aria-label={`Preview ${asset.displayName ?? asset.id}`}
+              className="reference-thumb"
+              key={asset.id}
+              onClick={() => onPreview?.(asset)}
+              type="button"
+            >
+              <AssetMedia asset={asset} controls={false} />
+            </button>
           ))}
         </div>
       ) : null}

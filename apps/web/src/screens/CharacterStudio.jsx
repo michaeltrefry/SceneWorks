@@ -355,6 +355,7 @@ export function CharacterStudio() {
               imageLocalJobs={imageLocalJobs}
               importAsset={importAsset}
               latestAssets={latestAssets}
+              onPreview={onPreview}
               rememberLocalGenerationJob={rememberLocalGenerationJob}
               selectedCharacter={selectedCharacter}
             />
