@@ -2751,6 +2751,301 @@ class MlxQwenAdapter:
         return {"error": "MLX Qwen sidecar produced no parseable result."}
 
 
+class MlxZImageAdapter:
+    """Z-Image-Turbo text-to-image via mflux (Apple MLX), run OUT-OF-PROCESS.
+
+    Third mflux family on the sc-1970 sidecar venv (after sc-1972 wired Qwen).
+    Same `/opt/mlx-flux-venv`, same `mlx_flux_runner.py` (dispatches on
+    `spec["model"]` to the matching mflux family class — `ZImage` for
+    `z_image_turbo`). Selection mirrors `MlxQwenAdapter` exactly; only the
+    supported-models set, the worker-event prefix, and the runtime adapter id
+    differ. sc-2145.
+
+    Spike measurement (2026-05-28, M5 Max 128 GB, mflux 0.17.5, 1024² 8
+    steps Q8): 53.3 s wall-clock, ~4.6 s/step steady-state, ~52.5 GB peak.
+    Z-Image-Turbo's value is its 8-step distillation, not raw step speed.
+
+    v1 scope: `z_image_turbo` only. `mflux.models.common.config.model_config`
+    also exposes `ModelConfig.z_image()` (full / non-turbo), but SceneWorks
+    only catalogs Turbo today — a follow-up can add Z-Image base if and when
+    a `z_image` manifest entry lands.
+
+    Selected when ALL of:
+      - the request model is in ``_supported_models`` (z_image_turbo)
+      - ``sys.platform == "darwin"``
+      - the sidecar venv exists (``_sidecar_available()``)
+      - ``SCENEWORKS_DISABLE_MLX_FLUX`` is unset (shared opt-out across the
+        whole mflux sidecar — one switch per venv, not per family)
+      - the request has no reference asset and no edit_image mode
+
+    Falls back to ``ZImageDiffusersAdapter`` (torch / diffusers) on any of
+    these failing. Never regresses the torch path.
+    """
+
+    id = "mlx_z_image"
+    _supported_models = {"z_image_turbo"}
+
+    def __init__(self) -> None:
+        self._scratch_dir: Path | None = None
+
+    def discard_temp_outputs(self, job_id: str | None = None) -> None:
+        work_dir = self._scratch_dir
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self._scratch_dir = None
+
+    def loaded_models(self) -> list[str]:
+        return []
+
+    @staticmethod
+    def _sidecar_python() -> str:
+        # Shared sidecar venv with MlxFluxAdapter / MlxQwenAdapter — one
+        # interpreter at /opt/mlx-flux-venv hosts every mflux family.
+        return os.getenv("SCENEWORKS_MLX_FLUX_PYTHON", "/opt/mlx-flux-venv/bin/python")
+
+    @staticmethod
+    def _runner_path() -> Path:
+        # Shared runner; dispatches on the spec's `model` field.
+        return Path(__file__).resolve().parent / "mlx_flux_runner.py"
+
+    def _sidecar_available(self) -> bool:
+        return Path(self._sidecar_python()).exists() and self._runner_path().exists()
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        model_target = MODEL_TARGETS.get(request.model, {})
+        if model_target.get("adapter") != ZImageDiffusersAdapter.id:
+            raise RuntimeError(f"{request.model} is not a Z-Image target.")
+        if request.model not in self._supported_models:
+            raise RuntimeError(
+                f"MlxZImageAdapter supports "
+                f"{', '.join(sorted(self._supported_models))}, not {request.model}."
+            )
+        if request.mode == "edit_image":
+            raise RuntimeError(
+                f"{request.model} MLX adapter is text-to-image only. "
+                "Use SCENEWORKS_IMAGE_ADAPTER=z_image_diffusers for the torch path."
+            )
+        if request.reference_asset_id:
+            # ZImageDiffusersAdapter itself has no reference path (sc-2005
+            # cleanup); raising here keeps the error surface honest if a
+            # caller manually targets MlxZImageAdapter with one.
+            raise RuntimeError(
+                f"{request.model} reference-image generation is not supported "
+                "on the MLX backend (Z-Image has no IP-Adapter weights upstream)."
+            )
+
+        validate_lora_compatibility(
+            request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
+        )
+        lora_specs = normalize_lora_specs(request.loras)
+
+        if not self._sidecar_available():
+            raise RuntimeError(
+                "MLX Z-Image generation requires the isolated mlx-flux sidecar venv "
+                "(shared with MlxFluxAdapter / MlxQwenAdapter). The desktop bootstrap "
+                "installs it on first launch (apps/desktop/src/setup.rs "
+                "provision_mlx_flux_venv); rebuild without SCENEWORKS_DISABLE_MLX_FLUX=1, "
+                "or set SCENEWORKS_MLX_FLUX_PYTHON to a Python interpreter that has "
+                f"mflux installed (looked for {self._sidecar_python()})."
+            )
+
+        total = request.count
+        steps = self._num_inference_steps(request, model_target)
+        guidance = self._guidance_scale(request, model_target)
+        quantize = self._resolve_quantize(request)
+        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+
+        progress(
+            "loading_model",
+            "loading_model",
+            0.18,
+            f"Loading {model_target['label']} (MLX sidecar venv).",
+        )
+        work_dir = Path(tempfile.mkdtemp(prefix="mlx_z_image_sidecar_"))
+        self._scratch_dir = work_dir
+        try:
+            images = self._run_sidecar(
+                job_id=job["id"],
+                work_dir=work_dir,
+                label=model_target["label"],
+                total=total,
+                spec={
+                    "model": request.model,
+                    "prompt": request.prompt,
+                    "negativePrompt": request.negative_prompt or None,
+                    "seeds": seeds,
+                    "height": request.height,
+                    "width": request.width,
+                    "numInferenceSteps": steps,
+                    "guidance": guidance,
+                    "quantize": quantize,
+                    "loras": [
+                        {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
+                        for lora in lora_specs
+                    ],
+                },
+                progress=progress,
+                cancel_requested=cancel_requested,
+            )
+
+            def image_at_index(index: int) -> Image.Image:
+                progress(
+                    "running",
+                    "generating",
+                    image_batch_progress(index, total),
+                    format_batch_running_message(model_target["label"], index, total),
+                )
+                with Image.open(images[index]) as handle:
+                    return handle.convert("RGB")
+
+            return ImageAssetWriter().write_incremental_outputs(
+                request=request,
+                project_path=project_path,
+                image_count=total,
+                image_at_index=image_at_index,
+                adapter_id=self.id,
+                progress=progress,
+                cancel_requested=cancel_requested,
+                raw_settings={
+                    **request.advanced,
+                    "repo": model_target["repo"],
+                    "numInferenceSteps": steps,
+                    "guidanceScale": guidance,
+                    "mlxQuantize": quantize,
+                    "sidecarVenv": self._sidecar_python(),
+                    "realModelInference": True,
+                },
+                settings=settings,
+                job_id=job["id"],
+            )
+        finally:
+            self.discard_temp_outputs(job["id"])
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
+
+    def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
+        # Z-Image-Turbo is guidance-distilled; mflux accepts guidance=None to
+        # skip the CFG path. Mirror the per-model default from MODEL_TARGETS
+        # (which the torch adapter also reads).
+        default = model_target.get("guidanceScale", 1.0)
+        try:
+            return float(request.advanced.get("guidanceScale", default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _resolve_quantize(self, request: ImageRequest) -> int | None:
+        """Pick the mflux quantize level. Order: advanced > manifest > Q8 default.
+        Identical to MlxFluxAdapter._resolve_quantize / MlxQwenAdapter._resolve_quantize."""
+        override = request.advanced.get("mlxQuantize")
+        if override is not None and not isinstance(override, bool):
+            try:
+                parsed = int(override)
+                return parsed if parsed > 0 else None
+            except (TypeError, ValueError):
+                pass
+        mlx_entry = request.model_manifest_entry.get("mlx") if request.model_manifest_entry else None
+        if isinstance(mlx_entry, dict):
+            manifest_q = mlx_entry.get("quantize")
+            if manifest_q is not None:
+                try:
+                    parsed = int(manifest_q)
+                    return parsed if parsed > 0 else None
+                except (TypeError, ValueError):
+                    pass
+        return 8
+
+    def _run_sidecar(
+        self,
+        *,
+        job_id: str,
+        work_dir: Path,
+        label: str,
+        total: int,
+        spec: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> list[str]:
+        spec = {**spec, "outDir": str(work_dir)}
+        spec_path = work_dir / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        stdout_log = work_dir / "stdout.log"
+        cmd = [self._sidecar_python(), str(self._runner_path()), str(spec_path)]
+        emit_worker_event(
+            "mlx_z_image_sidecar_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=spec["model"],
+            imageCount=total,
+            quantize=spec.get("quantize"),
+            sidecar=self._sidecar_python(),
+        )
+        progress(
+            "running",
+            "generating",
+            image_batch_progress(0, total),
+            f"Running {label} ({total} image(s)).",
+        )
+        with stdout_log.open("w", encoding="utf-8") as out:
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            while True:
+                try:
+                    proc.wait(timeout=2)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_requested():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise InterruptedError("Image generation canceled by user.")
+        result = self._read_result(work_dir, stdout_log)
+        if proc.returncode != 0 or "error" in result:
+            error = result.get("error") or f"MLX Z-Image sidecar exited with code {proc.returncode}."
+            emit_worker_event(
+                "mlx_z_image_sidecar_failed",
+                jobId=job_id,
+                adapter=self.id,
+                error=error,
+                returnCode=proc.returncode,
+            )
+            raise RuntimeError(f"MLX Z-Image generation failed in the sidecar venv: {error}")
+        images = [str(path) for path in result.get("images", [])]
+        if len(images) != total:
+            raise RuntimeError(f"MLX Z-Image sidecar produced {len(images)} image(s); expected {total}.")
+        emit_worker_event("mlx_z_image_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
+        return images
+
+    @staticmethod
+    def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
+        result_path = work_dir / "result.json"
+        if result_path.exists():
+            try:
+                return json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        try:
+            lines = [line for line in stdout_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {"error": "MLX Z-Image sidecar produced no parseable result."}
+
+
 class KolorsDiffusersAdapter:
     """Kwai-Kolors Kolors text-to-image via diffusers.KolorsPipeline.
 
@@ -5142,6 +5437,7 @@ def create_image_adapter(
 ) -> (
     ProceduralImageAdapter
     | ZImageDiffusersAdapter
+    | MlxZImageAdapter
     | QwenImageAdapter
     | MlxQwenAdapter
     | LensTurboAdapter
@@ -5164,6 +5460,7 @@ def create_image_adapter(
     # one), so match by string id and lazily import on the no-adapters-dict path.
     if requested and requested not in {
         ZImageDiffusersAdapter.id,
+        MlxZImageAdapter.id,
         QwenImageAdapter.id,
         MlxQwenAdapter.id,
         LensTurboAdapter.id,
@@ -5179,6 +5476,8 @@ def create_image_adapter(
         raise RuntimeError(f"Unsupported SCENEWORKS_IMAGE_ADAPTER value: {requested}.")
     if requested == ZImageDiffusersAdapter.id:
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
+    if requested == MlxZImageAdapter.id:
+        return adapters.get("mlx_z_image") if adapters else MlxZImageAdapter()
     if requested == QwenImageAdapter.id:
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
     if requested == MlxQwenAdapter.id:
@@ -5203,6 +5502,13 @@ def create_image_adapter(
         return _pulid_flux_adapter(adapters)
     model_target = MODEL_TARGETS.get(payload.get("model", "z_image_turbo"), {})
     if model_target.get("adapter") == ZImageDiffusersAdapter.id:
+        # Z-Image auto-dispatch: prefer MlxZImageAdapter on macOS when its
+        # sidecar venv (shared with FLUX / Qwen) is installed and the model is
+        # supported (z_image_turbo only in v1). Otherwise fall back to the
+        # torch path. SCENEWORKS_DISABLE_MLX_FLUX (shared opt-out) forces
+        # torch. sc-2145.
+        if _should_route_z_image_to_mlx(payload):
+            return adapters.get("mlx_z_image") if adapters else MlxZImageAdapter()
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
     if model_target.get("adapter") == QwenImageAdapter.id:
         # Qwen auto-dispatch: prefer MlxQwenAdapter on macOS when its sidecar venv
@@ -5267,6 +5573,38 @@ def _should_route_flux_to_mlx(payload: dict[str, Any]) -> bool:
     if payload.get("referenceAssetId"):
         return False
     return MlxFluxAdapter()._sidecar_available()
+
+
+def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
+    """Decide whether the Z-Image auto-dispatch path should pick MlxZImageAdapter
+    (shared mflux sidecar venv) over ZImageDiffusersAdapter (torch / diffusers).
+    Mirrors `_should_route_flux_to_mlx` / `_should_route_qwen_to_mlx` exactly,
+    except only `z_image_turbo` is wired in v1 (mflux also has `z_image` base /
+    full but SceneWorks only catalogs Turbo today — sc-2005 cleanup). sc-2145.
+
+    Gates:
+      1. SCENEWORKS_DISABLE_MLX_FLUX unset (shared opt-out — one env var per
+         sidecar venv, not per mflux family).
+      2. Platform == darwin.
+      3. Model in MlxZImageAdapter._supported_models.
+      4. mode != "edit_image".
+      5. No referenceAssetId (Z-Image has no reference path on either
+         backend; the flag is checked symmetrically with the other mflux
+         families).
+      6. Sidecar venv exists.
+    """
+    if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    if sys.platform != "darwin":
+        return False
+    model = payload.get("model")
+    if model not in MlxZImageAdapter._supported_models:
+        return False
+    if payload.get("mode") == "edit_image":
+        return False
+    if payload.get("referenceAssetId"):
+        return False
+    return MlxZImageAdapter()._sidecar_available()
 
 
 def _should_route_qwen_to_mlx(payload: dict[str, Any]) -> bool:

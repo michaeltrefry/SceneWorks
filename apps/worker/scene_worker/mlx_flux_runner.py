@@ -71,6 +71,14 @@ def _resolve_model_handle(model_id: str) -> tuple[type, object, str]:
     if model_id == "qwen_image":
         from mflux.models.qwen.variants.txt2img.qwen_image import QwenImage
         return QwenImage, ModelConfig.qwen_image(), "mlx_qwen"
+    if model_id == "z_image_turbo":
+        # NOTE: the ZImage import path is `variants.z_image`, not
+        # `variants.txt2img.z_image` (mflux 0.17.5 — Z-Image hasn't been
+        # refactored into the txt2img subpackage like Flux/Qwen). The
+        # GeneratedImage return shape matches even though the type annotation
+        # claims PIL.Image.Image — main() drops `.image` either way.
+        from mflux.models.z_image.variants.z_image import ZImage
+        return ZImage, ModelConfig.z_image_turbo(), "mlx_z_image"
     raise RuntimeError(f"mlx_flux_runner: unsupported model id {model_id!r}.")
 
 
