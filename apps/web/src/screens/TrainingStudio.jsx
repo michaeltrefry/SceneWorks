@@ -11,7 +11,7 @@ const trainingTabs = [
   { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
 ];
 const defaultGpuOptions = ["auto"];
-const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt"];
+const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"];
 const timestepTypeOptions = ["sigmoid", "linear", "weighted"];
 const timestepBiasOptions = ["balanced", "high_noise", "low_noise"];
 const lossTypeOptions = ["mse", "mae"];
@@ -25,6 +25,7 @@ const optimizerLabels = {
   adamw8bit: "AdamW 8-bit",
   prodigy: "Prodigy",
   prodigyopt: "Prodigy",
+  rose: "Rose",
 };
 // Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
 // worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.

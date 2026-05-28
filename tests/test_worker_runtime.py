@@ -3005,6 +3005,35 @@ def test_build_optimizer_uses_prodigy_with_aitoolkit_lr_floor(monkeypatch):
     assert calls == {"params": params, "kwargs": {"lr": 1.0, "eps": 1e-6, "weight_decay": 0.0001}}
 
 
+def test_build_optimizer_uses_rose(monkeypatch):
+    calls = {}
+
+    class FakeRose:
+        def __init__(self, params, **kwargs):
+            calls["params"] = params
+            calls["kwargs"] = kwargs
+
+    def fake_import_module(name):
+        if name == "torch":
+            return SimpleNamespace(optim=SimpleNamespace())
+        if name == "rose_opt":
+            return SimpleNamespace(Rose=FakeRose)
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr("scene_worker.training_adapters.importlib.import_module", fake_import_module)
+    params = [object()]
+
+    optimizer = build_optimizer("rose", params, 0.0005, 0.01)
+
+    assert isinstance(optimizer, FakeRose)
+    # compute_dtype="fp32" is pinned to avoid Rose's fp64 default, which has no
+    # MPS kernel on Apple Silicon.
+    assert calls == {
+        "params": params,
+        "kwargs": {"lr": 0.0005, "weight_decay": 0.01, "compute_dtype": "fp32"},
+    }
+
+
 def test_lr_schedule_updates_converts_microsteps_to_optimizer_updates():
     # accum=1 -> one optimizer update per micro-step; warmup passes through.
     assert lr_schedule_updates(1000, 1, 0) == (1000, 0)

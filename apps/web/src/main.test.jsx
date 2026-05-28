@@ -271,7 +271,7 @@ const zImageTrainingTarget = {
   },
   limits: {
     resolutions: [512, 768, 1024],
-    optimizers: ["adamw8bit", "adamw", "adam", "prodigyopt"],
+    optimizers: ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
     qualityPresets: ["speed", "balanced", "quality"],
     outputScopes: ["project", "global"],
   },
@@ -1355,7 +1355,7 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Guidance scale").value).toBe("0");
     expect(field(container, "Rank").value).toBe("16");
     expect(field(container, "Precision").value).toBe("bf16");
-    expect([...field(container, "Optimizer").options].map((option) => option.value)).toEqual(["adamw8bit", "adamw", "adam", "prodigyopt"]);
+    expect([...field(container, "Optimizer").options].map((option) => option.value)).toEqual(["adamw8bit", "adamw", "adam", "prodigyopt", "rose"]);
     await changeField(field(container, "Optimizer"), "prodigyopt");
     await changeField(field(container, "Guidance scale"), "1.2");
 

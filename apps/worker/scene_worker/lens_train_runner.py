@@ -136,6 +136,16 @@ def _build_optimizer(torch: Any, name: str, params: list[Any], lr: float, weight
         except Exception:
             _log("prodigyopt unavailable; falling back to torch.optim.AdamW.")
             return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    if normalized in {"rose", "rose-opt", "rose_opt", "roseopt"}:
+        try:
+            from rose_opt import Rose  # type: ignore
+
+            # compute_dtype="fp32": Rose defaults to fp64 internally, which has
+            # no MPS kernel; fp32 is safe on both CUDA and Apple Silicon.
+            return Rose(params, lr=lr, weight_decay=weight_decay, compute_dtype="fp32")
+        except Exception:
+            _log("rose-opt unavailable; falling back to torch.optim.AdamW.")
+            return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
     if normalized == "adam":
         return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
     return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)

@@ -913,7 +913,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "steps": [200, 6000],
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
-            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
@@ -1008,7 +1008,7 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             // for lower-VRAM runs.
             "resolutions": [768, 1024, 1440],
             "batchSize": [1, 4],
-            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
@@ -1170,7 +1170,7 @@ fn wan_lora_target() -> TrainingTarget {
             "steps": [200, 4000],
             "resolutions": [512, 768],
             "batchSize": [1, 2],
-            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
@@ -1249,7 +1249,7 @@ fn wan_moe_lora_target(
             "steps": [200, 4000],
             "resolutions": [512, 768],
             "batchSize": [1, 2],
-            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
@@ -1348,7 +1348,7 @@ fn sdxl_lora_target() -> TrainingTarget {
             "steps": [200, 6000],
             "resolutions": [768, 1024],
             "batchSize": [1, 4],
-            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt"],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
