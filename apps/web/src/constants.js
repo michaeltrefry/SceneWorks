@@ -221,7 +221,7 @@ export const fallbackModels = [
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
-      resolutions: ["768x512", "512x768", "640x640", "1024x1024", "1280x720", "720x1280"],
+      resolutions: ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
     },
     ui: {
       description: "First-class short-shot video target.",
@@ -239,7 +239,7 @@ export const fallbackModels = [
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
-      resolutions: ["768x512", "512x768", "640x640", "1024x1024", "1280x720", "720x1280"],
+      resolutions: ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
     },
     ui: {
       description: "Community LTX-2.3 merge tuned for image-to-video; uses LTX-video LoRAs.",

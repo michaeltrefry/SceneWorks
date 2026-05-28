@@ -972,7 +972,11 @@
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "fps": [24, 25, 30],
-        "resolutions": ["768x512", "512x768", "640x640", "1024x1024", "1280x720", "720x1280"],
+        // LTX is bucket-trained on 480p/720p derivatives; squares above 640x640
+        // fall outside the training distribution and produce black frames. Keep
+        // the square option at 640x640 even though normalized_dimensions would
+        // accept larger.
+        "resolutions": ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
         "requiresDimensionsMultipleOf": 32
       },
       "loraCompatibility": {
@@ -1071,7 +1075,9 @@
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "fps": [24, 25, 30],
-        "resolutions": ["768x512", "512x768", "640x640", "1024x1024", "1280x720", "720x1280"],
+        // See LTX-2.3 note above: squares above 640x640 are out-of-distribution
+        // and render black.
+        "resolutions": ["768x512", "512x768", "640x640", "1280x720", "720x1280"],
         "requiresDimensionsMultipleOf": 32
       },
       "loraCompatibility": {
