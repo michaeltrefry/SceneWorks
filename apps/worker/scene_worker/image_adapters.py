@@ -3751,12 +3751,33 @@ class SenseNovaU1Adapter:
             return default
 
     @staticmethod
-    def _image_guidance_scale(request: ImageRequest) -> float:
+    def _image_guidance_scale(request: ImageRequest, default: float = 1.0) -> float:
         # Image-conditioning guidance for editing (it2i); upstream default is 1.0.
+        # The character_image reference path raises the default to 1.5 so the model
+        # is pulled harder toward the reference subject (the sc-2015 spike found
+        # face-identity holds best when the reference is more heavily weighted).
         try:
-            return float(request.advanced.get("imageGuidanceScale", 1.0))
+            return float(request.advanced.get("imageGuidanceScale", default))
         except (TypeError, ValueError):
-            return 1.0
+            return default
+
+    @staticmethod
+    def _use_reference(request: ImageRequest) -> bool:
+        # Character Studio reference path (sc-2016): feed the reference asset
+        # through the same it2i_generate machinery the edit_image mode uses, but
+        # the reference (vs source_asset_id) drives subject identity while the
+        # prompt drives the new scene/pose. Mutually exclusive with edit_image
+        # — character_image is a subject-variation flow, edit_image is a
+        # localized modification flow. Mirrors QwenImageAdapter._use_reference.
+        #
+        # Honest tradeoff (sc-2015 hardware spike): SenseNova-U1's it2i path
+        # preserves the reference's wardrobe + accessories + tattoos + hair
+        # color very faithfully across scene variations, but face geometry
+        # drifts unless the framing stays close to the reference (ArcFace
+        # cosine 0.10–0.75 across cafe / pier / studio prompts). It's the
+        # right pick when outfit consistency matters more than face fidelity;
+        # InstantID-SDXL and PuLID-FLUX are the face-locked options.
+        return request.mode == "character_image" and bool(request.reference_asset_id)
 
     def generate(
         self,
@@ -3773,6 +3794,7 @@ class SenseNovaU1Adapter:
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a SenseNova-U1 target.")
         is_edit = request.mode == "edit_image"
+        is_character_image = self._use_reference(request)
         if is_edit and not model_supports_edit(request.model):
             raise RuntimeError(f"{request.model} does not support image editing.")
 
@@ -3795,9 +3817,20 @@ class SenseNovaU1Adapter:
             timestep_shift = 3.0
         if timestep_shift <= 0.0:
             timestep_shift = 3.0
-        img_guidance_scale = self._image_guidance_scale(request)
+        # Default image-conditioning guidance is 1.0 for edit (upstream default),
+        # 1.5 for character_image (pull harder toward the reference subject).
+        img_guidance_scale = self._image_guidance_scale(request, default=1.5 if is_character_image else 1.0)
         width, height = sensenova_resolution_for(request.width, request.height)
-        source_image = load_source_image(project_path, request) if is_edit else None
+        if is_edit:
+            source_image = load_source_image(project_path, request)
+        elif is_character_image:
+            # Reference is loaded at the requested W×H so the model can match the
+            # output bucket directly (matches the edit path's resize behavior).
+            source_image = load_reference_image(project_path, request.reference_asset_id).resize(
+                (width, height)
+            )
+        else:
+            source_image = None
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=distill_lora, job_id=job["id"])
@@ -3824,7 +3857,9 @@ class SenseNovaU1Adapter:
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                if is_edit:
+                if is_edit or is_character_image:
+                    # Both modes route through it2i_generate; the difference is
+                    # which asset the source_image points at (source vs reference).
                     image = self._run_edit_inference(
                         torch, model, tokenizer, request.prompt, source_image,
                         width, height, steps, guidance_scale, img_guidance_scale, timestep_shift, seed,
@@ -3866,7 +3901,9 @@ class SenseNovaU1Adapter:
                 "repo": repo,
                 "numInferenceSteps": steps,
                 "guidanceScale": guidance_scale,
-                **({"imageGuidanceScale": img_guidance_scale} if is_edit else {}),
+                **(
+                    {"imageGuidanceScale": img_guidance_scale} if (is_edit or is_character_image) else {}
+                ),
                 "timestepShift": timestep_shift,
                 "resolution": f"{width}x{height}",
                 "realModelInference": True,

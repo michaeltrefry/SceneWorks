@@ -2346,6 +2346,62 @@ def test_sensenova_u1_edit_support():
     assert model_supports_edit("sensenova_u1_8b_fast") is True
 
 
+# ---- sc-2016: SenseNova-U1 character_image (wardrobe-preserving reference) ----
+
+
+def test_sensenova_u1_use_reference_gates_on_mode_and_asset():
+    """The Character Studio reference path activates only when mode is
+    `character_image` AND a referenceAssetId is present. Mutually exclusive with
+    `edit_image` (mirrors QwenImageAdapter._use_reference)."""
+    from types import SimpleNamespace
+    use_ref = SenseNovaU1Adapter._use_reference
+    assert use_ref(SimpleNamespace(mode="character_image", reference_asset_id="asset_x")) is True
+    # No reference asset → falls back to plain t2i, never to the edit path with a None source.
+    assert use_ref(SimpleNamespace(mode="character_image", reference_asset_id=None)) is False
+    # Edit mode is its own branch; character_image gating must not catch it.
+    assert use_ref(SimpleNamespace(mode="edit_image", reference_asset_id="asset_x")) is False
+    # Plain text-to-image with a stray referenceAssetId stays t2i.
+    assert use_ref(SimpleNamespace(mode="text_to_image", reference_asset_id="asset_x")) is False
+
+
+def test_sensenova_u1_image_guidance_scale_default_pulls_for_character_image():
+    """The image-conditioning guidance defaults to 1.0 for edit_image (upstream
+    default) and 1.5 for character_image (pull harder toward the reference).
+    Per-request overrides via advanced.imageGuidanceScale win in both modes."""
+    from types import SimpleNamespace
+    img_cfg = SenseNovaU1Adapter._image_guidance_scale
+    # Default per-mode:
+    assert img_cfg(SimpleNamespace(advanced={})) == 1.0  # edit baseline
+    assert img_cfg(SimpleNamespace(advanced={}), default=1.5) == 1.5  # character_image default
+    # Override wins regardless of the default:
+    assert img_cfg(SimpleNamespace(advanced={"imageGuidanceScale": 2.5}), default=1.5) == 2.5
+    # Unparseable values fall back to the supplied default.
+    assert img_cfg(SimpleNamespace(advanced={"imageGuidanceScale": "x"}), default=1.5) == 1.5
+
+
+def test_sensenova_u1_advertises_character_image_capability():
+    """Both sensenova_u1 targets must advertise `character_image` in the builtin
+    manifest now that the worker dispatches it through the it2i_generate path
+    (sc-2016). Without this the sc-2018 reverse-drift guard would mark the
+    engine as 'wired but unreachable from the picker'."""
+    manifest = _load_builtin_models_manifest()
+    by_id = {model["id"]: model for model in manifest.get("models", [])}
+    for model_id in ("sensenova_u1_8b", "sensenova_u1_8b_fast"):
+        capabilities = by_id[model_id].get("capabilities") or []
+        assert "character_image" in capabilities, (
+            f"{model_id} must advertise character_image in the builtin manifest "
+            f"so the Image Studio picker surfaces the SenseNova reference flow."
+        )
+        ui = by_id[model_id].get("ui") or {}
+        # sc-2018 audit accepts ui.variationStrength as the edit-backbone engine
+        # declaration. SenseNova has no IP-Adapter / face-ID engine block, so
+        # this is the required gate for the character_image capability to be honest.
+        assert ui.get("variationStrength"), (
+            f"{model_id} declares character_image but no ui.variationStrength; "
+            f"the sc-2018 audit will fail (engine declaration missing)."
+        )
+
+
 def test_sensenova_u1_vqa_strips_reasoning():
     strip = SenseNovaU1Adapter._strip_reasoning
     # A complete think block is removed, leaving only the answer.
