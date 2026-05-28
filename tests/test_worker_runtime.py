@@ -4184,7 +4184,7 @@ def test_run_lora_train_job_executes_real_run(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None: callback(lambda: False),
+        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None, peaks=None: callback(lambda: False),
     )
     backend = FakeTrainingBackend()
     trainer = ZImageLoraTrainer(backend=backend)
@@ -4209,7 +4209,7 @@ def test_run_lora_train_job_marks_canceled(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None: callback(lambda: False),
+        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None, peaks=None: callback(lambda: False),
     )
 
     class CancelingTrainer:
@@ -4242,7 +4242,7 @@ def test_run_lora_train_job_reports_friendly_failure(monkeypatch, tmp_path):
     monkeypatch.setattr("scene_worker.runtime.gpu_utilization", lambda _gpu_id: None)
     monkeypatch.setattr(
         "scene_worker.runtime.run_blocking_job_step",
-        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None: callback(lambda: False),
+        lambda api, settings, job_id, status, callback, *, loaded_models, on_force_terminate=None, peaks=None: callback(lambda: False),
     )
 
     class FailingTrainer:
@@ -4470,7 +4470,7 @@ def test_video_job_reports_dynamic_loaded_models_on_progress_and_keepalive(monke
         def cleanup(self, _job_id):
             raise AssertionError("cleanup should not be called")
 
-    def run_immediately(_api, _settings, _job_id, _status, callback, *, loaded_models, on_force_terminate=None):
+    def run_immediately(_api, _settings, _job_id, _status, callback, *, loaded_models, on_force_terminate=None, peaks=None):
         blocking_models.append(loaded_models())
         result = callback(lambda: False)
         blocking_models.append(loaded_models())

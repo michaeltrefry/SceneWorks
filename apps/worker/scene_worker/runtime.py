@@ -207,14 +207,15 @@ def heartbeat(
     )
 
 
-def track_job_peaks(payload: dict, peaks: dict, settings: WorkerSettings) -> None:
-    """Sample GPU utilization, ratchet the running max into `peaks`, and fold
-    the peaks into a progress payload (sc-2086).
+def _sample_into_peaks(peaks: dict, settings: WorkerSettings) -> None:
+    """Sample current GPU utilization and ratchet the running max into a
+    per-job peaks dict (sc-2086).
 
-    `peaks` is a per-job dict (`{"memory": float, "load": float}`) that the
-    caller carries across every progress() call inside one job, so the
-    completed-row hardware meters show the highest values observed during the
-    run instead of whatever the last sample happened to be.
+    Shared by `track_job_peaks` (sampled at each progress() call boundary, the
+    one-shot path) and by `keep_job_alive` (sampled continuously during long
+    blocking diffusion phases that don't tick progress() themselves — without
+    this the video adapters miss the actual GPU-heavy window entirely because
+    their progress() callbacks fire at boundary points only).
 
     Defensive against minimal test settings (SimpleNamespace) that may not
     carry a gpu_id attribute — falls back to "cpu" the same way heartbeat()
@@ -223,15 +224,30 @@ def track_job_peaks(payload: dict, peaks: dict, settings: WorkerSettings) -> Non
     """
     gpu_id = getattr(settings, "gpu_id", "cpu")
     utilization = gpu_utilization(gpu_id)
-    if utilization:
-        mem_used = utilization.get("memoryUsedMb")
-        mem_total = utilization.get("memoryTotalMb")
-        if mem_used and mem_total and mem_total > 0:
-            pct = min(100.0, (float(mem_used) / float(mem_total)) * 100.0)
-            peaks["memory"] = max(peaks.get("memory", 0.0), pct)
-        load = utilization.get("gpuLoadPercent")
-        if load is not None:
-            peaks["load"] = max(peaks.get("load", 0.0), min(100.0, float(load)))
+    if not utilization:
+        return
+    mem_used = utilization.get("memoryUsedMb")
+    mem_total = utilization.get("memoryTotalMb")
+    if mem_used and mem_total and mem_total > 0:
+        pct = min(100.0, (float(mem_used) / float(mem_total)) * 100.0)
+        peaks["memory"] = max(peaks.get("memory", 0.0), pct)
+    load = utilization.get("gpuLoadPercent")
+    if load is not None:
+        peaks["load"] = max(peaks.get("load", 0.0), min(100.0, float(load)))
+
+
+def track_job_peaks(payload: dict, peaks: dict, settings: WorkerSettings) -> None:
+    """Sample GPU utilization, ratchet the running max into `peaks`, and fold
+    the peaks into a progress payload (sc-2086).
+
+    `peaks` is a per-job dict (`{"memory": float, "load": float}`) that the
+    caller carries across every progress() call inside one job, so the
+    completed-row hardware meters show the highest values observed during the
+    run instead of whatever the last sample happened to be. The same dict is
+    shared with `keep_job_alive` (via `run_blocking_job_step`) so peaks are
+    captured both at progress() boundaries and during blocking work.
+    """
+    _sample_into_peaks(peaks, settings)
     if peaks.get("memory"):
         payload["peakGpuMemoryPct"] = peaks["memory"]
     if peaks.get("load"):
@@ -564,6 +580,7 @@ def keep_job_alive(
     status: str,
     stop_event: threading.Event,
     loaded_models: LoadedModelsSource,
+    peaks: dict | None = None,
 ) -> None:
     interval = max(5, min(settings.heartbeat_seconds, 30))
     while not stop_event.wait(interval):
@@ -571,6 +588,12 @@ def keep_job_alive(
             heartbeat_with_loaded_models(api, settings, status, job_id, loaded_models)
         except httpx.HTTPError as exc:
             emit({"event": "heartbeat_failed", "jobId": job_id, "error": str(exc), "reportedAt": utc_now()})
+        # sc-2086 — keep the per-job peak GPU mem/load tracking current during
+        # long blocking phases (e.g. video diffusion) that don't tick
+        # progress() themselves. The next progress() call then folds the
+        # ratcheted peaks into its payload via track_job_peaks.
+        if peaks is not None:
+            _sample_into_peaks(peaks, settings)
 
 
 def run_blocking_job_step(
@@ -582,6 +605,7 @@ def run_blocking_job_step(
     *,
     loaded_models: LoadedModelsSource,
     on_force_terminate: Callable[[], None] | None = None,
+    peaks: dict | None = None,
 ) -> Any:
     """Run a job's blocking work while keeping it alive and cancelable.
 
@@ -589,11 +613,16 @@ def run_blocking_job_step(
     work, then invokes ``callback`` with a cached cancel predicate so adapters
     can poll cancellation cheaply (and so the monitor can force-stop the worker
     if a cancel goes unacknowledged past the deadline). ``on_force_terminate`` is
-    a best-effort, filesystem-only hook run just before the hard-stop os._exit."""
+    a best-effort, filesystem-only hook run just before the hard-stop os._exit.
+
+    ``peaks`` is the per-job sc-2086 dict — when supplied the keepalive thread
+    samples GPU utilization on every heartbeat and ratchets the running max
+    into the dict, so adapters whose progress() doesn't tick during their
+    blocking phase still capture peak meters."""
     stop_event = threading.Event()
     thread = threading.Thread(
         target=keep_job_alive,
-        args=(api, settings, job_id, status, stop_event, loaded_models),
+        args=(api, settings, job_id, status, stop_event, loaded_models, peaks),
         daemon=True,
     )
     thread.start()
@@ -735,6 +764,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
             ),
             loaded_models=adapter_loaded_models,
             on_force_terminate=(lambda: discard_scratch(job_id)) if callable(discard_scratch) else None,
+            peaks=peaks,
         )
         update_job(
             api,
@@ -816,6 +846,7 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
                 cancel_requested=cancel,
             ),
             loaded_models=adapter_loaded_models,
+            peaks=peaks,
         )
         update_job(
             api,
@@ -889,6 +920,7 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
                 cancel_requested=cancel,
             ),
             loaded_models=adapter_loaded_models,
+            peaks=peaks,
         )
         update_job(
             api,
@@ -982,6 +1014,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             # Reap the job's partial .tmp.mp4/.control.mp4 outputs if the hard-stop
             # backstop force-kills the worker (os._exit skips adapter cleanup).
             on_force_terminate=lambda: adapter.discard_temp_outputs(job_id),
+            peaks=peaks,
         )
         update_job(
             api,
@@ -1075,6 +1108,7 @@ def run_person_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
                 cancel_requested=cancel,
             ),
             loaded_models=lambda: [],
+            peaks=peaks,
         )
         update_job(
             api,
@@ -1206,6 +1240,7 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
             ),
             loaded_models=trainer_loaded_models,
             on_force_terminate=(lambda: discard_scratch(job_id)) if callable(discard_scratch) else None,
+            peaks=peaks,
         )
         update_job(
             api,
@@ -1277,6 +1312,7 @@ def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, jo
                 cancel_requested=cancel,
             ),
             loaded_models=lambda: [],
+            peaks=peaks,
         )
         update_job(
             api,
