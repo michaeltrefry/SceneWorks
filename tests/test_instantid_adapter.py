@@ -247,3 +247,12 @@ def test_openpose_scale_default_and_override():
     assert adapter._openpose_scale(SimpleNamespace(advanced={})) == 0.7
     assert adapter._openpose_scale(SimpleNamespace(advanced={"openPoseScale": 0.55})) == 0.55
     assert adapter._openpose_scale(SimpleNamespace(advanced={"openPoseScale": "x"})) == 0.7
+
+
+def test_face_restore_enabled_default_and_toggle():
+    # Defaults on; explicit booleans + string forms toggle the full-body restoration pass.
+    assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={})) is True
+    assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": False})) is False
+    assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": True})) is True
+    assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": "false"})) is False
+    assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": "off"})) is False

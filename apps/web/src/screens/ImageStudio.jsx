@@ -225,6 +225,7 @@ export function ImageStudio() {
   // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
   // (one image per pose) instead of the normal variations count. Transient (not saved).
   const [selectedPoseIds, setSelectedPoseIds] = useState([]);
+  const [faceRestore, setFaceRestore] = useState(true);
   const { byId: poseById } = usePoseLibrary();
   const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
   const [upscaleFactor, setUpscaleFactor] = useState(saved.upscaleFactor ?? 2);
@@ -631,8 +632,9 @@ export function ImageStudio() {
           ...(mode === "character_image" && referenceAssetId && viewAngles && viewAngle && !posePayload.length
             ? { viewAngle }
             : {}),
-          // Pose library (InstantID) — one image per selected pose.
-          ...(posePayload.length ? { poses: posePayload } : {}),
+          // Pose library (InstantID) — one image per selected pose; faceRestore toggles
+          // the full-body face-restoration pass.
+          ...(posePayload.length ? { poses: posePayload, faceRestore } : {}),
         },
       });
       onLocalJobCreated?.(job);
@@ -835,6 +837,10 @@ export function ImageStudio() {
                             }
                             selectedIds={selectedPoseIds}
                           />
+                          <label className="checkline">
+                            <input checked={faceRestore} onChange={(event) => setFaceRestore(event.target.checked)} type="checkbox" />
+                            Restore face (sharper identity; off keeps the raw render)
+                          </label>
                           <p className="muted">Selecting poses generates one image per pose (overrides Variations).</p>
                         </details>
                       ) : null}

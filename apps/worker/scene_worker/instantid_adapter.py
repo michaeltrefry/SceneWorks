@@ -350,6 +350,16 @@ class InstantIDAdapter:
             return 0.7
 
     @staticmethod
+    def _face_restore_enabled(request: ImageRequest) -> bool:
+        """Whether the full-body face-restoration pass runs (advanced.faceRestore,
+        default on). Off = the OpenPose+InstantID base image is used as-is (cleaner
+        blend, but weaker identity at the small full-body face size)."""
+        value = request.advanced.get("faceRestore", True)
+        if isinstance(value, str):
+            return value.strip().lower() not in ("false", "0", "no", "off", "")
+        return bool(value)
+
+    @staticmethod
     def _normalized_kps(face: Any) -> np.ndarray:
         """Reference 5-point kps normalized to the face bbox (so they can be re-placed at
         any position/scale on a new canvas)."""
@@ -432,7 +442,7 @@ class InstantIDAdapter:
         if cancel_requested is not None and cancel_requested():
             raise InterruptedError("Image generation canceled by user.")
         base = output.images[0].convert("RGB")
-        if face_box is not None:
+        if face_box is not None and self._face_restore_enabled(request):
             base = self._restore_face(settings, pipe, request, base, face_emb, seed, cancel_requested)
         return base
 
@@ -692,7 +702,15 @@ class InstantIDAdapter:
                 "instantId": True,
                 "ipAdapterScale": self._ip_adapter_scale(request),
                 "controlnetConditioningScale": self._controlnet_scale(request),
-                **({"openPoseScale": self._openpose_scale(request), "poseLibrary": True} if pose_set else {}),
+                **(
+                    {
+                        "openPoseScale": self._openpose_scale(request),
+                        "poseLibrary": True,
+                        "faceRestore": self._face_restore_enabled(request),
+                    }
+                    if pose_set
+                    else {}
+                ),
                 "numInferenceSteps": self._num_inference_steps(request, model_target),
                 "guidanceScale": self._guidance_scale(request, model_target),
                 "realModelInference": True,

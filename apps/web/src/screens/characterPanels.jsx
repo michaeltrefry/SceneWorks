@@ -612,6 +612,7 @@ export function CharacterPoseLibrary({
 }) {
   const { byId } = usePoseLibrary();
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
+  const [faceRestore, setFaceRestore] = React.useState(true);
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
@@ -685,7 +686,7 @@ export function CharacterPoseLibrary({
         count: 1,
         width: 1024,
         height: 1024,
-        advanced: { poses, ipAdapterScale: 0.8 },
+        advanced: { poses, ipAdapterScale: 0.8, faceRestore },
       });
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
@@ -733,6 +734,10 @@ export function CharacterPoseLibrary({
         onToggle={togglePose}
         selectedIds={selectedPoseIds}
       />
+      <label className="checkline">
+        <input checked={faceRestore} onChange={(event) => setFaceRestore(event.target.checked)} type="checkbox" />
+        Restore face (sharper identity; off keeps the raw render — fewer blend artifacts)
+      </label>
       <div className="inline-create">
         <button onClick={() => fileInputRef.current?.click()} type="button">
           Upload reference
