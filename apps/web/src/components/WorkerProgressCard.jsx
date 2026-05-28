@@ -80,7 +80,7 @@ export function deriveJobTitle(job) {
   const payload = job?.payload ?? {};
   switch (job?.type) {
     case "lora_train":
-      return `Training Run — ${payload.loraName ?? payload.targetName ?? payload.loraId ?? "(unnamed LoRA)"}`;
+      return `Training Run — ${payload.loraName ?? payload.outputName ?? payload.targetName ?? payload.plan?.output?.loraId ?? payload.loraId ?? "(unnamed LoRA)"}`;
     case "training_caption":
       return `Dataset Captioning — ${payload.datasetName ?? payload.datasetId ?? "(unnamed dataset)"}`;
     case "model_download":
@@ -226,6 +226,9 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
       {items.map((asset, index) => {
         const interactive = !!onThumbnailClick;
         const inner = <AssetThumbnail asset={asset} className="worker-progress-card__thumb-media" />;
+        const label = asset.displayName && variant === "image-grid" ? (
+          <small className="worker-progress-card__thumb-label">{asset.displayName}</small>
+        ) : null;
         const key = asset.id ?? `interim-${index}`;
         const isInterim = asset.__interim === true;
         return interactive ? (
@@ -237,10 +240,12 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
             aria-label={asset.displayName ?? "Open asset"}
           >
             {inner}
+            {label}
           </button>
         ) : (
           <span key={key} className={`${cellClass}${isInterim ? " interim" : ""}`}>
             {inner}
+            {label}
           </span>
         );
       })}

@@ -3,9 +3,8 @@ import { useAppContext } from "../context/AppContext.js";
 import { API_BASE_URL } from "../api.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
-import { useLiveJobElapsedSeconds } from "../components/JobProgress.jsx";
+import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
-import { formatSeconds, percent } from "../formatting.js";
 
 const trainingTabs = [
   { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
@@ -758,59 +757,44 @@ function latestTrainingSamples(job) {
   return samples.slice(-4);
 }
 
-function trainingSampleUrl(projectId, sample) {
+// Convert a training-sample record into an asset-shaped object that AssetThumbnail
+// (via assetUrl) can render. Worker emits {url, relativePath, step, prompt}; we
+// translate to either { url } (when relative) or { file: { path } } (when path-
+// based) so the shared component renders identically to other thumbnails.
+function trainingSampleToAsset(sample, projectId, label, key) {
   if (sample?.url) {
-    return sample.url.startsWith("http") ? sample.url : `${API_BASE_URL}${sample.url}`;
+    let relative = sample.url;
+    if (sample.url.startsWith(API_BASE_URL)) {
+      relative = sample.url.slice(API_BASE_URL.length);
+    }
+    return { id: key, type: "image", projectId, url: relative, displayName: label };
   }
-  if (projectId && sample?.relativePath) {
-    return `${API_BASE_URL}/api/v1/projects/${projectId}/files/${String(sample.relativePath).replaceAll("\\", "/")}`;
+  if (sample?.relativePath) {
+    return {
+      id: key,
+      type: "image",
+      projectId,
+      file: { path: sample.relativePath, mimeType: "image/png" },
+      displayName: label,
+    };
   }
-  return "";
+  return null;
 }
 
-function formatStage(value) {
-  return String(value ?? "queued").replaceAll("_", " ");
-}
-
-function TrainingLiveJobCard({ job, projectId }) {
-  const elapsedSeconds = useLiveJobElapsedSeconds(job);
+// Resolve the training-sample assets for a job. Pads with placeholder labels
+// (the sample-prompt list) so the image-grid skeleton cells communicate
+// "this slot is coming" just like image batches.
+function trainingSampleAssets(job, projectId) {
   const samples = latestTrainingSamples(job);
-  const progressLabel = percent(job.progress);
   const samplePrompts = Array.isArray(job.result?.samplePrompts)
     ? job.result.samplePrompts
     : samplePromptsFromTrigger(job.payload?.plan?.config?.triggerWord);
-  return (
-    <article className="training-live-card">
-      <div className="training-live-head">
-        <div>
-          <p className="eyebrow">Training run</p>
-          <h3>{job.payload?.outputName ?? job.payload?.plan?.output?.loraId ?? job.id}</h3>
-        </div>
-        <span className={`status-badge ${job.status}`}>{job.status}</span>
-      </div>
-      <div className="progress-track" aria-label={`${progressLabel} complete`}>
-        <span style={{ width: progressLabel }} />
-      </div>
-      <div className="training-live-meta">
-        <span>{formatStage(job.stage ?? job.status)}</span>
-        <span>{formatSeconds(elapsedSeconds)}</span>
-        <span>GPU {job.assignedGpu ?? job.requestedGpu ?? "auto"}</span>
-      </div>
-      {job.message ? <p className="job-message">{job.message}</p> : null}
-      <div className="training-sample-grid" aria-label="Training sample images">
-        {samplePrompts.slice(0, 4).map((prompt, index) => {
-          const sample = samples[index];
-          const src = trainingSampleUrl(projectId, sample);
-          return (
-            <div className="training-sample-tile" key={`${job.id}-${index}`}>
-              {src ? <img alt="" src={src} /> : <span>{sample ? "Loading" : "Waiting"}</span>}
-              <small>{sample?.step ? `Step ${sample.step}` : prompt}</small>
-            </div>
-          );
-        })}
-      </div>
-    </article>
-  );
+  return samplePrompts.slice(0, 4).map((prompt, index) => {
+    const sample = samples[index];
+    if (!sample) return null;
+    const label = sample?.step ? `Step ${sample.step}` : prompt;
+    return trainingSampleToAsset(sample, projectId, label, `${job.id}-sample-${index}`);
+  }).filter(Boolean);
 }
 
 function TrainingLiveProgress({ jobs, projectId }) {
@@ -826,9 +810,15 @@ function TrainingLiveProgress({ jobs, projectId }) {
         </div>
         <span>{jobs.length} active</span>
       </div>
-      <div className="training-live-list">
+      <div className="training-live-list worker-progress-card-stack">
         {jobs.map((job) => (
-          <TrainingLiveJobCard job={job} key={job.id} projectId={projectId} />
+          <WorkerProgressCard
+            key={job.id}
+            job={job}
+            thumbnailsVariant="image-grid"
+            thumbnailAssets={trainingSampleAssets(job, projectId)}
+            expectedThumbnailCount={4}
+          />
         ))}
       </div>
     </section>

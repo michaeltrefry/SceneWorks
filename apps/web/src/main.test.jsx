@@ -1302,8 +1302,10 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).toContain("Training in progress");
     expect(container.textContent).toContain("Portrait Set LoRA");
-    expect(container.textContent).toContain("rendering");
-    expect([...container.querySelectorAll(".training-sample-tile img")].map((image) => image.src)).toEqual([
+    // The unified WorkerProgressCard renders the stage with title-case via
+    // defaultChipLabel ("rendering" -> "Rendering"); same content, different style.
+    expect(container.textContent).toContain("Rendering");
+    expect([...container.querySelectorAll(".worker-progress-card__thumb-media")].map((image) => image.src)).toEqual([
       "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-1.png",
       "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-2.png",
       "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-3.png",
