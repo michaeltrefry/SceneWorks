@@ -3109,8 +3109,8 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Model download");
-    expect(container.textContent).toContain("downloading");
+    expect(container.textContent).toContain("Model Import");
+    expect(container.textContent).toContain("Downloading");
     expect(container.textContent).not.toContain("Jobs and GPUs");
   });
 
@@ -3166,7 +3166,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("LoRA imports in progress");
-    expect(container.textContent).toContain("running");
+    expect(container.textContent).toContain("Running");
     expect(container.textContent).not.toContain("Jobs and GPUs");
   });
 
@@ -3816,8 +3816,8 @@ describe("SceneWorks app shell", () => {
       }),
     );
     expect(onImportLora.mock.calls[0][0]).not.toHaveProperty("family");
-    expect(container.textContent).toContain("LoRA import");
-    expect(container.textContent).toContain("running");
+    expect(container.textContent).toContain("LoRA Import");
+    expect(container.textContent).toContain("Running");
   });
 
   it("keeps failed Models LoRA imports visible inline", async () => {
@@ -4041,8 +4041,8 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(container.textContent).toContain("Model imports in progress");
-    expect(container.textContent).toContain("Model import");
-    expect(container.textContent).toContain("downloading");
+    expect(container.textContent).toContain("Model Import");
+    expect(container.textContent).toContain("Downloading");
   });
 
   it("adds the SSE ticket as a query parameter", () => {
@@ -7401,7 +7401,7 @@ describe("SceneWorks app shell", () => {
     expect(container.querySelectorAll(".local-job-group").length).toBe(2);
     expect(container.textContent).toContain("Boil the water.");
     expect(container.querySelector(".document-view")).not.toBeNull();
-    expect(container.querySelector(".local-job-card.queued")).not.toBeNull();
+    expect(container.querySelector(".worker-progress-card.queued")).not.toBeNull();
     expect(container.textContent).not.toContain("Your generated document will appear here.");
   });
 

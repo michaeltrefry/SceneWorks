@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { JobProgressCard } from "../components/JobProgress.jsx";
+import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
 
@@ -178,7 +178,7 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
             {activeDownloadJobs.length ? (
               <div className="setup-wizard-progress">
                 {activeDownloadJobs.map((job) => (
-                  <JobProgressCard job={job} key={job.id} label="Model download" onOpenQueue={onOpenQueue} />
+                  <WorkerProgressCard job={job} key={job.id} onOpenQueue={onOpenQueue} />
                 ))}
               </div>
             ) : null}

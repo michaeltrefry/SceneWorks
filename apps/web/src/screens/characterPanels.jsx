@@ -2,10 +2,24 @@ import React from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
-import { JobProgressCard } from "../components/JobProgress.jsx";
+import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { usePoseLibrary } from "../poseLibrary.js";
 import { extractFamilies } from "../presetUtils.js";
+
+// Resolve a character generation job's produced images from the surrounding
+// latestAssets list. The component is propped from above (no AppContext here)
+// so this stays a small local helper instead of pulling in a shared util.
+function jobImageAssets(job, assets) {
+  if (!job?.result || !Array.isArray(assets)) return [];
+  const byId = new Map(assets.map((asset) => [asset.id, asset]));
+  const ids = job.result.assetIds ?? [];
+  if (ids.length) return ids.map((id) => byId.get(id)).filter((asset) => asset?.type === "image");
+  if (job.result.generationSetId) {
+    return assets.filter((asset) => asset?.type === "image" && asset.generationSetId === job.result.generationSetId);
+  }
+  return [];
+}
 
 export function editableLora(link) {
   return {
@@ -523,7 +537,22 @@ export function CharacterAngleSet({
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
-      {activeJob ? <JobProgressCard job={activeJob} label={`Angle set · ${angleCount} views`} /> : null}
+      {activeJob ? (
+        <WorkerProgressCard
+          job={{
+            ...activeJob,
+            payload: {
+              ...activeJob.payload,
+              characterId: selectedCharacter?.id,
+              characterName: selectedCharacter?.name,
+            },
+          }}
+          thumbnailsVariant="image-grid"
+          thumbnailAssets={jobImageAssets(activeJob, latestAssets)}
+          expectedThumbnailCount={angleCount}
+          onThumbnailClick={onPreview}
+        />
+      ) : null}
       {!activeJob && status ? <p className="inline-warning">{status}</p> : null}
       {characterImages.length ? (
         <div className="reference-thumb-row">
@@ -753,7 +782,22 @@ export function CharacterPoseLibrary({
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
-      {activeJob ? <JobProgressCard job={activeJob} label={`Pose library · ${selectedPoseIds.length} pose${selectedPoseIds.length === 1 ? "" : "s"}`} /> : null}
+      {activeJob ? (
+        <WorkerProgressCard
+          job={{
+            ...activeJob,
+            payload: {
+              ...activeJob.payload,
+              characterId: selectedCharacter?.id,
+              characterName: selectedCharacter?.name,
+            },
+          }}
+          thumbnailsVariant="image-grid"
+          thumbnailAssets={jobImageAssets(activeJob, latestAssets)}
+          expectedThumbnailCount={selectedPoseIds.length}
+          onThumbnailClick={onPreview}
+        />
+      ) : null}
       {!activeJob && status ? <p className="inline-warning">{status}</p> : null}
       {characterImages.length ? (
         <div className="reference-thumb-row">

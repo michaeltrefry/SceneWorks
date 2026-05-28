@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { JobProgressCard } from "../components/JobProgress.jsx";
+import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
 import { extractFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
@@ -513,7 +513,7 @@ export function ModelManagerScreen() {
                 </div>
               </dl>
               {localDownloadJob ? (
-                <JobProgressCard job={localDownloadJob} label="Model download" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                <WorkerProgressCard job={localDownloadJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
               ) : null}
               {mlxState ? (
                 <div className="mlx-status">
@@ -532,7 +532,7 @@ export function ModelManagerScreen() {
                     </p>
                   ) : null}
                   {convertJob ? (
-                    <JobProgressCard job={convertJob} label="MLX conversion" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                    <WorkerProgressCard job={convertJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
                   ) : null}
                   {showConvertButton ? (
                     <button
@@ -681,7 +681,7 @@ export function ModelManagerScreen() {
             <strong>Model imports in progress</strong>
             <div className="local-job-stack">
               {pendingModelImportJobs.map((job) => (
-                <JobProgressCard job={job} key={job.id} label="Model import" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
               ))}
             </div>
           </div>
@@ -852,7 +852,7 @@ export function ModelManagerScreen() {
             <strong>LoRA imports in progress</strong>
             <div className="local-job-stack">
               {localLoraImportJobs.map((job) => (
-                <JobProgressCard job={job} key={job.id} label="LoRA import" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
               ))}
             </div>
           </div>

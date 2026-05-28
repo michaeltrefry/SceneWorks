@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { DocumentView } from "../components/DocumentView.jsx";
-import { JobProgressCard } from "../components/JobProgress.jsx";
+import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import {
   DEFAULT_INTERLEAVE_RESOLUTION,
   DEFAULT_INTERLEAVE_SYSTEM_MESSAGE,
@@ -211,7 +211,7 @@ export function DocumentStudio() {
                   {segments ? (
                     <DocumentView assets={assets ?? []} projectId={activeProject?.id} segments={segments} />
                   ) : (
-                    <JobProgressCard job={job} label="Interleaved document" onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                    <WorkerProgressCard job={job} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
                   )}
                 </article>
               );
