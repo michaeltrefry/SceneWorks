@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   CharacterAngleSet,
+  CharacterAssets,
   CharacterLoras,
   CharacterLooks,
   CharacterPoseLibrary,
@@ -352,6 +353,8 @@ export function CharacterStudio() {
               submitReference={submitReference}
               updateCharacterReference={updateCharacterReference}
             />
+
+            <CharacterAssets assets={assets} onPreview={onPreview} selectedCharacter={selectedCharacter} />
 
             <CharacterAngleSet
               addCharacterReference={addCharacterReference}

@@ -8,6 +8,7 @@ import { liveElapsedSeconds } from "./formatting.js";
 import { foldUpscaledAssetVariants } from "./assetVariants.js";
 import { extractFamilies } from "./presetUtils.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
+import { CharacterAssets } from "./screens/characterPanels.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { DocumentStudio } from "./screens/DocumentStudio.jsx";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
@@ -2278,6 +2279,33 @@ describe("SceneWorks app shell", () => {
       }),
     );
     expect(baseContext.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-pose" });
+  });
+
+  it("collects all character-associated assets in the Character Studio gallery (sc-2076)", async () => {
+    const onPreview = vi.fn();
+    const selectedCharacter = { id: "char-1", name: "Mira" };
+    const assets = [
+      { id: "a1", type: "image", displayName: "by recipe", recipe: { normalizedSettings: { characterId: "char-1" } } },
+      { id: "a2", type: "image", displayName: "by reference", metadata: { characterReferences: [{ characterId: "char-1" }] } },
+      { id: "a3", type: "image", displayName: "other character", recipe: { normalizedSettings: { characterId: "char-2" } } },
+      { id: "a4", type: "image", displayName: "unassociated" },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<CharacterAssets assets={assets} onPreview={onPreview} selectedCharacter={selectedCharacter} />);
+    });
+
+    // Counts only assets associated with this character (by recipe characterId or by
+    // characterReferences) — not other characters' or unassociated assets.
+    expect(container.textContent).toContain("Generated for Mira (2)");
+    const previewButtons = [...container.querySelectorAll("button")].filter((button) =>
+      (button.getAttribute("aria-label") ?? "").startsWith("Preview "),
+    );
+    expect(previewButtons).toHaveLength(2);
+    await act(async () => {
+      previewButtons[0].click();
+    });
+    expect(onPreview).toHaveBeenCalled();
   });
 
   it("launches reference-based generation from an approved character reference", async () => {

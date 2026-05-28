@@ -544,6 +544,55 @@ export function CharacterAngleSet({
   );
 }
 
+// Persistent per-character asset gallery: every image generated in association with the
+// character (recipe.normalizedSettings.characterId) or referencing it
+// (metadata.characterReferences). Reads the full project asset list, so character outputs
+// persist beyond the transient "recent generations" window (sc-2076).
+export function CharacterAssets({ selectedCharacter, assets = [], onPreview }) {
+  const characterId = selectedCharacter?.id;
+  if (!selectedCharacter) {
+    return null;
+  }
+  const characterAssets = (assets ?? [])
+    .filter(
+      (asset) =>
+        (asset.type === "image" || asset.type === "frame") &&
+        (asset.recipe?.normalizedSettings?.characterId === characterId ||
+          (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === characterId)),
+    )
+    .sort((left, right) => new Date(right.createdAt ?? 0) - new Date(left.createdAt ?? 0));
+  return (
+    <section className="character-section">
+      <div className="section-heading">
+        <p className="eyebrow">Character assets</p>
+        <h2>
+          Generated for {selectedCharacter.name}
+          {characterAssets.length ? ` (${characterAssets.length})` : ""}
+        </h2>
+      </div>
+      {characterAssets.length ? (
+        <div className="reference-thumb-row">
+          {characterAssets.map((asset) => (
+            <button
+              aria-label={`Preview ${asset.displayName ?? asset.id}`}
+              className="reference-thumb"
+              key={asset.id}
+              onClick={() => onPreview?.(asset)}
+              type="button"
+            >
+              <AssetMedia asset={asset} controls={false} />
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="muted">
+          No images yet. Angle sets, pose generations, character tests, and any character-image render collect here automatically.
+        </p>
+      )}
+    </section>
+  );
+}
+
 // Pose library: pick one or more poses from the bundled OpenPose gallery and generate
 // the character in each, in a single batch job (advanced.poses) sharing one seed for
 // wardrobe/hair consistency. An OpenPose ControlNet drives the pose; a face-restoration
