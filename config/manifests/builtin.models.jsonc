@@ -414,7 +414,15 @@
       "family": "sensenova-u1",
       "type": "image",
       "adapter": "sensenova_u1",
-      "capabilities": ["text_to_image", "edit_image", "vqa", "interleave"],
+      // character_image (sc-2016): the instruction-edit (it2i) path doubles as a
+      // Character Studio backbone — the reference is fed via the same it2i kwarg
+      // edit_image uses, but driven by referenceAssetId. sc-2015 hardware spike
+      // measured a unique tradeoff: SenseNova preserves wardrobe + accessories +
+      // tattoos + hair color across scene variations, but face geometry drifts
+      // (cosine 0.10–0.75 vs InstantID's 0.876). The right pick when outfit
+      // consistency matters more than face fidelity; the manifest description
+      // is honest about that.
+      "capabilities": ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
       "downloads": [
         {
           "provider": "huggingface",
@@ -456,8 +464,15 @@
       },
       "ui": {
         "label": "SenseNova-U1 8B",
-        "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image and instruction-based editing with strong prompt following, dense text, and infographics. Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS). VQA/interleaved not wired yet.",
-        "recommendedFor": ["text_to_image", "edit_image"],
+        "description": "Unified multimodal model (NEO-unify, ~16B). Native text-to-image and instruction-based editing with strong prompt following, dense text, and infographics. In Character Studio, drives a *wardrobe-preserving* reference flow: SenseNova carries the tank, jacket, props, tattoos, and hair color from the reference into new scenes very faithfully, but face geometry can drift — best when outfit consistency matters more than face identity (for face-locked identity, pick InstantID or PuLID-FLUX). Heavy: ~42GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        // Edit-style backbone (no IP-Adapter / face-ID engine): the variation knob
+        // rides imageGuidanceScale. Higher = closer to the source/reference, lower
+        // = more prompt-driven variation. sc-2018 audit accepts this as the
+        // character_image engine declaration. Default 1.5 for character_image
+        // (the adapter raises the default vs the 1.0 edit baseline so the
+        // reference subject pulls harder by default).
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
         "promptGuide": {
           "title": "SenseNova-U1 8B Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b.md",
@@ -475,7 +490,11 @@
       "family": "sensenova-u1",
       "type": "image",
       "adapter": "sensenova_u1",
-      "capabilities": ["text_to_image", "edit_image"],
+      // character_image (sc-2016): same it2i Character Studio path as the base
+      // SenseNova-U1 8B target, on the 8-step distilled variant (~50s/image vs
+      // ~4.6 min). Distilled editing is upstream-marked experimental, so the
+      // base model is recommended for max-quality reference work.
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
       "downloads": [
         {
           // Shares the SenseNova-U1 8B base weights; the ~0.4GB 8-step distill
@@ -515,8 +534,11 @@
       },
       "ui": {
         "label": "SenseNova-U1 8B Fast",
-        "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image and editing (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Shares the SenseNova-U1 8B base weights (~35GB); a ~0.4GB distill LoRA downloads automatically on first use. Distilled editing is experimental — use the base SenseNova-U1 8B for max-quality edits.",
-        "recommendedFor": ["text_to_image", "edit_image"],
+        "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image, editing, and Character Studio reference (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base SenseNova-U1 8B (carries outfit + accessories + tattoos across new scenes, face may drift — pick InstantID or PuLID-FLUX for face-locked identity). Shares the SenseNova-U1 8B base weights (~35GB); a ~0.4GB distill LoRA downloads automatically on first use. Distilled editing is experimental — use the base SenseNova-U1 8B for max-quality reference work.",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        // Edit-style variation knob (imageGuidanceScale); see SenseNova-U1 8B
+        // for context. The fast variant defaults match the base variant.
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
         "promptGuide": {
           "title": "SenseNova-U1 8B Fast Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b-fast.md",
