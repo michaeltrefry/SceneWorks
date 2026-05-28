@@ -207,7 +207,7 @@ def heartbeat(
     )
 
 
-def track_job_peaks(payload: dict, peaks: dict, gpu_id: str) -> None:
+def track_job_peaks(payload: dict, peaks: dict, settings: WorkerSettings) -> None:
     """Sample GPU utilization, ratchet the running max into `peaks`, and fold
     the peaks into a progress payload (sc-2086).
 
@@ -215,7 +215,13 @@ def track_job_peaks(payload: dict, peaks: dict, gpu_id: str) -> None:
     caller carries across every progress() call inside one job, so the
     completed-row hardware meters show the highest values observed during the
     run instead of whatever the last sample happened to be.
+
+    Defensive against minimal test settings (SimpleNamespace) that may not
+    carry a gpu_id attribute — falls back to "cpu" the same way heartbeat()
+    does. gpu_utilization() returns None for unknown gpu ids, so the helper
+    no-ops cleanly when there's nothing to sample.
     """
+    gpu_id = getattr(settings, "gpu_id", "cpu")
     utilization = gpu_utilization(gpu_id)
     if utilization:
         mem_used = utilization.get("memoryUsedMb")
@@ -699,7 +705,7 @@ def run_image_job(api: ApiClient, settings: WorkerSettings, job: dict, image_ada
         }
         if result is not None:
             payload["result"] = result
-        track_job_peaks(payload, peaks, settings.gpu_id)
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     try:
@@ -793,7 +799,7 @@ def run_vqa_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapt
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
             payload["result"] = result
-        track_job_peaks(payload, peaks, settings.gpu_id)
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     try:
@@ -859,7 +865,7 @@ def run_interleave_job(api: ApiClient, settings: WorkerSettings, job: dict, imag
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
             payload["result"] = result
-        track_job_peaks(payload, peaks, settings.gpu_id)
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     try:
@@ -934,7 +940,7 @@ def run_video_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
             "progress": value,
             "message": message,
         }
-        track_job_peaks(payload, peaks, settings.gpu_id)
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     try:
@@ -1049,7 +1055,7 @@ def run_person_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings.gpu_id)
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     runner = run_person_detect if job_type == "person_detect" else run_person_track
@@ -1120,7 +1126,7 @@ def _run_lora_train_dry_run(api: ApiClient, settings: WorkerSettings, job: dict,
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
         update_payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(update_payload, peaks, settings.gpu_id)
+        track_job_peaks(update_payload, peaks, settings)
         update_job(api, job_id, update_payload)
 
     try:
@@ -1173,7 +1179,7 @@ def _run_lora_train_execution(api: ApiClient, settings: WorkerSettings, job: dic
         update_payload = {"status": status, "stage": stage, "progress": value, "message": message}
         if result is not None:
             update_payload["result"] = result
-        track_job_peaks(update_payload, peaks, settings.gpu_id)
+        track_job_peaks(update_payload, peaks, settings)
         update_job(api, job_id, update_payload)
 
     try:
@@ -1253,7 +1259,7 @@ def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, jo
     def progress(status: str, stage: str, value: float, message: str) -> None:
         heartbeat(api, settings, "busy", job_id)
         payload = {"status": status, "stage": stage, "progress": value, "message": message}
-        track_job_peaks(payload, peaks, settings.gpu_id)
+        track_job_peaks(payload, peaks, settings)
         update_job(api, job_id, payload)
 
     try:
