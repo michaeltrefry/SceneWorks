@@ -6517,3 +6517,279 @@ label {
   border-radius: var(--r-md, 8px);
   font-size: 0.85rem;
 }
+
+/*
+ * WorkerProgressCard (sc-2083) — unified worker/job progress component.
+ * See docs/design/worker-progress-card.md. Replaces .local-job-card, .job-row,
+ * and .training-live-card as those screens migrate (sc-2088..2092). Until
+ * cleanup (sc-2093) lands, the legacy classes coexist.
+ */
+.worker-progress-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  padding: 12px;
+  min-width: 0;
+}
+
+.worker-progress-card.failed,
+.worker-progress-card.canceled,
+.worker-progress-card.interrupted {
+  border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
+  background: var(--danger-soft);
+}
+
+.worker-progress-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.worker-progress-card__type {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Job-type chip color modifiers. Background uses accent-soft so the chip
+   reads as a category label, not a CTA. */
+.worker-progress-card__type.chip-image-generate,
+.worker-progress-card__type.chip-image-edit,
+.worker-progress-card__type.chip-image-vqa,
+.worker-progress-card__type.chip-image-interleave,
+.worker-progress-card__type.chip-person-replace {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: transparent;
+}
+
+.worker-progress-card__type.chip-video-generate,
+.worker-progress-card__type.chip-video-extend,
+.worker-progress-card__type.chip-video-bridge {
+  background: color-mix(in oklch, var(--accent) 18%, var(--surface));
+  color: var(--accent-strong);
+  border-color: transparent;
+}
+
+.worker-progress-card__type.chip-lora-train {
+  background: color-mix(in oklch, #f59f00 22%, var(--surface));
+  color: color-mix(in oklch, #b45309 85%, var(--text));
+  border-color: transparent;
+}
+
+.worker-progress-card__type.chip-training-caption {
+  background: color-mix(in oklch, #facc15 22%, var(--surface));
+  color: color-mix(in oklch, #854d0e 85%, var(--text));
+  border-color: transparent;
+}
+
+.worker-progress-card__type.chip-model-download,
+.worker-progress-card__type.chip-model-import,
+.worker-progress-card__type.chip-model-convert,
+.worker-progress-card__type.chip-lora-import {
+  background: color-mix(in oklch, var(--text-muted) 18%, var(--surface));
+  color: var(--text);
+}
+
+.worker-progress-card__title-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.worker-progress-card__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.worker-progress-card__id {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: copy;
+}
+
+.worker-progress-card__hardware {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.worker-progress-card__hw-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.worker-progress-card__pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.worker-progress-card__pill.device {
+  color: var(--text);
+}
+
+.worker-progress-card__pill.arch.arch-cuda {
+  background: color-mix(in oklch, #16a34a 16%, var(--surface));
+  color: color-mix(in oklch, #15803d 85%, var(--text));
+  border-color: transparent;
+}
+
+.worker-progress-card__pill.arch.arch-mps,
+.worker-progress-card__pill.arch.arch-mlx {
+  background: color-mix(in oklch, #2563eb 16%, var(--surface));
+  color: color-mix(in oklch, #1d4ed8 85%, var(--text));
+  border-color: transparent;
+}
+
+.worker-progress-card__meters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: 1 1 240px;
+  min-width: 200px;
+}
+
+.worker-progress-card__meter {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 120px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__meter-label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.worker-progress-card__meter-bar {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+}
+
+.worker-progress-card__meter-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 200ms ease;
+}
+
+.worker-progress-card__meter.empty .worker-progress-card__meter-bar {
+  background: transparent;
+}
+
+.worker-progress-card__meter-value {
+  font-variant-numeric: tabular-nums;
+  min-width: 32px;
+  text-align: right;
+}
+
+.worker-progress-card__status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+}
+
+.worker-progress-card__status-row > span {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.worker-progress-card__status-row small {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__status-row strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.worker-progress-card__progress.indeterminate {
+  position: relative;
+  overflow: hidden;
+}
+
+.worker-progress-card__progress.indeterminate::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--accent) 65%, transparent),
+    transparent
+  );
+  animation: worker-progress-card-indeterminate 1400ms ease-in-out infinite;
+}
+
+@keyframes worker-progress-card-indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(350%); }
+}
+
+.worker-progress-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 480px) {
+  .worker-progress-card__title-row {
+    grid-template-columns: 1fr;
+  }
+  .worker-progress-card__id {
+    justify-self: start;
+  }
+  .worker-progress-card__actions .secondary-action {
+    flex: 1 1 100%;
+  }
+}
