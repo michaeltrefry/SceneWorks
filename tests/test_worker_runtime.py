@@ -483,6 +483,168 @@ def test_qwen_loaded_models_track_text_and_edit_repos_independently():
     assert set(adapter.loaded_models()) == {"Qwen/Qwen-Image", "Qwen/Qwen-Image-Edit", "qwen_image_edit"}
 
 
+def test_qwen_image_edit_2509_model_target_defaults():
+    target = MODEL_TARGETS["qwen_image_edit_2509"]
+    assert target["adapter"] == "qwen_image"
+    assert target["family"] == "qwen-image"
+    assert target["supportsEdit"] is True
+    # Model-card recommends 50 steps for the September iteration (vs 20 on
+    # qwen_image_edit) — character_image quality benefits.
+    assert target["steps"] == 50
+    assert target["repo"] == "Qwen/Qwen-Image-Edit-2509"
+
+
+def test_create_image_adapter_routes_qwen_image_edit_2509():
+    # The new Plus model rides the same QwenImageAdapter; pipeline-class selection
+    # happens inside _load_pipeline based on the model id (sc-2014).
+    adapter = create_image_adapter({"payload": {"model": "qwen_image_edit_2509"}})
+    assert adapter.__class__.__name__ == "QwenImageAdapter"
+    assert adapter.id == "qwen_image"
+
+
+def test_qwen_edit_pipeline_name_by_model():
+    # qwen_image_edit_2509 -> QwenImageEditPlusPipeline (multi-image reference);
+    # everything else falls back to the single-image QwenImageEditPipeline.
+    assert QwenImageAdapter._edit_pipeline_name("qwen_image_edit_2509") == "QwenImageEditPlusPipeline"
+    assert QwenImageAdapter._edit_pipeline_name("qwen_image_edit") == "QwenImageEditPipeline"
+    # Defensive: anything else still gets the single-image pipeline, matching
+    # the same edit-style API surface.
+    assert QwenImageAdapter._edit_pipeline_name("qwen_image") == "QwenImageEditPipeline"
+
+
+def test_qwen_use_reference_only_for_character_image_with_reference():
+    use = QwenImageAdapter._use_reference
+    # Character Studio reference path requires both mode + a reference asset.
+    assert use(SimpleNamespace(mode="character_image", reference_asset_id="a")) is True
+    # No reference id → no character_image route (the picker shouldn't allow this
+    # combination, but the worker double-checks).
+    assert use(SimpleNamespace(mode="character_image", reference_asset_id=None)) is False
+    # Edit and text-to-image modes go through their own paths regardless of
+    # whether a reference id is also present.
+    assert use(SimpleNamespace(mode="edit_image", reference_asset_id="a")) is False
+    assert use(SimpleNamespace(mode="text_to_image", reference_asset_id="a")) is False
+
+
+def test_qwen_reference_true_cfg_scale_default_and_clamp():
+    adapter = QwenImageAdapter()
+    # Model-card default 4.0; clamp [1, 10] (below 1 disables CFG and the edit
+    # pipeline needs it > 1, above 10 collapses to pure negative-prompt steering).
+    assert adapter._reference_true_cfg_scale(SimpleNamespace(advanced={})) == 4.0
+    assert adapter._reference_true_cfg_scale(SimpleNamespace(advanced={"trueCfgScale": 2.5})) == 2.5
+    assert adapter._reference_true_cfg_scale(SimpleNamespace(advanced={"trueCfgScale": 0.5})) == 1.0
+    assert adapter._reference_true_cfg_scale(SimpleNamespace(advanced={"trueCfgScale": 99})) == 10.0
+    assert adapter._reference_true_cfg_scale(SimpleNamespace(advanced={"trueCfgScale": "x"})) == 4.0
+
+
+def test_qwen_reference_run_pipeline_passes_image_and_true_cfg(tmp_path, monkeypatch):
+    """A character_image job with referenceAssetId drives the reference branch of
+    _run_pipeline: load_reference_image(project_path, reference_asset_id) → image=
+    kwarg, plus true_cfg_scale + negative_prompt (defaulted to ' ' so true CFG
+    engages on Qwen edit pipelines). Mirrors the FLUX/SDXL torch-free pattern."""
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        def __init__(self):
+            self.last_kwargs: dict[str, Any] = {}
+
+        # Named params so filter_call_kwargs keeps the Qwen-specific kwargs we
+        # need to assert (FakePipe's `__call__` introspects clean via signature).
+        def __call__(
+            self,
+            *,
+            prompt=None,
+            negative_prompt=None,
+            image=None,
+            true_cfg_scale=None,
+            height=None,
+            width=None,
+            num_inference_steps=None,
+            guidance_scale=None,
+            generator=None,
+            **kwargs,
+        ):
+            self.last_kwargs = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "image": image,
+                "true_cfg_scale": true_cfg_scale,
+                "height": height,
+                "width": width,
+                "num_inference_steps": num_inference_steps,
+                "guidance_scale": guidance_scale,
+                "generator": generator,
+                **kwargs,
+            }
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+
+    seen: list[tuple] = []
+
+    def fake_load_reference_image(project_path, reference_asset_id):
+        seen.append((project_path, reference_asset_id))
+        return FakeImage()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.load_reference_image", fake_load_reference_image
+    )
+
+    # sampler_selection_from_advanced + apply_sampler poke the pipe — short-circuit.
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.apply_sampler",
+        lambda *args, **kwargs: None,
+    )
+
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "project-1",
+                "mode": "character_image",
+                "model": "qwen_image_edit_2509",
+                "prompt": "the same character at a cafe",
+                "referenceAssetId": "asset-ref",
+                "width": 16,
+                "height": 16,
+                "count": 1,
+                "advanced": {"trueCfgScale": 3.0},
+            }
+        }
+    )
+    pipe = FakePipe()
+    result = QwenImageAdapter()._run_pipeline(
+        SimpleNamespace(gpu_id="cpu"), pipe, request, 7, project_path
+    )
+    # Reference branch ran: load_reference_image called, image= kwarg threaded
+    # through with the loaded reference, true_cfg_scale from advanced overrides
+    # default, and negative_prompt defaulted to " " so true CFG engages (Qwen's
+    # edit pipeline needs a non-empty negative prompt for guidance > 1).
+    assert seen == [(project_path, "asset-ref")]
+    assert pipe.last_kwargs["true_cfg_scale"] == 3.0
+    assert pipe.last_kwargs["negative_prompt"] == " "
+    assert pipe.last_kwargs["image"] is not None
+    assert result is FakeOutput.images[0]
+
+
 def test_filter_call_kwargs_preserves_none_for_accepted_parameters():
     assert filter_call_kwargs(AcceptsNone(), {"prompt": "city", "image": None, "extra": 1}) == {
         "prompt": "city",

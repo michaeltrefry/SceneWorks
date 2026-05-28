@@ -251,6 +251,19 @@ MODEL_TARGETS = {
         "repo": "Qwen/Qwen-Image-Edit",
         "adapter": "qwen_image",
     },
+    "qwen_image_edit_2509": {
+        "label": "Qwen Image Edit (2509)",
+        "family": "qwen-image",
+        "supportsEdit": True,
+        # Model-card defaults: 50 steps + true_cfg_scale 4.0 (the variation/CFG knob;
+        # higher = more prompt adherence, lower = closer to the reference). Character
+        # Studio reference goes through QwenImageEditPlusPipeline which accepts a
+        # list of input images for multi-reference subject consistency. Apache-2.0,
+        # ungated. sc-2014.
+        "steps": 50,
+        "repo": "Qwen/Qwen-Image-Edit-2509",
+        "adapter": "qwen_image",
+    },
     "lens": {
         "label": "Lens",
         "family": "lens",
@@ -1384,6 +1397,16 @@ class ZImageDiffusersAdapter:
 class QwenImageAdapter:
     id = "qwen_image"
 
+    # qwen_image_edit_2509 routes through the multi-image-capable Edit Plus
+    # pipeline; the original qwen_image_edit uses the single-image Edit pipeline.
+    # Both pipelines accept `image=` + a variation prompt + `true_cfg_scale` —
+    # the diff is the multi-reference subject-consistency improvements baked into
+    # the September model (sc-2014, sc-2013 spike).
+    _EDIT_PIPELINE_BY_MODEL = {
+        "qwen_image_edit_2509": "QwenImageEditPlusPipeline",
+    }
+    _DEFAULT_EDIT_PIPELINE = "QwenImageEditPipeline"
+
     def __init__(self) -> None:
         self._text_pipe: Any | None = None
         self._edit_pipe: Any | None = None
@@ -1391,6 +1414,18 @@ class QwenImageAdapter:
         self._edit_repo: str | None = None
         self._loaded_model: str | None = None
         self._loaded_lora_states: dict[str, LoraPipelineState] = {}
+
+    @staticmethod
+    def _use_reference(request: ImageRequest) -> bool:
+        # Character Studio reference path: feed the reference as the edit-style
+        # `image=` kwarg and let true_cfg_scale steer prompt vs reference. Not
+        # combined with edit_image (mutually exclusive — character_image is a
+        # subject-variation flow, edit_image is a localized modification flow).
+        return request.mode == "character_image" and bool(request.reference_asset_id)
+
+    @classmethod
+    def _edit_pipeline_name(cls, model: str) -> str:
+        return cls._EDIT_PIPELINE_BY_MODEL.get(model, cls._DEFAULT_EDIT_PIPELINE)
 
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._text_repo, self._edit_repo, self._loaded_model) if value})
@@ -1513,10 +1548,10 @@ class QwenImageAdapter:
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
-        use_edit = request.mode == "edit_image"
+        use_edit_pipe = request.mode == "edit_image" or self._use_reference(request)
         cpu_offload = bool(request.advanced.get("cpuOffload", False))
-        cached_pipe = self._edit_pipe if use_edit else self._text_pipe
-        cached_repo = self._edit_repo if use_edit else self._text_repo
+        cached_pipe = self._edit_pipe if use_edit_pipe else self._text_pipe
+        cached_repo = self._edit_repo if use_edit_pipe else self._text_repo
         if cached_pipe is not None and cached_repo == repo:
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
@@ -1532,16 +1567,22 @@ class QwenImageAdapter:
             )
             return cached_pipe
         if cached_pipe is not None:
-            if use_edit:
+            if use_edit_pipe:
                 self._edit_pipe = None
                 self._edit_repo = None
             else:
                 self._text_pipe = None
                 self._text_repo = None
             self._empty_cuda_cache(torch)
-            self._forget_loaded_loras("edit" if use_edit else "text")
+            self._forget_loaded_loras("edit" if use_edit_pipe else "text")
 
-        pipeline_name = "QwenImageEditPipeline" if use_edit else "QwenImagePipeline"
+        if use_edit_pipe:
+            # Edit-style pipeline class is model-bound: qwen_image_edit_2509 ships
+            # the multi-image Plus variant, the original qwen_image_edit uses the
+            # single-image pipeline. Same `image=` kwarg shape on both.
+            pipeline_name = self._edit_pipeline_name(request.model)
+        else:
+            pipeline_name = "QwenImagePipeline"
         pipeline_class = getattr(diffusers, pipeline_name, None)
         if pipeline_class is None:
             raise RuntimeError(f"The installed diffusers package does not expose {pipeline_name}. Install the latest diffusers build.")
@@ -1555,7 +1596,8 @@ class QwenImageAdapter:
             repo=repo,
             device=device,
             dtype=str(dtype),
-            useImg2img=use_edit,
+            useImg2img=use_edit_pipe,
+            useReference=self._use_reference(request),
             cpuOffload=cpu_offload,
             cached=huggingface_repo_cache_exists(repo),
         )
@@ -1592,7 +1634,7 @@ class QwenImageAdapter:
             gpuMemory=gpu_memory_snapshot(torch, device),
         )
 
-        if use_edit:
+        if use_edit_pipe:
             self._edit_pipe = pipe
             self._edit_repo = repo
         else:
@@ -1632,9 +1674,22 @@ class QwenImageAdapter:
         if request.negative_prompt:
             kwargs["negative_prompt"] = request.negative_prompt
         if request.mode == "edit_image":
+            # QwenImageEditPipeline.__call__ takes `image=` + `true_cfg_scale` (its
+            # CFG knob) but NOT a `strength` kwarg — the previous edit path passed
+            # one and filter_call_kwargs silently dropped it (sc-2013 spike find).
             kwargs["image"] = load_source_image(project_path, request)
-            kwargs["strength"] = float(request.advanced.get("strength", 0.6))
             kwargs["true_cfg_scale"] = float(request.advanced.get("trueCfgScale", 4.0))
+        elif self._use_reference(request):
+            # Character Studio reference path: same `image=` kwarg as edit_image but
+            # the reference (vs source_asset_id) drives subject identity while the
+            # prompt drives the new scene/pose. true_cfg_scale is the variation
+            # knob: high (>4) leans prompt → more variation; low (~1) leans
+            # reference → closer to source. negative_prompt is required for true CFG
+            # to engage (falls back to a single space when blank).
+            kwargs["image"] = load_reference_image(project_path, request.reference_asset_id)
+            kwargs["true_cfg_scale"] = self._reference_true_cfg_scale(request)
+            if "negative_prompt" not in kwargs:
+                kwargs["negative_prompt"] = " "
         step_callback = cancel_step_callback(pipe, cancel_requested)
         if step_callback is not None:
             kwargs["callback_on_step_end"] = step_callback
@@ -1668,6 +1723,18 @@ class QwenImageAdapter:
             return float(request.advanced.get("guidanceScale", 4.0))
         except (TypeError, ValueError):
             return 4.0
+
+    def _reference_true_cfg_scale(self, request: ImageRequest) -> float:
+        # Variation knob for the character_image reference path. Model card default
+        # 4.0; higher = more prompt-driven variation, lower = closer to reference.
+        # Clamped [1, 10] — below 1 disables CFG (and Qwen's edit pipeline needs
+        # it >1 with a non-empty negative prompt to function), above 10 collapses
+        # to pure negative-prompt steering.
+        try:
+            scale = float(request.advanced.get("trueCfgScale", 4.0))
+        except (TypeError, ValueError):
+            return 4.0
+        return max(1.0, min(10.0, scale))
 
 
 class FluxDiffusersAdapter:

@@ -62,10 +62,22 @@ export const fallbackModels = [
     id: "qwen_image_edit",
     name: "Qwen Image Edit",
     type: "image",
-    capabilities: ["edit_image"],
+    // character_image (sc-2014): subject consistency via QwenImageEditPipeline's
+    // dual-control architecture; reference goes through `image=` + trueCfgScale.
+    capabilities: ["edit_image", "character_image"],
     ui: {
-      description: "Qwen image edit target.",
+      description: "Qwen image edit target. Dual-control architecture (semantic + appearance) handles both localized edits and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated.",
       promptGuide: { title: "Qwen Image Edit Prompt Guide", path: "/prompt-guides/qwen-image-edit.md" },
+    },
+  },
+  {
+    id: "qwen_image_edit_2509",
+    name: "Qwen Image Edit (2509)",
+    type: "image",
+    capabilities: ["edit_image", "character_image"],
+    ui: {
+      description: "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) via QwenImageEditPlusPipeline. Enhanced subject-consistency for character-in-new-context generation; multi-image reference support. Apache-2.0, ungated; ~50 steps at trueCfgScale 4.0.",
+      promptGuide: { title: "Qwen Image Edit (2509) Prompt Guide", path: "/prompt-guides/qwen-image-edit-2509.md" },
     },
   },
   {

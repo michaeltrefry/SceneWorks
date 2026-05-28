@@ -170,7 +170,11 @@
       "family": "qwen-image",
       "type": "image",
       "adapter": "qwen_image",
-      "capabilities": ["edit_image"],
+      // character_image: Qwen-Image-Edit's dual-control (Qwen2.5-VL semantic +
+      // VAE appearance) supports subject consistency across new scenes/poses;
+      // reference goes through `image=` on QwenImageEditPipeline (sc-2014 spike).
+      // qwen_image_edit_2509 below has stronger pose/subject decoupling.
+      "capabilities": ["edit_image", "character_image"],
       "downloads": [
         {
           "provider": "huggingface",
@@ -201,8 +205,8 @@
       },
       "ui": {
         "label": "Qwen Image Edit",
-        "description": "Higher-control image edit target kept behind the same adapter contract.",
-        "recommendedFor": ["edit_image"],
+        "description": "Higher-control image edit target backed by Diffusers QwenImageEditPipeline. Dual-control architecture (Qwen2.5-VL for semantic, VAE encoder for appearance) supports both localized edits (background change, object swap) and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated. With a character reference, runs the same pipeline with the reference as the `image=` kwarg — variation steered by `trueCfgScale` (4.0 default).",
+        "recommendedFor": ["edit_image", "character_image"],
         "promptGuide": {
           "title": "Qwen Image Edit Prompt Guide",
           "path": "/prompt-guides/qwen-image-edit.md",
@@ -210,6 +214,63 @@
             { "label": "Qwen Cloud image editing docs", "url": "https://docs.qwencloud.com/developer-guides/image-generation/image-editing" },
             { "label": "Qwen Cloud image prompt guide", "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/image-generation" },
             { "label": "Qwen Cloud text-to-image docs", "url": "https://docs.qwencloud.com/developer-guides/image-generation/text-to-image" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "qwen_image_edit_2509",
+      "name": "Qwen Image Edit (2509)",
+      "family": "qwen-image",
+      "type": "image",
+      "adapter": "qwen_image",
+      // QwenImageEditPlusPipeline: multi-image reference + enhanced single-image
+      // subject-consistency (the September 2509 iteration of Qwen-Image-Edit).
+      // Model-card use case: "changing a person's pose while maintaining excellent
+      // identity consistency" — directly Character Studio's wheelhouse (sc-2014).
+      "capabilities": ["edit_image", "character_image"],
+      "downloads": [
+        {
+          // Apache-2.0, ungated. Whole-repo download similar in size to qwen_image_edit.
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-Edit-2509",
+          "files": [],
+          "estimatedSizeBytes": 57720467613
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit-2509"
+      },
+      "defaults": {
+        // Model-card defaults: 50 steps + true_cfg_scale 4.0 (the variation knob;
+        // higher = more prompt-driven variation, lower = closer to reference).
+        "resolution": "1024x1024",
+        "steps": 50,
+        "count": 4,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
+        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+      },
+      "loraCompatibility": {
+        "families": ["qwen-image"],
+        "types": ["style", "enhance", "character"]
+      },
+      "ui": {
+        "label": "Qwen Image Edit (2509)",
+        "description": "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) backed by the multi-image `QwenImageEditPlusPipeline`. Enhanced subject-consistency for character-in-new-context generation — the model card calls out \"changing a person's pose while maintaining excellent identity consistency\". Apache-2.0, ungated. Recommended ~50 steps at trueCfgScale 4.0; bf16 MPS-supported per Qwen.",
+        "recommendedFor": ["edit_image", "character_image"],
+        "promptGuide": {
+          "title": "Qwen Image Edit (2509) Prompt Guide",
+          "path": "/prompt-guides/qwen-image-edit-2509.md",
+          "sources": [
+            { "label": "Qwen-Image-Edit-2509 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-Edit-2509" },
+            { "label": "Diffusers QwenImageEditPlusPipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/qwenimage" },
+            { "label": "Qwen-Image-Edit model card", "url": "https://huggingface.co/Qwen/Qwen-Image-Edit" }
           ]
         }
       }
