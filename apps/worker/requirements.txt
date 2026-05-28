@@ -20,6 +20,7 @@ accelerate>=1.11
 peft>=0.17,<1
 safetensors>=0.6
 prodigyopt>=1.1,<2
+rose-opt>=1.0.2,<2
 diffusers @ git+https://github.com/huggingface/diffusers.git
 # GGUF-quantized transformer loading (diffusers from_single_file +
 # GGUFQuantizationConfig) for Wan2.2 A14B quantized inference (sc-1982). Also used

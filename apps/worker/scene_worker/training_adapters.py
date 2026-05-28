@@ -667,7 +667,8 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float, weight_d
     """Build an optimizer for the LoRA parameters. ``adamw8bit`` uses
     bitsandbytes when available and falls back to torch AdamW otherwise (the
     8-bit optimizer is an optional, CUDA-only dependency). ``prodigy`` and
-    ``prodigyopt`` use the Prodigy optimizer package."""
+    ``prodigyopt`` use the Prodigy optimizer package. ``rose`` uses the rose-opt
+    package (stateless range-normalized updates, drop-in for AdamW)."""
 
     torch = importlib.import_module("torch")
     normalized = (name or "").strip().lower().replace("-", "").replace("_", "")
@@ -678,6 +679,14 @@ def build_optimizer(name: str, params: list[Any], learning_rate: float, weight_d
             raise TrainingKernelError("The Prodigy optimizer requires the prodigyopt Python package.") from exc
         use_lr = learning_rate if learning_rate >= 0.1 else 1.0
         return prodigy_module.Prodigy(params, lr=use_lr, eps=1e-6, weight_decay=weight_decay)
+    if normalized in {"rose", "roseopt"}:
+        try:
+            rose_module = importlib.import_module("rose_opt")
+        except Exception as exc:
+            raise TrainingKernelError("The Rose optimizer requires the rose-opt Python package.") from exc
+        # compute_dtype="fp32": Rose's fp64 default has no MPS kernel; fp32 is
+        # safe on both CUDA and Apple Silicon.
+        return rose_module.Rose(params, lr=learning_rate, weight_decay=weight_decay, compute_dtype="fp32")
     if normalized in {"adamw8bit", "adam8bit"}:
         try:
             bnb = importlib.import_module("bitsandbytes")
