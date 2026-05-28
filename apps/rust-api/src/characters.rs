@@ -352,6 +352,9 @@ pub(crate) async fn create_character_test_job(
         payload.look_id.map(Value::String).unwrap_or(Value::Null),
     );
     job_payload.insert("advanced".to_owned(), Value::Object(advanced));
+    // The worker's image_request_from_job requires payload.projectId; create_generation_job
+    // only stores it as the job column, so inject it here (as person/timeline/training jobs do).
+    job_payload.insert("projectId".to_owned(), Value::String(project_id.clone()));
     validate_job_lora_compatibility(&state, Some(&project_id), &mut job_payload, true).await?;
     let job = create_generation_job(
         state,

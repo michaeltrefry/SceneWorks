@@ -5663,6 +5663,9 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
     assert_eq!(test_job["type"], "image_generate");
     assert_eq!(test_job["payload"]["mode"], "character_image");
     assert_eq!(test_job["payload"]["characterId"], character_id);
+    // Regression (sc-2074): the worker's image_request_from_job requires payload.projectId;
+    // the test-job handler must inject it (it isn't carried by the column alone).
+    assert_eq!(test_job["payload"]["projectId"], project_id);
     assert_eq!(
         test_job["payload"]["advanced"]["approvedReferenceIds"][0],
         asset_id
