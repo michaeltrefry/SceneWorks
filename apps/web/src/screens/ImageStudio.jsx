@@ -225,6 +225,12 @@ export function ImageStudio() {
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [ipAdapterScale, setIpAdapterScale] = useState(saved.ipAdapterScale ?? 0.6);
   const [controlnetScale, setControlnetScale] = useState(saved.controlnetScale ?? 0.8);
+  // Variation knob for backbones whose CFG is decoupled from IP-Adapter:
+  // FLUX (true_cfg_scale alongside ipAdapterScale) and Qwen-Image-Edit (true_cfg_scale
+  // *replaces* the IP-Adapter slider because Qwen's edit pipeline doesn't use one).
+  // Per-model spec rides in ui.variationStrength; resets to the model default on
+  // model change like the other tuning knobs (sc-2017).
+  const [trueCfgScale, setTrueCfgScale] = useState(saved.trueCfgScale ?? 4.0);
   // InstantID canonical head angle ("" = match the reference's own angle). Rides advanced.viewAngle.
   const [viewAngle, setViewAngle] = useState(saved.viewAngle ?? "");
   // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
@@ -342,6 +348,11 @@ export function ImageStudio() {
   const viewAngles = Array.isArray(selectedModel?.ui?.viewAngles) ? selectedModel.ui.viewAngles : null;
   // Whether the model supports the OpenPose pose library (InstantID).
   const poseLibrary = Boolean(selectedModel?.ui?.poseLibrary);
+  // Variation slider spec (FLUX / Qwen). When declared, the model exposes a
+  // trueCfgScale knob alongside (FLUX) or instead of (Qwen, via hideReferenceStrength)
+  // the IP-Adapter reference-strength slider (sc-2017).
+  const variationStrength = selectedModel?.ui?.variationStrength;
+  const hideReferenceStrength = Boolean(selectedModel?.ui?.hideReferenceStrength);
   // Reset the reference tuning to the selected model's declared defaults whenever the
   // model changes, so InstantID starts at its tuned 0.8/0.8 and Kolors at 0.6, and the
   // view angle never carries over to a model that doesn't support it. Skip the mount
@@ -355,6 +366,7 @@ export function ImageStudio() {
     const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
     setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
     setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
+    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
     setViewAngle("");
     setSelectedPoseIds([]);
   }, [model]);
@@ -558,6 +570,7 @@ export function ImageStudio() {
     resolution,
     ipAdapterScale,
     controlnetScale,
+    trueCfgScale,
     viewAngle,
     upscaleEnabled,
     upscaleFactor,
@@ -674,12 +687,21 @@ export function ImageStudio() {
             ? { guidanceScale: Number(guidanceOverride) }
             : {}),
           // IP-Adapter / InstantID reference strength only applies when a character
-          // reference is attached; the worker reads advanced.ipAdapterScale.
-          ...(mode === "character_image" && referenceAssetId ? { ipAdapterScale } : {}),
+          // reference is attached AND the model uses the IP-Adapter knob; Qwen's
+          // edit pipeline ignores this scalar (hideReferenceStrength gates it out).
+          ...(mode === "character_image" && referenceAssetId && !hideReferenceStrength
+            ? { ipAdapterScale }
+            : {}),
           // Identity structure (controlnetConditioningScale) is InstantID-only — sent
           // only when the model exposes the control and a reference is attached.
           ...(mode === "character_image" && referenceAssetId && identityStructure
             ? { controlnetConditioningScale: controlnetScale }
+            : {}),
+          // Variation knob (trueCfgScale) — FLUX uses it alongside ipAdapterScale,
+          // Qwen uses it as the only variation lever. Sent only when the model
+          // declares a variationStrength slider AND a reference is attached.
+          ...(mode === "character_image" && referenceAssetId && variationStrength
+            ? { trueCfgScale }
             : {}),
           // View angle (InstantID) — only when a specific angle is chosen and no pose is
           // selected (a library pose drives the whole body, superseding the head angle).
@@ -838,18 +860,20 @@ export function ImageStudio() {
                           </button>
                         ))}
                       </div>
-                      <label className="reference-strength">
-                        {identityStructure ? "Identity strength" : "Reference strength"}
-                        <input
-                          max="1"
-                          min="0"
-                          onChange={(event) => setIpAdapterScale(Number(event.target.value))}
-                          step="0.05"
-                          type="range"
-                          value={ipAdapterScale}
-                        />
-                        <span>{ipAdapterScale.toFixed(2)}</span>
-                      </label>
+                      {hideReferenceStrength ? null : (
+                        <label className="reference-strength">
+                          {identityStructure ? "Identity strength" : "Reference strength"}
+                          <input
+                            max="1"
+                            min="0"
+                            onChange={(event) => setIpAdapterScale(Number(event.target.value))}
+                            step="0.05"
+                            type="range"
+                            value={ipAdapterScale}
+                          />
+                          <span>{ipAdapterScale.toFixed(2)}</span>
+                        </label>
+                      )}
                       {identityStructure ? (
                         <label className="reference-strength">
                           {identityStructure.label ?? "Identity structure"}
@@ -862,6 +886,20 @@ export function ImageStudio() {
                             value={controlnetScale}
                           />
                           <span>{controlnetScale.toFixed(2)}</span>
+                        </label>
+                      ) : null}
+                      {variationStrength ? (
+                        <label className="reference-strength">
+                          {variationStrength.label ?? "Variation"}
+                          <input
+                            max={variationStrength.max ?? 10}
+                            min={variationStrength.min ?? 1}
+                            onChange={(event) => setTrueCfgScale(Number(event.target.value))}
+                            step={variationStrength.step ?? 0.5}
+                            type="range"
+                            value={trueCfgScale}
+                          />
+                          <span>{trueCfgScale.toFixed(2)}</span>
                         </label>
                       ) : null}
                       {viewAngles ? (
@@ -903,6 +941,10 @@ export function ImageStudio() {
                         <span>
                           {identityStructure
                             ? "InstantID holds this person's face from the reference while the prompt drives the scene. Identity strength tunes likeness; Identity structure locks face geometry. Set a View angle to rotate the head (profiles, up/down, diagonals) with identity preserved. Raise Variations and leave the seed blank to explore takes."
+                            : variationStrength && hideReferenceStrength
+                            ? "Qwen's dual-control architecture (semantic + appearance) carries this reference's subject across new scenes and poses. Variation steers prompt-vs-reference balance: higher = more prompt-driven, lower = closer to the reference. Raise Variations and leave the seed blank to explore takes."
+                            : variationStrength
+                            ? "This reference's identity is carried across every variation. Reference strength tunes how strongly the reference conditions the result; Variation steers prompt adherence (raise for more variety, lower for closer to the reference). Raise Variations and leave the seed blank to explore takes."
                             : "This reference's identity is carried across every variation. Raise Variations and leave the seed blank to explore different takes."}
                         </span>
                       </div>

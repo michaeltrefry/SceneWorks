@@ -5687,6 +5687,169 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("surfaces the FLUX Variation slider alongside Reference strength and submits both knobs", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [
+            {
+              id: "char-1",
+              name: "Mira",
+              type: "person",
+              looks: [],
+              approvedReferences: [
+                {
+                  assetId: "ref-1",
+                  approved: true,
+                  asset: {
+                    id: "ref-1",
+                    type: "image",
+                    displayName: "Mira ref",
+                    projectId: "project-1",
+                    file: { path: "assets/images/ref_0001.png", mimeType: "image/png" },
+                  },
+                },
+              ],
+            },
+          ],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            {
+              id: "flux_dev",
+              name: "FLUX.1 [dev]",
+              type: "image",
+              family: "flux",
+              capabilities: ["character_image"],
+              ui: {
+                // FLUX exposes BOTH the IP-Adapter reference-strength slider
+                // (no override → global 0.6 default; the manifest sets 0.7 in
+                // production but this fixture intentionally omits that to verify
+                // the picker still renders correctly without a tuned default)
+                // AND the Variation slider for true_cfg_scale (sc-2017).
+                variationStrength: { label: "Variation", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
+              },
+            },
+          ],
+          latestAssets: [],
+          launchRequest: { id: "launch-flux", view: "Image", characterId: "char-1", referenceAssetId: "ref-1", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    // Both sliders are visible for FLUX: Reference strength (IP-Adapter) AND
+    // Variation (the trueCfgScale knob, which is FLUX's real-CFG lever since
+    // base FLUX is guidance-distilled).
+    expect(container.textContent).toContain("Reference strength");
+    expect(container.textContent).toContain("Variation");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    // Both knobs ride advanced: ipAdapterScale falls back to the global 0.6
+    // default (no per-model override) and trueCfgScale follows the model's
+    // declared default (4.0).
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        referenceAssetId: "ref-1",
+        advanced: expect.objectContaining({ ipAdapterScale: 0.6, trueCfgScale: 4.0 }),
+      }),
+    );
+  });
+
+  it("hides the Reference strength slider for Qwen and submits trueCfgScale alone", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [
+            {
+              id: "char-1",
+              name: "Mira",
+              type: "person",
+              looks: [],
+              approvedReferences: [
+                {
+                  assetId: "ref-1",
+                  approved: true,
+                  asset: {
+                    id: "ref-1",
+                    type: "image",
+                    displayName: "Mira ref",
+                    projectId: "project-1",
+                    file: { path: "assets/images/ref_0001.png", mimeType: "image/png" },
+                  },
+                },
+              ],
+            },
+          ],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            {
+              id: "qwen_image_edit_2509",
+              name: "Qwen Image Edit (2509)",
+              type: "image",
+              family: "qwen-image",
+              capabilities: ["character_image"],
+              ui: {
+                // Qwen-Image-Edit's variation knob is trueCfgScale; the IP-Adapter
+                // reference-strength slider would be a no-op here (the worker
+                // adapter doesn't read ipAdapterScale). Hide the slider AND drop
+                // it from the submit payload (sc-2017).
+                hideReferenceStrength: true,
+                variationStrength: { label: "Variation", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
+              },
+            },
+          ],
+          latestAssets: [],
+          launchRequest: { id: "launch-qwen", view: "Image", characterId: "char-1", referenceAssetId: "ref-1", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    // The no-op Reference-strength slider is hidden; only Variation renders.
+    expect(container.textContent).not.toContain("Reference strength");
+    expect(container.textContent).not.toContain("Identity strength");
+    expect(container.textContent).toContain("Variation");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    // advanced carries trueCfgScale but explicitly NOT ipAdapterScale.
+    const lastCall = createImageJob.mock.calls.at(-1)[0];
+    expect(lastCall.advanced.trueCfgScale).toBe(4.0);
+    expect(lastCall.advanced).not.toHaveProperty("ipAdapterScale");
+  });
+
   it("limits the character image model picker to reference-capable models", async () => {
     root = createRoot(container);
     await act(async () => {

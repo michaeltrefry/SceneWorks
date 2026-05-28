@@ -207,6 +207,18 @@
         "label": "Qwen Image Edit",
         "description": "Higher-control image edit target backed by Diffusers QwenImageEditPipeline. Dual-control architecture (Qwen2.5-VL for semantic, VAE encoder for appearance) supports both localized edits (background change, object swap) and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated. With a character reference, runs the same pipeline with the reference as the `image=` kwarg — variation steered by `trueCfgScale` (4.0 default).",
         "recommendedFor": ["edit_image", "character_image"],
+        // Qwen-Image-Edit's variation knob is true_cfg_scale (not an IP-Adapter
+        // reference-strength scalar): the existing "Reference strength" slider
+        // would be a no-op here. Hide it and surface variationStrength instead so
+        // the user has a real lever (sc-2017).
+        "hideReferenceStrength": true,
+        "variationStrength": {
+          "label": "Variation",
+          "default": 4.0,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.5
+        },
         "promptGuide": {
           "title": "Qwen Image Edit Prompt Guide",
           "path": "/prompt-guides/qwen-image-edit.md",
@@ -264,6 +276,16 @@
         "label": "Qwen Image Edit (2509)",
         "description": "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) backed by the multi-image `QwenImageEditPlusPipeline`. Enhanced subject-consistency for character-in-new-context generation — the model card calls out \"changing a person's pose while maintaining excellent identity consistency\". Apache-2.0, ungated. Recommended ~50 steps at trueCfgScale 4.0; bf16 MPS-supported per Qwen.",
         "recommendedFor": ["edit_image", "character_image"],
+        // Same variation-knob shape as qwen_image_edit (the picker hides the
+        // no-op IP-Adapter reference-strength slider and surfaces trueCfgScale).
+        "hideReferenceStrength": true,
+        "variationStrength": {
+          "label": "Variation",
+          "default": 4.0,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.5
+        },
         "promptGuide": {
           "title": "Qwen Image Edit (2509) Prompt Guide",
           "path": "/prompt-guides/qwen-image-edit-2509.md",
@@ -603,6 +625,16 @@
         "label": "FLUX.1 [dev]",
         "description": "Black Forest Labs FLUX.1 [dev] — higher-quality ~28-step (guidance 3.5) text-to-image. Distributed under the FLUX.1 [dev] Non-Commercial License: generations are for non-commercial use only. Gated Hugging Face download — accept the license at huggingface.co/black-forest-labs/FLUX.1-dev and add a Hugging Face token under Settings → Service credentials (or set HF_TOKEN on a server) before downloading. For commercial use choose FLUX.1 [schnell] (Apache-2.0). 12B transformer + T5-XXL; ~34GB bf16 VRAM, large-VRAM GPU. With a character reference, runs XLabs IP-Adapter for scene-flexible resemblance (faithful identity belongs to PuLID-FLUX).",
         "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        // FLUX is guidance-distilled; real CFG against the negative prompt rides
+        // on the parallel true_cfg_scale kwarg, distinct from the IP-Adapter
+        // reference-strength scalar. Surface BOTH levers in the picker (sc-2017).
+        "variationStrength": {
+          "label": "Variation",
+          "default": 4.0,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.5
+        },
         "promptGuide": {
           "title": "FLUX.1 [dev] Prompt Guide",
           "path": "/prompt-guides/flux-dev.md",

@@ -68,6 +68,10 @@ export const fallbackModels = [
     ui: {
       description: "Qwen image edit target. Dual-control architecture (semantic + appearance) handles both localized edits and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated.",
       promptGuide: { title: "Qwen Image Edit Prompt Guide", path: "/prompt-guides/qwen-image-edit.md" },
+      // Qwen's variation knob is trueCfgScale; the IP-Adapter reference-strength
+      // slider would be a no-op here. Hide it and surface variation instead (sc-2017).
+      hideReferenceStrength: true,
+      variationStrength: { label: "Variation", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
     },
   },
   {
@@ -78,6 +82,8 @@ export const fallbackModels = [
     ui: {
       description: "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) via QwenImageEditPlusPipeline. Enhanced subject-consistency for character-in-new-context generation; multi-image reference support. Apache-2.0, ungated; ~50 steps at trueCfgScale 4.0.",
       promptGuide: { title: "Qwen Image Edit (2509) Prompt Guide", path: "/prompt-guides/qwen-image-edit-2509.md" },
+      hideReferenceStrength: true,
+      variationStrength: { label: "Variation", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
     },
   },
   {
@@ -141,6 +147,9 @@ export const fallbackModels = [
     ui: {
       description: "FLUX.1 [dev] — higher-quality ~28-step text-to-image under the FLUX.1 [dev] Non-Commercial License (non-commercial only); gated download needs an HF token + license acceptance. ~34GB bf16, large-VRAM GPU. With a character reference, runs XLabs IP-Adapter for scene-flexible resemblance (faithful identity belongs to PuLID-FLUX).",
       promptGuide: { title: "FLUX.1 [dev] Prompt Guide", path: "/prompt-guides/flux-dev.md" },
+      // FLUX is guidance-distilled; real CFG rides on the parallel trueCfgScale
+      // kwarg, distinct from the IP-Adapter reference-strength scalar (sc-2017).
+      variationStrength: { label: "Variation", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
     },
   },
   {
