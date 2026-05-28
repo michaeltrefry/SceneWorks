@@ -1726,6 +1726,14 @@ def test_sdxl_model_target_defaults():
     assert sdxl["variant"] == "fp16"
     assert "maxSequenceLength" not in sdxl
     assert sdxl["repo"] == "stabilityai/stable-diffusion-xl-base-1.0"
+    # IP-Adapter plus-face for Character Studio reference conditioning (sc-2007):
+    # ViT-H image encoder shipped in the same repo, sdxl_models subfolder for the
+    # weights. Plus-face is the identity-leaning variant without scene/outfit copy.
+    ip_adapter = sdxl["ipAdapter"]
+    assert ip_adapter["repo"] == "h94/IP-Adapter"
+    assert ip_adapter["subfolder"] == "sdxl_models"
+    assert ip_adapter["weight"] == "ip-adapter-plus-face_sdxl_vit-h.safetensors"
+    assert ip_adapter["encoderSubfolder"] == "models/image_encoder"
 
 
 def test_sdxl_supports_edit():
@@ -1759,6 +1767,142 @@ def test_sdxl_num_inference_steps_default_and_override():
     # Explicit override is honored and clamped to [1, 80].
     assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 45}), sdxl) == 45
     assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 999}), sdxl) == 80
+
+
+def test_sdxl_reference_asset_id_parsed():
+    request = image_request_from_job(
+        {"payload": {"projectId": "p", "model": "sdxl", "referenceAssetId": "asset-ref"}}
+    )
+    assert request.reference_asset_id == "asset-ref"
+
+
+def test_sdxl_use_ip_adapter_only_for_text_with_reference():
+    use = SdxlDiffusersAdapter._use_ip_adapter
+    # IP-Adapter runs on the T2I pipeline with a reference image.
+    assert use(SimpleNamespace(mode="text_to_image", reference_asset_id="a")) is True
+    # Not for edit jobs (reference + img2img together is a future enhancement)...
+    assert use(SimpleNamespace(mode="edit_image", reference_asset_id="a")) is False
+    # ...and not without a reference image.
+    assert use(SimpleNamespace(mode="text_to_image", reference_asset_id=None)) is False
+
+
+def test_sdxl_ip_adapter_scale_default_and_clamp():
+    adapter = SdxlDiffusersAdapter()
+    # Plus-face default is 0.7 — identity-leaning while letting the prompt steer.
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={})) == 0.7
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": 0.4})) == 0.4
+    # Clamped to [0, 1]; unparseable falls back to the default.
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": 5})) == 1.0
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": -2})) == 0.0
+    assert adapter._ip_adapter_scale(SimpleNamespace(advanced={"ipAdapterScale": "x"})) == 0.7
+
+
+def test_sdxl_reference_run_pipeline_passes_ip_adapter_image(tmp_path, monkeypatch):
+    """A T2I job with referenceAssetId drives the IP-Adapter branch of _run_pipeline:
+    load_reference_image(project_path, reference_asset_id) → ip_adapter_image kwarg, plus
+    a per-request set_ip_adapter_scale. Mirrors test_kolors_reference_run_pipeline_passes_ip_adapter_image
+    so it runs torch-free in CI."""
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        def __init__(self):
+            self.scales: list[float] = []
+
+        def set_ip_adapter_scale(self, scale):
+            self.scales.append(scale)
+
+        def __call__(self, **kwargs):
+            self.last_kwargs = kwargs
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+
+    seen: list[tuple] = []
+
+    def fake_load_reference_image(project_path, reference_asset_id):
+        seen.append((project_path, reference_asset_id))
+        return FakeImage()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.load_reference_image", fake_load_reference_image
+    )
+
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "project-1",
+                "mode": "text_to_image",
+                "model": "sdxl",
+                "prompt": "a portrait of the character",
+                "referenceAssetId": "asset-ref",
+                "width": 16,
+                "height": 16,
+                "count": 1,
+                "advanced": {"ipAdapterScale": 0.5},
+            }
+        }
+    )
+    pipe = FakePipe()
+    result = SdxlDiffusersAdapter()._run_pipeline(
+        SimpleNamespace(gpu_id="cpu"), pipe, request, 7, project_path
+    )
+    # The IP-Adapter branch ran: it loaded the reference image (→ ip_adapter_image
+    # kwarg) and applied the per-request scale. (filter_call_kwargs only keeps a
+    # pipe's *named* params, and FakePipe takes **kwargs, so we assert via the
+    # observable side effects rather than last_kwargs — same as the edit test.)
+    assert seen == [(project_path, "asset-ref")]
+    assert pipe.scales == [0.5]
+    assert result is FakeOutput.images[0]
+
+
+def test_create_image_adapter_routes_realvisxl():
+    # RealVisXL is a photoreal SDXL finetune that rides the same adapter; pickers
+    # filter by capability flag, not adapter id (sc-2008).
+    adapter = create_image_adapter({"payload": {"model": "realvisxl"}})
+    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
+    assert adapter.id == "sdxl_diffusers"
+
+
+def test_realvisxl_model_target_defaults():
+    target = MODEL_TARGETS["realvisxl"]
+    # Same adapter + family as sdxl (sdxl-family LoRAs apply); plain photoreal
+    # selectable that complements instantid_realvisxl on the same checkpoint.
+    assert target["adapter"] == "sdxl_diffusers"
+    assert target["family"] == "sdxl"
+    assert target["supportsEdit"] is True
+    # SDXL defaults: ~30 steps at guidance 7.0, fp16 variant.
+    assert target["steps"] == 30
+    assert target["guidanceScale"] == 7.0
+    assert target["variant"] == "fp16"
+    # RealVisXL_V5.0: photoreal SDXL finetune (openrail++, ungated). Shares the
+    # HF cache with the InstantID built-in (no duplicate download).
+    assert target["repo"] == "SG161222/RealVisXL_V5.0"
+    # IP-Adapter block matches sdxl: any SDXL-UNet checkpoint can reuse it.
+    assert target["ipAdapter"] == MODEL_TARGETS["sdxl"]["ipAdapter"]
+
+
+def test_realvisxl_supports_edit():
+    assert model_supports_edit("realvisxl") is True
 
 
 def test_sdxl_adapter_applies_sdxl_lora(tmp_path):

@@ -391,6 +391,47 @@ MODEL_TARGETS = {
         "variant": "fp16",
         "repo": "stabilityai/stable-diffusion-xl-base-1.0",
         "adapter": "sdxl_diffusers",
+        # IP-Adapter for SDXL (Character Studio reference). plus-face holds facial
+        # structure via 16 patch tokens from a face-cropped training distribution,
+        # so it carries more identity than non-plus (4 global tokens) without
+        # copying clothing/composition as aggressively as plain plus (sc-2007).
+        # ViT-H image encoder shipped in the same repo. Any SDXL-UNet model
+        # (RealVisXL, etc.) can reuse this exact block. Stronger likeness still
+        # belongs to InstantID (sc-2009); IP-Adapter is the resemblance tier.
+        "ipAdapter": {
+            "repo": "h94/IP-Adapter",
+            "subfolder": "sdxl_models",
+            "weight": "ip-adapter-plus-face_sdxl_vit-h.safetensors",
+            "encoderSubfolder": "models/image_encoder",
+        },
+    },
+    "realvisxl": {
+        "label": "RealVisXL (photoreal SDXL)",
+        # SDXL UNet finetune — shares the sdxl LoRA family, sdxl_diffusers adapter,
+        # and the same IP-Adapter block. Use this for plain photoreal SDXL t2i /
+        # edit / reference work; InstantID (instantid_realvisxl) is the
+        # face-identity engine on the same checkpoint (sc-2008 vs sc-2009).
+        "family": "sdxl",
+        "supportsEdit": True,
+        # Real CFG with negative prompt: ~30 steps at guidance 7.0, native 1024.
+        "steps": 30,
+        "guidanceScale": 7.0,
+        # RealVisXL_V5.0 ships fp16-variant weights.
+        "variant": "fp16",
+        # Photoreal SDXL finetune that solves the "shiny/plastic" complaint —
+        # openrail++ (commercial use OK, ungated). Shares the HF cache with the
+        # InstantID built-in below (single ~6.6 GiB download).
+        "repo": "SG161222/RealVisXL_V5.0",
+        "adapter": "sdxl_diffusers",
+        # Same IP-Adapter as plain SDXL (h94/IP-Adapter is checkpoint-agnostic
+        # within the SDXL UNet family); identity-faithful likeness still belongs
+        # to instantid_realvisxl — IP-Adapter is the resemblance tier.
+        "ipAdapter": {
+            "repo": "h94/IP-Adapter",
+            "subfolder": "sdxl_models",
+            "weight": "ip-adapter-plus-face_sdxl_vit-h.safetensors",
+            "encoderSubfolder": "models/image_encoder",
+        },
     },
     "instantid_realvisxl": {
         "label": "InstantID (RealVisXL)",
@@ -2346,7 +2387,17 @@ class SdxlDiffusersAdapter:
         self._img2img_pipe: Any | None = None
         self._loaded_repo: str | None = None
         self._loaded_model: str | None = None
+        # Whether the resident text pipe has the IP-Adapter (+ image encoder) loaded.
+        # A plain-T2I pipe and an IP-Adapter pipe are not interchangeable, so this is
+        # part of the text-pipe cache key.
+        self._text_ip_adapter: bool = False
         self._loaded_lora_states: dict[str, LoraPipelineState] = {}
+
+    @staticmethod
+    def _use_ip_adapter(request: ImageRequest) -> bool:
+        # IP-Adapter reference conditioning runs on the text-to-image pipeline only
+        # (reference + img2img edit together is a future enhancement).
+        return request.mode != "edit_image" and bool(request.reference_asset_id)
 
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
@@ -2465,9 +2516,18 @@ class SdxlDiffusersAdapter:
         activate_torch_device(torch, device)
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         use_img2img = request.mode == "edit_image"
+        use_ip_adapter = self._use_ip_adapter(request)
+        ip_adapter = model_target.get("ipAdapter") or {}
+        if use_ip_adapter and not ip_adapter:
+            raise RuntimeError(
+                f"{request.model} does not support reference-image (IP-Adapter) generation."
+            )
         cpu_offload = bool(request.advanced.get("cpuOffload", False))
         cached_pipe = self._img2img_pipe if use_img2img else self._text_pipe
-        if cached_pipe is not None and self._loaded_repo == repo:
+        # The text pipe's IP-Adapter state is part of its cache key: a plain-T2I pipe
+        # cannot serve a reference job, and vice versa.
+        text_state_matches = use_img2img or self._text_ip_adapter == use_ip_adapter
+        if cached_pipe is not None and self._loaded_repo == repo and text_state_matches:
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
             emit_worker_event(
@@ -2482,17 +2542,22 @@ class SdxlDiffusersAdapter:
             )
             return cached_pipe
 
-        # Hold only one pipeline per repo: evict the stale pipe (other mode or
-        # stale repo) before loading so two large SDXL pipelines never sit
-        # resident at once.
+        # Hold only one pipeline per repo: evict stale pipes (other mode, stale repo,
+        # or a text pipe whose IP-Adapter state no longer matches) before loading so
+        # we don't keep two ~7GB SDXL pipelines resident.
         if self._loaded_repo and self._loaded_repo != repo:
             self._evict_pipelines(torch)
         elif use_img2img:
             if self._text_pipe is not None:
                 self._text_pipe = None
+                self._text_ip_adapter = False
                 self._forget_loaded_loras("text")
                 self._empty_cuda_cache(torch)
         else:
+            if self._text_pipe is not None:
+                self._text_pipe = None
+                self._forget_loaded_loras("text")
+                self._empty_cuda_cache(torch)
             if self._img2img_pipe is not None:
                 self._img2img_pipe = None
                 self._forget_loaded_loras("img2img")
@@ -2519,6 +2584,7 @@ class SdxlDiffusersAdapter:
             device=device,
             dtype=str(dtype),
             useImg2img=use_img2img,
+            useIpAdapter=use_ip_adapter,
             cpuOffload=cpu_offload,
             cached=cache_action == "Loading cached",
         )
@@ -2528,7 +2594,36 @@ class SdxlDiffusersAdapter:
             "torch_dtype": dtype,
             "variant": model_target.get("variant"),
         }
+        if use_ip_adapter:
+            # IP-Adapter (plus-face) needs the matching ViT-H CLIP image encoder,
+            # shipped in the same repo at models/image_encoder. Loading it here +
+            # passing image_encoder_folder=None to load_ip_adapter avoids a second
+            # fetch attempt against the SDXL repo (which has no image_encoder).
+            transformers = importlib.import_module("transformers")
+            encoder_class = getattr(transformers, "CLIPVisionModelWithProjection", None)
+            if encoder_class is None:
+                raise RuntimeError(
+                    "transformers does not expose CLIPVisionModelWithProjection, "
+                    "required for the SDXL IP-Adapter image encoder."
+                )
+            from_pretrained_kwargs["image_encoder"] = encoder_class.from_pretrained(
+                ip_adapter["repo"],
+                subfolder=ip_adapter.get("encoderSubfolder", "models/image_encoder"),
+                revision=ip_adapter.get("revision"),
+                torch_dtype=dtype,
+                low_cpu_mem_usage=True,
+            )
         pipe = pipeline_class.from_pretrained(repo, **from_pretrained_kwargs)
+        if use_ip_adapter:
+            # image_encoder_folder=None: we already supplied the encoder above.
+            pipe.load_ip_adapter(
+                ip_adapter["repo"],
+                subfolder=ip_adapter.get("subfolder", "sdxl_models"),
+                weight_name=ip_adapter["weight"],
+                revision=ip_adapter.get("revision"),
+                image_encoder_folder=None,
+            )
+            pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
         emit_worker_event(
             "image_pipeline_load_complete",
             jobId=job_id,
@@ -2568,6 +2663,7 @@ class SdxlDiffusersAdapter:
             self._img2img_pipe = pipe
         else:
             self._text_pipe = pipe
+            self._text_ip_adapter = use_ip_adapter
         self._loaded_repo = repo
         self._loaded_model = request.model
         return pipe
@@ -2575,6 +2671,7 @@ class SdxlDiffusersAdapter:
     def _evict_pipelines(self, torch: Any) -> None:
         self._text_pipe = None
         self._img2img_pipe = None
+        self._text_ip_adapter = False
         self._loaded_repo = None
         self._loaded_model = None
         self._loaded_lora_states.clear()
@@ -2615,6 +2712,12 @@ class SdxlDiffusersAdapter:
             # are dropped by filter_call_kwargs.
             kwargs["image"] = load_source_image(project_path, request)
             kwargs["strength"] = float(request.advanced.get("strength", 0.6))
+        elif self._use_ip_adapter(request):
+            # IP-Adapter conditions T2I on a reference image (style/identity). Vary
+            # prompt/seed across the batch to get many images of the same subject.
+            kwargs["ip_adapter_image"] = load_reference_image(project_path, request.reference_asset_id)
+            if hasattr(pipe, "set_ip_adapter_scale"):
+                pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
         step_callback = cancel_step_callback(pipe, cancel_requested)
         if step_callback is not None:
             kwargs["callback_on_step_end"] = step_callback
@@ -2649,6 +2752,16 @@ class SdxlDiffusersAdapter:
             return float(request.advanced.get("guidanceScale", default))
         except (TypeError, ValueError):
             return float(default)
+
+    def _ip_adapter_scale(self, request: ImageRequest) -> float:
+        # How strongly the reference conditions the result (0 = ignore,
+        # 1 = maximal). 0.7 holds plus-face identity while letting the prompt
+        # steer scene/pose; identity-faithful likeness belongs to InstantID.
+        try:
+            scale = float(request.advanced.get("ipAdapterScale", 0.7))
+        except (TypeError, ValueError):
+            return 0.7
+        return max(0.0, min(1.0, scale))
 
 
 class ChromaDiffusersAdapter:
