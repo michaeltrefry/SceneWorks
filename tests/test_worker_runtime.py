@@ -31,6 +31,7 @@ from scene_worker.image_adapters import (
     LensTurboAdapter,
     MlxFluxAdapter,
     MlxQwenAdapter,
+    MlxZImageAdapter,
     MODEL_TARGETS,
     QwenImageAdapter,
     REAL_ESRGAN_MODEL_SPECS,
@@ -1894,6 +1895,223 @@ def test_mlx_qwen_rejects_reference_asset():
         assert "character" in str(exc).lower() or "reference-image" in str(exc).lower()
     else:
         raise AssertionError("MlxQwenAdapter must reject reference-image jobs (deferred follow-up).")
+
+
+# --- sc-2145: Z-Image MLX adapter ---
+
+
+def test_z_image_turbo_manifest_has_mlx_block():
+    # sc-2145: z_image_turbo carries an mlx block + sampler/scheduler limits
+    # override (mflux's loop is sealed on "linear" — match the wan_2_2 /
+    # qwen_image precedents of restricting the menu to default-only when the
+    # MLX path is the active backend, epic 1753 §14).
+    import re
+
+    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
+    block = find_entry_block("z_image_turbo")
+    mlx_block = find_mlx_block(block)
+    quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
+    mem_match = re.search(r'"minMemoryGb"\s*:\s*(\d+)', mlx_block)
+    assert quant_match and int(quant_match.group(1)) in {3, 4, 5, 6, 8}, (
+        "z_image_turbo mlx.quantize must be a supported quant level (sc-2145)"
+    )
+    assert mem_match and int(mem_match.group(1)) > 0, (
+        "z_image_turbo mlx.minMemoryGb must be a positive int (sc-2145)"
+    )
+    assert '"samplers": ["default"]' in mlx_block, (
+        "z_image_turbo mlx must restrict samplers to default (mflux loop is linear-only)"
+    )
+    assert '"schedulers": ["default"]' in mlx_block, (
+        "z_image_turbo mlx must restrict schedulers to default (mflux loop is linear-only)"
+    )
+
+
+def test_create_image_adapter_routes_z_image_turbo(monkeypatch):
+    # Pin the auto-dispatch off the MLX path so this asserts the torch
+    # fallback on every host (a developer Mac with the mlx-flux sidecar
+    # installed would otherwise route here to MlxZImageAdapter — sc-2145).
+    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_FLUX", "1")
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "ZImageDiffusersAdapter"
+    assert adapter.id == "z_image_diffusers"
+
+
+def test_image_adapter_env_override_selects_mlx_z_image(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "mlx_z_image")
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "MlxZImageAdapter"
+    assert adapter.id == "mlx_z_image"
+
+
+def test_z_image_auto_dispatch_routes_to_mlx_when_sidecar_available(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "MlxZImageAdapter"
+
+
+def test_z_image_auto_dispatch_falls_back_when_sidecar_missing(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: False)
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "ZImageDiffusersAdapter"
+
+
+def test_z_image_auto_dispatch_respects_disable_env(monkeypatch):
+    # SCENEWORKS_DISABLE_MLX_FLUX=1 disables the whole mflux sidecar — FLUX,
+    # Qwen, and Z-Image MLX paths all opt out together.
+    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_FLUX", "1")
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "ZImageDiffusersAdapter"
+
+
+def test_z_image_auto_dispatch_skips_mlx_on_non_macos(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    assert adapter.__class__.__name__ == "ZImageDiffusersAdapter"
+
+
+def test_z_image_auto_dispatch_skips_mlx_for_edit_image(monkeypatch):
+    # z_image_edit (and any edit_image mode against z_image_turbo) stays on
+    # the torch path — mflux Z-Image is T2I-only in v1.
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter(
+        {"payload": {"model": "z_image_turbo", "mode": "edit_image"}}
+    )
+    assert adapter.__class__.__name__ == "ZImageDiffusersAdapter"
+
+
+def test_z_image_auto_dispatch_skips_mlx_for_z_image_edit_model(monkeypatch):
+    # z_image_edit is not in MlxZImageAdapter's supported set; the dispatch
+    # must keep it on the torch path even on macOS with the sidecar present.
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter({"payload": {"model": "z_image_edit"}})
+    assert adapter.__class__.__name__ == "ZImageDiffusersAdapter"
+
+
+def test_z_image_auto_dispatch_skips_mlx_when_reference_asset_present(monkeypatch):
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    adapter = create_image_adapter(
+        {"payload": {"model": "z_image_turbo", "referenceAssetId": "asset_ref"}}
+    )
+    assert adapter.__class__.__name__ == "ZImageDiffusersAdapter"
+
+
+def test_mlx_z_image_resolve_quantize_order():
+    adapter = MlxZImageAdapter()
+    request = SimpleNamespace(advanced={}, model_manifest_entry={})
+    assert adapter._resolve_quantize(request) == 8
+    request = SimpleNamespace(advanced={}, model_manifest_entry={"mlx": {"quantize": 4}})
+    assert adapter._resolve_quantize(request) == 4
+    request = SimpleNamespace(
+        advanced={"mlxQuantize": 3}, model_manifest_entry={"mlx": {"quantize": 8}}
+    )
+    assert adapter._resolve_quantize(request) == 3
+    request = SimpleNamespace(advanced={"mlxQuantize": 0}, model_manifest_entry={})
+    assert adapter._resolve_quantize(request) is None
+    request = SimpleNamespace(
+        advanced={"mlxQuantize": "junk"}, model_manifest_entry={"mlx": {"quantize": 6}}
+    )
+    assert adapter._resolve_quantize(request) == 6
+
+
+def test_mlx_z_image_requires_sidecar_when_missing(monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_MLX_FLUX_PYTHON", "/nonexistent/mlx-flux-venv/bin/python")
+    job = {
+        "id": "job_mlx_z_image_t2i",
+        "payload": {
+            "projectId": "p",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxZImageAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "sidecar" in str(exc).lower()
+    else:
+        raise AssertionError("MLX Z-Image generation must fail clearly when the sidecar venv is unavailable.")
+
+
+def test_mlx_z_image_rejects_unsupported_model():
+    job = {
+        "id": "job_mlx_z_image_wrong_model",
+        "payload": {"projectId": "p", "mode": "text_to_image", "model": "flux_schnell", "prompt": "x"},
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxZImageAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "Z-Image target" in str(exc) or "MlxZImageAdapter supports" in str(exc)
+    else:
+        raise AssertionError("MlxZImageAdapter must reject non-Z-Image models.")
+
+
+def test_mlx_z_image_rejects_image_edit():
+    job = {
+        "id": "job_mlx_z_image_edit",
+        "payload": {"projectId": "p", "mode": "edit_image", "model": "z_image_turbo", "prompt": "x"},
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxZImageAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "text-to-image only" in str(exc).lower()
+    else:
+        raise AssertionError("MlxZImageAdapter is T2I-only and must reject edit_image.")
+
+
+def test_mlx_z_image_rejects_reference_asset():
+    job = {
+        "id": "job_mlx_z_image_ref",
+        "payload": {
+            "projectId": "p",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "x",
+            "referenceAssetId": "asset_ref",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxZImageAdapter().generate(
+            settings=None, job=job, request=image_request_from_job(job), project_path=None,
+            progress=noop, cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "reference-image" in str(exc).lower() or "ip-adapter" in str(exc).lower()
+    else:
+        raise AssertionError("MlxZImageAdapter must reject reference-image jobs.")
 
 
 def test_flux_model_target_defaults():

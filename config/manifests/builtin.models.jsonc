@@ -47,6 +47,24 @@
         "families": ["z-image"],
         "types": ["style", "enhance", "character"]
       },
+      // macOS-only MLX backend (sc-2145, riding on the sc-1970 mflux sidecar
+      // venv at /opt/mlx-flux-venv that sc-1972 already installed). Selected
+      // by the worker auto-dispatch when the sidecar is installed, the job
+      // is plain T2I, and no reference asset is present; otherwise the torch
+      // ZImageDiffusersAdapter remains the default. mflux's generate loop is
+      // sealed on "linear" — override the sampler/scheduler menu to
+      // default-only when the MLX backend is the active path (epic 1753 §14,
+      // mirrors wan_2_2 / qwen_image precedents). minMemoryGb mirrors the
+      // sc-2145 verify measurement (Q8 1024² 8-step peak ~52.5 GB on M5 Max);
+      // Q4 brings this within tighter Mac budgets via advanced.mlxQuantize.
+      "mlx": {
+        "minMemoryGb": 40,
+        "quantize": 8,
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
       "ui": {
         "label": "Z-Image-Turbo",
         "description": "Fast first image target for local text-to-image generation.",
