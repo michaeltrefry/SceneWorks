@@ -3128,6 +3128,58 @@ label {
   border-radius: var(--r-md);
 }
 
+/* Character-scoped training datasets panel (sc-2022) */
+.character-dataset-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.character-dataset-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.character-dataset-cover {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: var(--bg-1);
+  border-radius: var(--r-sm);
+}
+
+.character-dataset-cover img,
+.character-dataset-cover video,
+.character-dataset-cover .thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.character-dataset-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.character-dataset-meta strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .model-card {
   display: grid;
   gap: 12px;

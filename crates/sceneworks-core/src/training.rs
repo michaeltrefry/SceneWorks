@@ -90,6 +90,11 @@ pub struct TrainingDataset {
     /// Owning project, when the dataset is project-scoped. `None` means global.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// Owning character, when the dataset is scoped to one (sc-2022). `None` for
+    /// general (style / standalone) datasets. Set when images are imported from a
+    /// character or the dataset is created from a character's images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_id: Option<String>,
     pub name: String,
     pub modality: TrainingModality,
     pub status: TrainingDatasetStatus,

@@ -8,7 +8,7 @@ import { liveElapsedSeconds } from "./formatting.js";
 import { foldUpscaledAssetVariants } from "./assetVariants.js";
 import { extractFamilies } from "./presetUtils.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
-import { CharacterAssets } from "./screens/characterPanels.jsx";
+import { CharacterAssets, CharacterDatasets } from "./screens/characterPanels.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { DocumentStudio } from "./screens/DocumentStudio.jsx";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
@@ -940,8 +940,13 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
     });
+    // Importing from the Character tab associates the dataset with that
+    // character (sc-2022).
     expect(createDataset).toHaveBeenCalledWith(
-      expect.objectContaining({ items: [expect.objectContaining({ assetId: "asset-char" })] }),
+      expect.objectContaining({
+        characterId: "char-1",
+        items: [expect.objectContaining({ assetId: "asset-char" })],
+      }),
     );
   });
 
@@ -2413,6 +2418,112 @@ describe("SceneWorks app shell", () => {
       previewButtons[0].click();
     });
     expect(onPreview).toHaveBeenCalled();
+  });
+
+  it("lists a character's associated datasets and opens one (sc-2022)", async () => {
+    const onOpenDataset = vi.fn();
+    const onCreateDataset = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <CharacterDatasets
+          datasets={[
+            { id: "ds-1", name: "Mira identity set", itemCount: 12, status: "ready", characterId: "char-1" },
+          ]}
+          imageCount={5}
+          onCreateDataset={onCreateDataset}
+          onOpenDataset={onOpenDataset}
+          projectId="project-1"
+          selectedCharacter={{ id: "char-1", name: "Mira" }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("For Mira (1)");
+    const row = container.querySelector(".character-dataset-row");
+    expect(row.textContent).toContain("Mira identity set");
+    expect(row.textContent).toContain("12 images · ready");
+
+    await act(async () => {
+      [...row.querySelectorAll("button")].find((button) => button.textContent === "Open").click();
+    });
+    expect(onOpenDataset).toHaveBeenCalledWith("ds-1");
+
+    // The create button reflects how many of the character's images would seed it.
+    const createButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Create dataset from 5 images"),
+    );
+    await act(async () => {
+      createButton.click();
+    });
+    expect(onCreateDataset).toHaveBeenCalled();
+  });
+
+  it("creates a dataset from a character's images and opens it (sc-2022)", async () => {
+    const createTrainingDataset = vi.fn(async () => ({ id: "ds-new" }));
+    const openDatasetInLibrary = vi.fn();
+    const assets = [
+      { id: "img-1", type: "image", displayName: "hero", recipe: { normalizedSettings: { characterId: "char-1" } } },
+      { id: "img-2", type: "image", displayName: "ref", metadata: { characterReferences: [{ characterId: "char-1" }] } },
+      { id: "img-3", type: "image", displayName: "other", recipe: { normalizedSettings: { characterId: "char-2" } } },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            addCharacterReference: () => {},
+            archiveCharacter: () => {},
+            assets,
+            attachCharacterLora: () => {},
+            characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+            createCharacter: () => {},
+            createCharacterLook: () => {},
+            createCharacterTestJob: () => {},
+            createTrainingDataset,
+            deleteAsset: () => {},
+            deleteCharacterLook: () => {},
+            detachCharacterLora: () => {},
+            imageModels: [],
+            latestImageAssets: [],
+            loras: [],
+            openDatasetInLibrary,
+            setPreviewAsset: () => {},
+            sendCharacterToImage: () => {},
+            sendCharacterToVideo: () => {},
+            purgeAsset: () => {},
+            removeCharacterReference: () => {},
+            trainingDatasets: [],
+            trainingDatasetsProjectId: "project-1",
+            updateAssetStatus: () => {},
+            updateCharacter: () => {},
+            updateCharacterLook: () => {},
+            updateCharacterLora: () => {},
+            updateCharacterReference: () => {},
+          },
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    // Two of three images belong to this character.
+    const createButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Create dataset from 2 images"),
+    );
+    expect(createButton).toBeTruthy();
+    await act(async () => {
+      createButton.click();
+    });
+
+    expect(createTrainingDataset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        characterId: "char-1",
+        name: "Mira dataset",
+        items: [{ assetId: "img-1" }, { assetId: "img-2" }],
+      }),
+    );
+    expect(openDatasetInLibrary).toHaveBeenCalledWith("ds-new");
   });
 
   it("launches reference-based generation from an approved character reference", async () => {

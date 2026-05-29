@@ -93,7 +93,9 @@ export function DatasetAddDialog({ assets = [], memberIds = [], characters = [],
 
   function commit() {
     if (selectedIds.length) {
-      onAdd(selectedIds);
+      // sc-2022: adding from the Character tab associates the dataset with that
+      // character on the next save; other sources pass no character.
+      onAdd(selectedIds, tab === "character" ? characterId : null);
       setSelectedIds([]);
     }
   }

@@ -659,6 +659,73 @@ export function CharacterAssets({ selectedCharacter, assets = [], onPreview }) {
   );
 }
 
+// Training datasets associated with this character (sc-2022). The character is
+// the hub for its references, looks, LoRAs, and — here — its LoRA training data.
+// This is UI grouping over the shared TrainingDataset backend: "Open" deep-links
+// into the Dataset editor, and "Create from images" seeds a new associated
+// dataset from the character's generated images. No dataset logic is duplicated.
+export function CharacterDatasets({
+  selectedCharacter,
+  projectId,
+  datasets = [],
+  imageCount = 0,
+  onOpenDataset,
+  onCreateDataset,
+  creating = false,
+}) {
+  if (!selectedCharacter) {
+    return null;
+  }
+  const coverAsset = (dataset) =>
+    dataset?.coverPath ? { projectId, type: "image", file: { path: dataset.coverPath } } : null;
+  return (
+    <section className="character-section character-datasets">
+      <div className="section-heading">
+        <p className="eyebrow">Training datasets</p>
+        <h2>
+          For {selectedCharacter.name}
+          {datasets.length ? ` (${datasets.length})` : ""}
+        </h2>
+      </div>
+      {datasets.length ? (
+        <ul className="character-dataset-list">
+          {datasets.map((dataset) => {
+            const cover = coverAsset(dataset);
+            return (
+              <li className="character-dataset-row" key={dataset.id}>
+                <span className="character-dataset-cover">
+                  {cover ? <AssetMedia asset={cover} controls={false} /> : <span className="thumb-placeholder" />}
+                </span>
+                <span className="character-dataset-meta">
+                  <strong>{dataset.name}</strong>
+                  <span className="muted">
+                    {dataset.itemCount ?? 0} image{(dataset.itemCount ?? 0) === 1 ? "" : "s"} · {dataset.status ?? "draft"}
+                  </span>
+                </span>
+                <button className="secondary-action" onClick={() => onOpenDataset?.(dataset.id)} type="button">
+                  Open
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="muted">No datasets yet for this character. Create one from its images to start a LoRA.</p>
+      )}
+      <div className="detail-actions">
+        <button
+          className="primary-action"
+          disabled={creating || imageCount === 0}
+          onClick={() => onCreateDataset?.()}
+          type="button"
+        >
+          {creating ? "Creating…" : `Create dataset from ${imageCount} image${imageCount === 1 ? "" : "s"}`}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 // Pose library: pick one or more poses from the bundled OpenPose gallery and generate
 // the character in each, in a single batch job (advanced.poses) sharing one seed for
 // wardrobe/hair consistency. An OpenPose ControlNet drives the pose; a face-restoration
