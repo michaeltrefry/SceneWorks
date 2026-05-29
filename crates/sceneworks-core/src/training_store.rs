@@ -26,6 +26,9 @@ pub struct TrainingDatasetCreateInput {
     pub modality: Option<TrainingModality>,
     #[serde(default)]
     pub status: Option<TrainingDatasetStatus>,
+    /// Optional owning character (sc-2022). `None` creates a general dataset.
+    #[serde(default)]
+    pub character_id: Option<String>,
     #[serde(default)]
     pub items: Vec<TrainingDatasetItemInput>,
 }
@@ -37,6 +40,10 @@ pub struct TrainingDatasetUpdateInput {
     pub name: Option<String>,
     #[serde(default)]
     pub status: Option<TrainingDatasetStatus>,
+    /// Associate the dataset with a character (sc-2022) when present. `Some`
+    /// sets/changes the owning character; absent leaves it unchanged.
+    #[serde(default)]
+    pub character_id: Option<String>,
     /// Full replacement for the dataset's ordered item set when present.
     #[serde(default)]
     pub items: Option<Vec<TrainingDatasetItemInput>>,
@@ -120,6 +127,10 @@ pub struct TrainingDatasetSummary {
     /// thumbnail (sc-2025). `None` when the dataset has no items.
     #[serde(default)]
     pub cover_path: Option<String>,
+    /// Owning character id (sc-2022), or `None` for a general dataset. Lets the
+    /// Character Studio filter the list to one character's datasets client-side.
+    #[serde(default)]
+    pub character_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +207,7 @@ impl TrainingDatasetStore {
             id: dataset_id,
             version: 1,
             project_id: Some(project_id.to_owned()),
+            character_id: input.character_id,
             name,
             modality,
             status: input.status.unwrap_or(TrainingDatasetStatus::Draft),
@@ -234,6 +246,11 @@ impl TrainingDatasetStore {
         }
         if let Some(status) = input.status {
             dataset.status = status;
+        }
+        // sc-2022: a present `character_id` (sets/changes the owning character);
+        // applied before either save path below so both persist it.
+        if let Some(character_id) = input.character_id {
+            dataset.character_id = Some(character_id);
         }
         if let Some(items) = input.items {
             let dataset_root = dataset_root(&self.project_path, &dataset.id);
@@ -927,6 +944,7 @@ pub fn apply_training_dataset_migrations(connection: &Connection) -> ProjectStor
           status text not null,
           version integer not null,
           item_count integer not null default 0,
+          character_id text,
           file_path text not null,
           created_at text not null,
           updated_at text not null
@@ -936,6 +954,7 @@ pub fn apply_training_dataset_migrations(connection: &Connection) -> ProjectStor
         ",
     )?;
     ensure_training_dataset_column(connection, "item_count", "integer not null default 0")?;
+    ensure_training_dataset_column(connection, "character_id", "text")?;
     Ok(())
 }
 
@@ -946,7 +965,7 @@ fn list_dataset_summaries_from_index(
     let connection = Connection::open(project_path.join("project.db"))?;
     let mut statement = connection.prepare(
         "
-        select id, project_id, name, modality, status, version, item_count, created_at, updated_at, file_path
+        select id, project_id, name, modality, status, version, item_count, created_at, updated_at, file_path, character_id
           from training_datasets
          where project_id = ?1
          order by updated_at desc, name asc
@@ -967,6 +986,7 @@ fn list_dataset_summaries_from_index(
                     created_at: row.get(7)?,
                     updated_at: row.get(8)?,
                     cover_path: None,
+                    character_id: row.get::<_, Option<String>>(10)?,
                 },
                 row.get::<_, Option<String>>(9)?,
             ))
@@ -1020,8 +1040,8 @@ fn index_dataset(
     connection.execute(
         "
         insert or replace into training_datasets (
-          id, project_id, name, modality, status, version, item_count, file_path, created_at, updated_at
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+          id, project_id, name, modality, status, version, item_count, character_id, file_path, created_at, updated_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ",
         params![
             dataset.id,
@@ -1031,6 +1051,7 @@ fn index_dataset(
             dataset.status.as_str(),
             dataset.version,
             i64::try_from(dataset.items.len()).unwrap_or(i64::MAX),
+            dataset.character_id,
             rel_path,
             dataset.created_at,
             dataset.updated_at,

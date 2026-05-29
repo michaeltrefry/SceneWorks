@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   CharacterAngleSet,
   CharacterAssets,
+  CharacterDatasets,
   CharacterLoras,
   CharacterLooks,
   CharacterPoseLibrary,
@@ -10,6 +11,7 @@ import {
   editableLora,
 } from "./characterPanels.jsx";
 import { CompactSelector } from "../components/CompactSelector.jsx";
+import { assetMatchesCharacter } from "../components/DatasetAddDialog.jsx";
 import { extractFamilies } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
 
@@ -54,6 +56,10 @@ export function CharacterStudio() {
     sendCharacterToImage,
     sendCharacterToVideo,
     updateAssetStatus,
+    trainingDatasets = [],
+    trainingDatasetsProjectId,
+    createTrainingDataset,
+    openDatasetInLibrary,
   } = useAppContext();
   const latestAssets = latestImageAssets;
   const onPreview = setPreviewAsset;
@@ -72,6 +78,7 @@ export function CharacterStudio() {
   const [testLookId, setTestLookId] = useState("");
   const [testCount, setTestCount] = useState(4);
   const [testResolution, setTestResolution] = useState("1024x1024");
+  const [creatingDataset, setCreatingDataset] = useState(false);
 
   const imageAssets = useMemo(
     () => assets.filter((asset) => ["image", "frame", "upload"].includes(asset.type)),
@@ -79,6 +86,21 @@ export function CharacterStudio() {
   );
   const selectedCharacter = characters.find((item) => item.id === selectedCharacterId) ?? characters[0] ?? null;
   const approvedReferences = selectedCharacter?.approvedReferences ?? [];
+  // sc-2022: datasets the dataset backend reports as owned by this character,
+  // and the character's own images (same match the Dataset editor's Character
+  // tab uses) that a new dataset would be seeded from.
+  const datasetsForProject = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
+  const characterDatasets = useMemo(
+    () => datasetsForProject.filter((dataset) => dataset.characterId === selectedCharacter?.id),
+    [datasetsForProject, selectedCharacter?.id],
+  );
+  const characterImageAssetIds = useMemo(
+    () =>
+      selectedCharacter
+        ? imageAssets.filter((asset) => assetMatchesCharacter(asset, selectedCharacter.id)).map((asset) => asset.id)
+        : [],
+    [imageAssets, selectedCharacter?.id],
+  );
   // Thumbnail for the compact selector (sc-2025): a character's first approved
   // reference image, falling back to any reference. Null → placeholder tile.
   const characterThumbAsset = (character) => {
@@ -169,6 +191,28 @@ export function CharacterStudio() {
     event.preventDefault();
     if (selectedCharacter) {
       await updateCharacter(selectedCharacter.id, draft);
+    }
+  }
+
+  // sc-2022: seed a new dataset (associated with this character) from its images
+  // and jump into the Dataset editor to caption and train, reusing the shared
+  // TrainingDataset engine.
+  async function createDatasetFromCharacter() {
+    if (!selectedCharacter || !characterImageAssetIds.length || creatingDataset) {
+      return;
+    }
+    setCreatingDataset(true);
+    try {
+      const created = await createTrainingDataset({
+        name: `${selectedCharacter.name} dataset`,
+        characterId: selectedCharacter.id,
+        items: characterImageAssetIds.map((assetId) => ({ assetId })),
+      });
+      if (created?.id) {
+        openDatasetInLibrary(created.id);
+      }
+    } finally {
+      setCreatingDataset(false);
     }
   }
 
@@ -421,6 +465,16 @@ export function CharacterStudio() {
               setLoraEdit={setLoraEdit}
               setLoraId={setLoraId}
               submitLora={submitLora}
+            />
+
+            <CharacterDatasets
+              creating={creatingDataset}
+              datasets={characterDatasets}
+              imageCount={characterImageAssetIds.length}
+              onCreateDataset={createDatasetFromCharacter}
+              onOpenDataset={openDatasetInLibrary}
+              projectId={activeProject?.id}
+              selectedCharacter={selectedCharacter}
             />
 
             <CharacterTest

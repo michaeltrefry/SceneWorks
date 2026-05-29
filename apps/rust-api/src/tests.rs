@@ -1116,6 +1116,117 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     assert_eq!(listed_after_delete, json!([]));
 }
 
+// sc-2022: a dataset can be associated with a character at create time or via a
+// later PATCH, and the association surfaces on the detail body and list summary
+// so the Character Studio can scope its dataset list client-side. General
+// datasets leave `characterId` null.
+#[tokio::test]
+async fn training_datasets_associate_with_a_character() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Character Datasets" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+    // Created with an explicit character association (the "create from a
+    // character's images" path).
+    let (status, scoped) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Mira identity set",
+            "characterId": "character_mira",
+            "items": [{ "assetId": asset_id }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(scoped["characterId"], "character_mira");
+    let scoped_id = scoped["id"].as_str().expect("dataset id").to_owned();
+
+    // A general dataset leaves the association null.
+    let (status, general) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({ "name": "Style set", "items": [{ "assetId": asset_id }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(general["characterId"], Value::Null);
+    let general_id = general["id"].as_str().expect("dataset id").to_owned();
+
+    // The association round-trips through a reload and the list summary.
+    let reloaded_app = create_app(settings).expect("app reloads");
+    let (status, listed) = request(
+        reloaded_app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let by_id = |id: &str| -> Value {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .cloned()
+            .expect("dataset present in list")
+    };
+    assert_eq!(by_id(&scoped_id)["characterId"], "character_mira");
+    assert_eq!(by_id(&general_id)["characterId"], Value::Null);
+
+    // PATCHing a general dataset associates it (the import-from-character path,
+    // which always saves a full item set alongside the new association).
+    let (status, associated) = request(
+        reloaded_app.clone(),
+        "PATCH",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{general_id}"),
+        json!({ "characterId": "character_kelsie", "items": [{ "assetId": asset_id }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(associated["characterId"], "character_kelsie");
+
+    let (status, relisted) = request(
+        reloaded_app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let associated_summary = relisted
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == general_id)
+        .cloned()
+        .expect("associated dataset present");
+    assert_eq!(associated_summary["characterId"], "character_kelsie");
+}
+
 #[tokio::test]
 async fn training_dataset_uploads_are_dataset_owned_not_assets() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

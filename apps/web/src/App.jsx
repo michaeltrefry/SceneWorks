@@ -1210,6 +1210,16 @@ export function App() {
     setActiveView("Video");
   }
 
+  // sc-2022: open a specific dataset in the Dataset editor (Character Studio's
+  // "Open" action on an associated dataset). The editor consumes studioLaunch.
+  function openDatasetInLibrary(datasetId) {
+    if (!datasetId) {
+      return;
+    }
+    setStudioLaunch({ id: crypto.randomUUID(), view: "LibraryDataSets", datasetId });
+    setActiveView("LibraryDataSets");
+  }
+
   async function updateAssetStatus(asset, changes) {
     try {
       const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/status`, token, {
@@ -1437,6 +1447,7 @@ export function App() {
     createCharacterTestJob,
     sendCharacterToImage,
     sendCharacterToVideo,
+    openDatasetInLibrary,
   };
 
   return (

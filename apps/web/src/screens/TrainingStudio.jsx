@@ -382,13 +382,16 @@ function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) {
   };
 }
 
-function datasetPayload({ activeDataset, assetsById, captionDraftById = {}, name, selectedAssetIds }) {
+function datasetPayload({ activeDataset, assetsById, associatedCharacterId, captionDraftById = {}, name, selectedAssetIds }) {
   const itemsByAssetId = new Map(
     (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item]),
   );
   return {
     name: name.trim(),
     modality: "image",
+    // sc-2022: associate the dataset with a character when one is set (created
+    // from a character's images, or images imported from the Character tab).
+    ...(associatedCharacterId ? { characterId: associatedCharacterId } : {}),
     items: selectedAssetIds
       .map((selectionId) => {
         const asset = assetsById.get(selectionId);
@@ -809,6 +812,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     trainingTargets: trainingTargetsCatalog,
     trainingTargetsError = "",
     setActiveView,
+    studioLaunch,
   } = useAppContext();
   const datasets = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
   const datasetsError = trainingDatasetsError;
@@ -836,6 +840,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
+  // Owning character for this dataset (sc-2022). Seeded from the loaded dataset,
+  // set when images are imported from the Character tab, threaded into the save
+  // payload. "" = a general (unassociated) dataset.
+  const [associatedCharacterId, setAssociatedCharacterId] = useState("");
   // Single source of truth for caption edits, keyed by selection id (sc-2025):
   // seeded from the saved dataset items, updated as the user edits an item's
   // caption or imports a .txt sidecar, and threaded into the dataset payload on
@@ -929,6 +937,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const dirty =
     Boolean(activeDataset) &&
     (draftName.trim() !== activeDataset.name ||
+      associatedCharacterId !== (activeDataset.characterId ?? "") ||
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
       captionsDirty);
@@ -1019,6 +1028,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
   useEffect(() => {
     setActiveTab(datasetLibraryMode ? "dataset" : "configure");
   }, [datasetLibraryMode]);
+
+  // sc-2022: open a dataset requested from elsewhere (Character Studio's
+  // "Open" action hands off via studioLaunch). Keyed on the launch id so a
+  // repeat request for the same dataset re-opens it.
+  useEffect(() => {
+    if (!datasetLibraryMode || studioLaunch?.view !== "LibraryDataSets" || !studioLaunch?.datasetId) {
+      return;
+    }
+    if (studioLaunch.datasetId !== selectedDatasetId) {
+      openDataset(studioLaunch.datasetId);
+    }
+  }, [datasetLibraryMode, studioLaunch?.id]);
 
   useEffect(() => {
     const datasetTriggerPhrase = triggerPhraseFromText(activeDataset?.name);
@@ -1121,6 +1142,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setActiveDataset(null);
       setDraftName("");
       setSelectedAssetIds([]);
+      setAssociatedCharacterId("");
       setSelectedDatasetId("");
       return;
     }
@@ -1132,6 +1154,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setActiveDataset(dataset);
       setDraftName(dataset?.name ?? "");
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
+      setAssociatedCharacterId(dataset?.characterId ?? "");
       setSelectedDatasetId(dataset?.id ?? datasetId);
     } catch (err) {
       setDatasetError(err.message);
@@ -1152,6 +1175,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setDatasetMessage("");
     setDraftName("");
     setSelectedAssetIds([]);
+    setAssociatedCharacterId("");
     setUploadedDatasetAssets([]);
     setSelectedDatasetId("");
   }
@@ -1291,13 +1315,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
-  function addAssets(ids) {
+  function addAssets(ids, characterId = null) {
     const additions = (ids ?? []).filter(Boolean);
     if (!additions.length) {
       return;
     }
     setDatasetMessage("");
     setSelectedAssetIds((current) => Array.from(new Set([...current, ...additions])));
+    // sc-2022: importing a character's images associates the dataset with it.
+    if (characterId) {
+      setAssociatedCharacterId(characterId);
+    }
   }
 
   // Accepts a FileList from either the dialog's file input or a drag/drop, so
@@ -1367,7 +1395,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // re-syncs local state from it. Shared by Save, Apply ordered names, and the
   // caption dialog so captioning/rename always act on the live persisted items.
   async function persistDataset() {
-    const payload = datasetPayload({ activeDataset, assetsById, captionDraftById, name: draftName, selectedAssetIds });
+    const payload = datasetPayload({
+      activeDataset,
+      assetsById,
+      associatedCharacterId,
+      captionDraftById,
+      name: draftName,
+      selectedAssetIds,
+    });
     const dataset = activeDataset
       ? await updateDataset(activeDataset.id, payload)
       : await createDataset(payload);
@@ -1376,6 +1411,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDraftName(dataset.name ?? draftName.trim());
       setUploadedDatasetAssets([]);
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
+      setAssociatedCharacterId(dataset.characterId ?? "");
       setSelectedDatasetId(dataset.id ?? "");
     }
     return dataset;
