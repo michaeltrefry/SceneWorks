@@ -679,7 +679,7 @@ function buildJoyCaptionPrompt(settings) {
     .replaceAll("{word_count}", captionLength);
 }
 
-function DatasetHealth({ health }) {
+function DatasetHealth({ health, action }) {
   return (
     <div className="training-health-grid" aria-label="Dataset health">
       <div>
@@ -694,10 +694,7 @@ function DatasetHealth({ health }) {
         <strong>{health.duplicateFilenames}</strong>
         <span>Duplicate filenames</span>
       </div>
-      <div className={health.disabledItems ? "needs-attention" : ""}>
-        <strong>{health.disabledItems}</strong>
-        <span>Disabled items</span>
-      </div>
+      {action ? <div className="training-health-action">{action}</div> : null}
     </div>
   );
 }
@@ -1599,12 +1596,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
                             value={draftName}
                           />
                         </label>
-                        <label>
-                          Modality
-                          <select disabled value="image">
-                            <option value="image">Image</option>
-                          </select>
-                        </label>
                         <button className="primary-action training-add-images" onClick={() => setAddDialogOpen(true)} type="button">
                           <Icon.Plus size={14} />
                           Add images
@@ -1620,7 +1611,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                           />
                         </label>
                         <button
-                          className="secondary-action"
+                          className="primary-action"
                           disabled={!activeDataset?.id || renaming || !memberAssets.length}
                           onClick={applyOrderedNames}
                           type="button"
@@ -1629,7 +1620,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                           {renaming ? "Renaming…" : "Apply ordered names"}
                         </button>
                         <button
-                          className="secondary-action"
+                          className="primary-action training-caption-all"
                           disabled={!memberAssets.length}
                           onClick={() => setCaptionDialog({ type: "all" })}
                           type="button"
@@ -1638,10 +1629,20 @@ export function TrainingStudio({ mode = "training" } = {}) {
                           Caption all
                         </button>
                       </div>
-                      <DatasetHealth health={health} />
+                      <DatasetHealth
+                        health={health}
+                        action={
+                          <>
+                            <button className="primary-action" disabled={!canSave} onClick={saveDataset} type="button">
+                              {savingDataset ? "Saving" : activeDataset ? "Save dataset" : "Create dataset"}
+                            </button>
+                            <span>{dirty ? "Unsaved changes" : activeDataset ? `Version ${activeDataset.version}` : "Draft"}</span>
+                          </>
+                        }
+                      />
                       <div className="training-validity">
                         <span className={health.valid ? "training-valid-dot valid" : "training-valid-dot"} />
-                        <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets and remove disabled items"}</span>
+                        <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets to build this dataset"}</span>
                       </div>
                       {unavailableAssetIds.length ? (
                         <div className="training-unavailable-list" aria-label="Unavailable dataset items">
@@ -1715,12 +1716,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
                         ) : (
                           <div className="empty-panel compact-panel">No images yet — use “Add images” to build this dataset.</div>
                         )}
-                      </div>
-                      <div className="training-dataset-actions">
-                        <button className="primary-action" disabled={!canSave} onClick={saveDataset} type="button">
-                          {savingDataset ? "Saving" : activeDataset ? "Save dataset" : "Create dataset"}
-                        </button>
-                        <span>{dirty ? "Unsaved changes" : activeDataset ? `Version ${activeDataset.version}` : "Draft"}</span>
                       </div>
                       {addDialogOpen ? (
                         <DatasetAddDialog

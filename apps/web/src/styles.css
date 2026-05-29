@@ -2035,8 +2035,7 @@ label {
 }
 
 .training-health-grid span,
-.training-validity,
-.training-dataset-actions span {
+.training-validity {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -2044,6 +2043,21 @@ label {
 .training-health-grid .needs-attention {
   border-color: color-mix(in oklch, var(--danger) 42%, var(--border));
   background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+}
+
+/* Save lives in the health row (sc-2025) so a small edit needs no scroll. */
+.training-health-action {
+  gap: 6px !important;
+  justify-items: stretch;
+}
+
+.training-health-action button {
+  width: 100%;
+  justify-content: center;
+}
+
+.training-health-action span {
+  text-align: center;
 }
 
 .training-validity {
@@ -2104,14 +2118,6 @@ label {
   color: color-mix(in oklch, var(--danger) 75%, var(--text));
   font-size: 11px;
   font-weight: 700;
-}
-
-.training-dataset-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
 .training-workflow-grid {
@@ -5605,6 +5611,11 @@ label {
   flex-wrap: wrap;
   gap: 10px;
   align-items: flex-end;
+}
+
+/* Push "Caption all" to the far right of the toolbar (sc-2025). */
+.training-caption-all {
+  margin-left: auto;
 }
 
 .training-rename-field {
