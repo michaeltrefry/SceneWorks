@@ -11,6 +11,8 @@ export function CompactSelector({
   items = [],
   selectedId = "",
   onSelect,
+  onCreate,
+  createLabel = "New",
   getThumbAsset = () => null,
   getSubtitle = () => "",
   busyId = "",
@@ -76,8 +78,28 @@ export function CompactSelector({
 
       {open ? (
         <div className="compact-selector-menu" role="listbox">
+          {onCreate ? (
+            <>
+              <button
+                className="compact-selector-item compact-selector-create"
+                onClick={() => {
+                  onCreate();
+                  setOpen(false);
+                }}
+                type="button"
+              >
+                <span className="compact-selector-thumb compact-selector-create-thumb" aria-hidden="true">
+                  <Icon.Plus />
+                </span>
+                <span className="compact-selector-label">
+                  <strong>{createLabel}</strong>
+                </span>
+              </button>
+              {items.length ? <div className="compact-selector-divider" role="separator" /> : null}
+            </>
+          ) : null}
           {items.length === 0 ? (
-            <p className="compact-selector-empty">{emptyLabel}</p>
+            onCreate ? null : <p className="compact-selector-empty">{emptyLabel}</p>
           ) : (
             items.map((item) => (
               <button

@@ -61,7 +61,6 @@ export function CharacterStudio() {
   const onSendVideo = sendCharacterToVideo;
   const [selectedCharacterId, setSelectedCharacterId] = useState(characters[0]?.id ?? "");
   const [draft, setDraft] = useState({ name: "", type: "person", description: "" });
-  const [newCharacter, setNewCharacter] = useState({ name: "", type: "person", description: "" });
   const [referenceAssetIds, setReferenceAssetIds] = useState([]);
   const [lookDraft, setLookDraft] = useState({ name: "", description: "" });
   const [selectedReferenceIds, setSelectedReferenceIds] = useState([]);
@@ -156,12 +155,13 @@ export function CharacterStudio() {
     }
   }, [imageModels, testModel]);
 
-  async function submitNewCharacter(event) {
-    event.preventDefault();
-    const created = await createCharacter(newCharacter);
+  // Create a draft character straight from the selector's "+ New character"
+  // item (sc-2025) — name and type are then edited in the detail form, mirroring
+  // the dataset "+ New dataset" flow.
+  async function createDraftCharacter() {
+    const created = await createCharacter({ name: "New character", type: "person", description: "" });
     if (created) {
       setSelectedCharacterId(created.id);
-      setNewCharacter({ name: "", type: "person", description: "" });
     }
   }
 
@@ -285,48 +285,29 @@ export function CharacterStudio() {
           <p className="eyebrow">Character Studio</p>
           <h2>{activeProject ? activeProject.name : "Create a project"}</h2>
         </div>
-        <form className="inline-create" onSubmit={submitNewCharacter}>
-          <input
-            aria-label="Character name"
-            onChange={(event) => setNewCharacter((item) => ({ ...item, name: event.target.value }))}
-            placeholder="New character"
-            value={newCharacter.name}
-          />
-          <select
-            aria-label="Character type"
-            onChange={(event) => setNewCharacter((item) => ({ ...item, type: event.target.value }))}
-            value={newCharacter.type}
-          >
-            {characterTypes.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-          <button disabled={!activeProject || !newCharacter.name.trim()} type="submit">
-            Create
-          </button>
-        </form>
       </div>
 
-      {!selectedCharacter ? (
-        <div className="empty-panel">No characters yet</div>
-      ) : (
-        <div className="character-layout">
-          <div className="character-selector-bar">
-            <CompactSelector
-              getSubtitle={(character) =>
-                `${typeLabel(character.type)} · ${character.references?.length ?? 0} ref${(character.references?.length ?? 0) === 1 ? "" : "s"}`
-              }
-              getThumbAsset={characterThumbAsset}
-              items={characters}
-              label="Select character"
-              onSelect={(character) => setSelectedCharacterId(character.id)}
-              placeholder="Select a character"
-              selectedId={selectedCharacter.id}
-            />
-          </div>
+      <div className="character-layout">
+        <div className="character-selector-bar">
+          <CompactSelector
+            createLabel="New character"
+            disabled={!activeProject}
+            getSubtitle={(character) =>
+              `${typeLabel(character.type)} · ${character.references?.length ?? 0} ref${(character.references?.length ?? 0) === 1 ? "" : "s"}`
+            }
+            getThumbAsset={characterThumbAsset}
+            items={characters}
+            label="Select character"
+            onCreate={createDraftCharacter}
+            onSelect={(character) => setSelectedCharacterId(character.id)}
+            placeholder="Select a character"
+            selectedId={selectedCharacter?.id ?? ""}
+          />
+        </div>
 
+        {!selectedCharacter ? (
+          <div className="empty-panel">No characters yet — use “New character” to start.</div>
+        ) : (
           <section className="character-detail">
             <form className="character-editor" onSubmit={saveCharacter}>
               <div className="control-grid">
@@ -465,8 +446,8 @@ export function CharacterStudio() {
               updateAssetStatus={updateAssetStatus}
             />
           </section>
-        </div>
-      )}
+        )}
+      </div>
     </section>
   );
 }

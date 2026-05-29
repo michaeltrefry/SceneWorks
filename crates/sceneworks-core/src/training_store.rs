@@ -116,6 +116,10 @@ pub struct TrainingDatasetSummary {
     pub item_count: usize,
     pub created_at: String,
     pub updated_at: String,
+    /// Project-relative path to the dataset's first item image, for a list
+    /// thumbnail (sc-2025). `None` when the dataset has no items.
+    #[serde(default)]
+    pub cover_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -942,29 +946,67 @@ fn list_dataset_summaries_from_index(
     let connection = Connection::open(project_path.join("project.db"))?;
     let mut statement = connection.prepare(
         "
-        select id, project_id, name, modality, status, version, item_count, created_at, updated_at
+        select id, project_id, name, modality, status, version, item_count, created_at, updated_at, file_path
           from training_datasets
          where project_id = ?1
          order by updated_at desc, name asc
         ",
     )?;
-    let summaries = statement
+    let rows = statement
         .query_map(params![project_id], |row| {
             let item_count: i64 = row.get(6)?;
-            Ok(TrainingDatasetSummary {
-                id: row.get(0)?,
-                project_id: row.get(1)?,
-                name: row.get(2)?,
-                modality: parse_string_enum(&row.get::<_, String>(3)?),
-                status: parse_string_enum(&row.get::<_, String>(4)?),
-                version: row.get(5)?,
-                item_count: usize::try_from(item_count).unwrap_or(0),
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
+            Ok((
+                TrainingDatasetSummary {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    name: row.get(2)?,
+                    modality: parse_string_enum(&row.get::<_, String>(3)?),
+                    status: parse_string_enum(&row.get::<_, String>(4)?),
+                    version: row.get(5)?,
+                    item_count: usize::try_from(item_count).unwrap_or(0),
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    cover_path: None,
+                },
+                row.get::<_, Option<String>>(9)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    let summaries = rows
+        .into_iter()
+        .map(|(mut summary, manifest_rel)| {
+            summary.cover_path = manifest_rel
+                .as_deref()
+                .and_then(|rel| resolve_dataset_cover(project_path, &summary.id, rel));
+            summary
+        })
+        .collect();
     Ok(summaries)
+}
+
+/// Project-relative path to a dataset's first item image, read from its on-disk
+/// manifest. Powers the dataset list thumbnail (sc-2025) without storing a
+/// denormalized column. `None` when the manifest is unreadable or item-less.
+fn resolve_dataset_cover(
+    project_path: &Path,
+    dataset_id: &str,
+    manifest_rel: &str,
+) -> Option<String> {
+    let manifest = read_json(&project_path.join(manifest_rel)).ok()?;
+    let item_path = manifest
+        .get("items")?
+        .as_array()?
+        .first()?
+        .get("path")?
+        .as_str()?;
+    if !is_safe_relative_path(item_path) {
+        return None;
+    }
+    relative_string(
+        project_path,
+        &dataset_root(project_path, dataset_id).join(item_path),
+    )
+    .ok()
 }
 
 fn index_dataset(

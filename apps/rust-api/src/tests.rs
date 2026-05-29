@@ -839,6 +839,11 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed[0]["id"], dataset_id);
     assert_eq!(listed[0]["itemCount"], 1);
+    // The summary carries a cover thumbnail path (sc-2025) for the dataset selector.
+    assert_eq!(
+        listed[0]["coverPath"],
+        format!("training/datasets/{dataset_id}/images/item_0001.png")
+    );
 
     let reloaded_app = create_app(settings).expect("app reloads");
     let (status, detail) = request(

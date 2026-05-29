@@ -490,12 +490,15 @@ button:focus-visible {
 }
 
 .project-menu-item-new {
-  margin-top: 4px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
   color: var(--accent-strong);
   font-weight: 600;
-  border-radius: 0 0 var(--r-sm) var(--r-sm);
+}
+
+.project-menu-divider,
+.compact-selector-divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
 }
 
 [data-theme="dark"] .project-menu-item-new {
@@ -505,9 +508,7 @@ button:focus-visible {
 .project-menu-create {
   display: flex;
   gap: 6px;
-  margin-top: 4px;
-  padding: 8px 6px 6px;
-  border-top: 1px solid var(--border);
+  padding: 6px;
 }
 
 .project-menu-create input {
@@ -670,6 +671,22 @@ button:focus-visible {
 
 [data-theme="dark"] .compact-selector-item.active {
   color: var(--accent);
+}
+
+.compact-selector-create {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+[data-theme="dark"] .compact-selector-create {
+  color: var(--accent);
+}
+
+.compact-selector-create-thumb {
+  display: grid;
+  place-items: center;
+  background: var(--surface-hover);
+  color: var(--accent-strong);
 }
 
 .project-list {

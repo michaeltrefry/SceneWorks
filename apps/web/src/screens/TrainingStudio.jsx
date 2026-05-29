@@ -953,14 +953,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     return map;
   }, [activeDataset, importedCaptions]);
-  // Thumbnail for the compact dataset selector (sc-2025): the open dataset's
-  // first member, else a list summary's first item asset if resolvable.
+  // Thumbnail for the compact dataset selector (sc-2025): the list summary's
+  // server-resolved cover image (first item), falling back to the open dataset's
+  // first loaded member.
   const datasetThumbAsset = (dataset) => {
+    if (dataset?.coverPath) {
+      return { projectId: activeProject?.id, type: "image", file: { path: dataset.coverPath } };
+    }
     if (dataset?.id === selectedDatasetId && memberAssets[0]) {
       return memberAssets[0];
     }
-    const firstItemAssetId = (dataset?.items ?? []).find((item) => item.assetId)?.assetId;
-    return firstItemAssetId ? assetsById.get(firstItemAssetId) ?? null : null;
+    return null;
   };
   const health = useMemo(
     () => datasetHealth({ activeDataset, imageAssets, selectedAssetIds }),
@@ -1584,6 +1587,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                     <div className="training-head-actions">
                       <CompactSelector
                         busyId={busyDatasetId}
+                        createLabel="New dataset"
                         getSubtitle={(dataset) => {
                           const count = datasetItemCount(dataset);
                           return `${count} item${count === 1 ? "" : "s"}`;
@@ -1591,6 +1595,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                         getThumbAsset={datasetThumbAsset}
                         items={datasets}
                         label="Select dataset"
+                        onCreate={startNewDataset}
                         onSelect={(dataset) => openDataset(dataset.id)}
                         placeholder={activeDataset ? activeDataset.name : "New dataset"}
                         selectedId={selectedDatasetId}
@@ -1598,10 +1603,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
                       <button className="secondary-action" disabled={loadingDatasets} onClick={onRefreshDatasets} type="button">
                         <Icon.Search size={14} />
                         {loadingDatasets ? "Refreshing" : "Refresh"}
-                      </button>
-                      <button className="primary-action" onClick={startNewDataset} type="button">
-                        <Icon.Plus size={14} />
-                        New
                       </button>
                     </div>
                   </div>

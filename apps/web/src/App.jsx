@@ -274,29 +274,6 @@ function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled
 
       {open ? (
         <div className="project-menu" role="listbox">
-          {projects.length === 0 ? (
-            <p className="project-menu-empty">No workspaces yet — create the first one below.</p>
-          ) : (
-            projects.map((project) => (
-              <button
-                aria-selected={project.id === activeProject?.id}
-                className={project.id === activeProject?.id ? "project-menu-item active" : "project-menu-item"}
-                key={project.id}
-                onClick={() => {
-                  onSelect(project);
-                  setOpen(false);
-                  setCreating(false);
-                  setName("");
-                }}
-                role="option"
-                type="button"
-              >
-                <span className="project-menu-thumb" aria-hidden="true" />
-                <span className="project-menu-label">{project.name}</span>
-              </button>
-            ))
-          )}
-
           {creating ? (
             <form className="project-menu-create" onSubmit={submitNew}>
               <input
@@ -328,6 +305,31 @@ function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled
               <Icon.Plus />
               <span className="project-menu-label">New workspace</span>
             </button>
+          )}
+
+          {projects.length ? <div className="project-menu-divider" role="separator" /> : null}
+
+          {projects.length === 0 ? (
+            <p className="project-menu-empty">No workspaces yet — create the first one above.</p>
+          ) : (
+            projects.map((project) => (
+              <button
+                aria-selected={project.id === activeProject?.id}
+                className={project.id === activeProject?.id ? "project-menu-item active" : "project-menu-item"}
+                key={project.id}
+                onClick={() => {
+                  onSelect(project);
+                  setOpen(false);
+                  setCreating(false);
+                  setName("");
+                }}
+                role="option"
+                type="button"
+              >
+                <span className="project-menu-thumb" aria-hidden="true" />
+                <span className="project-menu-label">{project.name}</span>
+              </button>
+            ))
           )}
         </div>
       ) : null}

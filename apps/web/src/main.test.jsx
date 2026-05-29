@@ -945,6 +945,39 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("shows a cover thumbnail per dataset and a New dataset item in the selector (sc-2025)", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [],
+          datasets: [
+            { id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 3, coverPath: "training/datasets/dataset-a/images/item_0001.png" },
+          ],
+        }),
+      );
+    });
+
+    // Pill shows the New-dataset draft placeholder before anything is opened.
+    expect(container.querySelector(".compact-selector-pill").textContent).toContain("New dataset");
+
+    await act(async () => {
+      container.querySelector(".compact-selector-pill").click();
+    });
+
+    // A "New dataset" create item sits at the top of the dropdown.
+    expect(container.querySelector(".compact-selector-create").textContent).toContain("New dataset");
+
+    // Every dataset row renders its server-provided cover thumbnail.
+    const datasetItem = [...container.querySelectorAll(".compact-selector-item")].find((button) =>
+      button.textContent.includes("Portrait Set"),
+    );
+    const cover = datasetItem.querySelector("img");
+    expect(cover).not.toBeNull();
+    expect(cover.getAttribute("src")).toContain("training/datasets/dataset-a/images/item_0001.png");
+  });
+
   it("lets users remove unavailable dataset assets before saving", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",
@@ -2272,6 +2305,61 @@ describe("SceneWorks app shell", () => {
 
     expect(field(container, "Name").value).toBe("Dax");
     expect(container.querySelector(".compact-selector-pill").textContent).toContain("Dax");
+  });
+
+  it("creates a character from the selector's New item (sc-2025)", async () => {
+    const createCharacter = vi.fn(async (payload) => ({
+      id: "char-new",
+      ...payload,
+      references: [],
+      approvedReferences: [],
+      looks: [],
+      loras: [],
+    }));
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      archiveCharacter: () => {},
+      assets: [],
+      attachCharacterLora: () => {},
+      characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+      createCharacter,
+      createCharacterLook: () => {},
+      createCharacterTestJob: () => {},
+      deleteAsset: () => {},
+      deleteCharacterLook: () => {},
+      detachCharacterLora: () => {},
+      imageModels: [],
+      latestImageAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      sendCharacterToImage: () => {},
+      sendCharacterToVideo: () => {},
+      purgeAsset: () => {},
+      removeCharacterReference: () => {},
+      updateAssetStatus: () => {},
+      updateCharacter: () => {},
+      updateCharacterLook: () => {},
+      updateCharacterLora: () => {},
+      updateCharacterReference: () => {},
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+
+    // No inline header create form anymore — creation lives in the dropdown.
+    expect([...container.querySelectorAll("input")].some((input) => input.getAttribute("aria-label") === "Character name")).toBe(false);
+
+    await act(async () => {
+      container.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      container.querySelector(".compact-selector-create").click();
+    });
+
+    expect(createCharacter).toHaveBeenCalledWith(expect.objectContaining({ name: "New character", type: "person" }));
   });
 
   it("fires a one-click angle-set batch job from the Character Studio panel", async () => {
