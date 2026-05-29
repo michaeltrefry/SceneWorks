@@ -1804,7 +1804,7 @@ class QwenImageAdapter:
         # Default differs by target: text-to-image qwen_image uses 4.0; the Edit
         # / Edit-Plus pipelines (incl. Lightning distill) require 1.0 per the
         # model card. Per-target default lives in MODEL_TARGETS.guidanceScale.
-        model_target = MODEL_TARGETS.get(request.model, {})
+        model_target = MODEL_TARGETS.get(getattr(request, "model", None) or "", {})
         default = model_target.get("guidanceScale", 4.0)
         try:
             return float(request.advanced.get("guidanceScale", default))
@@ -1852,7 +1852,7 @@ class QwenImageAdapter:
     def _true_cfg_scale_default(self, request: ImageRequest) -> float:
         # Per-model default for true_cfg_scale. Base Qwen Edit uses 4.0; Lightning
         # distill uses 1.0 (CFG disabled). MODEL_TARGETS.trueCfgScale overrides.
-        model_target = MODEL_TARGETS.get(request.model, {})
+        model_target = MODEL_TARGETS.get(getattr(request, "model", None) or "", {})
         default = model_target.get("trueCfgScale", 4.0)
         try:
             return float(request.advanced.get("trueCfgScale", default))
