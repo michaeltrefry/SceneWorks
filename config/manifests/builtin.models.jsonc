@@ -738,6 +738,157 @@
       }
     },
     {
+      "id": "flux2_klein_9b",
+      "name": "FLUX.2 [klein] 9B",
+      "family": "flux2-klein",
+      "type": "image",
+      // First MLX-only image-generation model family in SceneWorks. There is
+      // no diffusers torch backend for FLUX.2 today, so the adapter field
+      // points directly at mlx_flux2 (sc-2164). Non-Mac hosts hide the model
+      // via the macOnly flag below; on Mac the adapter requires the shared
+      // mflux sidecar venv (/opt/mlx-flux-venv).
+      "adapter": "mlx_flux2",
+      // Unified model: txt2img + edit (single reference image) via mflux's
+      // Flux2Klein / Flux2KleinEdit variants.
+      "capabilities": ["text_to_image", "character_image", "style_variations"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Gated repo (FLUX Non-Commercial License). Whole-repo download (~49 GiB
+          // — Qwen3 text embedder + Flux2 transformer + VAE).
+          "provider": "huggingface",
+          "repo": "black-forest-labs/FLUX.2-klein-9B",
+          "files": [],
+          "estimatedSizeBytes": 52613349376
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/black-forest-labs/FLUX.2-klein-9B"
+      },
+      "defaults": {
+        // Step-distilled to 4 steps; guidance MUST be 1.0 on distilled klein
+        // variants (mflux CLI errors on any other value).
+        "resolution": "1024x1024",
+        "steps": 4,
+        "guidanceScale": 1.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        "families": ["flux2"],
+        "types": ["style", "enhance", "character"]
+      },
+      // Q8 sweet spot on M-series: same per-step speed as bf16, ~25% peak
+      // memory reduction. minMemoryGb tracks bf16 peak ~36 GB measured at
+      // 1024² 4-step on M5 Max; 64 GB Macs are well in range.
+      "mlx": {
+        "minMemoryGb": 42,
+        "quantize": 8
+      },
+      // Gated FLUX Non-Commercial License (same posture as flux_dev: accept
+      // license + add HF token before downloading). Generations are
+      // non-commercial use only — matches SceneWorks's overall non-commercial
+      // posture, so no new app-level guardrail beyond the existing one.
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B",
+      "ui": {
+        "label": "FLUX.2 [klein] 9B",
+        "description": "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, MLX-only (Apple Silicon). 9B flow transformer + 8B Qwen3 text embedder; ~36 GB bf16 peak at 1024². Distributed under the FLUX Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-klein-9B and add a Hugging Face token under Settings → Service credentials before downloading. For faster reference editing on the same architecture, see FLUX.2 [klein] 9B-KV.",
+        "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        // Edit-style backbone (Flux2KleinEdit handles reference natively; no
+        // IP-Adapter, no face-ID). The variation knob maps to image_strength
+        // — surfaced as "Prompt strength" because the cache-distilled model
+        // adapts the reference primarily via the prompt at 4 steps.
+        "variationStrength": {
+          "label": "Prompt strength",
+          "default": 4.0,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.5
+        },
+        "promptGuide": {
+          "title": "FLUX.2 [klein] 9B Prompt Guide",
+          "path": "/prompt-guides/flux2-klein.md",
+          "sources": [
+            { "label": "FLUX.2 [klein] 9B model card", "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B" },
+            { "label": "FLUX.2 blog post", "url": "https://bfl.ai/blog/flux2-klein-towards-interactive-visual-intelligence" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv",
+      "name": "FLUX.2 [klein] 9B-KV",
+      "family": "flux2-klein",
+      "type": "image",
+      "adapter": "mlx_flux2",
+      // Reference-only: the KV cache caches reference-image K/V on step 0
+      // and reuses on steps 1-3, ~2.4× faster than the un-cached edit path
+      // on M5 Max (sc-2163, upstream PR filipstrand/mflux#426). Cache is
+      // meaningless without a reference image, so the model id is gated to
+      // character_image / edit modes only.
+      "capabilities": ["character_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/FLUX.2-klein-9b-kv",
+          "files": [],
+          "estimatedSizeBytes": 52613349376
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/black-forest-labs/FLUX.2-klein-9b-kv"
+      },
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 4,
+        "guidanceScale": 1.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4]
+      },
+      "loraCompatibility": {
+        "families": ["flux2"],
+        "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        "minMemoryGb": 42,
+        "quantize": 8
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv",
+      "ui": {
+        "label": "FLUX.2 [klein] 9B-KV",
+        "description": "FLUX.2 [klein] 9B with KV-cache acceleration for reference editing — ~2.4× faster than the base 9B edit path on Apple Silicon (validated M5 Max 128 GB, sc-2163). Reference image required; for plain text-to-image use FLUX.2 [klein] 9B. Distributed under the FLUX Non-Commercial License (gated). Same ~36 GB bf16 peak at 1024² as the base 9B.",
+        "recommendedFor": ["character_image"],
+        // Same edit-style knob as the base 9B (Flux2KleinEdit). The cache
+        // doesn't change the variation behavior, just the per-step compute.
+        "variationStrength": {
+          "label": "Prompt strength",
+          "default": 4.0,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.5
+        },
+        "promptGuide": {
+          "title": "FLUX.2 [klein] 9B Prompt Guide",
+          "path": "/prompt-guides/flux2-klein.md",
+          "sources": [
+            { "label": "FLUX.2 [klein] 9B-KV model card", "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv" },
+            { "label": "FLUX.2 blog post", "url": "https://bfl.ai/blog/flux2-klein-towards-interactive-visual-intelligence" }
+          ]
+        }
+      }
+    },
+    {
       "id": "chroma1_hd",
       "name": "Chroma1-HD",
       "family": "chroma",

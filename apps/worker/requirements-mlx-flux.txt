@@ -24,4 +24,9 @@
 # Adapter: `MlxFluxAdapter` in apps/worker/scene_worker/image_adapters.py
 # mflux pulls its own torch, transformers, huggingface_hub, mlx, etc. — pin
 # only mflux here and let it resolve the rest.
-mflux>=0.17.5,<0.18
+#
+# Temporarily pinned at michaeltrefry/mflux@claude/flux2-kv-cache (sc-2163,
+# upstream PR filipstrand/mflux#426) so MlxFlux2Adapter (sc-2164) can use the
+# FLUX.2-klein-9b-kv KV-cache optimisation (~2.4x faster multi-ref edit). Flip
+# back to a PyPI mflux>=0.18 pin once the upstream PR lands.
+mflux @ git+https://github.com/michaeltrefry/mflux.git@claude/flux2-kv-cache

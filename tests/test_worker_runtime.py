@@ -29,6 +29,7 @@ from scene_worker.image_adapters import (
     ImageAssetWriter,
     KolorsDiffusersAdapter,
     LensTurboAdapter,
+    MlxFlux2Adapter,
     MlxFluxAdapter,
     MlxQwenAdapter,
     MlxSdxlAdapter,
@@ -1970,6 +1971,189 @@ def test_mlx_qwen_rejects_reference_asset():
         assert "character" in str(exc).lower() or "reference-image" in str(exc).lower()
     else:
         raise AssertionError("MlxQwenAdapter must reject reference-image jobs (deferred follow-up).")
+
+
+# --- sc-2164: FLUX.2 [klein] MLX-only adapter ---
+
+
+def test_image_adapter_env_override_selects_mlx_flux2(monkeypatch):
+    # Explicit env override picks MlxFlux2Adapter regardless of platform/sidecar.
+    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "mlx_flux2")
+    adapter = create_image_adapter({"payload": {"model": "flux2_klein_9b"}})
+    assert adapter.__class__.__name__ == "MlxFlux2Adapter"
+    assert adapter.id == "mlx_flux2"
+
+
+def test_flux2_dispatch_picks_mlx_flux2_for_both_models(monkeypatch):
+    # FLUX.2-klein has no torch fallback in SceneWorks, so the dispatch
+    # ALWAYS returns MlxFlux2Adapter regardless of platform / sidecar. The
+    # adapter's own preflight raises a clean error on misconfigured hosts.
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    for model in ("flux2_klein_9b", "flux2_klein_9b_kv"):
+        adapter = create_image_adapter({"payload": {"model": model}})
+        assert adapter.__class__.__name__ == "MlxFlux2Adapter", model
+
+
+def test_should_route_flux2_to_mlx_predicate(monkeypatch):
+    from scene_worker.image_adapters import _should_route_flux2_to_mlx
+
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxFlux2Adapter, "_sidecar_available", lambda self: True)
+
+    # Happy paths.
+    assert _should_route_flux2_to_mlx({"model": "flux2_klein_9b"}) is True
+    assert _should_route_flux2_to_mlx(
+        {"model": "flux2_klein_9b", "referenceAssetId": "asset_ref"}
+    ) is True
+    # -kv requires a reference asset; without one the gate must fail so the
+    # adapter raises a clear error instead of running un-cached on -kv weights.
+    assert _should_route_flux2_to_mlx({"model": "flux2_klein_9b_kv"}) is False
+    assert _should_route_flux2_to_mlx(
+        {"model": "flux2_klein_9b_kv", "referenceAssetId": "asset_ref"}
+    ) is True
+    # Non-Mac and disable env both close the gate.
+    monkeypatch.setattr("sys.platform", "linux")
+    assert _should_route_flux2_to_mlx({"model": "flux2_klein_9b"}) is False
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_FLUX", "1")
+    assert _should_route_flux2_to_mlx({"model": "flux2_klein_9b"}) is False
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    # Missing sidecar closes the gate even on darwin.
+    monkeypatch.setattr(MlxFlux2Adapter, "_sidecar_available", lambda self: False)
+    assert _should_route_flux2_to_mlx({"model": "flux2_klein_9b"}) is False
+    # Unsupported model never matches.
+    assert _should_route_flux2_to_mlx({"model": "flux_dev"}) is False
+
+
+def test_mlx_flux2_kv_rejects_no_reference():
+    # -kv without a reference is misuse: the cache is meaningless and the
+    # 4-step distilled output drifts without it. Adapter must fail loudly.
+    job = {
+        "id": "job_mlx_flux2_kv_norefs",
+        "payload": {
+            "projectId": "p",
+            "mode": "text_to_image",
+            "model": "flux2_klein_9b_kv",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxFlux2Adapter().generate(
+            settings=None,
+            job=job,
+            request=image_request_from_job(job),
+            project_path=None,
+            progress=noop,
+            cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "reference image" in str(exc).lower()
+    else:
+        raise AssertionError(
+            "MlxFlux2Adapter must reject flux2_klein_9b_kv jobs without a reference image."
+        )
+
+
+def test_mlx_flux2_rejects_unsupported_model():
+    # Wrong model_target.adapter (e.g. routing a flux_schnell job through
+    # MlxFlux2Adapter by mistake) must fail clearly.
+    job = {
+        "id": "job_mlx_flux2_wrong_model",
+        "payload": {
+            "projectId": "p",
+            "mode": "text_to_image",
+            "model": "flux_schnell",
+            "prompt": "x",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxFlux2Adapter().generate(
+            settings=None,
+            job=job,
+            request=image_request_from_job(job),
+            project_path=None,
+            progress=noop,
+            cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "FLUX.2 target" in str(exc) or "MlxFlux2Adapter supports" in str(exc)
+    else:
+        raise AssertionError("MlxFlux2Adapter must reject non-FLUX.2 models.")
+
+
+def test_mlx_flux2_requires_sidecar_when_missing(monkeypatch):
+    # When the sidecar venv is missing, generate() must surface an actionable
+    # error rather than silently producing nothing.
+    monkeypatch.setenv("SCENEWORKS_MLX_FLUX_PYTHON", "/nonexistent/mlx-flux-venv/bin/python")
+    job = {
+        "id": "job_mlx_flux2_no_sidecar",
+        "payload": {
+            "projectId": "p",
+            "mode": "text_to_image",
+            "model": "flux2_klein_9b",
+            "prompt": "a cat",
+        },
+    }
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    try:
+        MlxFlux2Adapter().generate(
+            settings=None,
+            job=job,
+            request=image_request_from_job(job),
+            project_path=None,
+            progress=noop,
+            cancel_requested=lambda: False,
+        )
+    except RuntimeError as exc:
+        assert "sidecar" in str(exc).lower()
+    else:
+        raise AssertionError("MlxFlux2Adapter must fail when sidecar venv is unavailable.")
+
+
+def test_mlx_flux2_resolve_quantize_order():
+    # Same advanced > manifest > Q8 default algorithm as the other MLX adapters.
+    adapter = MlxFlux2Adapter()
+    request = SimpleNamespace(advanced={}, model_manifest_entry={})
+    assert adapter._resolve_quantize(request) == 8
+    request = SimpleNamespace(advanced={}, model_manifest_entry={"mlx": {"quantize": 4}})
+    assert adapter._resolve_quantize(request) == 4
+    request = SimpleNamespace(
+        advanced={"mlxQuantize": 3}, model_manifest_entry={"mlx": {"quantize": 8}}
+    )
+    assert adapter._resolve_quantize(request) == 3
+    request = SimpleNamespace(advanced={"mlxQuantize": 0}, model_manifest_entry={})
+    assert adapter._resolve_quantize(request) is None
+
+
+def test_flux2_klein_manifest_entries_present():
+    # Both flux2_klein_9b and flux2_klein_9b_kv must be present in the
+    # builtin manifest with the expected adapter + family + mlx block.
+    import re
+
+    _, find_entry_block, find_mlx_block = _manifest_brace_walker()
+    for model_id, expect_kv_only in (
+        ("flux2_klein_9b", False),
+        ("flux2_klein_9b_kv", True),
+    ):
+        block = find_entry_block(model_id)
+        assert '"adapter": "mlx_flux2"' in block, model_id
+        assert '"family": "flux2-klein"' in block, model_id
+        assert '"macOnly": true' in block, model_id
+        assert '"gated": true' in block, model_id
+        mlx_block = find_mlx_block(block)
+        quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
+        assert quant_match is not None, f"{model_id}: mlx.quantize missing"
+        assert int(quant_match.group(1)) == 8, f"{model_id}: quantize should be 8 (sweet spot)"
+        if expect_kv_only:
+            # -kv carries character_image only — the KV cache is meaningless
+            # without a reference image.
+            assert '"capabilities": ["character_image"]' in block.replace("\n", " "), model_id
+        else:
+            assert '"text_to_image"' in block, model_id
+            assert '"character_image"' in block, model_id
 
 
 # --- sc-2145: Z-Image MLX adapter ---

@@ -22,9 +22,11 @@ Progress and diagnostics go to stderr (captured into the worker log). A non-zero
 exit code with an "error" JSON on stdout signals failure to the adapter.
 
 Spec keys:
-    model: e.g. "flux_schnell" | "flux_dev" | "qwen_image"
+    model: e.g. "flux_schnell" | "flux_dev" | "qwen_image" | "flux2_klein_9b"
+        | "flux2_klein_9b_kv"
     prompt: str
-    negativePrompt: str | None
+    negativePrompt: str | None  (ignored by FLUX.2 — Flux2 disallows negatives;
+        focus on describing what you want.)
     seeds: list[int]
     height: int
     width: int
@@ -32,9 +34,15 @@ Spec keys:
     guidance: float
     quantize: int | None (None, 3, 4, 5, 6, 8)
     loras: list[{"path": str, "weight": float, "name": str}]
+    imagePaths: list[str] | None  (FLUX.2 edit mode only — list of reference
+        image paths. Triggers Flux2KleinEdit dispatch; for FLUX.2-klein-9b-kv
+        the KV cache auto-engages.)
     outDir: str (sidecar writes PNGs + result.json here)
 
 Validated 2026-05-28 against mflux 0.17.5 (sc-1969 FLUX spike, sc-1972 Qwen verify).
+sc-2164 extends with FLUX.2-klein-9b / -kv via Flux2Klein / Flux2KleinEdit, pinned
+to michaeltrefry/mflux@claude/flux2-kv-cache for the upstream KV-cache patch
+(filipstrand/mflux#426).
 """
 from __future__ import annotations
 
@@ -48,29 +56,33 @@ def _log(message: str) -> None:
     sys.stderr.flush()
 
 
-def _resolve_model_handle(model_id: str) -> tuple[type, object, str]:
-    """Map a SceneWorks model id onto an mflux (class, ModelConfig, filename_prefix).
+def _resolve_model_handle(model_id: str, has_reference: bool) -> tuple[type, object, str, str]:
+    """Map a SceneWorks model id + edit-vs-t2i hint onto an mflux
+    (class, ModelConfig, filename_prefix, family) tuple.
 
-    Each branch instantiates an mflux txt2img class for one model family and
+    Each branch instantiates an mflux generation class for one model family and
     returns it alongside a `ModelConfig` factory and the per-image filename
-    prefix used in `outDir`. Both classes expose the same
-    `(quantize, model_config, lora_paths, lora_scales)` constructor and the
-    same `generate_image(seed, prompt, num_inference_steps, height, width,
-    guidance, negative_prompt, ...)` keyword interface (mflux 0.17.5), so the
-    main loop is family-agnostic. Keep this map in sync with the
-    `_supported_models` sets in the corresponding adapters.
+    prefix used in `outDir`. The fourth tuple element is the family tag
+    (``"flux1" | "qwen" | "z_image" | "flux2"``) the main loop uses to skip
+    family-incompatible kwargs (e.g. ``negative_prompt`` is disallowed by
+    Flux2). Keep this map in sync with the `_supported_models` sets in the
+    corresponding adapters.
+
+    ``has_reference`` selects the edit variant for families that have one
+    (FLUX.2 → Flux2Klein vs Flux2KleinEdit). Families without an edit path
+    ignore the flag.
     """
     from mflux.models.common.config.model_config import ModelConfig
 
     if model_id == "flux_schnell":
         from mflux.models.flux.variants.txt2img.flux import Flux1
-        return Flux1, ModelConfig.schnell(), "mlx_flux"
+        return Flux1, ModelConfig.schnell(), "mlx_flux", "flux1"
     if model_id == "flux_dev":
         from mflux.models.flux.variants.txt2img.flux import Flux1
-        return Flux1, ModelConfig.dev(), "mlx_flux"
+        return Flux1, ModelConfig.dev(), "mlx_flux", "flux1"
     if model_id == "qwen_image":
         from mflux.models.qwen.variants.txt2img.qwen_image import QwenImage
-        return QwenImage, ModelConfig.qwen_image(), "mlx_qwen"
+        return QwenImage, ModelConfig.qwen_image(), "mlx_qwen", "qwen"
     if model_id == "z_image_turbo":
         # NOTE: the ZImage import path is `variants.z_image`, not
         # `variants.txt2img.z_image` (mflux 0.17.5 — Z-Image hasn't been
@@ -78,7 +90,24 @@ def _resolve_model_handle(model_id: str) -> tuple[type, object, str]:
         # GeneratedImage return shape matches even though the type annotation
         # claims PIL.Image.Image — main() drops `.image` either way.
         from mflux.models.z_image.variants.z_image import ZImage
-        return ZImage, ModelConfig.z_image_turbo(), "mlx_z_image"
+        return ZImage, ModelConfig.z_image_turbo(), "mlx_z_image", "z_image"
+    if model_id == "flux2_klein_9b":
+        if has_reference:
+            from mflux.models.flux2.variants.edit.flux2_klein_edit import Flux2KleinEdit
+            return Flux2KleinEdit, ModelConfig.flux2_klein_9b(), "mlx_flux2_klein", "flux2"
+        from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
+        return Flux2Klein, ModelConfig.flux2_klein_9b(), "mlx_flux2_klein", "flux2"
+    if model_id == "flux2_klein_9b_kv":
+        # The -kv variant only makes sense with a reference image (cache is
+        # meaningless otherwise). MlxFlux2Adapter gates this in the main venv
+        # so we get here only when has_reference is True.
+        if not has_reference:
+            raise RuntimeError(
+                "mlx_flux_runner: flux2_klein_9b_kv requires a reference image; "
+                "use flux2_klein_9b for text-to-image."
+            )
+        from mflux.models.flux2.variants.edit.flux2_klein_edit import Flux2KleinEdit
+        return Flux2KleinEdit, ModelConfig.flux2_klein_9b_kv(), "mlx_flux2_klein_kv", "flux2"
     raise RuntimeError(f"mlx_flux_runner: unsupported model id {model_id!r}.")
 
 
@@ -101,13 +130,15 @@ def main() -> int:
     if quantize is not None:
         quantize = int(quantize)
     loras = spec.get("loras") or []
+    image_paths = [str(p) for p in (spec.get("imagePaths") or []) if p]
+    has_reference = bool(image_paths)
     out_dir = Path(spec["outDir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / "result.json"
 
     # Heavy imports deferred until the spec is valid: a bad spec fails cleanly
     # before mflux loads MLX + the multi-GB transformer.
-    model_cls, model_config, filename_prefix = _resolve_model_handle(model_id)
+    model_cls, model_config, filename_prefix, family = _resolve_model_handle(model_id, has_reference)
 
     lora_paths: list[str] = []
     lora_scales: list[float] = []
@@ -138,16 +169,27 @@ def main() -> int:
     for index, seed in enumerate(seeds):
         # mflux 0.17.5 generate_image() takes per-call kwargs; older 0.12.x
         # took a Config object. Pin in requirements-mlx-flux.txt anchors us
-        # to the kwargs form.
-        result = model.generate_image(
-            seed=int(seed),
-            prompt=prompt,
-            num_inference_steps=steps,
-            height=height,
-            width=width,
-            guidance=guidance,
-            negative_prompt=negative_prompt,
-        )
+        # to the kwargs form. Per-family signature differences:
+        #   - Flux2 (txt2img + edit) disallows negative_prompt entirely
+        #     ("focus on describing what you want") and uses `image_paths` for
+        #     reference list (not `image_path`).
+        #   - Flux2Klein (txt2img) accepts a single optional `image_path`
+        #     instead of a list; the runner only dispatches to it when there
+        #     is no reference (image_paths is empty), so we don't pass it.
+        #   - Other families (Flux1, Qwen, Z-Image) still take negative_prompt.
+        gen_kwargs: dict[str, object] = {
+            "seed": int(seed),
+            "prompt": prompt,
+            "num_inference_steps": steps,
+            "height": height,
+            "width": width,
+            "guidance": guidance,
+        }
+        if family != "flux2":
+            gen_kwargs["negative_prompt"] = negative_prompt
+        if family == "flux2" and has_reference:
+            gen_kwargs["image_paths"] = image_paths
+        result = model.generate_image(**gen_kwargs)
         path = out_dir / f"{filename_prefix}_{index:04d}.png"
         result.image.save(path, "PNG")
         images.append(str(path))

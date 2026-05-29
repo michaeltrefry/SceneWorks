@@ -377,6 +377,33 @@ MODEL_TARGETS = {
             "imageEncoderRepo": "openai/clip-vit-large-patch14",
         },
     },
+    "flux2_klein_9b": {
+        "label": "FLUX.2 [klein] 9B",
+        "family": "flux2-klein",
+        # Unified model: txt2img via Flux2Klein, edit via Flux2KleinEdit (reference
+        # image conditioning). Both paths go through the same MLX-only adapter.
+        "supportsEdit": True,
+        # 4-step distilled (mflux's default for klein-9b); guidance 1.0 mandatory
+        # on distilled variants — the mflux CLI errors on any other value.
+        "steps": 4,
+        "guidanceScale": 1.0,
+        "repo": "black-forest-labs/FLUX.2-klein-9B",
+        "adapter": "mlx_flux2",
+    },
+    "flux2_klein_9b_kv": {
+        "label": "FLUX.2 [klein] 9B-KV",
+        "family": "flux2-klein",
+        # Edit-only (KV cache requires a reference image to be meaningful);
+        # MlxFlux2Adapter rejects this model id in txt2img mode. Cache
+        # auto-engages on the supports_kv_cache ModelConfig flag set in
+        # the pinned mflux fork (sc-2163, upstream PR filipstrand/mflux#426).
+        "supportsEdit": True,
+        "supportsTxt2Img": False,
+        "steps": 4,
+        "guidanceScale": 1.0,
+        "repo": "black-forest-labs/FLUX.2-klein-9b-kv",
+        "adapter": "mlx_flux2",
+    },
     "kolors": {
         "label": "Kolors",
         "family": "kolors",
@@ -3447,6 +3474,300 @@ class MlxSdxlAdapter:
             return float(default)
 
 
+class MlxFlux2Adapter:
+    """FLUX.2-klein-9b (txt2img + edit) via mflux (Apple MLX), run OUT-OF-PROCESS.
+
+    The first MLX-only image-generation family in SceneWorks — there is no
+    diffusers torch fallback for FLUX.2 today, so the model's manifest entry
+    points directly at this adapter rather than redirecting from a torch
+    adapter. On non-Mac hosts the dispatch falls through to nothing and the
+    job fails with a clear error; the frontend hides the model on those
+    platforms via the existing host-capability filter.
+
+    Shares the mflux sidecar venv (`/opt/mlx-flux-venv`) and runner
+    (`scene_worker/mlx_flux_runner.py`) with `MlxFluxAdapter` /
+    `MlxQwenAdapter` / `MlxZImageAdapter` — runner dispatches on
+    `spec["model"]` to `Flux2Klein` (txt2img) or `Flux2KleinEdit` (reference).
+
+    Two model ids:
+      - ``flux2_klein_9b`` — txt2img + edit. Edit mode passes a single
+        reference image through `image_paths` and runs the standard
+        denoise loop.
+      - ``flux2_klein_9b_kv`` — edit-only. The KV-cache distilled variant
+        from BFL (FLUX.2-klein-9b-kv) caches reference-image K/V on step
+        0 and reuses it on steps 1-3, ~2.4× faster than the un-cached
+        edit path on M5 Max. Cache auto-engages via the mflux
+        ModelConfig flag (sc-2163, upstream PR filipstrand/mflux#426).
+        Reference is required.
+
+    Dispatch gate: `_should_route_flux2_to_mlx`. The shared mflux escape
+    hatch ``SCENEWORKS_DISABLE_MLX_FLUX`` opts out of this adapter too.
+
+    Validation (M5 Max 128GB, 1024², 4 steps):
+      - flux2_klein_9b txt2img: ~26 s gen, ~36 GB peak
+      - flux2_klein_9b edit (no cache): ~33 s gen
+      - flux2_klein_9b_kv edit (cache on): ~13.5 s gen — 2.4× speedup
+      (numbers measured against the mflux fork's editable install during
+       sc-2163; sidecar venv post-provision should match).
+    """
+
+    id = "mlx_flux2"
+    _supported_models = {"flux2_klein_9b", "flux2_klein_9b_kv"}
+    _kv_only_models = {"flux2_klein_9b_kv"}  # require a reference image
+
+    def __init__(self) -> None:
+        self._scratch_dir: Path | None = None
+
+    def discard_temp_outputs(self, job_id: str | None = None) -> None:
+        work_dir = self._scratch_dir
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self._scratch_dir = None
+
+    def loaded_models(self) -> list[str]:
+        # The sidecar process loads + frees the model per job; nothing stays
+        # resident in this (main-venv) process. Mirrors MlxFluxAdapter.
+        return []
+
+    @staticmethod
+    def _sidecar_python() -> str:
+        return os.getenv("SCENEWORKS_MLX_FLUX_PYTHON", "/opt/mlx-flux-venv/bin/python")
+
+    @staticmethod
+    def _runner_path() -> Path:
+        return Path(__file__).resolve().parent / "mlx_flux_runner.py"
+
+    def _sidecar_available(self) -> bool:
+        return Path(self._sidecar_python()).exists() and self._runner_path().exists()
+
+    def generate(
+        self,
+        *,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        model_target = MODEL_TARGETS.get(request.model, {})
+        if model_target.get("adapter") != self.id:
+            raise RuntimeError(f"{request.model} is not a FLUX.2 target.")
+        if request.model not in self._supported_models:
+            raise RuntimeError(
+                f"MlxFlux2Adapter supports "
+                f"{', '.join(sorted(self._supported_models))}, not {request.model}."
+            )
+
+        # Resolve reference image (if any) to a local filesystem path so
+        # mflux's Flux2KleinEdit can read it directly. No PIL round-trip:
+        # find_asset_media_path returns the project-scoped path, and mflux's
+        # image loader handles dtype/resize itself.
+        reference_paths: list[str] = []
+        if request.reference_asset_id:
+            reference_paths.append(str(find_asset_media_path(project_path, request.reference_asset_id)))
+        has_reference = bool(reference_paths)
+
+        if request.model in self._kv_only_models and not has_reference:
+            raise RuntimeError(
+                f"{request.model} requires a reference image (the KV cache is "
+                "meaningless without one). Use flux2_klein_9b for text-to-image."
+            )
+
+        validate_lora_compatibility(
+            request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
+        )
+        lora_specs = normalize_lora_specs(request.loras)
+
+        if not self._sidecar_available():
+            raise RuntimeError(
+                "MLX FLUX.2 generation requires the isolated mlx-flux sidecar venv. The desktop "
+                "bootstrap installs it on first launch (apps/desktop/src/setup.rs "
+                "provision_mlx_flux_venv); rebuild without SCENEWORKS_DISABLE_MLX_FLUX=1, or set "
+                "SCENEWORKS_MLX_FLUX_PYTHON to a Python interpreter that has mflux installed "
+                f"(looked for {self._sidecar_python()})."
+            )
+
+        total = request.count
+        steps = self._num_inference_steps(request, model_target)
+        guidance = self._guidance_scale(request, model_target)
+        quantize = self._resolve_quantize(request)
+        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+
+        progress(
+            "loading_model",
+            "loading_model",
+            0.18,
+            f"Loading {model_target['label']} (MLX sidecar venv).",
+        )
+        work_dir = Path(tempfile.mkdtemp(prefix="mlx_flux2_sidecar_"))
+        self._scratch_dir = work_dir
+        try:
+            images = self._run_sidecar(
+                job_id=job["id"],
+                work_dir=work_dir,
+                label=model_target["label"],
+                total=total,
+                spec={
+                    "model": request.model,
+                    "prompt": request.prompt,
+                    "negativePrompt": None,  # Flux2 disallows negatives; runner skips it anyway
+                    "seeds": seeds,
+                    "height": request.height,
+                    "width": request.width,
+                    "numInferenceSteps": steps,
+                    "guidance": guidance,
+                    "quantize": quantize,
+                    "loras": [
+                        {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
+                        for lora in lora_specs
+                    ],
+                    "imagePaths": reference_paths or None,
+                },
+                progress=progress,
+                cancel_requested=cancel_requested,
+            )
+
+            def image_at_index(index: int) -> Image.Image:
+                progress(
+                    "running",
+                    "generating",
+                    image_batch_progress(index, total),
+                    format_batch_running_message(model_target["label"], index, total),
+                )
+                with Image.open(images[index]) as handle:
+                    return handle.convert("RGB")
+
+            return ImageAssetWriter().write_incremental_outputs(
+                request=request,
+                project_path=project_path,
+                image_count=total,
+                image_at_index=image_at_index,
+                adapter_id=self.id,
+                progress=progress,
+                cancel_requested=cancel_requested,
+                raw_settings={
+                    **request.advanced,
+                    "repo": model_target["repo"],
+                    "numInferenceSteps": steps,
+                    "guidanceScale": guidance,
+                    "mlxQuantize": quantize,
+                    "sidecarVenv": self._sidecar_python(),
+                    "hasReference": has_reference,
+                    "kvCacheEnabled": has_reference and request.model in self._kv_only_models,
+                    "realModelInference": True,
+                },
+                settings=settings,
+                job_id=job["id"],
+            )
+        finally:
+            self.discard_temp_outputs(job["id"])
+
+    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
+        # FLUX.2-klein distilled variants are 4-step; cap at 40 because the
+        # ModelConfig has supports_guidance=True so power users CAN crank
+        # steps if they really want.
+        return safe_int(request.advanced.get("steps"), model_target.get("steps", 4), 1, 40)
+
+    def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
+        # Distilled FLUX.2 wants guidance=1.0 (the mflux CLI even errors if
+        # not 1.0 on distilled variants). Leave room for manifest override
+        # in case a future base variant needs a different default.
+        default = model_target.get("guidanceScale", 1.0)
+        try:
+            return float(request.advanced.get("guidanceScale", default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _resolve_quantize(self, request: ImageRequest) -> int | None:
+        """Pick the mflux quantize level. Same algorithm as MlxFluxAdapter:
+        advanced override > manifest mlx.quantize > Q8 default.
+
+        FLUX.2-klein-9b at bf16 is ~36GB peak on M5 Max; Q8 cuts that
+        substantially with no visible quality drift on the spike runs.
+        """
+        override = request.advanced.get("mlxQuantize")
+        if override is not None and not isinstance(override, bool):
+            try:
+                parsed = int(override)
+                return parsed if parsed > 0 else None
+            except (TypeError, ValueError):
+                pass
+        mlx_entry = request.model_manifest_entry.get("mlx") if request.model_manifest_entry else None
+        if isinstance(mlx_entry, dict):
+            manifest_q = mlx_entry.get("quantize")
+            if manifest_q is not None:
+                try:
+                    parsed = int(manifest_q)
+                    return parsed if parsed > 0 else None
+                except (TypeError, ValueError):
+                    pass
+        return 8
+
+    def _run_sidecar(
+        self,
+        *,
+        job_id: str,
+        work_dir: Path,
+        label: str,
+        total: int,
+        spec: dict[str, Any],
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> list[str]:
+        spec = {**spec, "outDir": str(work_dir)}
+        spec_path = work_dir / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        stdout_log = work_dir / "stdout.log"
+        cmd = [self._sidecar_python(), str(self._runner_path()), str(spec_path)]
+        emit_worker_event(
+            "mlx_flux2_sidecar_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=spec["model"],
+            imageCount=total,
+            quantize=spec.get("quantize"),
+            sidecar=self._sidecar_python(),
+            hasReference=bool(spec.get("imagePaths")),
+        )
+        progress(
+            "running",
+            "generating",
+            image_batch_progress(0, total),
+            f"Running {label} ({total} image(s)).",
+        )
+        with stdout_log.open("w", encoding="utf-8") as out:
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            while True:
+                try:
+                    proc.wait(timeout=2)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_requested():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise InterruptedError("Image generation canceled by user.")
+        result = MlxFluxAdapter._read_result(work_dir, stdout_log)
+        if proc.returncode != 0 or "error" in result:
+            error = result.get("error") or f"MLX FLUX.2 sidecar exited with code {proc.returncode}."
+            emit_worker_event(
+                "mlx_flux2_sidecar_failed",
+                jobId=job_id,
+                adapter=self.id,
+                error=error,
+                returnCode=proc.returncode,
+            )
+            raise RuntimeError(f"MLX FLUX.2 generation failed in the sidecar venv: {error}")
+        images = [str(path) for path in result.get("images", [])]
+        if len(images) != total:
+            raise RuntimeError(f"MLX FLUX.2 sidecar produced {len(images)} image(s); expected {total}.")
+        emit_worker_event("mlx_flux2_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
+        return images
+
+
 class KolorsDiffusersAdapter:
     """Kwai-Kolors Kolors text-to-image via diffusers.KolorsPipeline.
 
@@ -5845,6 +6166,7 @@ def create_image_adapter(
     | SenseNovaU1Adapter
     | FluxDiffusersAdapter
     | MlxFluxAdapter
+    | MlxFlux2Adapter
     | KolorsDiffusersAdapter
     | SdxlDiffusersAdapter
     | MlxSdxlAdapter
@@ -5869,6 +6191,7 @@ def create_image_adapter(
         SenseNovaU1Adapter.id,
         FluxDiffusersAdapter.id,
         MlxFluxAdapter.id,
+        MlxFlux2Adapter.id,
         KolorsDiffusersAdapter.id,
         SdxlDiffusersAdapter.id,
         MlxSdxlAdapter.id,
@@ -5893,6 +6216,8 @@ def create_image_adapter(
         return adapters.get("flux_diffusers") if adapters else FluxDiffusersAdapter()
     if requested == MlxFluxAdapter.id:
         return adapters.get("mlx_flux") if adapters else MlxFluxAdapter()
+    if requested == MlxFlux2Adapter.id:
+        return adapters.get("mlx_flux2") if adapters else MlxFlux2Adapter()
     if requested == KolorsDiffusersAdapter.id:
         return adapters.get("kolors_diffusers") if adapters else KolorsDiffusersAdapter()
     if requested == SdxlDiffusersAdapter.id:
@@ -5939,6 +6264,14 @@ def create_image_adapter(
         return adapters.get("flux_diffusers") if adapters else FluxDiffusersAdapter()
     if model_target.get("adapter") == KolorsDiffusersAdapter.id:
         return adapters.get("kolors_diffusers") if adapters else KolorsDiffusersAdapter()
+    if model_target.get("adapter") == MlxFlux2Adapter.id:
+        # FLUX.2-klein has no torch fallback today — MlxFlux2Adapter is the
+        # only adapter for the family. The frontend hides the model on
+        # non-Mac hosts via the manifest `macOnly` flag; on any host the
+        # adapter's own preflight (platform, sidecar venv, -kv requires
+        # reference) raises a clear error if something is wrong, rather
+        # than silently rendering the procedural placeholder. sc-2164.
+        return adapters.get("mlx_flux2") if adapters else MlxFlux2Adapter()
     if model_target.get("adapter") == SdxlDiffusersAdapter.id:
         # SDXL auto-dispatch: prefer MlxSdxlAdapter on macOS when the vendored
         # mlx-examples is importable AND the model is supported AND the job
@@ -6051,6 +6384,41 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
     if payload.get("referenceAssetId"):
         return False
     return MlxZImageAdapter()._sidecar_available()
+
+
+def _should_route_flux2_to_mlx(payload: dict[str, Any]) -> bool:
+    """Decide whether MlxFlux2Adapter can handle a FLUX.2-klein job.
+
+    Unlike the other ``_should_route_*_to_mlx`` predicates, this is NOT an
+    "MLX vs torch" choice — FLUX.2-klein has no torch backend in SceneWorks
+    today, so MlxFlux2Adapter is the only adapter for the family. If this
+    predicate returns False on a flux2-klein job, the dispatch hands it to
+    the procedural preview placeholder and the frontend should have already
+    hidden the model on the host (manifest macOnly flag).
+
+    Gates:
+      1. SCENEWORKS_DISABLE_MLX_FLUX unset (shared opt-out with the other
+         mflux family — one env var per sidecar venv, not per family).
+      2. Platform == darwin (mflux/MLX is Apple-only).
+      3. Model in MlxFlux2Adapter._supported_models.
+      4. flux2_klein_9b_kv requires a reference image: KV cache only kicks in
+         when image_paths is populated, so a -kv request without a reference
+         is a misuse and must fail loudly rather than silently fall back to a
+         non-cached run (which wouldn't even produce the model's intended
+         distilled-at-4-steps output without the cache).
+      5. Sidecar venv exists.
+    sc-2164.
+    """
+    if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    if sys.platform != "darwin":
+        return False
+    model = payload.get("model")
+    if model not in MlxFlux2Adapter._supported_models:
+        return False
+    if model in MlxFlux2Adapter._kv_only_models and not payload.get("referenceAssetId"):
+        return False
+    return MlxFlux2Adapter()._sidecar_available()
 
 
 def _should_route_qwen_to_mlx(payload: dict[str, Any]) -> bool:
