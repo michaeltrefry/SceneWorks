@@ -2006,9 +2006,10 @@ def test_should_route_flux2_to_mlx_predicate(monkeypatch):
     assert _should_route_flux2_to_mlx(
         {"model": "flux2_klein_9b", "referenceAssetId": "asset_ref"}
     ) is True
-    # -kv requires a reference asset; without one the gate must fail so the
-    # adapter raises a clear error instead of running un-cached on -kv weights.
-    assert _should_route_flux2_to_mlx({"model": "flux2_klein_9b_kv"}) is False
+    # -kv routes to MLX with or without a reference (sc-2173): no reference
+    # runs txt2img through Flux2Klein, a reference engages the KV-cache edit
+    # path. FLUX.2 has no torch fallback, so both must route here.
+    assert _should_route_flux2_to_mlx({"model": "flux2_klein_9b_kv"}) is True
     assert _should_route_flux2_to_mlx(
         {"model": "flux2_klein_9b_kv", "referenceAssetId": "asset_ref"}
     ) is True
@@ -2026,9 +2027,13 @@ def test_should_route_flux2_to_mlx_predicate(monkeypatch):
     assert _should_route_flux2_to_mlx({"model": "flux_dev"}) is False
 
 
-def test_mlx_flux2_kv_rejects_no_reference():
-    # -kv without a reference is misuse: the cache is meaningless and the
-    # 4-step distilled output drifts without it. Adapter must fail loudly.
+def test_mlx_flux2_kv_allows_no_reference_txt2img(monkeypatch):
+    # sc-2173: -kv is no longer reference-gated. Without a reference it falls
+    # through to the txt2img path (the runner routes it to Flux2Klein) instead
+    # of raising. With the sidecar absent, generate() surfaces the *sidecar*
+    # error — the point is that it is NOT a "reference image" rejection, which
+    # proves the old gate is gone.
+    monkeypatch.setenv("SCENEWORKS_MLX_FLUX_PYTHON", "/nonexistent/mlx-flux-venv/bin/python")
     job = {
         "id": "job_mlx_flux2_kv_norefs",
         "payload": {
@@ -2049,11 +2054,11 @@ def test_mlx_flux2_kv_rejects_no_reference():
             cancel_requested=lambda: False,
         )
     except RuntimeError as exc:
-        assert "reference image" in str(exc).lower()
+        message = str(exc).lower()
+        assert "reference image" not in message, "-kv must no longer require a reference"
+        assert "sidecar" in message
     else:
-        raise AssertionError(
-            "MlxFlux2Adapter must reject flux2_klein_9b_kv jobs without a reference image."
-        )
+        raise AssertionError("MlxFlux2Adapter must still fail when the sidecar venv is unavailable.")
 
 
 def test_mlx_flux2_rejects_unsupported_model():
@@ -2134,10 +2139,10 @@ def test_flux2_klein_manifest_entries_present():
     import re
 
     _, find_entry_block, find_mlx_block = _manifest_brace_walker()
-    for model_id, expect_kv_only in (
-        ("flux2_klein_9b", False),
-        ("flux2_klein_9b_kv", True),
-    ):
+    # Both ids expose the same capability set: -kv is no longer gated to
+    # character_image only — it runs plain txt2img on par with the base 9B,
+    # the cache just doesn't engage without a reference (sc-2173).
+    for model_id in ("flux2_klein_9b", "flux2_klein_9b_kv"):
         block = find_entry_block(model_id)
         assert '"adapter": "mlx_flux2"' in block, model_id
         assert '"family": "flux2-klein"' in block, model_id
@@ -2147,13 +2152,8 @@ def test_flux2_klein_manifest_entries_present():
         quant_match = re.search(r'"quantize"\s*:\s*(\d+)', mlx_block)
         assert quant_match is not None, f"{model_id}: mlx.quantize missing"
         assert int(quant_match.group(1)) == 8, f"{model_id}: quantize should be 8 (sweet spot)"
-        if expect_kv_only:
-            # -kv carries character_image only — the KV cache is meaningless
-            # without a reference image.
-            assert '"capabilities": ["character_image"]' in block.replace("\n", " "), model_id
-        else:
-            assert '"text_to_image"' in block, model_id
-            assert '"character_image"' in block, model_id
+        assert '"text_to_image"' in block, model_id
+        assert '"character_image"' in block, model_id
 
 
 # --- sc-2145: Z-Image MLX adapter ---

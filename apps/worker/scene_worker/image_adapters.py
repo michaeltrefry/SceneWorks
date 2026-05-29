@@ -393,12 +393,13 @@ MODEL_TARGETS = {
     "flux2_klein_9b_kv": {
         "label": "FLUX.2 [klein] 9B-KV",
         "family": "flux2-klein",
-        # Edit-only (KV cache requires a reference image to be meaningful);
-        # MlxFlux2Adapter rejects this model id in txt2img mode. Cache
-        # auto-engages on the supports_kv_cache ModelConfig flag set in
-        # the pinned mflux fork (sc-2163, upstream PR filipstrand/mflux#426).
+        # Full txt2img + edit, same as the base 9B (sc-2173 validated the
+        # -kv distill renders plain text-to-image + non-character edit with
+        # no artifacts). The KV cache auto-engages only on the edit path when
+        # a reference is present, via the supports_kv_cache ModelConfig flag
+        # in the pinned mflux fork (sc-2163, upstream PR filipstrand/mflux#426).
         "supportsEdit": True,
-        "supportsTxt2Img": False,
+        "supportsTxt2Img": True,
         "steps": 4,
         "guidanceScale": 1.0,
         "repo": "black-forest-labs/FLUX.2-klein-9b-kv",
@@ -3497,8 +3498,10 @@ class MlxFlux2Adapter:
         from BFL (FLUX.2-klein-9b-kv) caches reference-image K/V on step
         0 and reuses it on steps 1-3, ~2.4× faster than the un-cached
         edit path on M5 Max. Cache auto-engages via the mflux
-        ModelConfig flag (sc-2163, upstream PR filipstrand/mflux#426).
-        Reference is required.
+        ModelConfig flag (sc-2163, upstream PR filipstrand/mflux#426). The
+        cache only engages on the edit path when a reference is present;
+        without one the id runs plain txt2img through ``Flux2Klein`` just
+        like the base 9B (sc-2173).
 
     Dispatch gate: `_should_route_flux2_to_mlx`. The shared mflux escape
     hatch ``SCENEWORKS_DISABLE_MLX_FLUX`` opts out of this adapter too.
@@ -3507,13 +3510,17 @@ class MlxFlux2Adapter:
       - flux2_klein_9b txt2img: ~26 s gen, ~36 GB peak
       - flux2_klein_9b edit (no cache): ~33 s gen
       - flux2_klein_9b_kv edit (cache on): ~13.5 s gen — 2.4× speedup
+      - flux2_klein_9b_kv txt2img: parity with base 9B, no cache artifacts
+        (sc-2173)
       (numbers measured against the mflux fork's editable install during
-       sc-2163; sidecar venv post-provision should match).
+       sc-2163/sc-2173; sidecar venv post-provision should match).
     """
 
     id = "mlx_flux2"
     _supported_models = {"flux2_klein_9b", "flux2_klein_9b_kv"}
-    _kv_only_models = {"flux2_klein_9b_kv"}  # require a reference image
+    # Models whose edit path uses the KV cache (engages only with a reference);
+    # they still run plain txt2img without one (sc-2173).
+    _kv_cache_models = {"flux2_klein_9b_kv"}
 
     def __init__(self) -> None:
         self._scratch_dir: Path | None = None
@@ -3567,12 +3574,6 @@ class MlxFlux2Adapter:
         if request.reference_asset_id:
             reference_paths.append(str(find_asset_media_path(project_path, request.reference_asset_id)))
         has_reference = bool(reference_paths)
-
-        if request.model in self._kv_only_models and not has_reference:
-            raise RuntimeError(
-                f"{request.model} requires a reference image (the KV cache is "
-                "meaningless without one). Use flux2_klein_9b for text-to-image."
-            )
 
         validate_lora_compatibility(
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
@@ -3654,7 +3655,7 @@ class MlxFlux2Adapter:
                     "mlxQuantize": quantize,
                     "sidecarVenv": self._sidecar_python(),
                     "hasReference": has_reference,
-                    "kvCacheEnabled": has_reference and request.model in self._kv_only_models,
+                    "kvCacheEnabled": has_reference and request.model in self._kv_cache_models,
                     "realModelInference": True,
                 },
                 settings=settings,
@@ -6401,13 +6402,10 @@ def _should_route_flux2_to_mlx(payload: dict[str, Any]) -> bool:
          mflux family — one env var per sidecar venv, not per family).
       2. Platform == darwin (mflux/MLX is Apple-only).
       3. Model in MlxFlux2Adapter._supported_models.
-      4. flux2_klein_9b_kv requires a reference image: KV cache only kicks in
-         when image_paths is populated, so a -kv request without a reference
-         is a misuse and must fail loudly rather than silently fall back to a
-         non-cached run (which wouldn't even produce the model's intended
-         distilled-at-4-steps output without the cache).
-      5. Sidecar venv exists.
-    sc-2164.
+      4. Sidecar venv exists.
+    Both ids route by reference presence inside the runner (txt2img vs edit);
+    -kv no longer requires a reference — its txt2img path is on par with the
+    base 9B (sc-2164, sc-2173).
     """
     if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
         return False
@@ -6415,8 +6413,6 @@ def _should_route_flux2_to_mlx(payload: dict[str, Any]) -> bool:
         return False
     model = payload.get("model")
     if model not in MlxFlux2Adapter._supported_models:
-        return False
-    if model in MlxFlux2Adapter._kv_only_models and not payload.get("referenceAssetId"):
         return False
     return MlxFlux2Adapter()._sidecar_available()
 

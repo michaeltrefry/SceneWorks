@@ -5,7 +5,7 @@
 A 9B-parameter Black Forest Labs FLUX.2 [klein] checkpoint, 4-step distilled — fast, high-quality text-to-image AND reference-driven editing in a single model. Apple Silicon only (MLX backend); ships in two variants:
 
 - **FLUX.2 [klein] 9B** — text-to-image and reference editing.
-- **FLUX.2 [klein] 9B-KV** — reference editing with KV-cache acceleration, ~2.4× faster than the base 9B edit path. Reference image required (cache is meaningless without one).
+- **FLUX.2 [klein] 9B-KV** — text-to-image and reference editing, plus KV-cache acceleration that makes editing ~2.4× faster than the base 9B edit path. The cache engages automatically when you attach a reference; without one it runs plain text-to-image on par with the base 9B.
 
 > **License:** FLUX Non-Commercial License — gated Hugging Face download. Accept the license at the model card and add a Hugging Face token under Settings → Service credentials before downloading. Generations are for non-commercial use only.
 

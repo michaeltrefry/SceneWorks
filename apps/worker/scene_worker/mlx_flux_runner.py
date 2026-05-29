@@ -98,16 +98,16 @@ def _resolve_model_handle(model_id: str, has_reference: bool) -> tuple[type, obj
         from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
         return Flux2Klein, ModelConfig.flux2_klein_9b(), "mlx_flux2_klein", "flux2"
     if model_id == "flux2_klein_9b_kv":
-        # The -kv variant only makes sense with a reference image (cache is
-        # meaningless otherwise). MlxFlux2Adapter gates this in the main venv
-        # so we get here only when has_reference is True.
-        if not has_reference:
-            raise RuntimeError(
-                "mlx_flux_runner: flux2_klein_9b_kv requires a reference image; "
-                "use flux2_klein_9b for text-to-image."
-            )
-        from mflux.models.flux2.variants.edit.flux2_klein_edit import Flux2KleinEdit
-        return Flux2KleinEdit, ModelConfig.flux2_klein_9b_kv(), "mlx_flux2_klein_kv", "flux2"
+        # Same FLUX.2 [klein] 9B architecture as flux2_klein_9b with the KV
+        # cache enabled (a separate distill — sc-2173). The cache machinery
+        # lives entirely in Flux2KleinEdit and only engages when a reference
+        # is present, so txt2img + non-character edit run fine on these
+        # weights. Route by reference presence, exactly like flux2_klein_9b.
+        if has_reference:
+            from mflux.models.flux2.variants.edit.flux2_klein_edit import Flux2KleinEdit
+            return Flux2KleinEdit, ModelConfig.flux2_klein_9b_kv(), "mlx_flux2_klein_kv", "flux2"
+        from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
+        return Flux2Klein, ModelConfig.flux2_klein_9b_kv(), "mlx_flux2_klein_kv", "flux2"
     raise RuntimeError(f"mlx_flux_runner: unsupported model id {model_id!r}.")
 
 
