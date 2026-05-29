@@ -9411,3 +9411,131 @@ def test_hide_reference_strength_models_declare_a_variation_knob():
         f"with NO identity tuning control. Add `variationStrength` or drop "
         f"`hideReferenceStrength`."
     )
+
+
+# ---- sc-2003: multi-backbone angle-set picker ----
+
+
+def test_character_studio_angle_prompt_augments_cover_full_pack():
+    """Every angle in the canonical ANGLE_SET_ORDER must have a matching
+    prompt-augment string. Backbones that consume the shared list (Qwen, FLUX2,
+    SenseNova) won't render correctly for an angle without an augment — the
+    user would get an unaugmented prompt repeated for that index."""
+    from scene_worker.character_studio_angles import (
+        ANGLE_PROMPT_AUGMENTS,
+        ANGLE_SET_ORDER,
+        augment_prompt_for_angle,
+    )
+
+    missing = [angle for angle in ANGLE_SET_ORDER if not ANGLE_PROMPT_AUGMENTS.get(angle)]
+    assert not missing, f"Angles missing prompt augments: {missing}"
+    # Augment helper appends the per-angle clause to the user's base prompt.
+    augmented = augment_prompt_for_angle("a portrait of the woman", "three_quarter_left")
+    assert "three-quarter left profile" in augmented
+    assert augmented.startswith("a portrait of the woman,")
+    # Unknown angle is a no-op (caller passes the base through unchanged).
+    assert augment_prompt_for_angle("hello", "unknown_angle_id") == "hello"
+
+
+def test_prompt_driven_angle_backbones_share_the_instantid_angle_pack():
+    """Each prompt-driven backbone (Qwen-Lightning, FLUX.2-klein, SenseNova) in
+    the multi-backbone angle-set picker (sc-2003) MUST advertise the same 11
+    canonical angles as the InstantID baseline. The picker depends on every
+    backbone exposing the same angle ids so the dropdown shows identical
+    angle options regardless of which backbone is selected.
+    """
+    manifest = _load_builtin_models_manifest()
+    manifest_by_id = {model["id"]: model for model in manifest.get("models", [])}
+    instantid_angles = (
+        manifest_by_id.get("instantid_realvisxl", {}).get("ui", {}).get("viewAngles") or []
+    )
+    instantid_ids = {entry["id"] for entry in instantid_angles}
+    assert len(instantid_ids) == 11, "Baseline angle pack drifted from 11 canonical angles."
+    # The four prompt-driven backbones we shipped in the picker matrix:
+    for model_id in (
+        "qwen_image_edit_2511_lightning",
+        "flux2_klein_9b",
+        "sensenova_u1_8b",
+    ):
+        backbone = manifest_by_id.get(model_id) or {}
+        view_angles = backbone.get("ui", {}).get("viewAngles") or []
+        ids = {entry["id"] for entry in view_angles}
+        assert ids == instantid_ids, (
+            f"{model_id} advertises viewAngles that don't match InstantID's pack: "
+            f"missing={instantid_ids - ids}, extra={ids - instantid_ids}. "
+            f"The Character Studio angle dropdown depends on all four backbones "
+            f"exposing the same 11 angle ids."
+        )
+
+
+def test_qwen_image_adapter_angleset_loop_uses_augmented_prompts(monkeypatch):
+    """When advanced.angleSet is set on a character_image request, the
+    QwenImageAdapter loops the 11 canonical angles and routes each to
+    _run_pipeline with the per-angle prompt_override — NOT the original
+    user prompt. Sanity-check this without loading torch / diffusers."""
+    from scene_worker.character_studio_angles import ANGLE_PROMPT_AUGMENTS, ANGLE_SET_ORDER
+    from scene_worker.image_adapters import QwenImageAdapter
+
+    captured: list[str] = []
+
+    def fake_run_pipeline(self, settings, pipe, request, seed, project_path, *, cancel_requested=None, prompt_override=None):
+        from PIL import Image as _Image
+        captured.append(prompt_override or request.prompt)
+        return _Image.new("RGB", (8, 8))
+
+    # Stub out the heavy load + LoRA paths.
+    monkeypatch.setattr(QwenImageAdapter, "_run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(QwenImageAdapter, "_load_pipeline", lambda self, *args, **kwargs: object())
+    monkeypatch.setattr(QwenImageAdapter, "_apply_loras", lambda self, *args, **kwargs: None)
+    # Don't actually write asset files in the test — short-circuit the writer.
+    from scene_worker import image_adapters as ia
+
+    class _FakeWriter:
+        def write_incremental_outputs(self, *, image_count, image_at_index, **_kwargs):
+            for index in range(image_count):
+                image_at_index(index)
+            return {"images": image_count}
+
+    monkeypatch.setattr(ia, "ImageAssetWriter", _FakeWriter)
+
+    request = ia.ImageRequest(
+        project_id="p",
+        mode="character_image",
+        prompt="a photo of the character",
+        negative_prompt="",
+        model="qwen_image_edit_2511_lightning",
+        count=1,
+        seed=42,
+        seeds=[],
+        width=1024,
+        height=1024,
+        style_preset="",
+        loras=[],
+        character_id=None,
+        character_look_id=None,
+        source_asset_id=None,
+        reference_asset_id="ref-asset-id",
+        advanced={"angleSet": True},
+        model_manifest_entry={},
+    )
+    # select_torch_device reads settings.gpu_id; "cpu" forces the cpu branch
+    # which doesn't touch torch.cuda / torch.backends.mps.
+    from types import SimpleNamespace as _SimpleNamespace
+
+    fake_settings = _SimpleNamespace(gpu_id="cpu")
+    QwenImageAdapter().generate(
+        settings=fake_settings,
+        job={"id": "job_x", "payload": {}},
+        request=request,
+        project_path=None,
+        progress=lambda *args, **kwargs: None,
+        cancel_requested=lambda: False,
+    )
+    assert len(captured) == len(ANGLE_SET_ORDER) == 11
+    # Each captured prompt should contain the corresponding angle's augment.
+    for prompt, angle in zip(captured, ANGLE_SET_ORDER):
+        augment = ANGLE_PROMPT_AUGMENTS[angle]
+        assert augment in prompt, (
+            f"angle '{angle}' didn't reach _run_pipeline as an augmented prompt: "
+            f"expected snippet {augment!r} in {prompt!r}"
+        )

@@ -122,6 +122,18 @@ def main() -> int:
     prompt = str(spec.get("prompt") or "")
     negative_prompt = spec.get("negativePrompt") or None
     seeds = [int(seed) for seed in spec.get("seeds") or []] or [0]
+    # sc-2003 multi-backbone angle set: optional per-iteration prompt overrides
+    # parallel to ``seeds``. None / absent / empty → all iterations use the
+    # top-level ``prompt`` (the existing single-prompt batch path). When set,
+    # the runner zips one prompt per seed and ignores the top-level ``prompt``
+    # for that iteration. Adapter side (MlxFlux2Adapter) computes the augmented
+    # prompts via character_studio_angles.augment_prompt_for_angle.
+    prompts_override = spec.get("prompts") or None
+    if prompts_override is not None and len(prompts_override) != len(seeds):
+        raise RuntimeError(
+            f"mlx_flux_runner: prompts list length ({len(prompts_override)}) "
+            f"must equal seeds list length ({len(seeds)})."
+        )
     height = int(spec.get("height") or 1024)
     width = int(spec.get("width") or 1024)
     steps = int(spec.get("numInferenceSteps") or 4)
@@ -177,9 +189,12 @@ def main() -> int:
         #     instead of a list; the runner only dispatches to it when there
         #     is no reference (image_paths is empty), so we don't pass it.
         #   - Other families (Flux1, Qwen, Z-Image) still take negative_prompt.
+        # Per-iteration prompt override (sc-2003 angle set); falls back to the
+        # top-level prompt when prompts_override isn't set.
+        iter_prompt = prompts_override[index] if prompts_override else prompt
         gen_kwargs: dict[str, object] = {
             "seed": int(seed),
-            "prompt": prompt,
+            "prompt": iter_prompt,
             "num_inference_steps": steps,
             "height": height,
             "width": width,

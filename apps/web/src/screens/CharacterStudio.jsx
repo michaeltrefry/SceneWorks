@@ -79,16 +79,38 @@ export function CharacterStudio() {
   );
   const selectedCharacter = characters.find((item) => item.id === selectedCharacterId) ?? characters[0] ?? null;
   const approvedReferences = selectedCharacter?.approvedReferences ?? [];
-  // The InstantID-style model that can render a one-click angle set (declares view angles).
-  const angleModel = useMemo(
-    () => imageModels.find((item) => Array.isArray(item.ui?.viewAngles) && item.ui.viewAngles.length > 0) ?? null,
+  // Multi-backbone model picker for the angle set + pose library (sc-2003).
+  // Each backbone declares ui.viewAngles / ui.poseLibrary in the manifest;
+  // the worker dispatch handles per-backbone angle / pose loops (InstantID
+  // landmark pack + OpenPose ControlNet for the strict tier; prompt-driven
+  // augments + multi-image references for the prompt-driven tiers).
+  //
+  // Spike-validated angle backbones (sc-2003 follow-up, mean ArcFace cosine):
+  //   instantid_realvisxl                 — landmark deterministic, highest
+  //   qwen_image_edit_2511_lightning      — 0.62, prompt-driven fast tier
+  //   flux2_klein_9b                      — 0.52, holds portrait at profiles
+  //   sensenova_u1_8b                     — 0.29, wardrobe-continuity tier
+  //
+  // Spike-validated pose backbones:
+  //   instantid_realvisxl                 — OpenPose ControlNet strict
+  //   qwen_image_edit_2511_lightning      — multi-image best-effort
+  //   flux2_klein_9b                      — multi-image best-effort
+  //
+  // SenseNova-U1 is gated out of the pose picker because it2i_generate is
+  // single-image only (side-by-side concat is rendered literally, not
+  // interpreted as a pose instruction).
+  const angleModels = useMemo(
+    () => imageModels.filter((item) => Array.isArray(item.ui?.viewAngles) && item.ui.viewAngles.length > 0),
     [imageModels],
   );
-  // The InstantID-style model that supports the pose library (OpenPose-driven poses).
-  const poseModel = useMemo(
-    () => imageModels.find((item) => item.ui?.poseLibrary) ?? null,
+  const poseModels = useMemo(
+    () => imageModels.filter((item) => item.ui?.poseLibrary),
     [imageModels],
   );
+  // Default selection: the first registered backbone (manifest order keeps
+  // InstantID first so the existing strict tier remains the default).
+  const angleModel = angleModels[0] ?? null;
+  const poseModel = poseModels[0] ?? null;
 
   useEffect(() => {
     if (!selectedCharacter && characters[0]?.id) {
@@ -359,6 +381,7 @@ export function CharacterStudio() {
             <CharacterAngleSet
               addCharacterReference={addCharacterReference}
               angleModel={angleModel}
+              angleModels={angleModels}
               approvedReferences={approvedReferences}
               createImageJob={createImageJob}
               imageLocalJobs={imageLocalJobs}
@@ -378,6 +401,7 @@ export function CharacterStudio() {
               latestAssets={latestAssets}
               onPreview={onPreview}
               poseModel={poseModel}
+              poseModels={poseModels}
               rememberLocalGenerationJob={rememberLocalGenerationJob}
               selectedCharacter={selectedCharacter}
             />

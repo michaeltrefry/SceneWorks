@@ -400,6 +400,7 @@ export function CharacterTest({
 export function CharacterAngleSet({
   selectedCharacter,
   angleModel,
+  angleModels,
   approvedReferences,
   createImageJob,
   importAsset,
@@ -409,7 +410,20 @@ export function CharacterAngleSet({
   rememberLocalGenerationJob,
   onPreview,
 }) {
-  const angleCount = angleModel?.ui?.viewAngles?.length ?? 0;
+  // sc-2003: multi-backbone picker. angleModels is the full list of viewAngles-
+  // capable backbones (manifest order: InstantID first, then prompt-driven
+  // tiers). angleModel is the resolved default (kept for back-compat with the
+  // pre-picker callers); the local state below tracks the user's pick.
+  const availableModels = Array.isArray(angleModels) && angleModels.length > 0
+    ? angleModels
+    : (angleModel ? [angleModel] : []);
+  const [selectedAngleModelId, setSelectedAngleModelId] = React.useState(
+    angleModel?.id ?? availableModels[0]?.id ?? "",
+  );
+  const activeAngleModel = availableModels.find((item) => item.id === selectedAngleModelId)
+    ?? availableModels[0]
+    ?? null;
+  const angleCount = activeAngleModel?.ui?.viewAngles?.length ?? 0;
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
@@ -422,16 +436,24 @@ export function CharacterAngleSet({
     setReferenceAssetId(approvedReferences[0]?.assetId ?? "");
   }, [characterId, approvedReferences]);
   React.useEffect(() => {
-    // Seed with the character's appearance notes (InstantID preserves the face but NOT
-    // hair/wardrobe, so describe them here for a consistent turnaround) + tight framing.
+    // Seed with the character's appearance notes (face-identity engines preserve
+    // face but not hair/wardrobe, so describe them here for a consistent
+    // turnaround) + tight framing.
     const appearance = (selectedCharacter?.description ?? "").trim() || selectedCharacter?.name || "the character";
     setPrompt(
       `${appearance}, head and shoulders, neutral expression, consistent outfit, plain grey background, face clearly visible, sharp focus, photorealistic`,
     );
     setStatus("");
   }, [characterId, selectedCharacter?.name, selectedCharacter?.description]);
+  // Reset the picker selection when the available models change (e.g. a new
+  // manifest load) so a stale id doesn't lock the panel.
+  React.useEffect(() => {
+    if (!availableModels.find((item) => item.id === selectedAngleModelId)) {
+      setSelectedAngleModelId(availableModels[0]?.id ?? "");
+    }
+  }, [availableModels, selectedAngleModelId]);
 
-  if (!angleModel || !selectedCharacter) {
+  if (!activeAngleModel || !selectedCharacter) {
     return null;
   }
 
@@ -462,7 +484,7 @@ export function CharacterAngleSet({
   }
 
   async function generate() {
-    if (!referenceAssetId || submitting) {
+    if (!referenceAssetId || submitting || !activeAngleModel) {
       return;
     }
     setSubmitting(true);
@@ -470,7 +492,7 @@ export function CharacterAngleSet({
     try {
       const job = await createImageJob({
         mode: "character_image",
-        model: angleModel.id,
+        model: activeAngleModel.id,
         characterId,
         referenceAssetId,
         prompt: prompt.trim(),
@@ -500,12 +522,27 @@ export function CharacterAngleSet({
     <section className="character-section">
       <div className="section-heading">
         <p className="eyebrow">Angle set</p>
-        <h2>{angleModel.name} turnaround</h2>
+        <h2>{activeAngleModel.name} turnaround</h2>
       </div>
       <p>
         Generate {angleCount} consistent views of this character (front, three-quarters, profiles, up/down and the
         diagonals) from one reference, in a single job. A good starting set for curating a character LoRA.
       </p>
+      {availableModels.length > 1 ? (
+        <label>
+          Backbone
+          <select
+            onChange={(event) => setSelectedAngleModelId(event.target.value)}
+            value={selectedAngleModelId}
+          >
+            {availableModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
       {approvedReferences.length ? (
         <div className="reference-thumb-row">
           {approvedReferences.map((reference) => (
@@ -630,6 +667,7 @@ export function CharacterAssets({ selectedCharacter, assets = [], onPreview }) {
 export function CharacterPoseLibrary({
   selectedCharacter,
   poseModel,
+  poseModels,
   approvedReferences,
   createImageJob,
   importAsset,
@@ -639,6 +677,18 @@ export function CharacterPoseLibrary({
   rememberLocalGenerationJob,
   onPreview,
 }) {
+  // sc-2003: multi-backbone picker. poseModels is the full list of poseLibrary-
+  // capable backbones (manifest order: InstantID strict tier first, then the
+  // multi-image best-effort tiers).
+  const availableModels = Array.isArray(poseModels) && poseModels.length > 0
+    ? poseModels
+    : (poseModel ? [poseModel] : []);
+  const [selectedPoseModelId, setSelectedPoseModelId] = React.useState(
+    poseModel?.id ?? availableModels[0]?.id ?? "",
+  );
+  const activePoseModel = availableModels.find((item) => item.id === selectedPoseModelId)
+    ?? availableModels[0]
+    ?? null;
   const { byId } = usePoseLibrary();
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
   const [faceRestore, setFaceRestore] = React.useState(true);
@@ -655,13 +705,18 @@ export function CharacterPoseLibrary({
   }, [characterId, approvedReferences]);
   React.useEffect(() => {
     // Pose-neutral prompt: the skeleton sets the stance, so describe only appearance +
-    // outfit/shoes (InstantID preserves the face but NOT hair/wardrobe).
+    // outfit/shoes (face-identity engines preserve the face but NOT hair/wardrobe).
     const appearance = (selectedCharacter?.description ?? "").trim() || selectedCharacter?.name || "the character";
     setPrompt(`${appearance}, consistent outfit and shoes, plain grey background, soft even lighting, sharp focus, photorealistic`);
     setStatus("");
   }, [characterId, selectedCharacter?.name, selectedCharacter?.description]);
+  React.useEffect(() => {
+    if (!availableModels.find((item) => item.id === selectedPoseModelId)) {
+      setSelectedPoseModelId(availableModels[0]?.id ?? "");
+    }
+  }, [availableModels, selectedPoseModelId]);
 
-  if (!poseModel || !selectedCharacter) {
+  if (!activePoseModel || !selectedCharacter) {
     return null;
   }
 
@@ -695,7 +750,7 @@ export function CharacterPoseLibrary({
 
   async function generate() {
     const poses = selectedPoseIds.map((id) => byId[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }));
-    if (!referenceAssetId || !poses.length || submitting) {
+    if (!referenceAssetId || !poses.length || submitting || !activePoseModel) {
       return;
     }
     setSubmitting(true);
@@ -703,7 +758,7 @@ export function CharacterPoseLibrary({
     try {
       const job = await createImageJob({
         mode: "character_image",
-        model: poseModel.id,
+        model: activePoseModel.id,
         characterId,
         referenceAssetId,
         prompt: prompt.trim(),
@@ -736,10 +791,25 @@ export function CharacterPoseLibrary({
         <h2>Generate {selectedCharacter.name} in a pose</h2>
       </div>
       <p>
-        Pick one or more poses and generate this character in each, in a single job. An OpenPose ControlNet drives the
-        pose; each image adds a face-restoration pass so identity holds at full-body size, so larger selections take a
-        while.
+        Pick one or more poses and generate this character in each, in a single job. The strict tier (InstantID) uses an
+        OpenPose ControlNet to enforce the pose and a face-restoration pass to anchor identity; the best-effort tiers
+        (Qwen-Lightning, FLUX.2-klein) approximate the pose via multi-image reference.
       </p>
+      {availableModels.length > 1 ? (
+        <label>
+          Backbone
+          <select
+            onChange={(event) => setSelectedPoseModelId(event.target.value)}
+            value={selectedPoseModelId}
+          >
+            {availableModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
       {approvedReferences.length ? (
         <div className="reference-thumb-row">
           {approvedReferences.map((reference) => (

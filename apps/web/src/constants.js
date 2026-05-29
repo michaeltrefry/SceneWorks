@@ -83,13 +83,31 @@ export const fallbackModels = [
     type: "image",
     capabilities: ["edit_image", "character_image"],
     ui: {
-      description: "4-step distilled Qwen-Image-Edit-2511 (lightx2v Lightning LoRA fused at load). ~10x faster at a small quality trade-off; CFG disabled.",
+      description: "4-step distilled Qwen-Image-Edit-2511 (lightx2v Lightning LoRA fused at load). ~10x faster at a small quality trade-off; CFG disabled. In Character Studio's angle set + pose library, the prompt-driven fast tier (sc-2003 spike: mean ArcFace 0.62 across 5 angles, second-best identity after InstantID; pose-library multi-image best-effort, sitting 0.68 / standing 0.45). Caveat: profile prompts reframe to full-body (Qwen's framing-expansion personality).",
       promptGuide: { title: "Qwen Image Edit (2511) Lightning Prompt Guide", path: "/prompt-guides/qwen-image-edit-2511-lightning.md" },
       hideReferenceStrength: true,
       // Distill is trained at cfg 1.0; the lever is exposed only as a narrow
       // safety range (1.0–2.0) for users willing to trade ghosting for stronger
       // prompt adherence. Default stays at 1.0.
       variationStrength: { label: "Prompt strength", default: 1.0, min: 1.0, max: 2.0, step: 0.25 },
+      // Multi-backbone angle set (sc-2003): same 11 canonical angles as the
+      // InstantID baseline, driven by prompt rather than landmark pack (worker
+      // resolves via character_studio_angles.ANGLE_PROMPT_AUGMENTS). Pose
+      // library deferred to a follow-up PR; the spike validated the multi-
+      // image trick at sitting 0.68 / standing 0.45 ArcFace cosine.
+      viewAngles: [
+        { id: "three_quarter_left", label: "Three-quarter left" },
+        { id: "three_quarter_right", label: "Three-quarter right" },
+        { id: "left_profile", label: "Left profile" },
+        { id: "right_profile", label: "Right profile" },
+        { id: "up", label: "Looking up" },
+        { id: "down", label: "Looking down" },
+        { id: "up_left", label: "Up · left" },
+        { id: "up_right", label: "Up · right" },
+        { id: "down_left", label: "Down · left" },
+        { id: "down_right", label: "Down · right" },
+        { id: "front", label: "Front" },
+      ],
     },
   },
   {
@@ -123,11 +141,30 @@ export const fallbackModels = [
     capabilities: ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
     limits: { resolutions: ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"] },
     ui: {
-      description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
+      description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Available in the angle-set picker (sc-2003) as the wardrobe-continuity tier — lowest pure-face ArcFace cosine (mean 0.29) but the most faithful preservation of tank + tattoo + accessories. NOT shown in the pose library — it2i_generate is single-image only. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
       promptGuide: { title: "SenseNova-U1 8B Prompt Guide", path: "/prompt-guides/sensenova-u1-8b.md" },
       // Edit-style variation knob (imageGuidanceScale): higher = closer to the
       // reference, lower = more prompt-driven variation. Drives advanced.imageGuidanceScale.
       variationStrength: { label: "Reference strength", default: 1.5, min: 0.5, max: 4.0, step: 0.1 },
+      // Multi-backbone angle set (sc-2003): SenseNova rotates the head per
+      // prompt and uniquely preserves wardrobe + tattoos + accessories at the
+      // cost of face-geometry fidelity. Worker resolves the augment via
+      // SenseNovaU1Adapter._ANGLE_PROMPT_AUGMENTS. NOT pose-library-capable
+      // (it2i_generate is single-image only; side-by-side concat is rendered
+      // literally rather than interpreted as a pose instruction).
+      viewAngles: [
+        { id: "three_quarter_left", label: "Three-quarter left" },
+        { id: "three_quarter_right", label: "Three-quarter right" },
+        { id: "left_profile", label: "Left profile" },
+        { id: "right_profile", label: "Right profile" },
+        { id: "up", label: "Looking up" },
+        { id: "down", label: "Looking down" },
+        { id: "up_left", label: "Up · left" },
+        { id: "up_right", label: "Up · right" },
+        { id: "down_left", label: "Down · left" },
+        { id: "down_right", label: "Down · right" },
+        { id: "front", label: "Front" },
+      ],
     },
   },
   {
@@ -267,7 +304,7 @@ export const fallbackModels = [
     // Reference-driven only — appears solely in the "With character" picker.
     capabilities: ["character_image"],
     ui: {
-      description: "Identity-preserving FLUX character generation — holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. FLUX.1-dev + PuLID IDFormer cross-attention; the sc-2012 spike measured 0.8016 ArcFace cosine vs reference at id_weight=1.0 / start-cfg=4 (above InstantID-SDXL no-restore; no face-restoration pass needed). Pick a character with an approved reference, then raise Variations. ~30 steps at guidance 4.0, ~85 GB peak unified memory. License: FLUX.1 [dev] non-commercial (gated).",
+      description: "Identity-preserving FLUX character generation — holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. FLUX.1-dev + PuLID IDFormer cross-attention; the sc-2012 spike measured 0.8016 ArcFace cosine vs reference at id_weight=1.0 / start-cfg=4 (above InstantID-SDXL no-restore; no face-restoration pass needed). Pick a character with an approved reference, then raise Variations. ~30 steps at guidance 4.0, ~85 GB peak unified memory. License: FLUX.1 [dev] non-commercial (gated). NOT shown in the angle-set or pose-library pickers (sc-2003 spike: identity injection over-anchors the head to the reference's frontal pose; prompt direction is treated as decorative — left/right outputs are visually identical).",
       promptGuide: { title: "PuLID-FLUX Prompt Guide", path: "/prompt-guides/pulid-flux.md" },
       // Identity tuning: reference strength drives idWeight (PuLID's identity-strength
       // analog of InstantID's ip_adapter_scale); identityStructure adds a second slider
@@ -275,6 +312,36 @@ export const fallbackModels = [
       // editability but weaker identity; PuLID photoreal recommendation is 4).
       referenceStrengthDefault: 1.0,
       identityStructure: { label: "Identity start step", default: 4, min: 0, max: 8, step: 1 },
+    },
+  },
+  {
+    id: "flux2_klein_9b",
+    name: "FLUX.2 [klein] 9B",
+    type: "image",
+    // FLUX.2 [klein] — Apple Silicon MLX-only image-edit backbone. The
+    // adapter advertises text_to_image (txt2img) and character_image (reference
+    // editing through Flux2KleinEdit + image_paths).
+    capabilities: ["text_to_image", "character_image", "style_variations"],
+    ui: {
+      description: "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, MLX-only (Apple Silicon). Distributed under the FLUX Non-Commercial License (gated). In Character Studio's angle set + pose library, the FLUX.2-aesthetic tier (sc-2003 spike: mean ArcFace 0.52 across 5 angles — third-best identity hold, BUT the only prompt-driven backbone that holds portrait framing at 90° profiles where Qwen and InstantID both reframe). Pose library runs the multi-image trick (skeleton + character) at compact ~22 GB memory.",
+      promptGuide: { title: "FLUX.2 [klein] 9B Prompt Guide", path: "/prompt-guides/flux2-klein.md" },
+      variationStrength: { label: "Prompt strength", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
+      // Multi-backbone angle set (sc-2003). MlxFlux2Adapter passes the per-
+      // angle augmented prompt through the sidecar runner. Pose library
+      // deferred to a follow-up PR.
+      viewAngles: [
+        { id: "three_quarter_left", label: "Three-quarter left" },
+        { id: "three_quarter_right", label: "Three-quarter right" },
+        { id: "left_profile", label: "Left profile" },
+        { id: "right_profile", label: "Right profile" },
+        { id: "up", label: "Looking up" },
+        { id: "down", label: "Looking down" },
+        { id: "up_left", label: "Up · left" },
+        { id: "up_right", label: "Up · right" },
+        { id: "down_left", label: "Down · left" },
+        { id: "down_right", label: "Down · right" },
+        { id: "front", label: "Front" },
+      ],
     },
   },
   {

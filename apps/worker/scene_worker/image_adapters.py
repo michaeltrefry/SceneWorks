@@ -31,6 +31,11 @@ from sceneworks_shared import (
 )
 
 from .adapter_utils import cancel_step_callback, filter_call_kwargs
+from .character_studio_angles import (
+    ANGLE_PROMPT_AUGMENTS,
+    ANGLE_SET_ORDER as CHARACTER_ANGLE_SET_ORDER,
+    augment_prompt_for_angle,
+)
 from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
@@ -1572,14 +1577,29 @@ class QwenImageAdapter:
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         label = "Qwen Image"
+        # sc-2003 multi-backbone angle set: when advanced.angleSet is set on a
+        # character_image request, loop the 11 canonical angles in one job — one
+        # image per pack angle, each driven by the per-angle augmented prompt.
+        # Mirrors the InstantID angle-set shape (sc-2050) but uses a prompt
+        # augment rather than a landmark pack, since Qwen has no landmark
+        # ControlNet (the spike-validated prompt-driven path, mean ArcFace
+        # cosine 0.62 on Kelsie). All angles share one seed for noise-derived
+        # attribute continuity (hair / wardrobe / lighting) — same trick the
+        # InstantID angle set uses.
+        angle_set = self._use_reference(request) and bool(request.advanced.get("angleSet"))
+        angles = list(CHARACTER_ANGLE_SET_ORDER) if angle_set else []
+        total = len(angles) if angle_set else request.count
+        set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
 
         def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            seed = set_seed if angle_set else resolve_seed(request.seed, request.prompt, index, request.seeds)
+            angle = angles[index] if angle_set else None
+            prompt_override = augment_prompt_for_angle(request.prompt, angle) if angle else None
             progress(
                 "running",
                 "generating",
-                image_batch_progress(index, request.count),
-                format_batch_running_message(label, index, request.count),
+                image_batch_progress(index, total),
+                format_batch_running_message(label, index, total),
             )
             emit_worker_event(
                 "image_inference_start",
@@ -1587,12 +1607,21 @@ class QwenImageAdapter:
                 adapter=self.id,
                 model=request.model,
                 imageIndex=index,
-                imageCount=request.count,
+                imageCount=total,
+                viewAngle=angle,
                 device=device,
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
             try:
-                image = self._run_pipeline(settings, pipe, request, seed, project_path, cancel_requested=cancel_requested)
+                image = self._run_pipeline(
+                    settings,
+                    pipe,
+                    request,
+                    seed,
+                    project_path,
+                    cancel_requested=cancel_requested,
+                    prompt_override=prompt_override,
+                )
             except Exception as exc:
                 emit_worker_event(
                     "image_inference_failed",
@@ -1615,7 +1644,7 @@ class QwenImageAdapter:
         return ImageAssetWriter().write_incremental_outputs(
             request=request,
             project_path=project_path,
-            image_count=request.count,
+            image_count=total,
             image_at_index=image_at_index,
             adapter_id=self.id,
             progress=progress,
@@ -1626,6 +1655,7 @@ class QwenImageAdapter:
                 "numInferenceSteps": self._num_inference_steps(request, model_target),
                 "guidanceScale": self._guidance_scale(request),
                 "realModelInference": True,
+                **({"angleSet": True} if angle_set else {}),
             },
             settings=settings,
             job_id=job["id"],
@@ -1764,6 +1794,7 @@ class QwenImageAdapter:
         seed: int,
         project_path: Path,
         cancel_requested: CancelCallback | None = None,
+        prompt_override: str | None = None,
     ) -> Image.Image:
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
@@ -1771,8 +1802,12 @@ class QwenImageAdapter:
         generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
         sampler_key, scheduler_key, shift_value = sampler_selection_from_advanced(request.advanced)
         apply_sampler(pipe, sampler_key, scheduler_key, shift_value, adapter=self.id)
+        # sc-2003 angleSet: each angle in the loop calls _run_pipeline with the
+        # per-angle augmented prompt as `prompt_override`; falls back to the
+        # request's prompt for single-image generation.
+        effective_prompt = prompt_override if prompt_override else request.prompt
         kwargs = {
-            "prompt": request.prompt,
+            "prompt": effective_prompt,
             "height": request.height,
             "width": request.width,
             "num_inference_steps": self._num_inference_steps(request, MODEL_TARGETS[request.model]),
@@ -3588,11 +3623,34 @@ class MlxFlux2Adapter:
                 f"(looked for {self._sidecar_python()})."
             )
 
-        total = request.count
+        # sc-2003 multi-backbone angle set: when advanced.angleSet is set on a
+        # character_image request with a reference, loop the 11 canonical
+        # angles in one job — same shape as InstantID's angle set (sc-2050),
+        # but the per-angle prompt augment comes from
+        # character_studio_angles.ANGLE_PROMPT_AUGMENTS (Flux2 has no landmark
+        # ControlNet; the angle comes from prompt-driven editing of the
+        # reference). Spike-validated: FLUX.2-klein mean ArcFace 0.52 across
+        # angles AND uniquely holds portrait framing at 90° profiles where
+        # Qwen-Lightning reframes to full-body.
+        is_character_image = request.mode == "character_image" and has_reference
+        angle_set = is_character_image and bool(request.advanced.get("angleSet"))
+        if angle_set:
+            angles = list(CHARACTER_ANGLE_SET_ORDER)
+            total = len(angles)
+            set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
+            # Shared seed across the set so noise-derived attributes (hair,
+            # lighting) stay consistent across angles — only the head pose
+            # changes. Mirrors the sc-2050 InstantID angle-set seed strategy.
+            seeds = [set_seed] * total
+            prompts = [augment_prompt_for_angle(request.prompt, angle) for angle in angles]
+        else:
+            total = request.count
+            angles = None
+            seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
+            prompts = None
         steps = self._num_inference_steps(request, model_target)
         guidance = self._guidance_scale(request, model_target)
         quantize = self._resolve_quantize(request)
-        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
 
         progress(
             "loading_model",
@@ -3613,6 +3671,9 @@ class MlxFlux2Adapter:
                     "prompt": request.prompt,
                     "negativePrompt": None,  # Flux2 disallows negatives; runner skips it anyway
                     "seeds": seeds,
+                    # Per-iteration prompt overrides — runner zips with seeds.
+                    # None / absent → all iterations use the top-level "prompt".
+                    "prompts": prompts,
                     "height": request.height,
                     "width": request.width,
                     "numInferenceSteps": steps,
@@ -3656,6 +3717,7 @@ class MlxFlux2Adapter:
                     "hasReference": has_reference,
                     "kvCacheEnabled": has_reference and request.model in self._kv_only_models,
                     "realModelInference": True,
+                    **({"angleSet": True} if angle_set else {}),
                 },
                 settings=settings,
                 job_id=job["id"],
@@ -5471,14 +5533,28 @@ class SenseNovaU1Adapter:
         model, tokenizer = self._load_model(torch, repo, device, dtype, distill_lora=distill_lora, job_id=job["id"])
         self._loaded_model = request.model
         label = model_target["label"]
+        # sc-2003 multi-backbone angle set: loop the 11 canonical angles when
+        # advanced.angleSet is set on a character_image request, augmenting the
+        # user's prompt per-angle. SenseNova-U1 has no landmark or face-ID
+        # conditioning — the angle comes entirely from the prompt augment.
+        # Spike-validated: mean ArcFace 0.29 across angles (lowest of the 4
+        # angle-capable backbones for pure face fidelity, but uniquely
+        # preserves the reference's wardrobe + accessories — the "character
+        # continuity" tier in the picker).
+        angle_set = is_character_image and bool(request.advanced.get("angleSet"))
+        angles = list(CHARACTER_ANGLE_SET_ORDER) if angle_set else []
+        total = len(angles) if angle_set else request.count
+        set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
 
         def image_at_index(index: int) -> Image.Image:
-            seed = resolve_seed(request.seed, request.prompt, index, request.seeds)
+            seed = set_seed if angle_set else resolve_seed(request.seed, request.prompt, index, request.seeds)
+            angle = angles[index] if angle_set else None
+            effective_prompt = augment_prompt_for_angle(request.prompt, angle) if angle else request.prompt
             progress(
                 "running",
                 "generating",
-                image_batch_progress(index, request.count),
-                format_batch_running_message(label, index, request.count),
+                image_batch_progress(index, total),
+                format_batch_running_message(label, index, total),
             )
             emit_worker_event(
                 "image_inference_start",
@@ -5486,7 +5562,8 @@ class SenseNovaU1Adapter:
                 adapter=self.id,
                 model=request.model,
                 imageIndex=index,
-                imageCount=request.count,
+                imageCount=total,
+                viewAngle=angle,
                 device=device,
                 resolution=f"{width}x{height}",
                 gpuMemory=gpu_memory_snapshot(torch, device),
@@ -5496,12 +5573,12 @@ class SenseNovaU1Adapter:
                     # Both modes route through it2i_generate; the difference is
                     # which asset the source_image points at (source vs reference).
                     image = self._run_edit_inference(
-                        torch, model, tokenizer, request.prompt, source_image,
+                        torch, model, tokenizer, effective_prompt, source_image,
                         width, height, steps, guidance_scale, img_guidance_scale, timestep_shift, seed,
                     )
                 else:
                     image = self._run_inference(
-                        torch, model, tokenizer, request.prompt,
+                        torch, model, tokenizer, effective_prompt,
                         width, height, steps, guidance_scale, timestep_shift, seed,
                     )
             except Exception as exc:
@@ -5526,7 +5603,7 @@ class SenseNovaU1Adapter:
         return ImageAssetWriter().write_incremental_outputs(
             request=request,
             project_path=project_path,
-            image_count=request.count,
+            image_count=total,
             image_at_index=image_at_index,
             adapter_id=self.id,
             progress=progress,
@@ -5542,6 +5619,7 @@ class SenseNovaU1Adapter:
                 "timestepShift": timestep_shift,
                 "resolution": f"{width}x{height}",
                 "realModelInference": True,
+                **({"angleSet": True} if angle_set else {}),
             },
             settings=settings,
             job_id=job["id"],

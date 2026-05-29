@@ -333,6 +333,34 @@
           "max": 2.0,
           "step": 0.25
         },
+        // Multi-backbone angle set (sc-2003): the picker exposes Qwen-Lightning
+        // as a prompt-driven alternative to InstantID's landmark-pack precision.
+        // Hardware spike (sc-2003 follow-up): mean ArcFace 0.62 across the 5
+        // measured angles — 2nd-best identity hold among prompt-driven backbones,
+        // far above PuLID-FLUX (which doesn't rotate the head at all). The 11
+        // canonical angles ride the same shared ANGLE_SET_ORDER as InstantID;
+        // the worker resolves the per-angle prompt augment from
+        // QwenImageAdapter._ANGLE_PROMPT_AUGMENTS. Caveat: profile prompts
+        // reframe to full-body (Qwen's "leaning at railing" interpretation
+        // bug, sc-2013).
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
+        // NOTE: pose library deferred to a follow-up PR. The sc-2003 hardware
+        // spike validated Qwen-Lightning's multi-image trick (image=[skeleton,
+        // character]) at sitting 0.68 / standing 0.45 ArcFace cosine, but the
+        // worker dispatch + adapter plumbing for it ships separately so this PR
+        // focuses on shipping the angle picker for all four backbones.
         "promptGuide": {
           "title": "Qwen Image Edit (2511) Lightning Prompt Guide",
           "path": "/prompt-guides/qwen-image-edit-2511-lightning.md",
@@ -520,6 +548,33 @@
         // (the adapter raises the default vs the 1.0 edit baseline so the
         // reference subject pulls harder by default).
         "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        // Multi-backbone angle set (sc-2003): SenseNova-U1 rotates the head per
+        // prompt and preserves the reference's wardrobe + tattoos + accessories
+        // most faithfully of any backbone in the picker. Hardware spike: mean
+        // ArcFace 0.29 across the 5 measured angles (vs Qwen-Lightning 0.62 and
+        // FLUX.2-klein 0.52) — pure-face cosine is lowest of the 4 angle-capable
+        // backbones, but the *overall character* (face + outfit + props) often
+        // reads as more consistent to a human. Best pick when wardrobe
+        // continuity matters more than strict face-geometry identity.
+        //
+        // NOT shipped for the pose library: it2i_generate is single-image only,
+        // and the side-by-side concat trick (which works on the multi-image-
+        // capable Qwen + FLUX.2-klein backbones) is rendered literally rather
+        // than interpreted as a pose instruction (ArcFace 0.06–0.22 in the
+        // hardware spike — sc-2003 follow-up).
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
         "promptGuide": {
           "title": "SenseNova-U1 8B Prompt Guide",
           "path": "/prompt-guides/sensenova-u1-8b.md",
@@ -810,6 +865,31 @@
           "max": 10.0,
           "step": 0.5
         },
+        // Multi-backbone angle set (sc-2003): FLUX.2-klein rotates the head per
+        // prompt AND keeps portrait framing at 90° profiles — the only prompt-
+        // driven backbone in the picker that doesn't reframe to full-body on
+        // profile prompts. Hardware spike: mean ArcFace 0.52 across the 5
+        // angles (front 0.68 / 3/4-L 0.54 / 3/4-R 0.57 / L-profile 0.38 /
+        // R-profile 0.43). Sits between Qwen-Lightning (0.62) and SenseNova
+        // (0.29) on identity, but uniquely strong on profile framing. Compact
+        // MLX memory (~22 GB) + FLUX.2 photoreal aesthetic.
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
+        // NOTE: pose library deferred to a follow-up PR (same reason as
+        // qwen_image_edit_2511_lightning). The sc-2003 hardware spike
+        // validated the multi-image trick (image_paths=[skeleton, character])
+        // at sitting 0.54 / standing 0.36 ArcFace cosine.
         "promptGuide": {
           "title": "FLUX.2 [klein] 9B Prompt Guide",
           "path": "/prompt-guides/flux2-klein.md",
