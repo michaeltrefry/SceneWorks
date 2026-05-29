@@ -5806,8 +5806,8 @@ describe("SceneWorks app shell", () => {
           gpuOptions: ["auto"],
           imageModels: [
             {
-              id: "qwen_image_edit_2509",
-              name: "Qwen Image Edit (2509)",
+              id: "qwen_image_edit_2511",
+              name: "Qwen Image Edit (2511)",
               type: "image",
               family: "qwen-image",
               capabilities: ["character_image"],

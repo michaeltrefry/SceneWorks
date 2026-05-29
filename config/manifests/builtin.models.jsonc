@@ -201,30 +201,34 @@
       }
     },
     {
-      "id": "qwen_image_edit",
-      "name": "Qwen Image Edit",
+      "id": "qwen_image_edit_2511",
+      "name": "Qwen Image Edit (2511)",
       "family": "qwen-image",
       "type": "image",
       "adapter": "qwen_image",
-      // character_image: Qwen-Image-Edit's dual-control (Qwen2.5-VL semantic +
-      // VAE appearance) supports subject consistency across new scenes/poses;
-      // reference goes through `image=` on QwenImageEditPipeline (sc-2014 spike).
-      // qwen_image_edit_2509 below has stronger pose/subject decoupling.
+      // Successor to Qwen-Image-Edit (Aug 2025) and Qwen-Image-Edit-2509 (Sep 2025).
+      // Same QwenImageEditPlusPipeline shape as 2509; the 2511 weights bring drift
+      // mitigation, multi-person consistency, integrated popular LoRAs, and
+      // stronger geometric reasoning. The two earlier IDs are aliased to 2511
+      // weights on the worker so existing jobs/presets/characters keep resolving.
       "capabilities": ["edit_image", "character_image"],
       "downloads": [
         {
+          // Apache-2.0, ungated. Comparable size to the 2509 release.
           "provider": "huggingface",
-          "repo": "Qwen/Qwen-Image-Edit",
+          "repo": "Qwen/Qwen-Image-Edit-2511",
           "files": [],
           "estimatedSizeBytes": 57720467613
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit"
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit-2511"
       },
       "defaults": {
+        // Model-card defaults: 40 steps + true_cfg_scale 4.0 + guidance_scale 1.0.
         "resolution": "1024x1024",
-        "steps": 20,
+        "steps": 40,
+        "guidanceScale": 1.0,
         "count": 4,
         "sampler": "default",
         "scheduler": "default"
@@ -240,8 +244,8 @@
         "types": ["style", "enhance", "character"]
       },
       "ui": {
-        "label": "Qwen Image Edit",
-        "description": "Higher-control image edit target backed by Diffusers QwenImageEditPipeline. Dual-control architecture (Qwen2.5-VL for semantic, VAE encoder for appearance) supports both localized edits (background change, object swap) and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated. With a character reference, runs the same pipeline with the reference as the `image=` kwarg; `trueCfgScale` (4.0 default) steers prompt adherence — identity stays steady across the range, the knob controls how strictly the model follows the scene/composition described in the prompt vs the reference's own surroundings (sc-2013 spike measured ArcFace cosine Δ0.011 across tc 2→6).",
+        "label": "Qwen Image Edit (2511)",
+        "description": "December 2025 iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2511) on the multi-image `QwenImageEditPlusPipeline`. Mitigates image drift, improves character consistency in multi-person scenes, integrates popular LoRAs into the base, and strengthens geometric reasoning. Apache-2.0, ungated. Recommended 40 steps at trueCfgScale 4.0 / guidanceScale 1.0; bf16 MPS-supported per Qwen. trueCfgScale is the slider lever — identity stays steady across the range, the knob is a prompt-adherence vs reference-surroundings tradeoff (sc-2013 spike on the 2509 release; same Plus pipeline shape).",
         "recommendedFor": ["edit_image", "character_image"],
         // Qwen-Image-Edit's slider is true_cfg_scale (not an IP-Adapter
         // reference-strength scalar): the existing "Reference strength" slider
@@ -259,49 +263,45 @@
           "step": 0.5
         },
         "promptGuide": {
-          "title": "Qwen Image Edit Prompt Guide",
-          "path": "/prompt-guides/qwen-image-edit.md",
+          "title": "Qwen Image Edit (2511) Prompt Guide",
+          "path": "/prompt-guides/qwen-image-edit-2511.md",
           "sources": [
-            { "label": "Qwen Cloud image editing docs", "url": "https://docs.qwencloud.com/developer-guides/image-generation/image-editing" },
-            { "label": "Qwen Cloud image prompt guide", "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/image-generation" },
-            { "label": "Qwen Cloud text-to-image docs", "url": "https://docs.qwencloud.com/developer-guides/image-generation/text-to-image" }
+            { "label": "Qwen-Image-Edit-2511 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-Edit-2511" },
+            { "label": "Qwen-Image-Edit-2511 announcement", "url": "https://qwen.ai/blog?id=qwen-image-edit-2511" },
+            { "label": "Diffusers QwenImageEditPlusPipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/qwenimage" }
           ]
         }
       }
     },
     {
-      "id": "qwen_image_edit_2509",
-      "name": "Qwen Image Edit (2509)",
+      "id": "qwen_image_edit_2511_lightning",
+      "name": "Qwen Image Edit (2511) Lightning",
       "family": "qwen-image",
       "type": "image",
       "adapter": "qwen_image",
-      // QwenImageEditPlusPipeline: multi-image reference + enhanced single-image
-      // subject-consistency (the September 2509 iteration of Qwen-Image-Edit).
-      // Model-card use case: "changing a person's pose while maintaining excellent
-      // identity consistency" — directly Character Studio's wheelhouse (sc-2014).
+      // lightx2v 4-step distill LoRA fused at load over the Qwen-Image-Edit-2511
+      // base weights. ~10× faster than the 40-step base. CFG disabled (1.0)
+      // per the distill recipe; user LoRAs still apply on top of the fused base.
       "capabilities": ["edit_image", "character_image"],
       "downloads": [
         {
-          // Apache-2.0, ungated. Whole-repo download similar in size to qwen_image_edit.
+          // Shares the Qwen-Image-Edit-2511 base; the ~1 GB Lightning LoRA is
+          // fetched on first use and fused in-process.
           "provider": "huggingface",
-          "repo": "Qwen/Qwen-Image-Edit-2509",
+          "repo": "Qwen/Qwen-Image-Edit-2511",
           "files": [],
+          "default": true,
           "estimatedSizeBytes": 57720467613
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit-2509"
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-Edit-2511"
       },
       "defaults": {
-        // Model-card defaults: 50 steps + true_cfg_scale 4.0. The sc-2013
-        // hardware spike measured identity holding steady across the slider
-        // range (ArcFace cosine 0.8125 / 0.8187 / 0.8240 at tc 2 / 4 / 6 on
-        // the studio portrait prompt) — the knob is prompt-adherence vs the
-        // reference's own surroundings, NOT identity-vs-variation. Mac users
-        // wanting sub-10-minute generations should override steps to 20 in
-        // advanced settings (~7 min/image vs ~16 min at 50; minor quality hit).
+        // 4-step distill: cfg 1.0 / true_cfg_scale 1.0 / 4 steps (vs base 40).
         "resolution": "1024x1024",
-        "steps": 50,
+        "steps": 4,
+        "guidanceScale": 1.0,
         "count": 4,
         "sampler": "default",
         "scheduler": "default"
@@ -317,30 +317,29 @@
         "types": ["style", "enhance", "character"]
       },
       "ui": {
-        "label": "Qwen Image Edit (2509)",
-        "description": "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) backed by the multi-image `QwenImageEditPlusPipeline`. Enhanced subject-consistency for character-in-new-context generation — sc-2013 hardware spike measured ArcFace cosine 0.75 mean vs reference, second only to InstantID across the epic. Apache-2.0, ungated. Recommended ~50 steps at trueCfgScale 4.0; bf16 MPS-supported per Qwen. Slowest engine in the picker on Mac (~16 min/image at 50 steps; drop to 20 steps in advanced settings for ~7 min/image at a small quality cost).",
+        "label": "Qwen Image Edit (2511) Lightning",
+        "description": "4-step distilled Qwen-Image-Edit-2511 — ~10× faster at a small quality trade-off. Shares the Qwen-Image-Edit-2511 base weights; the lightx2v 4-step distill LoRA fuses on first use. CFG is disabled by default (distill drops the guidance signal); the variation knob (trueCfgScale) pins to 1.0. Apache-2.0 base + LoRA.",
         "recommendedFor": ["edit_image", "character_image"],
-        // Same trueCfgScale slider as qwen_image_edit (the picker hides the
-        // no-op IP-Adapter reference-strength slider and surfaces trueCfgScale).
-        // Labeled "Prompt strength" per the sc-2013 measurement — identity is
-        // steady across the slider range; the knob controls how strictly the
-        // model adheres to the prompt's scene/composition vs the reference's
-        // own surroundings.
         "hideReferenceStrength": true,
+        // Distill is trained at cfg 1.0; the variation slider is exposed only as
+        // a narrow safety lever (1.0–2.0) for users willing to trade some
+        // ghosting for stronger prompt adherence. Default stays at 1.0. Labeled
+        // "Prompt strength" to match the sc-2013 naming convention across the
+        // Qwen Edit family.
         "variationStrength": {
           "label": "Prompt strength",
-          "default": 4.0,
+          "default": 1.0,
           "min": 1.0,
-          "max": 10.0,
-          "step": 0.5
+          "max": 2.0,
+          "step": 0.25
         },
         "promptGuide": {
-          "title": "Qwen Image Edit (2509) Prompt Guide",
-          "path": "/prompt-guides/qwen-image-edit-2509.md",
+          "title": "Qwen Image Edit (2511) Lightning Prompt Guide",
+          "path": "/prompt-guides/qwen-image-edit-2511-lightning.md",
           "sources": [
-            { "label": "Qwen-Image-Edit-2509 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-Edit-2509" },
-            { "label": "Diffusers QwenImageEditPlusPipeline docs", "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/qwenimage" },
-            { "label": "Qwen-Image-Edit model card", "url": "https://huggingface.co/Qwen/Qwen-Image-Edit" }
+            { "label": "Qwen-Image-Edit-2511 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-Edit-2511" },
+            { "label": "lightx2v Qwen-Image-Edit-2511-Lightning", "url": "https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning" },
+            { "label": "Qwen-Image-Lightning GitHub", "url": "https://github.com/ModelTC/Qwen-Image-Lightning" }
           ]
         }
       }

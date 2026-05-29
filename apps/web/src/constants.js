@@ -59,34 +59,37 @@ export const fallbackModels = [
     },
   },
   {
-    id: "qwen_image_edit",
-    name: "Qwen Image Edit",
+    id: "qwen_image_edit_2511",
+    name: "Qwen Image Edit (2511)",
     type: "image",
-    // character_image (sc-2014): subject consistency via QwenImageEditPipeline's
-    // dual-control architecture; reference goes through `image=` + trueCfgScale.
+    // character_image (sc-2014): subject consistency via QwenImageEditPlusPipeline;
+    // reference goes through `image=` + trueCfgScale. sc-2160 replaces the
+    // August/September iterations with the December 2511 release.
     capabilities: ["edit_image", "character_image"],
     ui: {
-      description: "Qwen image edit target. Dual-control architecture (semantic + appearance) handles both localized edits and subject-consistency across new scenes/poses (Character Studio reference). Apache-2.0, ungated. trueCfgScale is the slider lever; sc-2013 spike measured identity steady across the range — the knob controls prompt adherence, not identity-vs-variation.",
-      promptGuide: { title: "Qwen Image Edit Prompt Guide", path: "/prompt-guides/qwen-image-edit.md" },
+      description: "December 2025 iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2511) on QwenImageEditPlusPipeline. Drift mitigation, multi-person consistency, integrated popular LoRAs. Apache-2.0, ungated; 40 steps at trueCfgScale 4.0 / guidanceScale 1.0.",
+      promptGuide: { title: "Qwen Image Edit (2511) Prompt Guide", path: "/prompt-guides/qwen-image-edit-2511.md" },
       // Qwen's slider drives trueCfgScale; the IP-Adapter reference-strength
       // slider would be a no-op here. Hide it and surface trueCfgScale instead
-      // (sc-2017). Labeled "Prompt strength" because the sc-2013 spike showed
-      // identity holds across the range (ArcFace cosine Δ0.011 at tc 2→6); the
-      // knob is a prompt-adherence vs reference-surroundings tradeoff.
+      // (sc-2017). Label is "Prompt strength" per sc-2013: identity holds
+      // across the range, the knob is a prompt-adherence vs reference tradeoff.
       hideReferenceStrength: true,
       variationStrength: { label: "Prompt strength", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
     },
   },
   {
-    id: "qwen_image_edit_2509",
-    name: "Qwen Image Edit (2509)",
+    id: "qwen_image_edit_2511_lightning",
+    name: "Qwen Image Edit (2511) Lightning",
     type: "image",
     capabilities: ["edit_image", "character_image"],
     ui: {
-      description: "September monthly iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2509) via QwenImageEditPlusPipeline. Enhanced subject-consistency for character-in-new-context generation; multi-image reference support. Apache-2.0, ungated; ~50 steps at trueCfgScale 4.0. sc-2013 spike: 2nd-strongest face-identity engine in the epic (mean ArcFace 0.75) behind InstantID, but slowest by ~8x on Mac (~16 min/image at 50 steps; drop to 20 steps in advanced for ~7 min).",
-      promptGuide: { title: "Qwen Image Edit (2509) Prompt Guide", path: "/prompt-guides/qwen-image-edit-2509.md" },
+      description: "4-step distilled Qwen-Image-Edit-2511 (lightx2v Lightning LoRA fused at load). ~10x faster at a small quality trade-off; CFG disabled.",
+      promptGuide: { title: "Qwen Image Edit (2511) Lightning Prompt Guide", path: "/prompt-guides/qwen-image-edit-2511-lightning.md" },
       hideReferenceStrength: true,
-      variationStrength: { label: "Prompt strength", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
+      // Distill is trained at cfg 1.0; the lever is exposed only as a narrow
+      // safety range (1.0–2.0) for users willing to trade ghosting for stronger
+      // prompt adherence. Default stays at 1.0.
+      variationStrength: { label: "Prompt strength", default: 1.0, min: 1.0, max: 2.0, step: 0.25 },
     },
   },
   {

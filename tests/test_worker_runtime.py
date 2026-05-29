@@ -488,33 +488,102 @@ def test_qwen_loaded_models_track_text_and_edit_repos_independently():
     assert set(adapter.loaded_models()) == {"Qwen/Qwen-Image", "Qwen/Qwen-Image-Edit", "qwen_image_edit"}
 
 
-def test_qwen_image_edit_2509_model_target_defaults():
-    target = MODEL_TARGETS["qwen_image_edit_2509"]
+def test_qwen_image_edit_2511_model_target_defaults():
+    target = MODEL_TARGETS["qwen_image_edit_2511"]
     assert target["adapter"] == "qwen_image"
     assert target["family"] == "qwen-image"
     assert target["supportsEdit"] is True
-    # Model-card recommends 50 steps for the September iteration (vs 20 on
-    # qwen_image_edit) — character_image quality benefits.
-    assert target["steps"] == 50
-    assert target["repo"] == "Qwen/Qwen-Image-Edit-2509"
+    # Model card: 40 steps, guidanceScale 1.0, trueCfgScale 4.0 (default).
+    assert target["steps"] == 40
+    assert target["guidanceScale"] == 1.0
+    assert target["repo"] == "Qwen/Qwen-Image-Edit-2511"
 
 
-def test_create_image_adapter_routes_qwen_image_edit_2509():
-    # The new Plus model rides the same QwenImageAdapter; pipeline-class selection
-    # happens inside _load_pipeline based on the model id (sc-2014).
-    adapter = create_image_adapter({"payload": {"model": "qwen_image_edit_2509"}})
+def test_qwen_image_edit_legacy_ids_alias_to_2511_repo():
+    # sc-2160: the August qwen_image_edit and the September qwen_image_edit_2509
+    # IDs now route to the December 2511 weights so old jobs/presets resolve.
+    legacy = MODEL_TARGETS["qwen_image_edit"]
+    sept = MODEL_TARGETS["qwen_image_edit_2509"]
+    assert legacy["repo"] == "Qwen/Qwen-Image-Edit-2511"
+    assert sept["repo"] == "Qwen/Qwen-Image-Edit-2511"
+    assert legacy["steps"] == 40
+    assert sept["steps"] == 40
+    assert legacy["guidanceScale"] == 1.0
+    assert sept["guidanceScale"] == 1.0
+
+
+def test_qwen_image_edit_2511_lightning_model_target_defaults():
+    target = MODEL_TARGETS["qwen_image_edit_2511_lightning"]
+    assert target["adapter"] == "qwen_image"
+    assert target["family"] == "qwen-image"
+    assert target["supportsEdit"] is True
+    # 4-step distill: cfg 1.0, true_cfg_scale 1.0, shares 2511 base weights.
+    assert target["steps"] == 4
+    assert target["guidanceScale"] == 1.0
+    assert target["trueCfgScale"] == 1.0
+    assert target["repo"] == "Qwen/Qwen-Image-Edit-2511"
+    assert target["distillLora"] == {
+        "repo": "lightx2v/Qwen-Image-Edit-2511-Lightning",
+        "file": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+    }
+
+
+def test_create_image_adapter_routes_qwen_image_edit_2511():
+    # All Qwen Edit IDs ride the same QwenImageAdapter; pipeline-class selection
+    # happens inside _load_pipeline based on the model id.
+    adapter = create_image_adapter({"payload": {"model": "qwen_image_edit_2511"}})
     assert adapter.__class__.__name__ == "QwenImageAdapter"
     assert adapter.id == "qwen_image"
+    lightning = create_image_adapter({"payload": {"model": "qwen_image_edit_2511_lightning"}})
+    assert lightning.__class__.__name__ == "QwenImageAdapter"
 
 
 def test_qwen_edit_pipeline_name_by_model():
-    # qwen_image_edit_2509 -> QwenImageEditPlusPipeline (multi-image reference);
-    # everything else falls back to the single-image QwenImageEditPipeline.
+    # sc-2160: every edit ID (incl. legacy aliases) ships the multi-image Plus
+    # pipeline now that they all run against the 2511 base weights.
+    assert QwenImageAdapter._edit_pipeline_name("qwen_image_edit") == "QwenImageEditPlusPipeline"
     assert QwenImageAdapter._edit_pipeline_name("qwen_image_edit_2509") == "QwenImageEditPlusPipeline"
-    assert QwenImageAdapter._edit_pipeline_name("qwen_image_edit") == "QwenImageEditPipeline"
+    assert QwenImageAdapter._edit_pipeline_name("qwen_image_edit_2511") == "QwenImageEditPlusPipeline"
+    assert QwenImageAdapter._edit_pipeline_name("qwen_image_edit_2511_lightning") == "QwenImageEditPlusPipeline"
     # Defensive: anything else still gets the single-image pipeline, matching
     # the same edit-style API surface.
     assert QwenImageAdapter._edit_pipeline_name("qwen_image") == "QwenImageEditPipeline"
+
+
+def test_qwen_distill_lora_helpers():
+    base_target = MODEL_TARGETS["qwen_image_edit_2511"]
+    lightning_target = MODEL_TARGETS["qwen_image_edit_2511_lightning"]
+    assert QwenImageAdapter._distill_lora_for(base_target) is None
+    assert QwenImageAdapter._distill_key_for(None) is None
+    spec = QwenImageAdapter._distill_lora_for(lightning_target)
+    assert spec is not None
+    key = QwenImageAdapter._distill_key_for(spec)
+    assert key == "lightx2v/Qwen-Image-Edit-2511-Lightning/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+
+
+def test_qwen_guidance_scale_reads_model_target_default():
+    # 2511 family defaults to guidanceScale 1.0 (Plus pipeline requirement).
+    request = SimpleNamespace(model="qwen_image_edit_2511", advanced={})
+    assert QwenImageAdapter()._guidance_scale(request) == 1.0
+    # qwen_image (text-to-image) still defaults to 4.0.
+    request_t2i = SimpleNamespace(model="qwen_image", advanced={})
+    assert QwenImageAdapter()._guidance_scale(request_t2i) == 4.0
+    # User override wins.
+    request_override = SimpleNamespace(model="qwen_image_edit_2511", advanced={"guidanceScale": 3.5})
+    assert QwenImageAdapter()._guidance_scale(request_override) == 3.5
+
+
+def test_qwen_true_cfg_scale_default_per_model():
+    adapter = QwenImageAdapter()
+    # Base family: 4.0 default.
+    request = SimpleNamespace(model="qwen_image_edit_2511", advanced={})
+    assert adapter._true_cfg_scale_default(request) == 4.0
+    # Lightning: distilled at 1.0.
+    lightning_request = SimpleNamespace(model="qwen_image_edit_2511_lightning", advanced={})
+    assert adapter._true_cfg_scale_default(lightning_request) == 1.0
+    # User override wins on either.
+    override = SimpleNamespace(model="qwen_image_edit_2511_lightning", advanced={"trueCfgScale": 2.0})
+    assert adapter._true_cfg_scale_default(override) == 2.0
 
 
 def test_qwen_use_reference_only_for_character_image_with_reference():
@@ -1774,16 +1843,21 @@ def test_qwen_auto_dispatch_skips_mlx_for_edit_image(monkeypatch):
 
 
 def test_qwen_auto_dispatch_skips_mlx_for_qwen_image_edit_model(monkeypatch):
-    # qwen_image_edit / qwen_image_edit_2509 are not in MlxQwenAdapter's
-    # supported set; auto-dispatch must keep them on the torch path.
+    # qwen_image_edit / qwen_image_edit_2509 / qwen_image_edit_2511 / Lightning
+    # are not in MlxQwenAdapter's supported set; auto-dispatch must keep them on
+    # the torch path.
     monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
     monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
     monkeypatch.setattr("sys.platform", "darwin")
     monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: True)
-    adapter = create_image_adapter({"payload": {"model": "qwen_image_edit"}})
-    assert adapter.__class__.__name__ == "QwenImageAdapter"
-    adapter = create_image_adapter({"payload": {"model": "qwen_image_edit_2509"}})
-    assert adapter.__class__.__name__ == "QwenImageAdapter"
+    for model in (
+        "qwen_image_edit",
+        "qwen_image_edit_2509",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning",
+    ):
+        adapter = create_image_adapter({"payload": {"model": model}})
+        assert adapter.__class__.__name__ == "QwenImageAdapter", model
 
 
 def test_qwen_auto_dispatch_skips_mlx_when_reference_asset_present(monkeypatch):

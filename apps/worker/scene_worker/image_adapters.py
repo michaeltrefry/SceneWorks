@@ -245,26 +245,59 @@ MODEL_TARGETS = {
         "repo": "Qwen/Qwen-Image",
         "adapter": "qwen_image",
     },
+    # sc-2160: qwen_image_edit (Aug 2025) and qwen_image_edit_2509 (Sep 2025) are
+    # aliased to Qwen-Image-Edit-2511 (Dec 2025) — the 2511 weights are a drop-in
+    # successor on the same QwenImageEditPlusPipeline, with drift mitigation,
+    # multi-person consistency, integrated popular LoRAs, and stronger geometric
+    # reasoning. Keeping the legacy IDs here means old jobs/presets/characters
+    # pinned to them still resolve. The manifest exposes only qwen_image_edit_2511
+    # + qwen_image_edit_2511_lightning in the picker.
     "qwen_image_edit": {
         "label": "Qwen Image Edit",
         "family": "qwen-image",
         "supportsEdit": True,
-        "steps": 20,
-        "repo": "Qwen/Qwen-Image-Edit",
+        "steps": 40,
+        "guidanceScale": 1.0,
+        "repo": "Qwen/Qwen-Image-Edit-2511",
         "adapter": "qwen_image",
     },
     "qwen_image_edit_2509": {
         "label": "Qwen Image Edit (2509)",
         "family": "qwen-image",
         "supportsEdit": True,
-        # Model-card defaults: 50 steps + true_cfg_scale 4.0 (the variation/CFG knob;
-        # higher = more prompt adherence, lower = closer to the reference). Character
-        # Studio reference goes through QwenImageEditPlusPipeline which accepts a
-        # list of input images for multi-reference subject consistency. Apache-2.0,
-        # ungated. sc-2014.
-        "steps": 50,
-        "repo": "Qwen/Qwen-Image-Edit-2509",
+        "steps": 40,
+        "guidanceScale": 1.0,
+        "repo": "Qwen/Qwen-Image-Edit-2511",
         "adapter": "qwen_image",
+    },
+    "qwen_image_edit_2511": {
+        "label": "Qwen Image Edit (2511)",
+        "family": "qwen-image",
+        "supportsEdit": True,
+        # Model-card defaults: 40 steps + true_cfg_scale 4.0 + guidance_scale 1.0.
+        # Same QwenImageEditPlusPipeline as the 2509 release (multi-image-capable);
+        # 2511 improvements are in the weights, not the API. Apache-2.0, ungated.
+        "steps": 40,
+        "guidanceScale": 1.0,
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "adapter": "qwen_image",
+    },
+    "qwen_image_edit_2511_lightning": {
+        "label": "Qwen Image Edit (2511) Lightning",
+        "family": "qwen-image",
+        "supportsEdit": True,
+        # 4-step distill: cfg 1.0 / true_cfg_scale 1.0 / 4 steps (vs base 40).
+        # lightx2v Lightning LoRA fuses into the 2511 base on load; user LoRAs
+        # still stack on top via the normal apply_loras_to_pipeline path.
+        "steps": 4,
+        "guidanceScale": 1.0,
+        "trueCfgScale": 1.0,
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "adapter": "qwen_image",
+        "distillLora": {
+            "repo": "lightx2v/Qwen-Image-Edit-2511-Lightning",
+            "file": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+        },
     },
     "lens": {
         "label": "Lens",
@@ -1428,13 +1461,15 @@ class ZImageDiffusersAdapter:
 class QwenImageAdapter:
     id = "qwen_image"
 
-    # qwen_image_edit_2509 routes through the multi-image-capable Edit Plus
-    # pipeline; the original qwen_image_edit uses the single-image Edit pipeline.
-    # Both pipelines accept `image=` + a variation prompt + `true_cfg_scale` —
-    # the diff is the multi-reference subject-consistency improvements baked into
-    # the September model (sc-2014, sc-2013 spike).
+    # sc-2160: all edit IDs route through QwenImageEditPlusPipeline now that the
+    # legacy qwen_image_edit / qwen_image_edit_2509 IDs alias to the 2511 base
+    # (same Plus shape). Both pipelines accept `image=` + true_cfg_scale; the
+    # Plus variant is the multi-image-capable one used by all modern releases.
     _EDIT_PIPELINE_BY_MODEL = {
+        "qwen_image_edit": "QwenImageEditPlusPipeline",
         "qwen_image_edit_2509": "QwenImageEditPlusPipeline",
+        "qwen_image_edit_2511": "QwenImageEditPlusPipeline",
+        "qwen_image_edit_2511_lightning": "QwenImageEditPlusPipeline",
     }
     _DEFAULT_EDIT_PIPELINE = "QwenImageEditPipeline"
 
@@ -1443,6 +1478,10 @@ class QwenImageAdapter:
         self._edit_pipe: Any | None = None
         self._text_repo: str | None = None
         self._edit_repo: str | None = None
+        # sc-2160: distill LoRA fuse state ?? pipeline cache must discriminate
+        # between fused (Lightning) and unfused base loads on the same repo.
+        self._text_distill_key: str | None = None
+        self._edit_distill_key: str | None = None
         self._loaded_model: str | None = None
         self._loaded_lora_states: dict[str, LoraPipelineState] = {}
 
@@ -1470,6 +1509,8 @@ class QwenImageAdapter:
         self._edit_pipe = None
         self._text_repo = None
         self._edit_repo = None
+        self._text_distill_key = None
+        self._edit_distill_key = None
         self._loaded_model = None
         self._loaded_lora_states.clear()
         self._empty_cuda_cache(importlib.import_module("torch"))
@@ -1581,9 +1622,12 @@ class QwenImageAdapter:
         dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
         use_edit_pipe = request.mode == "edit_image" or self._use_reference(request)
         cpu_offload = bool(request.advanced.get("cpuOffload", False))
+        distill_lora = self._distill_lora_for(model_target)
+        distill_key = self._distill_key_for(distill_lora)
         cached_pipe = self._edit_pipe if use_edit_pipe else self._text_pipe
         cached_repo = self._edit_repo if use_edit_pipe else self._text_repo
-        if cached_pipe is not None and cached_repo == repo:
+        cached_distill = self._edit_distill_key if use_edit_pipe else self._text_distill_key
+        if cached_pipe is not None and cached_repo == repo and cached_distill == distill_key:
             self._loaded_model = request.model
             progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']}.")
             emit_worker_event(
@@ -1601,16 +1645,18 @@ class QwenImageAdapter:
             if use_edit_pipe:
                 self._edit_pipe = None
                 self._edit_repo = None
+                self._edit_distill_key = None
             else:
                 self._text_pipe = None
                 self._text_repo = None
+                self._text_distill_key = None
             self._empty_cuda_cache(torch)
             self._forget_loaded_loras("edit" if use_edit_pipe else "text")
 
         if use_edit_pipe:
-            # Edit-style pipeline class is model-bound: qwen_image_edit_2509 ships
-            # the multi-image Plus variant, the original qwen_image_edit uses the
-            # single-image pipeline. Same `image=` kwarg shape on both.
+            # Edit-style pipeline class is model-bound. As of sc-2160 every edit
+            # ID (incl. legacy aliases) ships the multi-image Plus pipeline; the
+            # original single-image class stays as the default fallback only.
             pipeline_name = self._edit_pipeline_name(request.model)
         else:
             pipeline_name = "QwenImagePipeline"
@@ -1665,12 +1711,16 @@ class QwenImageAdapter:
             gpuMemory=gpu_memory_snapshot(torch, device),
         )
 
+        if distill_lora is not None:
+            self._fuse_distill_lora(pipe, distill_lora, job_id=job_id)
         if use_edit_pipe:
             self._edit_pipe = pipe
             self._edit_repo = repo
+            self._edit_distill_key = distill_key
         else:
             self._text_pipe = pipe
             self._text_repo = repo
+            self._text_distill_key = distill_key
         self._loaded_model = request.model
         return pipe
 
@@ -1708,8 +1758,9 @@ class QwenImageAdapter:
             # QwenImageEditPipeline.__call__ takes `image=` + `true_cfg_scale` (its
             # CFG knob) but NOT a `strength` kwarg — the previous edit path passed
             # one and filter_call_kwargs silently dropped it (sc-2013 spike find).
+            # Default true_cfg_scale per-model (Lightning needs 1.0; base 4.0).
             kwargs["image"] = load_source_image(project_path, request)
-            kwargs["true_cfg_scale"] = float(request.advanced.get("trueCfgScale", 4.0))
+            kwargs["true_cfg_scale"] = self._true_cfg_scale_default(request)
         elif self._use_reference(request):
             # Character Studio reference path: same `image=` kwarg as edit_image but
             # the reference (vs source_asset_id) drives subject identity while the
@@ -1750,22 +1801,71 @@ class QwenImageAdapter:
         return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
 
     def _guidance_scale(self, request: ImageRequest) -> float:
+        # Default differs by target: text-to-image qwen_image uses 4.0; the Edit
+        # / Edit-Plus pipelines (incl. Lightning distill) require 1.0 per the
+        # model card. Per-target default lives in MODEL_TARGETS.guidanceScale.
+        model_target = MODEL_TARGETS.get(getattr(request, "model", None) or "", {})
+        default = model_target.get("guidanceScale", 4.0)
         try:
-            return float(request.advanced.get("guidanceScale", 4.0))
+            return float(request.advanced.get("guidanceScale", default))
         except (TypeError, ValueError):
-            return 4.0
+            return float(default)
+
+    @staticmethod
+    def _distill_lora_for(model_target: dict[str, Any]) -> dict[str, Any] | None:
+        distill = model_target.get("distillLora")
+        return distill if isinstance(distill, dict) else None
+
+    @staticmethod
+    def _distill_key_for(distill_lora: dict[str, Any] | None) -> str | None:
+        if distill_lora is None:
+            return None
+        return f"{distill_lora.get('repo', '')}/{distill_lora.get('file', '')}"
+
+    def _fuse_distill_lora(self, pipe: Any, distill_lora: dict[str, Any], *, job_id: str) -> None:
+        repo = str(distill_lora["repo"])
+        file_name = str(distill_lora.get("file") or "")
+        emit_worker_event(
+            "image_distill_lora_fuse_start",
+            jobId=job_id,
+            adapter=self.id,
+            repo=repo,
+            file=file_name,
+        )
+        load_kwargs: dict[str, Any] = {}
+        if file_name:
+            load_kwargs["weight_name"] = file_name
+        # load_lora_weights ?? fuse_lora ?? unload_lora_weights bakes the distill
+        # into the base so user LoRAs can still occupy the adapter slot via the
+        # existing apply_loras_to_pipeline path.
+        pipe.load_lora_weights(repo, **load_kwargs)
+        pipe.fuse_lora()
+        pipe.unload_lora_weights()
+        emit_worker_event(
+            "image_distill_lora_fuse_complete",
+            jobId=job_id,
+            adapter=self.id,
+            repo=repo,
+            file=file_name,
+        )
+
+    def _true_cfg_scale_default(self, request: ImageRequest) -> float:
+        # Per-model default for true_cfg_scale. Base Qwen Edit uses 4.0; Lightning
+        # distill uses 1.0 (CFG disabled). MODEL_TARGETS.trueCfgScale overrides.
+        model_target = MODEL_TARGETS.get(getattr(request, "model", None) or "", {})
+        default = model_target.get("trueCfgScale", 4.0)
+        try:
+            return float(request.advanced.get("trueCfgScale", default))
+        except (TypeError, ValueError):
+            return float(default)
 
     def _reference_true_cfg_scale(self, request: ImageRequest) -> float:
-        # Variation knob for the character_image reference path. Model card default
-        # 4.0; higher = more prompt-driven variation, lower = closer to reference.
-        # Clamped [1, 10] — below 1 disables CFG (and Qwen's edit pipeline needs
-        # it >1 with a non-empty negative prompt to function), above 10 collapses
-        # to pure negative-prompt steering.
-        try:
-            scale = float(request.advanced.get("trueCfgScale", 4.0))
-        except (TypeError, ValueError):
-            return 4.0
-        return max(1.0, min(10.0, scale))
+        # Variation knob for the character_image reference path. Defaults per-
+        # model (Lightning fixes at 1.0, base 4.0; higher = more prompt-driven,
+        # lower = closer to reference). Clamped [1, 10] — below 1 disables CFG
+        # (Qwen's edit pipeline needs it >1 with a non-empty negative prompt to
+        # function), above 10 collapses to pure negative-prompt steering.
+        return max(1.0, min(10.0, self._true_cfg_scale_default(request)))
 
 
 class FluxDiffusersAdapter:
