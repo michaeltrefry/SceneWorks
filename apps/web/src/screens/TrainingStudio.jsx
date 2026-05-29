@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { API_BASE_URL } from "../api.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
+import { CompactSelector } from "../components/CompactSelector.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
@@ -193,10 +194,6 @@ const defaultCaptionSettings = {
   captionPrompt: "",
   lowVram: false,
 };
-
-function formatDatasetModality(dataset) {
-  return String(dataset.modality ?? "image").replaceAll("_", " ");
-}
 
 function datasetItemCount(dataset) {
   const value = Number(dataset.itemCount ?? dataset.items?.length ?? 0);
@@ -956,6 +953,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     return map;
   }, [activeDataset, importedCaptions]);
+  // Thumbnail for the compact dataset selector (sc-2025): the open dataset's
+  // first member, else a list summary's first item asset if resolvable.
+  const datasetThumbAsset = (dataset) => {
+    if (dataset?.id === selectedDatasetId && memberAssets[0]) {
+      return memberAssets[0];
+    }
+    const firstItemAssetId = (dataset?.items ?? []).find((item) => item.assetId)?.assetId;
+    return firstItemAssetId ? assetsById.get(firstItemAssetId) ?? null : null;
+  };
   const health = useMemo(
     () => datasetHealth({ activeDataset, imageAssets, selectedAssetIds }),
     [activeDataset, imageAssets, selectedAssetIds],
@@ -1576,6 +1582,19 @@ export function TrainingStudio({ mode = "training" } = {}) {
                       <h3>{active.title}</h3>
                     </div>
                     <div className="training-head-actions">
+                      <CompactSelector
+                        busyId={busyDatasetId}
+                        getSubtitle={(dataset) => {
+                          const count = datasetItemCount(dataset);
+                          return `${count} item${count === 1 ? "" : "s"}`;
+                        }}
+                        getThumbAsset={datasetThumbAsset}
+                        items={datasets}
+                        label="Select dataset"
+                        onSelect={(dataset) => openDataset(dataset.id)}
+                        placeholder={activeDataset ? activeDataset.name : "New dataset"}
+                        selectedId={selectedDatasetId}
+                      />
                       <button className="secondary-action" disabled={loadingDatasets} onClick={onRefreshDatasets} type="button">
                         <Icon.Search size={14} />
                         {loadingDatasets ? "Refreshing" : "Refresh"}
@@ -1590,30 +1609,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   {datasetError ? <p className="inline-warning">{datasetError}</p> : null}
                   {datasetMessage ? <p className="inline-success">{datasetMessage}</p> : null}
                   <div className="training-dataset-workspace">
-                    <aside className="training-dataset-list-panel">
-                      {loadingDatasets ? <div className="empty-panel compact-panel">Loading training datasets</div> : null}
-                      {!loadingDatasets && datasets.length === 0 ? <div className="empty-panel compact-panel">No training datasets yet</div> : null}
-                      {datasets.map((dataset) => {
-                        const itemCount = datasetItemCount(dataset);
-                        return (
-                          <button
-                            aria-pressed={selectedDatasetId === dataset.id}
-                            className={selectedDatasetId === dataset.id ? "training-dataset-row active" : "training-dataset-row"}
-                            disabled={busyDatasetId === dataset.id}
-                            key={dataset.id}
-                            onClick={() => openDataset(dataset.id)}
-                            type="button"
-                          >
-                            <div>
-                              <strong>{dataset.name ?? dataset.id}</strong>
-                              <span>{formatDatasetModality(dataset)} dataset</span>
-                            </div>
-                            <span>{busyDatasetId === dataset.id ? "Opening" : `${itemCount} item${itemCount === 1 ? "" : "s"}`}</span>
-                          </button>
-                        );
-                      })}
-                    </aside>
-
+                    {loadingDatasets ? <div className="empty-panel compact-panel">Loading training datasets</div> : null}
+                    {!loadingDatasets && datasets.length === 0 ? (
+                      <div className="empty-panel compact-panel">No training datasets yet — use “New” to start one.</div>
+                    ) : null}
                     <div className="training-dataset-editor">
                       <div className="training-dataset-form">
                         <label>

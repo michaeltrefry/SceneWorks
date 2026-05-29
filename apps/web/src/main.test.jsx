@@ -832,7 +832,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+      container.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
     expect(loadDataset).toHaveBeenCalledWith("dataset-a");
@@ -973,7 +976,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+      container.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
 
@@ -1018,7 +1024,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+      container.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
 
@@ -1088,7 +1097,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+      container.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
     await changeField(field(container, "Item ID"), "item_0007");
@@ -1164,7 +1176,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+      container.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
     expect(field(container, "Caption prompt").value).toContain("Write a long detailed description for this image.");
@@ -1245,7 +1260,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+      container.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
     await changeField(field(container, "Method"), "metadata");
@@ -1313,7 +1331,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll(".training-dataset-row")].find((button) => button.textContent.includes("Portrait Set")).click();
+      container.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
     expect(field(container, "Trigger words").value).toBe("Portrait Set");
@@ -2196,6 +2217,61 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("network hiccup");
     expect(container.querySelectorAll(".asset-preview-chip")).toHaveLength(1);
     expect(container.textContent).toContain("Beta");
+  });
+
+  it("switches the active character via the compact selector (sc-2025)", async () => {
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      archiveCharacter: () => {},
+      assets: [],
+      attachCharacterLora: () => {},
+      characters: [
+        { id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
+        { id: "char-2", name: "Dax", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
+      ],
+      createCharacter: () => {},
+      createCharacterLook: () => {},
+      createCharacterTestJob: () => {},
+      deleteAsset: () => {},
+      deleteCharacterLook: () => {},
+      detachCharacterLora: () => {},
+      imageModels: [],
+      latestImageAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      sendCharacterToImage: () => {},
+      sendCharacterToVideo: () => {},
+      purgeAsset: () => {},
+      removeCharacterReference: () => {},
+      updateAssetStatus: () => {},
+      updateCharacter: () => {},
+      updateCharacterLook: () => {},
+      updateCharacterLora: () => {},
+      updateCharacterReference: () => {},
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+
+    // The full-height character list is replaced by a compact selector pill.
+    expect(container.querySelector(".character-list")).toBeNull();
+    const pill = container.querySelector(".compact-selector-pill");
+    expect(pill.textContent).toContain("Mira");
+    expect(field(container, "Name").value).toBe("Mira");
+
+    // Open the dropdown and switch to the second character.
+    await act(async () => {
+      pill.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Dax")).click();
+    });
+
+    expect(field(container, "Name").value).toBe("Dax");
+    expect(container.querySelector(".compact-selector-pill").textContent).toContain("Dax");
   });
 
   it("fires a one-click angle-set batch job from the Character Studio panel", async () => {

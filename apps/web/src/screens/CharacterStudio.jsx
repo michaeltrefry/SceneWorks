@@ -9,6 +9,7 @@ import {
   CharacterTest,
   editableLora,
 } from "./characterPanels.jsx";
+import { CompactSelector } from "../components/CompactSelector.jsx";
 import { extractFamilies } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
 
@@ -79,6 +80,16 @@ export function CharacterStudio() {
   );
   const selectedCharacter = characters.find((item) => item.id === selectedCharacterId) ?? characters[0] ?? null;
   const approvedReferences = selectedCharacter?.approvedReferences ?? [];
+  // Thumbnail for the compact selector (sc-2025): a character's first approved
+  // reference image, falling back to any reference. Null → placeholder tile.
+  const characterThumbAsset = (character) => {
+    const references = character?.references ?? [];
+    const reference = references.find((item) => item.approved) ?? references[0];
+    if (!reference?.assetId) {
+      return null;
+    }
+    return imageAssets.find((asset) => asset.id === reference.assetId) ?? null;
+  };
   // Multi-backbone model picker for the angle set + pose library (sc-2003).
   // Each backbone declares ui.viewAngles / ui.poseLibrary in the manifest;
   // the worker dispatch handles per-backbone angle / pose loops (InstantID
@@ -302,20 +313,19 @@ export function CharacterStudio() {
         <div className="empty-panel">No characters yet</div>
       ) : (
         <div className="character-layout">
-          <aside className="character-list">
-            {characters.map((character) => (
-              <button
-                className={character.id === selectedCharacter.id ? "character-row active" : "character-row"}
-                key={character.id}
-                onClick={() => setSelectedCharacterId(character.id)}
-                type="button"
-              >
-                <strong>{character.name}</strong>
-                <span>{typeLabel(character.type)}</span>
-                <small>{character.references?.length ?? 0} refs</small>
-              </button>
-            ))}
-          </aside>
+          <div className="character-selector-bar">
+            <CompactSelector
+              getSubtitle={(character) =>
+                `${typeLabel(character.type)} · ${character.references?.length ?? 0} ref${(character.references?.length ?? 0) === 1 ? "" : "s"}`
+              }
+              getThumbAsset={characterThumbAsset}
+              items={characters}
+              label="Select character"
+              onSelect={(character) => setSelectedCharacterId(character.id)}
+              placeholder="Select a character"
+              selectedId={selectedCharacter.id}
+            />
+          </div>
 
           <section className="character-detail">
             <form className="character-editor" onSubmit={saveCharacter}>
