@@ -1994,6 +1994,47 @@ def test_flux2_dispatch_picks_mlx_flux2_for_both_models(monkeypatch):
         assert adapter.__class__.__name__ == "MlxFlux2Adapter", model
 
 
+def test_flux2_dispatch_resolves_via_runtime_registry(monkeypatch):
+    # sc-2203 regression: in the REAL worker, create_image_adapter is called
+    # WITH the runtime's image_adapters dict, so the flux2 dispatch does
+    # `adapters.get("mlx_flux2")`. MlxFlux2Adapter was added to the dispatch +
+    # MODEL_TARGETS in sc-2164 but never registered in that dict, so every
+    # FLUX.2 job resolved to None and crashed with
+    # "'NoneType' object has no attribute 'generate'". The no-dict test above
+    # missed it (it takes the `else MlxFlux2Adapter()` branch). Pass a registry
+    # and assert the lookup resolves.
+    from scene_worker.image_adapters import MlxFlux2Adapter
+
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
+    registry = {"mlx_flux2": MlxFlux2Adapter()}
+    for model in ("flux2_klein_9b", "flux2_klein_9b_kv"):
+        adapter = create_image_adapter({"payload": {"model": model}}, registry)
+        assert adapter is not None, f"{model} dispatched to None — adapter not registered"
+        assert adapter.__class__.__name__ == "MlxFlux2Adapter", model
+
+
+def test_runtime_registry_covers_all_model_target_adapters():
+    # sc-2203 guard: every adapter id a manifest model can dispatch to (the
+    # `adapter` field in MODEL_TARGETS) must be a key in the runtime's
+    # image_adapters registry, or create_image_adapter's `adapters.get(id)`
+    # returns None and the job crashes. Catches "added to dispatch but forgot
+    # to register" for any future adapter, not just FLUX.2.
+    import re
+    from pathlib import Path
+
+    from scene_worker import runtime
+    from scene_worker.image_adapters import MODEL_TARGETS
+
+    src = Path(runtime.__file__).read_text(encoding="utf-8")
+    block = src.split("image_adapters: dict[str, object] = {", 1)[1].split("}", 1)[0]
+    registered = set(re.findall(r'"([a-z0-9_]+)":', block))
+
+    needed = {target["adapter"] for target in MODEL_TARGETS.values() if target.get("adapter")}
+    missing = needed - registered
+    assert not missing, f"adapter ids in MODEL_TARGETS not registered in runtime: {sorted(missing)}"
+    assert "mlx_flux2" in registered  # the specific sc-2203 regression
+
+
 def test_should_route_flux2_to_mlx_predicate(monkeypatch):
     from scene_worker.image_adapters import _should_route_flux2_to_mlx
 
