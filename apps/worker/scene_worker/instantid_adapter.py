@@ -49,6 +49,7 @@ from .image_adapters import (
     select_torch_device,
     select_torch_dtype,
 )
+from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline
 from .settings import WorkerSettings
 
 _VENDOR = Path(__file__).resolve().parent / "_vendor" / "instantid"
@@ -183,6 +184,10 @@ class InstantIDAdapter:
         # "identity" (IdentityNet only) vs "multi" (IdentityNet + OpenPose). A job that
         # switches between view-angle and full-body-pose modes reloads the pipeline.
         self._loaded_controlnet_mode: str | None = None
+        # SDXL LoRA merge state for the single cached pipe (sc-2224). One field rather
+        # than the dict-keyed cache other adapters use, because this adapter holds at
+        # most one pipe at a time and reloads (clearing this) on repo/mode change.
+        self._loaded_lora_state = LoraPipelineState()
         self._face_app: Any | None = None
 
     def loaded_models(self) -> list[str]:
@@ -195,6 +200,7 @@ class InstantIDAdapter:
         self._loaded_repo = None
         self._loaded_model = None
         self._loaded_controlnet_mode = None
+        self._loaded_lora_state = LoraPipelineState()
         self._empty_cache(importlib.import_module("torch"))
         return True
 
@@ -616,6 +622,19 @@ class InstantIDAdapter:
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (InstantID).")
         pipe = self._load_pipeline(
             settings, request, model_target, progress=progress, job_id=job["id"], pose_set=pose_set
+        )
+        # Apply any selected SDXL LoRAs to the (cached) pipe once, before the angle/pose
+        # loop — every image in the set reuses this pipe, and the merge persists across
+        # the per-pose _restore_face pass (validated by the sc-2222 spike). previous_state
+        # tracks the single live pipe (reset on reload via unload());
+        # validate_lora_compatibility (family "sdxl") rejects incompatible LoRAs.
+        self._loaded_lora_state = apply_loras_to_pipeline(
+            pipe,
+            request.loras,
+            adapter_id=self.id,
+            model_family=model_target.get("family"),
+            model_id=request.model,
+            previous_state=self._loaded_lora_state,
         )
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)

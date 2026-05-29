@@ -19,6 +19,7 @@ from scene_worker.instantid_adapter import (
     _letterbox,
     _view_angle_kps,
 )
+from scene_worker.lora_adapters import LoraPipelineState
 from scene_worker.openpose_skeleton import (
     draw_bodypose,
     face_box_from_keypoints,
@@ -256,3 +257,105 @@ def test_face_restore_enabled_default_and_toggle():
     assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": True})) is True
     assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": "false"})) is False
     assert InstantIDAdapter._face_restore_enabled(SimpleNamespace(advanced={"faceRestore": "off"})) is False
+
+
+# ---- SDXL LoRA application (sc-2224) --------------------------------------------
+#
+# The InstantID pipe is a StableDiffusionXLControlNetPipeline; the sc-2222 spike
+# confirmed the existing SDXL LoRA merge path stacks on it (IdentityNet/OpenPose +
+# IP-Adapter, bf16/MPS) and persists across the per-pose _restore_face pass. These
+# tests cover the adapter-level wiring (apply once before the angle/pose loop, state
+# threaded across jobs, reset on unload) with the pipe + merge mocked — the merge
+# math + family gating live in lora_adapters and are exercised via the real
+# apply_loras_to_pipeline in test_lora_family_incompatibility_is_rejected.
+
+
+def _generate_capturing_loras(monkeypatch, adapter, job):
+    """Run generate() with the model load + LoRA merge + asset writer mocked, returning
+    the list of recorded apply_loras_to_pipeline calls."""
+    calls: list[dict] = []
+    applied_state = LoraPipelineState(key="applied", adapter_names=("sw_test",))
+
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())  # extras present
+    monkeypatch.setattr(adapter, "_load_pipeline", lambda *a, **k: SimpleNamespace(tag="fakepipe"))
+    monkeypatch.setattr("scene_worker.instantid_adapter.select_torch_device", lambda *a, **k: "cpu")
+    monkeypatch.setattr("scene_worker.instantid_adapter.activate_torch_device", lambda *a, **k: None)
+
+    def _fake_apply(pipe, loras, **kwargs):
+        calls.append({"pipe": pipe, "loras": loras, **kwargs})
+        return applied_state
+
+    monkeypatch.setattr("scene_worker.instantid_adapter.apply_loras_to_pipeline", _fake_apply)
+    monkeypatch.setattr(
+        "scene_worker.instantid_adapter.ImageAssetWriter.write_incremental_outputs",
+        lambda self, **kwargs: {"images": []},
+    )
+    adapter.generate(
+        settings=SimpleNamespace(gpu_id="cpu"),
+        job=job,
+        request=image_request_from_job(job),
+        project_path=None,
+        progress=_NOOP,
+        cancel_requested=lambda: False,
+    )
+    return calls, applied_state
+
+
+def test_generate_applies_request_loras(instantid_model, monkeypatch):
+    loras = [{"id": "kelsie-sdxl", "path": "/loras/kelsie.safetensors", "families": ["sdxl"]}]
+    job = _job(instantid_model, referenceAssetId="ref-x", loras=loras)
+    adapter = InstantIDAdapter()
+    calls, applied_state = _generate_capturing_loras(monkeypatch, adapter, job)
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["loras"] == loras
+    assert call["adapter_id"] == "instantid_sdxl"
+    assert call["model_family"] == "sdxl"
+    assert call["model_id"] == instantid_model
+    # Fresh adapter: the first job threads in the empty starting state.
+    assert call["previous_state"] == LoraPipelineState()
+    # The returned state is stored so the next job can clear/diff against it.
+    assert adapter._loaded_lora_state is applied_state
+
+
+def test_generate_with_no_loras_still_applies_empty(instantid_model, monkeypatch):
+    # A job without loras must still call apply (with []), so a LoRA from a prior job on
+    # the cached pipe is cleared rather than silently carried over.
+    job = _job(instantid_model, referenceAssetId="ref-x")
+    calls, _ = _generate_capturing_loras(monkeypatch, InstantIDAdapter(), job)
+    assert len(calls) == 1 and calls[0]["loras"] == []
+
+
+def test_generate_threads_previous_lora_state_across_jobs(instantid_model, monkeypatch):
+    # The cached pipe persists across jobs, so each apply must receive the prior job's
+    # returned state as previous_state (the diff drives load/clear of adapters).
+    adapter = InstantIDAdapter()
+    job = _job(instantid_model, referenceAssetId="ref-x", loras=[{"id": "a", "path": "/a.safetensors"}])
+    calls1, applied_state = _generate_capturing_loras(monkeypatch, adapter, job)
+    assert calls1[0]["previous_state"] == LoraPipelineState()
+
+    calls2, _ = _generate_capturing_loras(monkeypatch, adapter, job)
+    assert calls2[0]["previous_state"] is applied_state
+
+
+def test_unload_resets_lora_state():
+    adapter = InstantIDAdapter()
+    adapter._pipe = SimpleNamespace(tag="fakepipe")
+    adapter._loaded_lora_state = LoraPipelineState(key="applied", adapter_names=("sw_test",))
+    adapter._empty_cache = lambda *_a, **_k: None  # avoid importing torch
+    assert adapter.unload() is True
+    # The merge belongs to the (now-discarded) pipe; the next pipe must start clean.
+    assert adapter._loaded_lora_state == LoraPipelineState()
+
+
+def test_lora_family_incompatibility_is_rejected():
+    # The InstantID family is "sdxl"; a flux LoRA must be rejected. validate runs before
+    # the pipe is touched, so a bare sentinel pipe is never used.
+    from scene_worker.lora_adapters import apply_loras_to_pipeline
+
+    flux_lora = [{"id": "flux-style", "path": "/loras/flux.safetensors", "families": ["flux"]}]
+    with pytest.raises(RuntimeError, match="not compatible"):
+        apply_loras_to_pipeline(
+            object(), flux_lora, adapter_id="instantid_sdxl", model_family="sdxl"
+        )
