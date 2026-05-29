@@ -984,6 +984,22 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     assert!(caption_image_path.contains(&dataset_id));
     assert!(caption_image_path.ends_with("item_0001.png"));
 
+    // sc-2025: itemIds targets a single image and recaptions it even though it
+    // already has a caption (recaption:false would otherwise skip it).
+    let (status, single_item_job) = request(
+        reloaded_app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/caption-jobs"),
+        json!({ "recaption": false, "itemIds": ["item_0001"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let single_items = single_item_job["payload"]["items"]
+        .as_array()
+        .expect("caption items");
+    assert_eq!(single_items.len(), 1);
+    assert_eq!(single_items[0]["itemId"], "item_0001");
+
     let (status, renamed) = request(
         reloaded_app.clone(),
         "POST",

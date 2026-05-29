@@ -309,6 +309,11 @@ pub(crate) struct TrainingCaptionJobRequest {
     pub(crate) requested_gpu: String,
     #[serde(default)]
     pub(crate) options: TrainingCaptionOptions,
+    /// Restrict the job to these dataset item ids (sc-2025 per-image Re-Caption).
+    /// When present, only those items are captioned and they are always recaptioned;
+    /// when absent, the dataset-wide `recaption`/missing-caption rule applies.
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

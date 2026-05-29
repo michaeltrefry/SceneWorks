@@ -1974,9 +1974,7 @@ label {
 .training-config-preview,
 .training-config-form,
 .training-config-grid,
-.training-advanced-grid,
-.training-caption-editor,
-.training-caption-list {
+.training-advanced-grid {
   display: grid;
   gap: 10px;
 }
@@ -2237,155 +2235,18 @@ label {
   line-height: 1.45;
 }
 
-.training-caption-toolbar {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
-  gap: 10px;
-  align-items: end;
-}
-
-.training-caption-workspace {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(250px, 320px);
-  gap: 14px;
-  align-items: start;
-}
-
-.training-caption-sidebar {
-  display: grid;
-  gap: 10px;
-  position: sticky;
-  top: 12px;
-  max-height: calc(100vh - 24px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  align-self: start;
-  min-width: 0;
-  padding-right: 2px;
-}
-
-.training-caption-sidebar-section {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface);
-}
-
-.training-sidebar-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.training-sidebar-heading strong {
-  color: var(--text);
-  font-size: 14px;
-}
-
-.training-caption-sidebar label,
-.training-caption-toolbar label,
-.training-caption-fields label {
-  display: grid;
-  gap: 7px;
-  min-width: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
 .training-toggle-line {
+  display: grid;
   grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
   align-items: center;
   color: var(--text);
   font-weight: 600;
+  font-size: 12px;
 }
 
 .training-toggle-line input {
   width: auto;
-}
-
-.training-caption-option-list {
-  display: grid;
-  gap: 8px;
-  max-height: 260px;
-  overflow: auto;
-  padding-right: 2px;
-}
-
-.training-caption-sidebar textarea {
-  resize: vertical;
-  min-height: 168px;
-}
-
-.training-caption-submit {
-  width: 100%;
-  justify-content: center;
-}
-
-.training-caption-row {
-  display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
-  gap: 12px;
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface);
-}
-
-.training-caption-preview {
-  display: grid;
-  gap: 8px;
-  align-content: start;
-}
-
-.training-caption-preview button {
-  overflow: hidden;
-  width: 96px;
-  aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-  color: var(--text-muted);
-}
-
-.training-caption-preview img,
-.training-caption-preview video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.training-caption-preview span {
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.training-caption-fields {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(120px, 1fr));
-  gap: 10px;
-  min-width: 0;
-}
-
-.training-caption-text {
-  grid-column: 1 / -1;
-}
-
-.training-caption-fields textarea {
-  resize: vertical;
-  min-height: 76px;
 }
 
 .preset-rail-head {
@@ -5738,67 +5599,167 @@ label {
 }
 
 /* Dataset member grid (sc-2026): the editor body shows only members + captions */
-.training-member-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+/* Dataset toolbar (sc-2025): rename + caption actions above the card grid */
+.training-dataset-toolbar {
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+  align-items: flex-end;
 }
 
-.training-member-card {
+.training-rename-field {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  padding: 8px;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.training-rename-field input {
+  min-width: 160px;
+}
+
+/* Unified image + caption cards (sc-2025): thumbnail + read-only name/source,
+   editable caption underneath, actions at the bottom. Responsive auto-fill. */
+.training-caption-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.training-caption-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface);
 }
 
-.training-member-card.disabled {
+.training-caption-card.disabled {
   opacity: 0.6;
 }
 
-.training-member-thumb {
+.training-caption-card-head {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.training-caption-card-thumb {
   padding: 0;
   border: none;
   background: none;
   cursor: pointer;
 }
 
-.training-member-thumb img,
-.training-member-thumb video {
-  width: 56px;
-  height: 56px;
+.training-caption-card-thumb img,
+.training-caption-card-thumb video {
+  width: 72px;
+  height: 72px;
   object-fit: cover;
   border-radius: var(--r-sm);
   background: var(--bg-2);
 }
 
-.training-member-meta {
+.training-caption-card-meta {
   display: grid;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
 }
 
-.training-member-meta strong {
+.training-caption-card-meta strong {
   overflow: hidden;
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.training-member-caption {
-  overflow: hidden;
-  font-size: 12px;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.training-caption-source {
+  justify-self: start;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--surface-hover);
+  color: var(--text-muted);
 }
 
-.training-member-caption.muted {
+.training-caption-source.source-imported {
+  background: color-mix(in oklch, var(--accent) 16%, transparent);
+  color: var(--accent-strong);
+}
+
+.training-caption-source.source-auto {
+  background: color-mix(in oklch, var(--warm) 22%, transparent);
+}
+
+.training-caption-card-text {
+  width: 100%;
+  resize: vertical;
+}
+
+.training-caption-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.training-caption-card-actions button {
+  flex: 1;
+}
+
+/* Caption settings dialog (sc-2025) */
+.dataset-caption-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  width: min(620px, 96vw);
+  max-height: 92vh;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.dataset-caption-head,
+.dataset-caption-footer {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dataset-caption-head h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.dataset-caption-body {
+  display: grid;
+  gap: 12px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.dataset-caption-body label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
   color: var(--text-muted);
-  font-style: italic;
+}
+
+.dataset-caption-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.dataset-caption-options {
+  display: grid;
+  gap: 4px;
 }
 
 /* Asset preview chip (in pickers) */
@@ -6176,10 +6137,6 @@ label {
   .training-config-preview,
   .training-config-grid,
   .training-advanced-grid,
-  .training-caption-workspace,
-  .training-caption-toolbar,
-  .training-caption-row,
-  .training-caption-fields,
   .preset-layout,
   .character-layout,
   .queue-header,

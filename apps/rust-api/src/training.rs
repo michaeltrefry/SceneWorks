@@ -135,10 +135,19 @@ pub(crate) async fn create_training_dataset_caption_job(
             "Training dataset has no items to caption.",
         ));
     }
+    // sc-2025: a per-image Re-Caption targets specific item ids and always
+    // recaptions them; otherwise the dataset-wide recaption/missing rule applies.
+    let target_ids: Option<std::collections::HashSet<&str>> = payload
+        .item_ids
+        .as_ref()
+        .map(|ids| ids.iter().map(String::as_str).collect());
     let items = dataset
         .items
         .iter()
-        .filter(|item| payload.recaption || item.caption.text.trim().is_empty())
+        .filter(|item| match &target_ids {
+            Some(ids) => ids.contains(item.id.as_str()),
+            None => payload.recaption || item.caption.text.trim().is_empty(),
+        })
         .map(|item| {
             json!({
                 "itemId": item.id.clone(),
