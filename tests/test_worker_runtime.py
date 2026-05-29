@@ -9473,8 +9473,21 @@ def test_qwen_image_adapter_angleset_loop_uses_augmented_prompts(monkeypatch):
     QwenImageAdapter loops the 11 canonical angles and routes each to
     _run_pipeline with the per-angle prompt_override — NOT the original
     user prompt. Sanity-check this without loading torch / diffusers."""
+    import sys as _sys
+    from types import ModuleType, SimpleNamespace as _SimpleNamespace
+
     from scene_worker.character_studio_angles import ANGLE_PROMPT_AUGMENTS, ANGLE_SET_ORDER
     from scene_worker.image_adapters import QwenImageAdapter
+
+    # CI (sceneworks-core-pytest) installs requirements-dev.txt only — torch
+    # isn't there. Stub the few attrs the generate() path touches so the test
+    # runs against the pure-Python dispatch logic without pulling torch.
+    if "torch" not in _sys.modules:
+        torch_stub = ModuleType("torch")
+        torch_stub.cuda = _SimpleNamespace(is_available=lambda: False, empty_cache=lambda: None)
+        torch_stub.backends = _SimpleNamespace(mps=_SimpleNamespace(is_available=lambda: False))
+        torch_stub.mps = _SimpleNamespace(empty_cache=lambda: None)
+        monkeypatch.setitem(_sys.modules, "torch", torch_stub)
 
     captured: list[str] = []
 
@@ -9497,6 +9510,13 @@ def test_qwen_image_adapter_angleset_loop_uses_augmented_prompts(monkeypatch):
             return {"images": image_count}
 
     monkeypatch.setattr(ia, "ImageAssetWriter", _FakeWriter)
+    # Bypass the GPU-backend-required check and the device-activation step:
+    # both poke at torch internals the stub above doesn't fully model, and the
+    # dispatch logic we're verifying doesn't depend on the answer.
+    monkeypatch.setattr(ia, "require_inference_backend_for_gpu_worker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ia, "activate_torch_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ia, "select_torch_device", lambda *args, **kwargs: "cpu")
+    monkeypatch.setattr(ia, "gpu_memory_snapshot", lambda *args, **kwargs: None)
 
     request = ia.ImageRequest(
         project_id="p",
@@ -9518,10 +9538,6 @@ def test_qwen_image_adapter_angleset_loop_uses_augmented_prompts(monkeypatch):
         advanced={"angleSet": True},
         model_manifest_entry={},
     )
-    # select_torch_device reads settings.gpu_id; "cpu" forces the cpu branch
-    # which doesn't touch torch.cuda / torch.backends.mps.
-    from types import SimpleNamespace as _SimpleNamespace
-
     fake_settings = _SimpleNamespace(gpu_id="cpu")
     QwenImageAdapter().generate(
         settings=fake_settings,
