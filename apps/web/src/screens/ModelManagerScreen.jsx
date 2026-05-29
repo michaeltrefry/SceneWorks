@@ -81,6 +81,45 @@ const MODEL_TYPE_OPTIONS = [
   { value: "utility", label: "Utility" },
 ];
 
+// Models render in type-grouped sections. Order is fixed; any model whose `type`
+// isn't listed here falls into a trailing "Other" group so nothing is hidden.
+const MODEL_TYPE_GROUPS = [
+  { type: "image", label: "Image Models" },
+  { type: "video", label: "Video Models" },
+  { type: "utility", label: "Utility Models" },
+];
+
+// Capability descriptors shown as chips on each model card. With models now grouped
+// by `type`, the chips are what tell the user what a card actually does (plain
+// text-to-image vs editing vs character reference, etc.). Unknown keys fall back to
+// a humanized form so a new capability still reads sensibly without a code change.
+const CAPABILITY_LABELS = {
+  text_to_image: "Text to Image",
+  image_to_image: "Image to Image",
+  edit_image: "Image Edit",
+  character_image: "Character",
+  style_variations: "Style Variations",
+  vqa: "Visual Q&A",
+  interleave: "Interleaved",
+  image_to_video: "Image to Video",
+  text_to_video: "Text to Video",
+  first_last_frame: "First / Last Frame",
+  extend_clip: "Extend Clip",
+  video_bridge: "Video Bridge",
+  replace_person: "Replace Person",
+};
+
+function capabilityLabel(capability) {
+  return CAPABILITY_LABELS[capability] ?? String(capability).replaceAll("_", " ");
+}
+
+// Group key for the family-organized LoRA list. A LoRA can list several compatible
+// families; we group under its primary one and bucket family-less entries under a
+// trailing "compatible" group.
+function loraGroupKey(lora) {
+  return lora.family ?? extractFamilies(lora)[0] ?? "";
+}
+
 // Gated models (e.g. FLUX.1 [dev]) need an accepted license + a saved credential
 // before a download can succeed. The catalog flags these with `gated`/
 // `credentialHost`/`licenseUrl` (sc-1898). When the matching credential is already
@@ -433,6 +472,169 @@ export function ModelManagerScreen() {
     (importForm.scope === "project" && !activeProject) ||
     (isFileImport ? !importForm.file : !importForm.sourceUrl.trim());
 
+  // Models grouped by type for the sectioned layout. Known types keep their fixed
+  // order; anything else lands in a trailing "Other" group. Empty groups drop out.
+  const knownModelTypes = new Set(MODEL_TYPE_GROUPS.map((group) => group.type));
+  const modelGroups = [
+    ...MODEL_TYPE_GROUPS.map((group) => ({ ...group, items: models.filter((model) => model.type === group.type) })),
+    { type: "other", label: "Other Models", items: models.filter((model) => !knownModelTypes.has(model.type)) },
+  ].filter((group) => group.items.length > 0);
+
+  // Visible LoRAs grouped by family for the family-organized list. The family
+  // dropdown still narrows `visibleLoras` upstream; when a specific family is
+  // selected this collapses to a single group.
+  const loraGroupMap = new Map();
+  visibleLoras.forEach((lora) => {
+    const key = loraGroupKey(lora) || "compatible";
+    if (!loraGroupMap.has(key)) {
+      loraGroupMap.set(key, []);
+    }
+    loraGroupMap.get(key).push(lora);
+  });
+  const loraGroups = [...loraGroupMap.entries()]
+    .sort(([a], [b]) => (a === "compatible" ? 1 : b === "compatible" ? -1 : a.localeCompare(b)))
+    .map(([family, items]) => ({ family, items }));
+
+  function renderModelCard(model) {
+    const downloadJobs = downloadJobsFor(model);
+    const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
+    const installed = model.installState === "installed";
+    const localDownloadJob = installed ? null : downloadJobs.find((job) => job.status !== "completed");
+    const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
+    const downloadSize = downloadSizeText(model);
+    const unassociated = !model.family;
+    const capabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
+    const deleteKey = `model:${model.id}`;
+    const canDelete = Boolean(onDeleteModel) && model.removable !== false;
+    // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
+    const mlxState = model.mlxConversionState;
+    const mlxMinGb = model.mlx?.minMemoryGb ?? null;
+    const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
+    const convertJobs = convertJobsFor(model);
+    const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
+    const failedConvert = convertJobs.find((job) => terminalStatuses.has(job.status) && job.status !== "completed");
+    const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
+    const gated = Boolean(model.gated);
+    const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
+    return (
+      <article className="model-card" key={model.id}>
+        <div>
+          <p className="eyebrow">{model.family ?? "unassociated"}</p>
+          <h3>{model.name}</h3>
+        </div>
+        <span className={installed ? "status-badge installed" : "status-badge"}>{installed ? "installed" : "missing"}</span>
+        {unassociated ? (
+          <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
+            needs family
+          </span>
+        ) : null}
+        {capabilities.length ? (
+          <ul className="model-capabilities">
+            {capabilities.map((capability) => (
+              <li className="chip" key={capability}>
+                {capabilityLabel(capability)}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <p>{model.ui?.description ?? model.family ?? model.id}</p>
+        {gated && !installed ? (
+          <GatedModelNotice
+            host={model.credentialHost}
+            licenseUrl={model.licenseUrl}
+            present={credentialPresent}
+            onOpenSettings={() => setActiveView("Settings")}
+          />
+        ) : null}
+        <dl>
+          <div>
+            <dt>Repo</dt>
+            <dd>{model.downloads?.[0]?.repo ?? "none"}</dd>
+          </div>
+          <div>
+            <dt>Download size</dt>
+            <dd>{downloadSize}</dd>
+          </div>
+        </dl>
+        {localDownloadJob ? (
+          <WorkerProgressCard job={localDownloadJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+        ) : null}
+        {mlxState ? (
+          <div className="mlx-status">
+            <div className="mlx-status-badges">
+              <span className="status-badge">MLX</span>
+              {mlxMinGb != null ? (
+                <span className={mlxEnoughMemory ? "status-badge" : "status-badge warning"}>needs ≥ {mlxMinGb} GB</span>
+              ) : null}
+            </div>
+            <p>{mlxStatusText(model)}</p>
+            {!mlxEnoughMemory ? (
+              <p className="inline-warning">
+                Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
+              </p>
+            ) : null}
+            {convertJob ? <WorkerProgressCard job={convertJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} /> : null}
+            {showConvertButton ? (
+              <button
+                disabled={mlxState === "converted" || Boolean(convertJob) || !mlxEnoughMemory}
+                onClick={() => onConvertModel?.(model)}
+                type="button"
+              >
+                {convertJob
+                  ? convertJob.status
+                  : mlxState === "converted"
+                    ? "MLX ready"
+                    : failedConvert
+                      ? "Retry MLX Conversion"
+                      : "Convert to MLX"}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="model-card-actions">
+          <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">
+            {downloadJob
+              ? downloadJob.status
+              : installed
+                ? "Ready"
+                : failedDownload
+                  ? "Retry Download"
+                  : model.downloadSizeLabel
+                    ? `Download ${downloadSize}`
+                    : "Download"}
+          </button>
+          <button className="danger-action" disabled={!canDelete || deletingItem === deleteKey} onClick={() => deleteModel(model)} type="button">
+            {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
+          </button>
+        </div>
+      </article>
+    );
+  }
+
+  function renderLoraRow(lora) {
+    const installed = lora.installState === "installed";
+    const missing = lora.installState === "missing";
+    const statusText = missing ? "unavailable" : installed ? "installed" : "pending";
+    const deleteKey = `lora:${lora.scope ?? "global"}:${lora.id}`;
+    return (
+      <article className={missing ? "lora-row warning" : "lora-row"} key={lora.id ?? lora.name}>
+        <span>
+          <strong>{lora.name ?? lora.id}</strong>
+          <small>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</small>
+        </span>
+        <span className={installed ? "status-badge installed" : "status-badge"}>{statusText}</span>
+        <button
+          className="danger-action"
+          disabled={!onDeleteLora || lora.removable === false || deletingItem === deleteKey}
+          onClick={() => deleteLora(lora)}
+          type="button"
+        >
+          {lora.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
+        </button>
+      </article>
+    );
+  }
+
   return (
     <section className="main-surface models-surface">
       <div className="surface-header">
@@ -453,124 +655,15 @@ export function ModelManagerScreen() {
         </label>
       </div>
 
-      <div className="model-grid">
-        {models.map((model) => {
-          const downloadJobs = downloadJobsFor(model);
-          const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
-          const installed = model.installState === "installed";
-          const localDownloadJob = installed ? null : downloadJobs.find((job) => job.status !== "completed");
-          const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
-          const downloadSize = downloadSizeText(model);
-          const unassociated = !model.family;
-          const deleteKey = `model:${model.id}`;
-          const canDelete = Boolean(onDeleteModel) && model.removable !== false;
-          // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
-          const mlxState = model.mlxConversionState;
-          const mlxMinGb = model.mlx?.minMemoryGb ?? null;
-          const mlxEnoughMemory =
-            unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
-          const convertJobs = convertJobsFor(model);
-          const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
-          const failedConvert = convertJobs.find(
-            (job) => terminalStatuses.has(job.status) && job.status !== "completed",
-          );
-          const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
-          const gated = Boolean(model.gated);
-          const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
-          return (
-            <article className="model-card" key={model.id}>
-              <div>
-                <p className="eyebrow">{model.type}</p>
-                <h3>{model.name}</h3>
-              </div>
-              <span className={installed ? "status-badge installed" : "status-badge"}>{installed ? "installed" : "missing"}</span>
-              {unassociated ? (
-                <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
-                  needs family
-                </span>
-              ) : null}
-              <p>{model.ui?.description ?? model.family ?? model.id}</p>
-              {gated && !installed ? (
-                <GatedModelNotice
-                  host={model.credentialHost}
-                  licenseUrl={model.licenseUrl}
-                  present={credentialPresent}
-                  onOpenSettings={() => setActiveView("Settings")}
-                />
-              ) : null}
-              <dl>
-                <div>
-                  <dt>Family</dt>
-                  <dd>{model.family ?? "unassociated"}</dd>
-                </div>
-                <div>
-                  <dt>Repo</dt>
-                  <dd>{model.downloads?.[0]?.repo ?? "none"}</dd>
-                </div>
-                <div>
-                  <dt>Download size</dt>
-                  <dd>{downloadSize}</dd>
-                </div>
-              </dl>
-              {localDownloadJob ? (
-                <WorkerProgressCard job={localDownloadJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-              ) : null}
-              {mlxState ? (
-                <div className="mlx-status">
-                  <div className="mlx-status-badges">
-                    <span className="status-badge">MLX</span>
-                    {mlxMinGb != null ? (
-                      <span className={mlxEnoughMemory ? "status-badge" : "status-badge warning"}>
-                        needs ≥ {mlxMinGb} GB
-                      </span>
-                    ) : null}
-                  </div>
-                  <p>{mlxStatusText(model)}</p>
-                  {!mlxEnoughMemory ? (
-                    <p className="inline-warning">
-                      Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
-                    </p>
-                  ) : null}
-                  {convertJob ? (
-                    <WorkerProgressCard job={convertJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-                  ) : null}
-                  {showConvertButton ? (
-                    <button
-                      disabled={mlxState === "converted" || Boolean(convertJob) || !mlxEnoughMemory}
-                      onClick={() => onConvertModel?.(model)}
-                      type="button"
-                    >
-                      {convertJob
-                        ? convertJob.status
-                        : mlxState === "converted"
-                          ? "MLX ready"
-                          : failedConvert
-                            ? "Retry MLX Conversion"
-                            : "Convert to MLX"}
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-              <div className="model-card-actions">
-                <button disabled={installed || !model.downloadable || Boolean(downloadJob)} onClick={() => onDownloadModel(model)} type="button">
-                  {downloadJob
-                    ? downloadJob.status
-                    : installed
-                      ? "Ready"
-                      : failedDownload
-                        ? "Retry Download"
-                        : model.downloadSizeLabel
-                          ? `Download ${downloadSize}`
-                          : "Download"}
-                </button>
-                <button className="danger-action" disabled={!canDelete || deletingItem === deleteKey} onClick={() => deleteModel(model)} type="button">
-                  {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
+      {modelGroups.map((group) => (
+        <section className="model-type-group" key={group.type}>
+          <div className="model-type-group-heading">
+            <h3>{group.label}</h3>
+            <span>{group.items.length}</span>
+          </div>
+          <div className="model-grid">{group.items.map((model) => renderModelCard(model))}</div>
+        </section>
+      ))}
       {deleteMessage.text ? <p className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}>{deleteMessage.text}</p> : null}
 
       <section className="model-import-panel-section">
@@ -859,29 +952,16 @@ export function ModelManagerScreen() {
         ) : null}
         {hiddenImportCount ? <p className="helper-copy">{hiddenImportCount} LoRA import{hiddenImportCount === 1 ? " is" : "s are"} hidden by this family filter.</p> : null}
         {visibleLoras.length ? (
-          <div className="lora-list">
-            {visibleLoras.map((lora) => {
-              const installed = lora.installState === "installed";
-              const missing = lora.installState === "missing";
-              const statusText = missing ? "unavailable" : installed ? "installed" : "pending";
-              return (
-                <article className={missing ? "lora-row warning" : "lora-row"} key={lora.id ?? lora.name}>
-                  <span>
-                    <strong>{lora.name ?? lora.id}</strong>
-                    <small>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</small>
-                  </span>
-                  <span className={installed ? "status-badge installed" : "status-badge"}>{statusText}</span>
-                  <button
-                    className="danger-action"
-                    disabled={!onDeleteLora || lora.removable === false || deletingItem === `lora:${lora.scope ?? "global"}:${lora.id}`}
-                    onClick={() => deleteLora(lora)}
-                    type="button"
-                  >
-                    {lora.removable === false ? "Protected" : deletingItem === `lora:${lora.scope ?? "global"}:${lora.id}` ? "Deleting" : "Delete"}
-                  </button>
-                </article>
-              );
-            })}
+          <div className="lora-family-groups">
+            {loraGroups.map((group) => (
+              <div className="lora-family-group" key={group.family}>
+                <div className="lora-family-group-heading">
+                  <h3>{group.family === "compatible" ? "Other / compatible" : group.family}</h3>
+                  <span>{group.items.length}</span>
+                </div>
+                <div className="lora-list">{group.items.map((lora) => renderLoraRow(lora))}</div>
+              </div>
+            ))}
           </div>
         ) : localLoraImportJobs.length ? null : loras.length && familyFilter !== "all" ? (
           <div className="empty-panel compact-panel">No LoRAs match {familyFilter}</div>

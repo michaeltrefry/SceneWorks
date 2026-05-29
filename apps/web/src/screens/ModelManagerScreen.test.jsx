@@ -272,3 +272,117 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     expect(payload.baseModel).toBe("wan_2_2_t2v_14b");
   });
 });
+
+describe("ModelManagerScreen type-grouped layout", () => {
+  let container;
+  let root;
+  let ModelManagerScreen;
+  let AppContext;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.__TAURI__ = { core: { invoke: vi.fn(async () => null) } };
+    vi.resetModules();
+    ({ AppContext } = await import("../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render({ models = [], loras = [] } = {}) {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras,
+      models,
+      presets: [],
+      jobAction: () => {},
+      setActiveView: () => {},
+      deleteLora: () => {},
+      deleteModel: () => {},
+      createModelDownloadJob: () => {},
+      createModelConvertJob: () => {},
+      createLoraImportJob: () => {},
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const MODELS = [
+    { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image", "style_variations"], installState: "missing" },
+    { id: "wan_t2v", name: "Wan T2V", type: "video", family: "wan-video", capabilities: ["text_to_video"], installState: "missing" },
+    { id: "real_esrgan", name: "Real-ESRGAN", type: "utility", family: "real-esrgan", capabilities: [], installState: "missing" },
+  ];
+
+  function groupHeadings() {
+    return [...container.querySelectorAll(".model-type-group-heading h3")].map((h) => h.textContent);
+  }
+
+  it("renders one section per populated model type, in fixed order", async () => {
+    await render({ models: MODELS });
+    expect(groupHeadings()).toEqual(["Image Models", "Video Models", "Utility Models"]);
+    // Each group holds exactly its own type's card.
+    const groups = container.querySelectorAll(".model-type-group");
+    expect(groups.length).toBe(3);
+    expect(groups[0].querySelectorAll(".model-card").length).toBe(1);
+    expect(groups[0].textContent).toContain("Z-Image-Turbo");
+    expect(groups[1].textContent).toContain("Wan T2V");
+    expect(groups[2].textContent).toContain("Real-ESRGAN");
+  });
+
+  it("omits a type section when no model has that type", async () => {
+    await render({ models: [MODELS[0]] });
+    expect(groupHeadings()).toEqual(["Image Models"]);
+  });
+
+  it("describes each model's capabilities as chips on the card", async () => {
+    await render({ models: [MODELS[0]] });
+    const chips = [...container.querySelectorAll(".model-capabilities .chip")].map((c) => c.textContent);
+    expect(chips).toEqual(["Text to Image", "Style Variations"]);
+  });
+
+  it("groups LoRAs by family with a heading per family", async () => {
+    await render({
+      models: MODELS,
+      loras: [
+        { id: "a", name: "Flux A", family: "flux", installState: "installed" },
+        { id: "b", name: "Flux B", family: "flux", installState: "installed" },
+        { id: "c", name: "Wan C", family: "wan-video", installState: "installed" },
+      ],
+    });
+    const families = [...container.querySelectorAll(".lora-family-group-heading h3")].map((h) => h.textContent);
+    expect(families).toEqual(["flux", "wan-video"]);
+    const groups = container.querySelectorAll(".lora-family-group");
+    expect(groups[0].querySelectorAll(".lora-row").length).toBe(2);
+    expect(groups[1].querySelectorAll(".lora-row").length).toBe(1);
+  });
+
+  it("buckets family-less LoRAs under a trailing 'Other / compatible' group", async () => {
+    await render({
+      models: MODELS,
+      loras: [
+        { id: "a", name: "Flux A", family: "flux", installState: "installed" },
+        { id: "x", name: "Loose", installState: "installed" },
+      ],
+    });
+    const families = [...container.querySelectorAll(".lora-family-group-heading h3")].map((h) => h.textContent);
+    expect(families).toEqual(["flux", "Other / compatible"]);
+  });
+});
