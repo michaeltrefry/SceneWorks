@@ -18,6 +18,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             setup::start_setup,
             settings::get_app_settings,
+            settings::save_app_theme,
             settings::get_storage_setup,
             settings::save_storage_setup,
             settings::complete_setup,

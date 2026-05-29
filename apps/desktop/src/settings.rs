@@ -176,6 +176,12 @@ pub struct AppSettings {
     /// host/label/scheme so the UI can enumerate them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<CredentialMeta>,
+    /// Last-used UI theme (`"light"` or `"dark"`). Persisted here because the
+    /// desktop webview's `localStorage` is keyed to the API's per-launch random
+    /// port and so can't be relied on across runs (same reason as the wizard
+    /// state). `None` until the user first toggles the theme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
 }
 
 fn settings_path() -> PathBuf {
@@ -317,6 +323,29 @@ pub fn save_storage_setup(data_dir: String, hf_home: String) -> Result<AppSettin
 pub fn complete_setup() -> Result<(), String> {
     let mut settings = load_settings();
     settings.setup_completed = true;
+    save_settings(&settings)
+}
+
+/// The valid stored theme for `input`, or `None` if it isn't a theme we
+/// recognize (so a stray value can't wedge the persisted setting).
+fn normalize_theme(input: &str) -> Option<String> {
+    match input.trim() {
+        "light" => Some("light".to_owned()),
+        "dark" => Some("dark".to_owned()),
+        _ => None,
+    }
+}
+
+/// Persist the last-used UI theme so the desktop shell restores it on the next
+/// launch (the webview's `localStorage` is unreliable across runs — see the
+/// wizard-state commands). Unrecognized values are ignored.
+#[tauri::command]
+pub fn save_app_theme(theme: String) -> Result<(), String> {
+    let Some(theme) = normalize_theme(&theme) else {
+        return Ok(());
+    };
+    let mut settings = load_settings();
+    settings.theme = Some(theme);
     save_settings(&settings)
 }
 
@@ -599,6 +628,14 @@ mod tests {
         assert!(settings.credentials.is_empty());
         // Removing a host that isn't recorded is a no-op.
         assert!(!remove_credential_meta(&mut settings, HF_HOST));
+    }
+
+    #[test]
+    fn normalize_theme_accepts_only_known_themes() {
+        assert_eq!(normalize_theme(" light "), Some("light".to_owned()));
+        assert_eq!(normalize_theme("dark"), Some("dark".to_owned()));
+        assert_eq!(normalize_theme("blue"), None);
+        assert_eq!(normalize_theme(""), None);
     }
 
     #[test]
