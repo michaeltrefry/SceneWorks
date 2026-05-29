@@ -746,26 +746,40 @@ def build_peft_network_config(peft: Any, config: TrainingRunConfig) -> Any:
 
 
 def write_lokr_adapter(
-    state_dict: dict[str, Any], output_dir: str, file_name: str, *, decompose_factor: int
+    state_dict: dict[str, Any],
+    output_dir: str,
+    file_name: str,
+    *,
+    rank: int,
+    alpha: int,
+    decompose_factor: int,
+    target_modules: Any,
 ) -> str:
-    """Write a LoKr adapter to safetensors with routing metadata.
+    """Write a LoKr adapter to safetensors with routing + reconstruction metadata.
 
     diffusers' ``save_lora_weights``/``load_lora_weights`` only understand LoRA
     (``lora_A``/``lora_B``) keys — LoKr emits ``lokr_w1``/``lokr_w2``/``lokr_t2``,
-    so the trainer serializes the raw ``get_peft_model_state_dict`` directly and
-    stamps ``networkType``/``decomposeFactor`` into the file metadata. The
-    inference loader (epic 2193) reads that metadata to route through PEFT
-    injection instead of ``load_lora_weights``."""
+    so the trainer serializes the raw ``get_peft_model_state_dict`` directly. The
+    file header carries everything the inference loader (epic 2193) needs to
+    rebuild the matching ``peft.LoKrConfig`` and inject it (``load_lora_weights``
+    cannot consume LoKr): ``networkType`` to route, plus ``rank``/``alpha``/
+    ``decomposeFactor``/``targetModules`` to reconstruct the network. safetensors
+    metadata is ``str``→``str``, so ints are stringified and the module list is
+    JSON-encoded."""
 
     from safetensors.torch import save_file
 
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, file_name)
     tensors = {key: value.detach().cpu().contiguous() for key, value in state_dict.items()}
+    modules = list(target_modules) if isinstance(target_modules, (list, tuple)) else target_modules
     metadata = {
         "format": "pt",
         "networkType": "lokr",
+        "rank": str(int(rank)),
+        "alpha": str(int(alpha)),
         "decomposeFactor": str(int(decompose_factor)),
+        "targetModules": json.dumps(modules),
     }
     save_file(tensors, path, metadata=metadata)
     return path
@@ -1062,7 +1076,14 @@ class _ZImageLoraBackend:
 
         progress("loading_model", "loading_model", 0.16, "Attaching LoRA adapter to the transformer.")
         self._network_type = config.network_type
-        self._decompose_factor = config.decompose_factor
+        # Stashed for the save path: everything write_lokr_adapter needs to stamp
+        # into the file so inference can rebuild the matching LoKrConfig.
+        self._lokr_save_kwargs = {
+            "rank": config.rank,
+            "alpha": config.alpha,
+            "decompose_factor": config.decompose_factor,
+            "target_modules": config.lora_target_modules,
+        }
         lora_config = build_peft_network_config(peft, config)
         transformer.add_adapter(lora_config)
         self._activate_lora_adapter(transformer)
@@ -1437,7 +1458,7 @@ class _ZImageLoraBackend:
                 lora_state_dict,
                 output_dir,
                 file_name,
-                decompose_factor=getattr(self, "_decompose_factor", -1),
+                **getattr(self, "_lokr_save_kwargs", {}),
             )
         else:
             type(self._pipeline).save_lora_weights(
@@ -1598,7 +1619,14 @@ class _SdxlLoraBackend:
 
         progress("loading_model", "loading_model", 0.16, "Attaching LoRA adapter to the U-Net.")
         self._network_type = config.network_type
-        self._decompose_factor = config.decompose_factor
+        # Stashed for the save path: everything write_lokr_adapter needs to stamp
+        # into the file so inference can rebuild the matching LoKrConfig.
+        self._lokr_save_kwargs = {
+            "rank": config.rank,
+            "alpha": config.alpha,
+            "decompose_factor": config.decompose_factor,
+            "target_modules": config.lora_target_modules,
+        }
         lora_config = build_peft_network_config(peft, config)
         unet.add_adapter(lora_config)
         self._activate_lora_adapter(unet)
@@ -1908,7 +1936,7 @@ class _SdxlLoraBackend:
                 lora_state_dict,
                 output_dir,
                 file_name,
-                decompose_factor=getattr(self, "_decompose_factor", -1),
+                **getattr(self, "_lokr_save_kwargs", {}),
             )
         else:
             type(self._pipeline).save_lora_weights(

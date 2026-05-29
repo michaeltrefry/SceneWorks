@@ -43,6 +43,7 @@ from .lora_adapters import (
     apply_loras_to_pipeline,
     normalize_lora_specs,
     reject_loras_if_unsupported,
+    reject_lokr_loras,
     validate_lora_compatibility,
 )
 from .settings import WorkerSettings
@@ -2400,6 +2401,9 @@ class MlxFluxAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
+        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
+        # clearly rather than silently ignoring the adapter (epic 2193).
+        reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
             raise RuntimeError(
@@ -2717,6 +2721,9 @@ class MlxQwenAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
+        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
+        # clearly rather than silently ignoring the adapter (epic 2193).
+        reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
             raise RuntimeError(
@@ -3010,6 +3017,9 @@ class MlxZImageAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
+        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
+        # clearly rather than silently ignoring the adapter (epic 2193).
+        reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
             raise RuntimeError(
@@ -3322,6 +3332,9 @@ class MlxSdxlAdapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
+        # The MLX backend can't apply LoKr (its merge math is LoRA-only); the SDXL
+        # family can produce LoKr adapters, so reject them clearly here (epic 2193).
+        reject_lokr_loras(lora_specs, self.id)
 
         total = request.count
         steps = self._num_inference_steps(request, model_target)
@@ -3614,6 +3627,9 @@ class MlxFlux2Adapter:
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
         )
         lora_specs = normalize_lora_specs(request.loras)
+        # The MLX backend can't apply LoKr (its merge math is LoRA-only); reject
+        # clearly rather than silently ignoring the adapter (epic 2193).
+        reject_lokr_loras(lora_specs, self.id)
 
         if not self._sidecar_available():
             raise RuntimeError(

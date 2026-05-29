@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import importlib
 import json
 import re
 from pathlib import Path
@@ -223,6 +224,97 @@ def wan_moe_low_noise_sibling(primary: Path) -> str | None:
     return str(sibling) if sibling.is_file() else None
 
 
+# --------------------------------------------------------------------------- #
+# LoKr (LyCORIS Kronecker) support (epic 2193).
+#
+# diffusers' ``load_lora_weights`` only understands LoRA-format keys, so a LoKr
+# adapter (``lokr_w1``/``lokr_w2``) must be applied by rebuilding its
+# ``peft.LoKrConfig`` from the safetensors header and injecting it into the
+# pipeline's denoiser module. The trainer (epic 2193 / write_lokr_adapter) stamps
+# everything needed: ``networkType`` to route, plus ``rank``/``alpha``/
+# ``decomposeFactor``/``targetModules`` to reconstruct the network.
+# --------------------------------------------------------------------------- #
+
+
+def read_adapter_metadata(path: str | Path) -> dict[str, str]:
+    """Best-effort read of an adapter's safetensors header metadata."""
+
+    try:
+        from safetensors import safe_open
+
+        with safe_open(str(path), framework="pt") as handle:
+            return dict(handle.metadata() or {})
+    except Exception:
+        return {}
+
+
+def adapter_network_type(path: str | Path) -> str:
+    """``"lokr"`` for a LoKr adapter, else ``"lora"`` (the default for every
+    adapter without explicit ``networkType`` metadata)."""
+
+    return (read_adapter_metadata(path).get("networkType") or "lora").strip().lower()
+
+
+def reject_lokr_loras(specs: list[LoraSpec], adapter_id: str) -> None:
+    """Guard for backends that cannot apply LoKr (e.g. MLX, whose merge math is
+    LoRA-only). Raises a clear error rather than silently mis-applying."""
+
+    for spec in specs:
+        if adapter_network_type(spec.path) == "lokr":
+            raise RuntimeError(
+                f"{adapter_id} cannot apply the LoKr adapter '{spec.id}'. LoKr "
+                "(LyCORIS Kronecker) adapters require the torch generation backend; "
+                "this backend does not support them yet (epic 2193)."
+            )
+
+
+def _denoiser_module(pipe: Any) -> Any:
+    """The pipeline submodule LoKr injects into — the UNet or the DiT transformer."""
+
+    return getattr(pipe, "unet", None) or getattr(pipe, "transformer", None)
+
+
+def inject_lokr_adapter(pipe: Any, spec: LoraSpec, *, adapter_id: str) -> None:
+    """Rebuild ``spec``'s ``LoKrConfig`` from its file metadata and inject it into
+    the denoiser, then load the trained weights — the LoKr equivalent of
+    ``pipe.load_lora_weights`` (which cannot consume LoKr keys)."""
+
+    module = _denoiser_module(pipe)
+    if module is None:
+        raise RuntimeError(
+            f"{adapter_id} cannot apply the LoKr adapter '{spec.id}': the pipeline "
+            "exposes no unet/transformer module to inject into."
+        )
+    try:
+        peft = importlib.import_module("peft")
+        from safetensors.torch import load_file
+    except Exception as exc:
+        raise RuntimeError(peft_backend_message(adapter_id, [spec])) from exc
+
+    meta = read_adapter_metadata(spec.path)
+    rank = int(meta.get("rank") or 16)
+    target_modules = json.loads(meta.get("targetModules") or "null")
+    config = peft.LoKrConfig(
+        r=rank,
+        alpha=int(meta.get("alpha") or rank),
+        decompose_factor=int(meta.get("decomposeFactor") or -1),
+        target_modules=target_modules,
+        init_weights=True,
+    )
+    peft.inject_adapter_in_model(config, module, adapter_name=spec.adapter_name)
+
+    state = load_file(str(spec.path))
+    reference = next(module.parameters(), None)
+    if reference is not None:
+        state = {
+            key: value.to(device=reference.device, dtype=reference.dtype)
+            for key, value in state.items()
+        }
+    from peft import set_peft_model_state_dict
+
+    set_peft_model_state_dict(module, state, adapter_name=spec.adapter_name)
+
+
 def apply_loras_to_pipeline(
     pipe: Any,
     loras: list[dict[str, Any]],
@@ -262,6 +354,11 @@ def apply_loras_to_pipeline(
             raise RuntimeError(f"{adapter_id} cannot clear previously loaded LoRAs between jobs.")
 
     for spec in specs_to_load:
+        # LoKr can't load via load_lora_weights (its lokr_* keys are unrecognized);
+        # rebuild the LoKrConfig from file metadata and inject it instead (epic 2193).
+        if adapter_network_type(spec.path) == "lokr":
+            inject_lokr_adapter(pipe, spec, adapter_id=adapter_id)
+            continue
         try:
             pipe.load_lora_weights(spec.path, adapter_name=spec.adapter_name)
             # Wan A14B MoE: also load the low-noise half into the second expert.
@@ -281,7 +378,14 @@ def apply_loras_to_pipeline(
 
     names = tuple(spec.adapter_name for spec in specs)
     weights = [spec.weight for spec in specs]
-    if hasattr(pipe, "set_adapters"):
+    # Injected LoKr adapters live on the denoiser module but aren't tracked by the
+    # pipeline's lora bookkeeping, so pipe.set_adapters may not see them. When any
+    # adapter is LoKr, set weights on the module (which knows every PEFT adapter).
+    if any(adapter_network_type(spec.path) == "lokr" for spec in specs):
+        set_adapter_weights_on_module(
+            _denoiser_module(pipe), names, weights, adapter_id=adapter_id, specs=specs
+        )
+    elif hasattr(pipe, "set_adapters"):
         set_lora_adapters(pipe, names, weights, adapter_id=adapter_id, specs=specs)
     elif len(names) > 1 or any(weight != 1.0 for weight in weights):
         raise RuntimeError(f"{adapter_id} loaded LoRAs but cannot apply per-LoRA weights.")
@@ -291,13 +395,43 @@ def apply_loras_to_pipeline(
 def clear_loras(pipe: Any, adapter_names: tuple[str, ...], *, adapter_id: str) -> None:
     if not adapter_names:
         return
-    if hasattr(pipe, "unload_lora_weights"):
-        pipe.unload_lora_weights()
-        return
+    # Prefer deleting by name: it removes injected LoKr adapters too, which
+    # unload_lora_weights (LoRA-only) leaves behind and would leak into the next
+    # job (epic 2193). Fall back to unload for pipelines without delete_adapters.
     if hasattr(pipe, "delete_adapters"):
         pipe.delete_adapters(list(adapter_names))
         return
+    if hasattr(pipe, "unload_lora_weights"):
+        pipe.unload_lora_weights()
+        return
     raise RuntimeError(f"{adapter_id} cannot clear previously loaded LoRAs between jobs.")
+
+
+def set_adapter_weights_on_module(
+    module: Any,
+    names: tuple[str, ...],
+    weights: list[float],
+    *,
+    adapter_id: str,
+    specs: list[LoraSpec],
+) -> None:
+    """Activate adapters and apply per-adapter weights on the denoiser module
+    itself — used when LoKr adapters are present (see ``apply_loras_to_pipeline``)."""
+
+    if module is None or not hasattr(module, "set_adapters"):
+        # A single adapter at full weight needs no explicit activation; anything
+        # else genuinely cannot be applied without module-level adapter control.
+        if len(names) > 1 or any(weight != 1.0 for weight in weights):
+            raise RuntimeError(
+                f"{adapter_id} loaded a LoKr adapter but cannot apply per-adapter weights."
+            )
+        return
+    try:
+        module.set_adapters(list(names), weights=list(weights))
+    except Exception as exc:
+        if is_peft_backend_error(exc):
+            raise RuntimeError(peft_backend_message(adapter_id, specs)) from exc
+        raise
 
 
 def lora_path(lora: dict[str, Any]) -> Path | None:
