@@ -131,6 +131,7 @@ function withTrainingDataSetsLibraryContext(p) {
       activeProject: p.activeProject,
       authenticated: p.authenticated,
       assets: p.assets,
+      characters: p.characters,
       gpuOptions: p.gpuOptions,
       jobs: p.jobs,
       setPreviewAsset: p.onPreview ?? (() => {}),
@@ -707,8 +708,18 @@ describe("SceneWorks app shell", () => {
     });
 
     await changeField(field(container, "Dataset name"), "Mira Set");
+    // Add the image via the Asset Library tab of the add dialog.
     await act(async () => {
-      container.querySelector(".training-asset-card input").click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
+    });
+    await act(async () => {
+      container.querySelector(".dataset-add-card").click();
+    });
+    await act(async () => {
+      container.querySelector(".dataset-add-footer button.primary-action").click();
     });
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
@@ -753,7 +764,11 @@ describe("SceneWorks app shell", () => {
 
     const imageFile = new File([new Uint8Array([1, 2, 3])], "mira.png", { type: "image/png" });
     const captionFile = new File(["a portrait of mira"], "mira.txt", { type: "text/plain" });
-    const fileInput = container.querySelector(".training-import-button input[type=file]");
+    // Import via the File tab of the add dialog (default tab).
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+    });
+    const fileInput = container.querySelector(".dataset-add-dropzone input[type=file]");
     await act(async () => {
       Object.defineProperty(fileInput, "files", { configurable: true, value: [imageFile, captionFile] });
       fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -764,6 +779,9 @@ describe("SceneWorks app shell", () => {
     expect(uploadDatasetItem).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain("Imported 1 image with 1 caption");
 
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Close").click();
+    });
     await changeField(field(container, "Dataset name"), "Mira Set");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
@@ -818,10 +836,22 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     expect(loadDataset).toHaveBeenCalledWith("dataset-a");
-    expect(container.querySelectorAll(".training-asset-card input")[0].checked).toBe(true);
+    // The editor body shows only the dataset's own member (asset-a), not all assets.
+    expect(container.querySelectorAll(".training-member-card")).toHaveLength(1);
+    expect(container.querySelector(".training-member-grid").textContent).toContain("Mira.png");
 
+    // Add the second asset through the Asset Library tab (current members excluded).
     await act(async () => {
-      container.querySelectorAll(".training-asset-card input")[1].click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
+    });
+    await act(async () => {
+      container.querySelector(".dataset-add-card").click();
+    });
+    await act(async () => {
+      container.querySelector(".dataset-add-footer button.primary-action").click();
     });
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
@@ -838,6 +868,78 @@ describe("SceneWorks app shell", () => {
       }),
     );
     expect(container.textContent).toContain("Dataset changes saved");
+  });
+
+  it("scopes the add dialog: Library excludes Character Studio outputs, Character tab pulls them in (sc-2026)", async () => {
+    const createDataset = vi.fn(async (payload) => ({ id: "dataset-new", name: payload.name, version: 1, items: payload.items }));
+    const assets = [
+      {
+        id: "asset-lib",
+        type: "image",
+        displayName: "Studio render.png",
+        origin: "image_studio",
+        file: { path: "assets/images/studio.png", mimeType: "image/png" },
+      },
+      {
+        id: "asset-char",
+        type: "image",
+        displayName: "Kelsie hero.png",
+        origin: "character_studio",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        file: { path: "assets/images/kelsie.png", mimeType: "image/png" },
+      },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets,
+          characters: [{ id: "char-1", name: "Kelsie" }],
+          createDataset,
+          datasets: [],
+        }),
+      );
+    });
+
+    await changeField(field(container, "Dataset name"), "Kelsie Set");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+    });
+
+    // Asset Library tab is scoped: the Character Studio output is hidden.
+    await act(async () => {
+      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
+    });
+    const libraryCards = [...container.querySelectorAll(".dataset-add-card")];
+    expect(libraryCards).toHaveLength(1);
+    expect(libraryCards[0].textContent).toContain("Studio render.png");
+
+    // Character tab intentionally surfaces the character's image (its character_studio output).
+    await act(async () => {
+      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Character").click();
+    });
+    const characterCards = [...container.querySelectorAll(".dataset-add-card")];
+    expect(characterCards).toHaveLength(1);
+    expect(characterCards[0].textContent).toContain("Kelsie hero.png");
+    await act(async () => {
+      characterCards[0].click();
+    });
+    await act(async () => {
+      container.querySelector(".dataset-add-footer button.primary-action").click();
+    });
+
+    // The editor body is the member grid only — no all-asset picker remains.
+    expect(container.querySelector(".training-asset-picker")).toBeNull();
+    expect(container.querySelector(".training-member-grid").textContent).toContain("Kelsie hero.png");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
+    });
+    expect(createDataset).toHaveBeenCalledWith(
+      expect.objectContaining({ items: [expect.objectContaining({ assetId: "asset-char" })] }),
+    );
   });
 
   it("lets users remove unavailable dataset assets before saving", async () => {

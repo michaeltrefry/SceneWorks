@@ -1670,8 +1670,7 @@ label {
 .training-step-block,
 .training-dataset-list-panel,
 .training-dataset-editor,
-.training-advanced-panel,
-.training-asset-card {
+.training-advanced-panel {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface-2);
@@ -1891,10 +1890,6 @@ label {
   color: var(--text-muted);
 }
 
-.training-import-button {
-  min-height: 40px;
-}
-
 .training-health-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1976,63 +1971,6 @@ label {
 .training-unavailable-item span {
   color: var(--text-muted);
   font-size: 12px;
-}
-
-.training-asset-picker {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 10px;
-}
-
-.training-asset-card {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  padding: 8px;
-  background: var(--surface);
-}
-
-.training-asset-card.selected {
-  border-color: color-mix(in oklch, var(--accent) 58%, var(--border));
-  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent) 34%, transparent);
-}
-
-.training-asset-card.disabled {
-  border-color: color-mix(in oklch, var(--danger) 42%, var(--border));
-  background: color-mix(in oklch, var(--danger) 7%, var(--surface));
-}
-
-.training-asset-card > button {
-  overflow: hidden;
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-}
-
-.training-asset-card img,
-.training-asset-card video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.training-asset-card label {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  min-height: 24px;
-  font-size: 12px;
-}
-
-.training-asset-card label span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .training-asset-badge {
@@ -5591,6 +5529,181 @@ label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Dataset add dialog (sc-2026): three-tab add-to-dataset modal */
+.dataset-add-modal {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 12px;
+  width: min(960px, 96vw);
+  max-height: 92vh;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.dataset-add-head,
+.dataset-add-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dataset-add-head h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.dataset-add-footer {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.dataset-add-dropzone {
+  display: grid;
+  gap: 12px;
+  place-items: center;
+  padding: 40px 16px;
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.dataset-add-dropzone.active {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 8%, transparent);
+}
+
+.dataset-add-character {
+  display: grid;
+  gap: 12px;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.dataset-add-character > label {
+  display: grid;
+  gap: 4px;
+  max-width: 320px;
+}
+
+.dataset-add-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.dataset-add-card {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--r-md);
+  color: var(--text);
+  padding: 6px;
+  text-align: left;
+  cursor: pointer;
+  transition: transform var(--t-fast), border-color var(--t-fast), box-shadow var(--t-fast);
+}
+
+.dataset-add-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-strong);
+}
+
+.dataset-add-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+.dataset-add-card img,
+.dataset-add-card video {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  background: var(--bg-2);
+  border-radius: var(--r-sm);
+}
+
+.dataset-add-card span {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Dataset member grid (sc-2026): the editor body shows only members + captions */
+.training-member-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.training-member-card {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.training-member-card.disabled {
+  opacity: 0.6;
+}
+
+.training-member-thumb {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.training-member-thumb img,
+.training-member-thumb video {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+
+.training-member-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.training-member-meta strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-member-caption {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-member-caption.muted {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 /* Asset preview chip (in pickers) */

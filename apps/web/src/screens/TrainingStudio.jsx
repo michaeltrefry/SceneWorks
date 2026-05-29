@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { API_BASE_URL } from "../api.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
+import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
@@ -835,6 +836,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     activeProject,
     authenticated = true,
     assets = [],
+    characters = [],
     gpuOptions = defaultGpuOptions,
     jobs = [],
     setPreviewAsset,
@@ -880,6 +882,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [draftName, setDraftName] = useState("");
   const [busyDatasetId, setBusyDatasetId] = useState("");
   const [importingAssets, setImportingAssets] = useState(false);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
@@ -935,6 +938,24 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => selectedAssetIds.filter((assetId) => !assetsById.has(assetId)),
     [assetsById, selectedAssetIds],
   );
+  // Members shown in the editor body: the dataset's own items (available
+  // assets), in selection order. Captions come from the saved dataset items or
+  // freshly imported .txt sidecars, keyed by selection id.
+  const memberAssets = useMemo(
+    () => selectedAssetIds.map((id) => assetsById.get(id)).filter(Boolean),
+    [assetsById, selectedAssetIds],
+  );
+  const memberCaptionById = useMemo(() => {
+    const map = new Map(
+      (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), captionText(item)]),
+    );
+    for (const [assetId, caption] of Object.entries(importedCaptions)) {
+      if (caption?.text) {
+        map.set(assetId, caption.text);
+      }
+    }
+    return map;
+  }, [activeDataset, importedCaptions]);
   const health = useMemo(
     () => datasetHealth({ activeDataset, imageAssets, selectedAssetIds }),
     [activeDataset, imageAssets, selectedAssetIds],
@@ -1161,13 +1182,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
-  function toggleAsset(assetId) {
-    setDatasetMessage("");
-    setSelectedAssetIds((current) =>
-      current.includes(assetId) ? current.filter((id) => id !== assetId) : [...current, assetId],
-    );
-  }
-
+  // Drops a member (or an unavailable/orphaned id) from the dataset selection.
   function removeUnavailableAsset(assetId) {
     setDatasetMessage("");
     setSelectedAssetIds((current) => current.filter((id) => id !== assetId));
@@ -1292,8 +1307,19 @@ export function TrainingStudio({ mode = "training" } = {}) {
     );
   }
 
-  async function handleImport(event) {
-    const files = Array.from(event.target.files ?? []);
+  function addAssets(ids) {
+    const additions = (ids ?? []).filter(Boolean);
+    if (!additions.length) {
+      return;
+    }
+    setDatasetMessage("");
+    setSelectedAssetIds((current) => Array.from(new Set([...current, ...additions])));
+  }
+
+  // Accepts a FileList from either the dialog's file input or a drag/drop, so
+  // both entry points share the import + caption-pairing path.
+  async function handleImport(fileList) {
+    const files = Array.from(fileList ?? []);
     if (!files.length) {
       return;
     }
@@ -1350,7 +1376,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDatasetError(err.message);
     } finally {
       setImportingAssets(false);
-      event.target.value = "";
     }
   }
 
@@ -1605,10 +1630,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                             <option value="image">Image</option>
                           </select>
                         </label>
-                        <label className="file-upload-button training-import-button">
-                          <input accept="image/*,.txt,text/plain" disabled={importingAssets} multiple onChange={handleImport} type="file" />
-                          {importingAssets ? "Importing" : "Import images & captions"}
-                        </label>
+                        <button className="primary-action training-add-images" onClick={() => setAddDialogOpen(true)} type="button">
+                          <Icon.Plus size={14} />
+                          Add images
+                        </button>
                       </div>
                       <DatasetHealth health={health} />
                       <div className="training-validity">
@@ -1630,37 +1655,41 @@ export function TrainingStudio({ mode = "training" } = {}) {
                           ))}
                         </div>
                       ) : null}
-                      <div className="training-asset-picker" aria-label="Training dataset image assets">
-                        {imageAssets.length ? (
-                          imageAssets.map((asset) => {
-                            const selected = selectedAssetIds.includes(asset.id);
+                      <div className="training-member-grid" aria-label="Dataset images">
+                        {memberAssets.length ? (
+                          memberAssets.map((asset) => {
                             const disabled = asset.status?.rejected || asset.status?.trashed;
+                            const caption = memberCaptionById.get(asset.id);
                             return (
                               <article
-                                className={[
-                                  "training-asset-card",
-                                  selected ? "selected" : "",
-                                  disabled ? "disabled" : "",
-                                ]
-                                  .filter(Boolean)
-                                  .join(" ")}
+                                className={["training-member-card", disabled ? "disabled" : ""].filter(Boolean).join(" ")}
                                 key={asset.id}
                               >
-                                <button onClick={() => onPreview(asset)} type="button">
+                                <button className="training-member-thumb" onClick={() => onPreview(asset)} type="button">
                                   <AssetThumbnail asset={asset} />
                                 </button>
-                                <label>
-                                  <input checked={selected} onChange={() => toggleAsset(asset.id)} type="checkbox" />
-                                  <span>{asset.displayName ?? imageAssetName(asset)}</span>
-                                </label>
-                                {disabled ? (
-                                  <span className="training-asset-badge">{asset.status?.trashed ? "Trashed" : "Rejected"}</span>
-                                ) : null}
+                                <div className="training-member-meta">
+                                  <strong>{asset.displayName ?? imageAssetName(asset)}</strong>
+                                  <span className={caption ? "training-member-caption" : "training-member-caption muted"}>
+                                    {caption || "Needs caption"}
+                                  </span>
+                                  {disabled ? (
+                                    <span className="training-asset-badge">{asset.status?.trashed ? "Trashed" : "Rejected"}</span>
+                                  ) : null}
+                                </div>
+                                <button
+                                  aria-label={`Remove ${asset.displayName ?? imageAssetName(asset)}`}
+                                  className="secondary-action training-member-remove"
+                                  onClick={() => removeUnavailableAsset(asset.id)}
+                                  type="button"
+                                >
+                                  Remove
+                                </button>
                               </article>
                             );
                           })
                         ) : (
-                          <div className="empty-panel compact-panel">Import or create project images before building a dataset</div>
+                          <div className="empty-panel compact-panel">No images yet — use “Add images” to build this dataset.</div>
                         )}
                       </div>
                       <div className="training-dataset-actions">
@@ -1669,6 +1698,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
                         </button>
                         <span>{dirty ? "Unsaved changes" : activeDataset ? `Version ${activeDataset.version}` : "Draft"}</span>
                       </div>
+                      {addDialogOpen ? (
+                        <DatasetAddDialog
+                          assets={imageAssets}
+                          characters={characters}
+                          importing={importingAssets}
+                          memberIds={selectedAssetIds}
+                          onAdd={addAssets}
+                          onClose={() => setAddDialogOpen(false)}
+                          onImport={handleImport}
+                        />
+                      ) : null}
                     </div>
                   </div>
                 </>
