@@ -3117,21 +3117,34 @@ class MlxZImageAdapter:
         # Strict pose tier (sc-2257): advanced.poses is a list of {id, keypoints}.
         # Each pose renders to an OpenPose skeleton that conditions the ported
         # Z-Image Fun-Controlnet-Union branch (true pose lock, not best-effort).
-        # No reference is used — Z-Image has no IP-Adapter, so identity comes from
-        # the prompt; the skeleton supplies the pose.
+        #
+        # Identity (sc-2328): when a pose request also carries a character reference,
+        # we feed it as the img2img INIT image so the skeleton drives the pose WHILE
+        # the reference seeds identity, in one pass. Z-Image has no IP-Adapter, so the
+        # img2img init is the only identity mechanism; without it identity comes from
+        # the prompt alone (the original pose-only sc-2257 behaviour). Resolved below.
         raw_poses = request.advanced.get("poses")
         pose_entries = [p for p in raw_poses if isinstance(p, dict)] if isinstance(raw_poses, list) else []
         pose_set = len(pose_entries) > 0
         if request.reference_asset_id and not pose_set:
-            # ZImageDiffusersAdapter itself has no reference path (sc-2005
-            # cleanup); raising here keeps the error surface honest if a
-            # caller manually targets MlxZImageAdapter with one. Pose requests
-            # may carry a character reference we can't consume — ignore it
-            # rather than reject (the skeleton drives the pose).
+            # A bare reference (no poses) has no home on the MLX backend: there is no
+            # IP-Adapter, and reference-only img2img with no skeleton is the best-effort
+            # tier we deliberately did NOT build (superseded by this unified path:
+            # sc-2263 → sc-2328). Reject clearly rather than silently ignore.
             raise RuntimeError(
                 f"{request.model} reference-image generation is not supported "
                 "on the MLX backend (Z-Image has no IP-Adapter weights upstream)."
             )
+
+        # Resolve the character reference (if present) to a local path for the
+        # img2img identity init (sc-2328). One reference shared across the whole pose
+        # set — identity is constant; only the per-pose skeleton changes. None →
+        # pose-only generation (identity from the prompt), the prior sc-2257 path.
+        reference_init_path: str | None = None
+        reference_strength: float | None = None
+        if pose_set and request.reference_asset_id:
+            reference_init_path = str(find_asset_media_path(project_path, request.reference_asset_id))
+            reference_strength = self._reference_strength(request)
 
         validate_lora_compatibility(
             request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
@@ -3245,6 +3258,10 @@ class MlxZImageAdapter:
                     # lock strength. None → the plain text-to-image path.
                     "controlImagePaths": control_image_paths,
                     "controlScale": control_scale,
+                    # Identity img2img-init shared across the pose set (sc-2328);
+                    # None → pose-only (identity from the prompt).
+                    "imagePath": reference_init_path,
+                    "imageStrength": reference_strength,
                 },
                 progress=progress,
                 cancel_requested=cancel_requested,
@@ -3296,6 +3313,21 @@ class MlxZImageAdapter:
         except (TypeError, ValueError):
             return 0.9
         return max(0.0, min(2.0, value))
+
+    def _reference_strength(self, request: ImageRequest) -> float:
+        """img2img-init strength for the unified strict pose tier (sc-2328): how much
+        of the character reference to keep as the denoising init. mflux's image_strength
+        is INVERTED from diffusers — higher keeps MORE of the init (stronger identity,
+        but the skeleton control gets fewer denoising steps to repose), lower denoises
+        more (freer repose, identity drifts toward the prompt). Default 0.5 is a neutral
+        starting point pending the real-Mac sweep (sc-2328 E2E). Overridable via
+        advanced.referenceStrength; clamped to [0.05, 1.0] so a present reference always
+        seeds identity (strength 0 disables img2img entirely in mflux)."""
+        try:
+            value = float(request.advanced.get("referenceStrength", 0.5))
+        except (TypeError, ValueError):
+            return 0.5
+        return max(0.05, min(1.0, value))
 
     def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
         # Z-Image-Turbo is guidance-distilled; mflux accepts guidance=None to
@@ -7064,9 +7096,14 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
       2. Platform == darwin.
       3. Model in MlxZImageAdapter._supported_models.
       4. mode != "edit_image".
-      5. No referenceAssetId (Z-Image has no reference path on either
-         backend; the flag is checked symmetrically with the other mflux
-         families).
+      5. No referenceAssetId — UNLESS the request carries advanced.poses. A
+         plain reference (no poses) has no Z-Image path on either backend, so it
+         falls to torch; but a POSE request must route here regardless of a
+         reference, because the strict Fun-Controlnet-Union pose tier (sc-2257)
+         exists ONLY on MLX (the torch ZImageDiffusersAdapter has no pose
+         ControlNet and would honour count while silently ignoring advanced.poses
+         → "1 of 1" for N poses). MLX consumes the reference as an identity
+         img2img-init (sc-2328) or ignores it (sc-2257).
       6. Sidecar venv exists.
     """
     if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
@@ -7078,7 +7115,14 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
         return False
     if payload.get("mode") == "edit_image":
         return False
-    if payload.get("referenceAssetId"):
+    # A pose request belongs on MLX even WITH a reference: the strict pose ControlNet
+    # (sc-2257) lives only here, so diverting reference+pose jobs to torch makes torch
+    # honour count (1) while dropping advanced.poses → "1 of 1" for N poses. The MLX
+    # strict pose path consumes the reference as an identity img2img-init (sc-2328) or
+    # ignores it (sc-2257). Only a plain reference (no poses) falls back to torch.
+    advanced = payload.get("advanced")
+    has_poses = isinstance(advanced, dict) and bool(advanced.get("poses"))
+    if payload.get("referenceAssetId") and not has_poses:
         return False
     # peft-trained LoKr runs natively on MLX for Z-Image (sc-2216: mflux LoKrLoader),
     # so a LoKr job STAYS on the MLX path (Michael's preference) — no torch fallback.

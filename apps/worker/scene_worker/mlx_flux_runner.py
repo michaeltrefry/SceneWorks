@@ -168,6 +168,14 @@ def _run_z_image_control(
     control weights at full precision before quantizing the whole transformer, so
     the control branch quantizes from its real weights (Q8 ≈ halves transformer
     memory vs bf16). Both validated on M5 Max (sc-2257).
+
+    Identity (sc-2328): when the spec carries ``imagePath`` (a character reference),
+    it is forwarded to ``generate_image`` as the img2img *init* image (shared across
+    every pose — identity is constant, only the per-iteration skeleton changes). The
+    init seeds identity while the skeleton control_context still drives the pose, in
+    one pass — Z-Image has no IP-Adapter, so this img2img init is how identity is
+    held. ``imageStrength`` is mflux's INVERTED strength (higher = more init kept =
+    stronger identity, less reposing room); the adapter tunes its default.
     """
     if model_id != "z_image_turbo":
         raise RuntimeError(
@@ -178,6 +186,13 @@ def _run_z_image_control(
             f"mlx_flux_runner: controlImagePaths length ({len(control_image_paths)}) "
             f"must equal seeds list length ({len(seeds)})."
         )
+
+    # Identity init (sc-2328): a single character reference shared across the whole
+    # pose set. None → pose-only (the original sc-2257 behaviour, identity from the
+    # prompt). image_strength is forwarded verbatim (mflux clamps to [0, 1]).
+    image_init_path = (spec.get("imagePath") or None) and str(spec["imagePath"])
+    raw_strength = spec.get("imageStrength")
+    image_strength = float(raw_strength) if raw_strength is not None else None
 
     from huggingface_hub import hf_hub_download
     from mflux.models.common.config.model_config import ModelConfig
@@ -205,7 +220,8 @@ def _run_z_image_control(
 
     _log(
         f"loading ZImageControl model={model_id} controlScale={control_scale} "
-        f"loras={len(lora_paths)} steps={steps} quantize={quantize}"
+        f"loras={len(lora_paths)} steps={steps} quantize={quantize} "
+        f"identityInit={'yes' if image_init_path else 'no'} imageStrength={image_strength}"
     )
     model = ZImageControl(
         control_weights_path=cn_path,
@@ -229,6 +245,9 @@ def _run_z_image_control(
             width=width,
             guidance=guidance,
             negative_prompt=negative_prompt,
+            # Identity init shared across the pose set (sc-2328); None → pose-only.
+            image_path=image_init_path,
+            image_strength=image_strength,
         )
         path = out_dir / f"mlx_z_image_control_{index:04d}.png"
         result.image.save(path, "PNG")

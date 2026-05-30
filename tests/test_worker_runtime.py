@@ -2456,6 +2456,30 @@ def test_should_route_z_image_to_mlx_keeps_lokr_on_mlx(monkeypatch):
     assert _should_route_z_image_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lycoris"}]}) is False
 
 
+def test_should_route_z_image_pose_with_reference_to_mlx(monkeypatch):
+    """sc-2328 regression: a strict pose request carrying a reference MUST route to MLX.
+    The strict Fun-Controlnet-Union pose tier lives only on the MLX backend; the torch
+    adapter has no pose ControlNet, so diverting reference+pose jobs to torch (the old
+    `referenceAssetId -> torch` gate) made it honour count=1 while dropping the poses
+    → the "1 of 1 for N poses" bug. A plain reference (no poses) still falls to torch."""
+    from scene_worker.image_adapters import _should_route_z_image_to_mlx
+
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    model = next(iter(MlxZImageAdapter._supported_models))
+
+    poses = [{"id": "sit_01", "keypoints": []}, {"id": "stand_01", "keypoints": []}]
+    # Reference + poses → MLX (strict pose lives there; reference becomes the identity init).
+    assert _should_route_z_image_to_mlx(
+        {"model": model, "referenceAssetId": "asset_kelsie", "advanced": {"poses": poses}}
+    ) is True
+    # Reference, no poses → still torch (no plain-reference Z-Image path on MLX).
+    assert _should_route_z_image_to_mlx({"model": model, "referenceAssetId": "asset_kelsie"}) is False
+    # Poses, no reference → MLX (the original pose-only sc-2257 path).
+    assert _should_route_z_image_to_mlx({"model": model, "advanced": {"poses": poses}}) is True
+
+
 def test_mlx_flux2_kv_allows_no_reference_txt2img(monkeypatch):
     # sc-2173: -kv is no longer reference-gated. Without a reference it falls
     # through to the txt2img path (the runner routes it to Flux2Klein) instead
@@ -2653,6 +2677,179 @@ def test_mlx_z_image_pose_set_builds_control_skeleton_specs(tmp_path, monkeypatc
         assert "pose_skeleton_" in entry and entry.endswith(".png")
     assert spec["controlScale"] == 0.9  # default lock strength (reference default)
     assert captured["raw_settings"].get("poseLibrary") is True
+    # No reference on this job → pose-only (the original sc-2257 behaviour). The
+    # identity img2img-init keys (sc-2328) must be absent so nothing changes.
+    assert spec["imagePath"] is None
+    assert spec["imageStrength"] is None
+
+
+def test_mlx_z_image_pose_set_with_reference_sends_identity_init(tmp_path, monkeypatch):
+    """sc-2328: a strict pose job that ALSO carries a character reference resolves the
+    reference to a local path and sends it as a single shared img2img-init (imagePath)
+    + imageStrength so the skeleton drives the pose while the reference seeds identity,
+    in one pass. The per-pose skeleton control is unchanged from sc-2257."""
+    import numpy as _np
+    from scene_worker import image_adapters as ia
+
+    adapter = ia.MlxZImageAdapter()
+    monkeypatch.setattr(ia.MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    monkeypatch.setattr(
+        ia, "draw_wholebody", lambda w, h, kps, hands=None, face=None, stickwidth=4: _np.zeros((h, w, 3), dtype=_np.uint8)
+    )
+    # Reference resolution goes through the project sidecar/DB; stub it to a known path.
+    ref_path = tmp_path / "kelsie_ref.png"
+    ref_path.write_bytes(b"PNG")
+    monkeypatch.setattr(ia, "find_asset_media_path", lambda project_path, asset_id: ref_path)
+
+    captured: dict = {}
+
+    def fake_run_sidecar(self, *, job_id, work_dir, label, total, spec, progress, cancel_requested):
+        captured["spec"] = spec
+        return [str(work_dir / f"out_{i}.png") for i in range(total)]
+
+    monkeypatch.setattr(ia.MlxZImageAdapter, "_run_sidecar", fake_run_sidecar)
+    monkeypatch.setattr(
+        ia.ImageAssetWriter,
+        "write_incremental_outputs",
+        lambda self, *, image_count, image_at_index, raw_settings, **kwargs: {"images": image_count},
+    )
+
+    kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    job = {
+        "id": "job_z_image_pose_ref",
+        "payload": {
+            "projectId": "p",
+            "mode": "character_image",
+            "model": "z_image_turbo",
+            "prompt": "the character",
+            "count": 1,
+            "width": 32,
+            "height": 32,
+            "referenceAssetId": "asset_kelsie",
+            "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}]},
+        },
+    }
+    adapter.generate(
+        settings=SimpleNamespace(gpu_id="cpu"),
+        job=job,
+        request=image_request_from_job(job),
+        project_path=tmp_path,
+        progress=lambda *a, **k: None,
+        cancel_requested=lambda: False,
+    )
+    spec = captured["spec"]
+    # Skeleton control still per-pose (identity is constant, only the pose changes).
+    assert len(spec["controlImagePaths"]) == 2
+    # Single shared reference init across the whole set + default strength.
+    assert spec["imagePath"] == str(ref_path)
+    assert spec["imageStrength"] == 0.5  # _reference_strength default (sc-2328)
+
+
+def test_mlx_z_image_reference_strength_default_override_and_clamp():
+    """sc-2328: _reference_strength defaults to 0.5, honours advanced.referenceStrength,
+    clamps to [0.05, 1.0] (strength 0 disables img2img in mflux), and is robust to junk."""
+    from scene_worker.image_adapters import MlxZImageAdapter
+
+    adapter = MlxZImageAdapter()
+
+    def req(advanced):
+        return SimpleNamespace(advanced=advanced)
+
+    assert adapter._reference_strength(req({})) == 0.5
+    assert adapter._reference_strength(req({"referenceStrength": 0.8})) == 0.8
+    assert adapter._reference_strength(req({"referenceStrength": 5})) == 1.0  # clamp high
+    assert adapter._reference_strength(req({"referenceStrength": 0})) == 0.05  # clamp low (keep img2img on)
+    assert adapter._reference_strength(req({"referenceStrength": "nope"})) == 0.5  # junk → default
+
+
+def test_run_z_image_control_forwards_identity_init(tmp_path, monkeypatch):
+    """sc-2328: the sidecar runner forwards spec.imagePath/imageStrength into
+    ZImageControl.generate_image as the img2img init, and omits them (None) when the
+    spec has no reference (the original pose-only sc-2257 path)."""
+    import sys
+    from types import ModuleType, SimpleNamespace as NS
+    from unittest import mock
+
+    calls: list[dict] = []
+
+    class _FakeImage:
+        def save(self, path, fmt):  # noqa: D401 - test stub
+            Path(path).write_bytes(b"PNG")
+
+    class _FakeZImageControl:
+        def __init__(self, **kwargs):
+            pass
+
+        def generate_image(self, **kwargs):
+            calls.append(kwargs)
+            return NS(image=_FakeImage())
+
+    class _FakeModelConfig:
+        @staticmethod
+        def z_image_turbo():
+            return object()
+
+    # Register fake mflux + huggingface_hub module chains so the runner's deferred
+    # imports resolve without the (absent) sidecar venv.
+    def _mod(name):
+        m = ModuleType(name)
+        return m
+
+    hf = _mod("huggingface_hub")
+    hf.hf_hub_download = lambda repo_id, filename: str(tmp_path / "cn.safetensors")
+    mc_mod = _mod("mflux.models.common.config.model_config")
+    mc_mod.ModelConfig = _FakeModelConfig
+    zc_mod = _mod("mflux.models.z_image.variants.z_image_control")
+    zc_mod.ZImageControl = _FakeZImageControl
+    fakes = {
+        "huggingface_hub": hf,
+        "mflux": _mod("mflux"),
+        "mflux.models": _mod("mflux.models"),
+        "mflux.models.common": _mod("mflux.models.common"),
+        "mflux.models.common.config": _mod("mflux.models.common.config"),
+        "mflux.models.common.config.model_config": mc_mod,
+        "mflux.models.z_image": _mod("mflux.models.z_image"),
+        "mflux.models.z_image.variants": _mod("mflux.models.z_image.variants"),
+        "mflux.models.z_image.variants.z_image_control": zc_mod,
+    }
+
+    from scene_worker.mlx_flux_runner import _run_z_image_control
+
+    def run(spec_extra):
+        calls.clear()
+        out_dir = tmp_path / "out"
+        out_dir.mkdir(exist_ok=True)
+        spec = {"outDir": str(out_dir), **spec_extra}
+        with mock.patch.dict(sys.modules, fakes):
+            _run_z_image_control(
+                spec=spec,
+                model_id="z_image_turbo",
+                prompt="the character",
+                prompts_override=None,
+                negative_prompt=None,
+                seeds=[7],
+                height=32,
+                width=32,
+                steps=8,
+                guidance=0.0,
+                quantize=8,
+                loras=[],
+                control_image_paths=[str(tmp_path / "skeleton.png")],
+                out_dir=out_dir,
+                result_path=out_dir / "result.json",
+            )
+        return calls[0]
+
+    # With a reference: forwarded as the img2img init.
+    got = run({"controlScale": 0.9, "imagePath": str(tmp_path / "ref.png"), "imageStrength": 0.5})
+    assert got["image_path"] == str(tmp_path / "ref.png")
+    assert got["image_strength"] == 0.5
+    assert got["control_image_path"] == str(tmp_path / "skeleton.png")
+
+    # Without a reference: pose-only, init args are None (unchanged sc-2257 behaviour).
+    got = run({"controlScale": 0.9})
+    assert got["image_path"] is None
+    assert got["image_strength"] is None
 
 
 def test_mlx_flux2_requires_sidecar_when_missing(monkeypatch):
