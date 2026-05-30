@@ -1,6 +1,6 @@
 import React from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
-import { AssetCard } from "../components/assetPanels.jsx";
+import { AssetCard, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
@@ -380,6 +380,16 @@ export function CharacterTest({
             </button>
           </div>
         ) : null}
+        {showOutputs && showingTrash ? (
+          <button
+            className="danger-action empty-trash-button"
+            disabled={!trashedAssets.length}
+            onClick={() => emptyTrash(trashedAssets, purgeAsset)}
+            type="button"
+          >
+            Empty Trash ({trashedAssets.length})
+          </button>
+        ) : null}
       </div>
       {showOutputs ? (
         <div className="review-grid">
@@ -672,13 +682,25 @@ export function CharacterAssets({
           {activeAssets.length ? ` (${activeAssets.length})` : ""}
         </h2>
       </div>
-      <div className="segmented-control" role="group" aria-label="Character asset collection">
-        <button className={showingTrash ? "" : "active"} onClick={() => setViewMode("active")} type="button">
-          Images ({activeAssets.length})
-        </button>
-        <button className={showingTrash ? "active" : ""} onClick={() => setViewMode("trashed")} type="button">
-          Trashcan ({trashedAssets.length})
-        </button>
+      <div className="trash-controls">
+        <div className="segmented-control" role="group" aria-label="Character asset collection">
+          <button className={showingTrash ? "" : "active"} onClick={() => setViewMode("active")} type="button">
+            Images ({activeAssets.length})
+          </button>
+          <button className={showingTrash ? "active" : ""} onClick={() => setViewMode("trashed")} type="button">
+            Trashcan ({trashedAssets.length})
+          </button>
+        </div>
+        {showingTrash ? (
+          <button
+            className="danger-action empty-trash-button"
+            disabled={!trashedAssets.length}
+            onClick={() => emptyTrash(trashedAssets, purgeAsset)}
+            type="button"
+          >
+            Empty Trash ({trashedAssets.length})
+          </button>
+        ) : null}
       </div>
       {visibleAssets.length ? (
         <div className="reference-thumb-row">

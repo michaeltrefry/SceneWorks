@@ -2714,6 +2714,86 @@ describe("SceneWorks app shell", () => {
     expect(purgeAsset).toHaveBeenCalledWith(expect.objectContaining({ id: "img-trashed" }));
   });
 
+  it("Empty Trash purges all discarded images for the character and only in the Trashcan view", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const purgeAsset = vi.fn();
+    const assets = [
+      { id: "img-active", type: "image", displayName: "keep", recipe: { normalizedSettings: { characterId: "char-1" } } },
+      {
+        id: "img-trash-1",
+        type: "image",
+        status: { trashed: true },
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+      },
+      {
+        id: "img-trash-2",
+        type: "image",
+        status: { trashed: true },
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+      },
+      // Belongs to another character — must never be purged by this view.
+      { id: "img-other", type: "image", status: { trashed: true }, recipe: { normalizedSettings: { characterId: "char-2" } } },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            addCharacterReference: () => {},
+            archiveCharacter: () => {},
+            assets,
+            attachCharacterLora: () => {},
+            characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+            createCharacter: () => {},
+            createCharacterLook: () => {},
+            createCharacterTestJob: () => {},
+            deleteAsset: () => {},
+            deleteCharacterLook: () => {},
+            detachCharacterLora: () => {},
+            imageModels: [],
+            latestImageAssets: assets,
+            loras: [],
+            setPreviewAsset: () => {},
+            sendCharacterToImage: () => {},
+            sendCharacterToVideo: () => {},
+            purgeAsset,
+            removeCharacterReference: () => {},
+            updateAssetStatus: () => {},
+            updateCharacter: () => {},
+            updateCharacterLook: () => {},
+            updateCharacterLora: () => {},
+            updateCharacterReference: () => {},
+          },
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    const findSection = () =>
+      [...container.querySelectorAll(".character-section")].find((section) =>
+        section.querySelector(".eyebrow")?.textContent === "Character assets",
+      );
+    // No Empty Trash in the active Images view.
+    expect([...findSection().querySelectorAll("button")].some((button) => button.textContent.startsWith("Empty Trash"))).toBe(false);
+
+    await act(async () => {
+      [...findSection().querySelectorAll("button")].find((button) => button.textContent.includes("Trashcan (2)")).click();
+    });
+    const emptyButton = [...findSection().querySelectorAll("button")].find((button) => button.textContent.startsWith("Empty Trash"));
+    expect(emptyButton).toBeTruthy();
+    expect(emptyButton.textContent).toContain("(2)");
+
+    await act(async () => {
+      emptyButton.click();
+    });
+    expect(purgeAsset).toHaveBeenCalledTimes(2);
+    expect(purgeAsset).toHaveBeenCalledWith(expect.objectContaining({ id: "img-trash-1" }));
+    expect(purgeAsset).toHaveBeenCalledWith(expect.objectContaining({ id: "img-trash-2" }));
+    expect(purgeAsset).not.toHaveBeenCalledWith(expect.objectContaining({ id: "img-other" }));
+    confirm.mockRestore();
+  });
+
   it("launches reference-based generation from an approved character reference", async () => {
     const sendCharacterToImage = vi.fn();
     const reference = { assetId: "ref-1", approved: true, asset: { id: "ref-1", type: "image", displayName: "Mira ref" } };
@@ -7870,6 +7950,78 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Purge").click();
     });
     expect(purgeAsset).toHaveBeenCalledWith(trashed);
+  });
+
+  it("Empty Trash purges every discarded asset in the Library Trashcan view only", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const purgeAsset = vi.fn();
+    const active = {
+      id: "asset-active",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Active Frame",
+      status: { trashed: false },
+    };
+    const trashedA = {
+      id: "trash-a",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Trash A",
+      status: { trashed: true },
+    };
+    const trashedB = {
+      id: "trash-b",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Trash B",
+      status: { trashed: true },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Trash" },
+            assets: [active, trashedA, trashedB],
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset,
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: null,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    // Empty Trash only appears in the Trashcan view.
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent.startsWith("Empty Trash"))).toBe(false);
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Trashcan").click();
+    });
+    const emptyButton = [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Empty Trash"));
+    expect(emptyButton).toBeTruthy();
+    expect(emptyButton.textContent).toContain("(2)");
+
+    await act(async () => {
+      emptyButton.click();
+    });
+    expect(confirm).toHaveBeenCalled();
+    expect(purgeAsset).toHaveBeenCalledTimes(2);
+    expect(purgeAsset).toHaveBeenCalledWith(trashedA);
+    expect(purgeAsset).toHaveBeenCalledWith(trashedB);
+    expect(purgeAsset).not.toHaveBeenCalledWith(active);
+    confirm.mockRestore();
   });
 
   it("DocumentStudio renders an interleaved document and submits a compose job", async () => {

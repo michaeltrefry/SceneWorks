@@ -1678,6 +1678,19 @@ label {
   margin-bottom: 12px;
 }
 
+/* Trashcan toggle + Empty Trash, kept on one row above the grid. */
+.trash-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.empty-trash-button {
+  font-size: 12px;
+}
+
 /* Pose library picker (multi-select OpenPose gallery) */
 .pose-library {
   display: flex;

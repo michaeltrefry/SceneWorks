@@ -5,6 +5,30 @@ import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { Modal } from "./Modal.jsx";
 
+// Permanently purge every discarded asset in a single Trashcan view. The caller
+// passes only the assets visible in that view, so per-character and per-filter
+// trashcans empty their own scope and nothing else. Confirms first (guarded so
+// headless/test environments skip the prompt) and purges sequentially.
+export async function emptyTrash(trashedAssets, purgeAsset) {
+  const items = (trashedAssets ?? []).filter((asset) => asset?.status?.trashed);
+  if (!items.length || typeof purgeAsset !== "function") {
+    return;
+  }
+  if (
+    typeof window !== "undefined" &&
+    typeof window.confirm === "function" &&
+    !window.confirm(
+      `Permanently delete ${items.length} discarded item${items.length === 1 ? "" : "s"}? This cannot be undone.`,
+    )
+  ) {
+    return;
+  }
+  for (const asset of items) {
+    // eslint-disable-next-line no-await-in-loop -- sequential keeps state updates predictable
+    await purgeAsset(asset);
+  }
+}
+
 // Reopens a saved interleaved document: the asset's file points to the segments
 // JSON in assets/documents/, fetched here (served like any project file).
 function DocumentReader({ asset }) {

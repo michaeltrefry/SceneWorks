@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
-import { AssetDetail, AssetGrid } from "../components/assetPanels.jsx";
+import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
 import { terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
 
@@ -72,6 +72,17 @@ export function LibraryScreen() {
     }
     return true;
   }));
+  // All discarded assets within the current type/tag filters — the exact scope
+  // the "Empty Trash" button purges (unfolded, so folded variants go too).
+  const trashedInView = libraryAssets.filter((asset) => {
+    if (typeFilter !== "all" && asset.type !== typeFilter) {
+      return false;
+    }
+    if (tagFilter !== "all" && !(asset.tags ?? []).includes(tagFilter)) {
+      return false;
+    }
+    return Boolean(asset.status?.trashed);
+  });
 
   async function handleImport(event) {
     const [file] = event.target.files;
@@ -131,6 +142,16 @@ export function LibraryScreen() {
               Trashcan
             </button>
           </div>
+          {assetMode === "trashcan" ? (
+            <button
+              className="danger-action empty-trash-button"
+              disabled={!trashedInView.length}
+              onClick={() => emptyTrash(trashedInView, purgeAsset)}
+              type="button"
+            >
+              Empty Trash ({trashedInView.length})
+            </button>
+          ) : null}
         </div>
         <div className="hero-stats">
           <div className="hero-stat">
