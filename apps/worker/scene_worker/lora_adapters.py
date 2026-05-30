@@ -255,24 +255,93 @@ def read_adapter_metadata(path: str | Path) -> dict[str, str]:
         return {}
 
 
+# Tensor-key substrings that mark a LyCORIS-format adapter (LoKr/LoHa). These are
+# the third-party kohya / ai-toolkit families whose keys ``load_lora_weights``
+# cannot consume — without this sniff they fall through to diffusers and crash with
+# a multi-thousand-line "state_dict should be empty at this point" dump (epic 2193).
+_LYCORIS_KEY_MARKERS = (".lokr_w1", ".lokr_w2", ".lokr_t2", ".hada_w1_a", ".hada_w2_a")
+
+
+def _adapter_tensor_names(path: str | Path, limit: int = 256) -> list[str]:
+    """Best-effort peek at an adapter's tensor names (header only, no tensor data)."""
+
+    try:
+        from safetensors import safe_open
+
+        with safe_open(str(path), framework="pt") as handle:
+            names: list[str] = []
+            for key in handle.keys():  # noqa: SIM118 - safetensors handle isn't a dict
+                names.append(key)
+                if len(names) >= limit:
+                    break
+            return names
+    except Exception:
+        return []
+
+
 def adapter_network_type(path: str | Path) -> str:
-    """``"lokr"`` for a LoKr adapter, else ``"lora"`` (the default for every
-    adapter without explicit ``networkType`` metadata)."""
+    """``"lokr"`` for a SceneWorks-trained (peft) LoKr adapter, else ``"lora"``.
+
+    Keyed off the ``networkType`` metadata SceneWorks' own trainer stamps (epic
+    2193). Third-party LyCORIS adapters carry no such stamp — use
+    :func:`classify_adapter_network` to detect those by tensor-key sniffing."""
 
     return (read_adapter_metadata(path).get("networkType") or "lora").strip().lower()
 
 
+def classify_adapter_network(path: str | Path) -> str:
+    """Classify an adapter into the layout that decides how it's applied:
+
+    - ``"lokr"``   — SceneWorks-trained peft LoKr (``networkType`` metadata) →
+      :func:`inject_lokr_adapter` (rebuilds ``peft.LoKrConfig``).
+    - ``"lycoris"`` — third-party LyCORIS LoKr/LoHa (kohya / ai-toolkit), detected
+      by ``lokr_*``/``hada_*`` tensor keys or ``ss_network_module`` →
+      :func:`apply_lycoris_adapter` (the ``lycoris`` library loader).
+    - ``"lora"``   — a standard low-rank adapter → ``pipe.load_lora_weights``.
+    """
+
+    # SceneWorks-trained peft LoKr is defined solely by the ``networkType`` stamp;
+    # delegate to adapter_network_type so it stays the single source of truth.
+    if adapter_network_type(path) == "lokr":
+        return "lokr"
+    meta = read_adapter_metadata(path)
+    module = (meta.get("ss_network_module") or "").lower()
+    if "lycoris" in module:
+        return "lycoris"
+    names = _adapter_tensor_names(path)
+    if any(any(marker in name for marker in _LYCORIS_KEY_MARKERS) for name in names):
+        return "lycoris"
+    return "lora"
+
+
 def reject_lokr_loras(specs: list[LoraSpec], adapter_id: str) -> None:
-    """Guard for backends that cannot apply LoKr (e.g. MLX, whose merge math is
-    LoRA-only). Raises a clear error rather than silently mis-applying."""
+    """Guard for backends that cannot apply LoKr/LyCORIS (e.g. MLX, whose merge
+    math is LoRA-only). Raises a clear, short error rather than silently
+    mis-applying or letting diffusers dump thousands of unconsumed keys."""
 
     for spec in specs:
-        if adapter_network_type(spec.path) == "lokr":
+        kind = classify_adapter_network(spec.path)
+        if kind in ("lokr", "lycoris"):
+            label = "LoKr" if kind == "lokr" else "LyCORIS (LoKr/LoHa)"
             raise RuntimeError(
-                f"{adapter_id} cannot apply the LoKr adapter '{spec.id}'. LoKr "
-                "(LyCORIS Kronecker) adapters require the torch generation backend; "
-                "this backend does not support them yet (epic 2193)."
+                f"{adapter_id} cannot apply the {label} adapter '{spec.id}'. "
+                f"{label} adapters require the torch generation backend; this "
+                "backend does not support them (epic 2193)."
             )
+
+
+def _lycoris_module_prefix(path: str | Path) -> str:
+    """The ``LycorisNetwork.LORA_PREFIX`` that maps this file's keys onto a denoiser
+    module. kohya/ai-toolkit DiT adapters prefix denoiser keys with ``lora_unet``
+    (the lycoris loader matches ``f"{PREFIX}_{module_name}"``)."""
+
+    for name in _adapter_tensor_names(path, limit=8):
+        head = name.split(".", 1)[0]
+        if head.startswith("lora_unet"):
+            return "lora_unet"
+        if head.startswith("lora_transformer"):
+            return "lora_transformer"
+    return "lora_unet"
 
 
 def _denoiser_module(pipe: Any) -> Any:
@@ -322,6 +391,92 @@ def inject_lokr_adapter(pipe: Any, spec: LoraSpec, *, adapter_id: str) -> None:
     set_peft_model_state_dict(module, state, adapter_name=spec.adapter_name)
 
 
+# Active LyCORIS networks are stashed on the denoiser module under this attribute
+# so ``clear_loras`` can ``restore()`` them — they aren't peft adapters and the
+# pipeline's lora bookkeeping never sees them, so a permanent merge would corrupt
+# the next job on a reused/cached pipeline. apply_to() + restore() keeps it clean.
+_LYCORIS_ATTR = "_sceneworks_lycoris_nets"
+
+
+def apply_lycoris_adapter(pipe: Any, spec: LoraSpec, *, adapter_id: str) -> None:
+    """Apply a third-party LyCORIS LoKr/LoHa adapter via the ``lycoris`` library —
+    the equivalent of ``pipe.load_lora_weights`` for files diffusers can't consume.
+
+    Uses ``apply_to()`` (reversible) and keeps the network handle on the denoiser
+    so ``clear_loras`` can ``restore()`` it between jobs (epic 2193)."""
+
+    module = _denoiser_module(pipe)
+    if module is None:
+        raise RuntimeError(
+            f"{adapter_id} cannot apply the LyCORIS adapter '{spec.id}': the "
+            "pipeline exposes no unet/transformer module to inject into."
+        )
+    try:
+        from lycoris import LycorisNetwork, create_lycoris_from_weights
+    except Exception as exc:  # pragma: no cover - exercised only without lycoris
+        raise RuntimeError(
+            f"{adapter_id} cannot apply the LyCORIS adapter '{spec.id}': the "
+            "'lycoris-lora' package is not installed in the worker environment "
+            "(epic 2193)."
+        ) from exc
+
+    prefix = _lycoris_module_prefix(spec.path)
+    saved_prefix = LycorisNetwork.LORA_PREFIX
+    try:
+        LycorisNetwork.LORA_PREFIX = prefix
+        network, _ = create_lycoris_from_weights(spec.weight, str(spec.path), module)
+    finally:
+        LycorisNetwork.LORA_PREFIX = saved_prefix
+
+    if not getattr(network, "loras", None):
+        raise RuntimeError(
+            f"{adapter_id} loaded the LyCORIS adapter '{spec.id}' but matched 0 "
+            f"modules (prefix {prefix!r}); the adapter's layer naming does not "
+            "match this model's transformer."
+        )
+    network.apply_to()
+    reference = next(module.parameters(), None)
+    if reference is not None:
+        network.to(device=reference.device, dtype=reference.dtype)
+    network.set_multiplier(spec.weight)
+
+    store = getattr(module, _LYCORIS_ATTR, None)
+    if store is None:
+        store = {}
+        setattr(module, _LYCORIS_ATTR, store)
+    store[spec.adapter_name] = network
+
+
+def _restore_lycoris_nets(module: Any, names: set[str] | None = None) -> set[str]:
+    """Reverse LyCORIS ``apply_to`` for the named adapters (or all) on ``module``.
+
+    Returns the set of adapter names actually restored, so callers can tell which
+    of the names they asked to clear were LyCORIS (and therefore already handled
+    here, with no peft delete/unload needed)."""
+
+    restored: set[str] = set()
+    if module is None:
+        return restored
+    store = getattr(module, _LYCORIS_ATTR, None)
+    if not store:
+        return restored
+    for name in list(store.keys()):
+        if names is not None and name not in names:
+            continue
+        network = store.pop(name)
+        restored.add(name)
+        try:
+            network.restore()
+        except Exception:
+            pass
+    if not store:
+        try:
+            delattr(module, _LYCORIS_ATTR)
+        except Exception:
+            pass
+    return restored
+
+
 def apply_loras_to_pipeline(
     pipe: Any,
     loras: list[dict[str, Any]],
@@ -352,8 +507,15 @@ def apply_loras_to_pipeline(
     specs_to_load = [spec for spec in specs if spec.adapter_name not in previous_by_name]
 
     if removed_names:
-        if hasattr(pipe, "delete_adapters"):
-            pipe.delete_adapters(list(removed_names))
+        module = _denoiser_module(pipe)
+        # Reverse any LyCORIS adapters among the removed set first (they aren't peft
+        # adapters, so delete_adapters/unload won't touch them) — epic 2193.
+        restored = _restore_lycoris_nets(module, set(removed_names))
+        non_lycoris_removed = [name for name in removed_names if name not in restored]
+        if not non_lycoris_removed:
+            pass  # every removed adapter was LyCORIS; the restore handled it
+        elif hasattr(pipe, "delete_adapters"):
+            pipe.delete_adapters(non_lycoris_removed)
         elif hasattr(pipe, "unload_lora_weights"):
             pipe.unload_lora_weights()
             specs_to_load = specs
@@ -361,10 +523,16 @@ def apply_loras_to_pipeline(
             raise RuntimeError(f"{adapter_id} cannot clear previously loaded LoRAs between jobs.")
 
     for spec in specs_to_load:
-        # LoKr can't load via load_lora_weights (its lokr_* keys are unrecognized);
-        # rebuild the LoKrConfig from file metadata and inject it instead (epic 2193).
-        if adapter_network_type(spec.path) == "lokr":
+        # Neither LoKr nor LyCORIS load via load_lora_weights (their lokr_*/hada_*
+        # keys are unrecognized and crash diffusers). Route each to its loader
+        # (epic 2193): SceneWorks-trained peft LoKr → inject_lokr_adapter; a
+        # third-party kohya/ai-toolkit LyCORIS file → apply_lycoris_adapter.
+        kind = classify_adapter_network(spec.path)
+        if kind == "lokr":
             inject_lokr_adapter(pipe, spec, adapter_id=adapter_id)
+            continue
+        if kind == "lycoris":
+            apply_lycoris_adapter(pipe, spec, adapter_id=adapter_id)
             continue
         try:
             pipe.load_lora_weights(spec.path, adapter_name=spec.adapter_name)
@@ -385,22 +553,38 @@ def apply_loras_to_pipeline(
 
     names = tuple(spec.adapter_name for spec in specs)
     weights = [spec.weight for spec in specs]
-    # Injected LoKr adapters live on the denoiser module but aren't tracked by the
-    # pipeline's lora bookkeeping, so pipe.set_adapters may not see them. When any
-    # adapter is LoKr, set weights on the module (which knows every PEFT adapter).
-    if any(adapter_network_type(spec.path) == "lokr" for spec in specs):
+    kinds = {spec.adapter_name: classify_adapter_network(spec.path) for spec in specs}
+    # LyCORIS nets carry their own multiplier (set at apply time) and aren't peft
+    # adapters, so they're excluded from pipeline weight wiring. Of the rest:
+    # injected peft LoKr adapters live on the denoiser module and aren't tracked by
+    # the pipeline's lora bookkeeping, so when any is LoKr we set weights on the
+    # module (which knows every PEFT adapter); otherwise use pipe.set_adapters.
+    managed_names = tuple(name for name in names if kinds[name] != "lycoris")
+    managed_weights = [weight for name, weight in zip(names, weights) if kinds[name] != "lycoris"]
+    if any(kinds[name] == "lokr" for name in managed_names):
         set_adapter_weights_on_module(
-            _denoiser_module(pipe), names, weights, adapter_id=adapter_id, specs=specs
+            _denoiser_module(pipe), managed_names, managed_weights, adapter_id=adapter_id, specs=specs
         )
-    elif hasattr(pipe, "set_adapters"):
-        set_lora_adapters(pipe, names, weights, adapter_id=adapter_id, specs=specs)
-    elif len(names) > 1 or any(weight != 1.0 for weight in weights):
+    elif managed_names and hasattr(pipe, "set_adapters"):
+        set_lora_adapters(pipe, managed_names, managed_weights, adapter_id=adapter_id, specs=specs)
+    elif managed_names and (len(managed_names) > 1 or any(weight != 1.0 for weight in managed_weights)):
         raise RuntimeError(f"{adapter_id} loaded LoRAs but cannot apply per-LoRA weights.")
     return LoraPipelineState(key=key, adapter_names=names, specs=tuple(specs))
 
 
 def clear_loras(pipe: Any, adapter_names: tuple[str, ...], *, adapter_id: str) -> None:
     if not adapter_names:
+        return
+    # Reverse LyCORIS adapters first: they're applied via the lycoris network's
+    # apply_to (not peft), so delete_adapters/unload_lora_weights would leave them
+    # active and corrupt the next job on a reused pipeline (epic 2193).
+    module = _denoiser_module(pipe)
+    restored = _restore_lycoris_nets(module, set(adapter_names))
+    # If every cleared adapter was a LyCORIS one, the restore above is the whole
+    # job — there is no peft adapter to delete/unload (and demanding one would
+    # spuriously fail on a pipe that only ever held LyCORIS adapters).
+    remaining = [name for name in adapter_names if name not in restored]
+    if not remaining:
         return
     # Prefer deleting by name: it removes injected LoKr adapters too, which
     # unload_lora_weights (LoRA-only) leaves behind and would leak into the next

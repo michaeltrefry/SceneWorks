@@ -18,6 +18,11 @@ sentencepiece>=0.2,<1
 protobuf>=4.25,<7
 accelerate>=1.11
 peft>=0.17,<1
+# Third-party LyCORIS LoKr/LoHa adapter loading for generation (epic 2193). kohya
+# and ai-toolkit produce lokr_*/hada_* keys that diffusers' load_lora_weights
+# cannot consume; lycoris.create_lycoris_from_weights applies them onto the
+# denoiser (see lora_adapters.apply_lycoris_adapter).
+lycoris-lora>=3.4,<4
 safetensors>=0.6
 prodigyopt>=1.1,<2
 rose-opt>=1.0.2,<2

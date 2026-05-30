@@ -43,6 +43,7 @@ from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
     LoraPipelineState,
     adapter_network_type,
+    classify_adapter_network,
     apply_loras_to_pipeline,
     lora_path,
     normalize_lora_specs,
@@ -6937,23 +6938,24 @@ def _should_route_flux_to_mlx(payload: dict[str, Any]) -> bool:
 
 
 def _request_has_lokr_lora(payload: dict[str, Any]) -> bool:
-    """True if any LoRA in the request is a LoKr adapter. LoKr applies only on the
-    torch backends (the MLX merge math is LoRA-only), so the MLX routing gates
-    fall back to torch when this is true (epic 2193) — the same graceful fallback
-    a reference image triggers. Prefers the ``networkType`` recorded on the LoRA
-    (zero I/O) and falls back to reading the adapter's safetensors header."""
+    """True if any LoRA in the request is a LoKr/LyCORIS adapter. These apply only
+    on the torch backends (the MLX merge math is LoRA-only), so the MLX routing
+    gates fall back to torch when this is true (epic 2193) — the same graceful
+    fallback a reference image triggers. Prefers the ``networkType`` recorded on
+    the LoRA (zero I/O) and otherwise classifies the adapter's safetensors header
+    (which also catches third-party LyCORIS files that carry no ``networkType``)."""
 
     for lora in payload.get("loras") or []:
         if not isinstance(lora, dict):
             continue
         recorded = lora.get("networkType") or (lora.get("compatibility") or {}).get("networkType")
         network_type = str(recorded or "").strip().lower()
+        if network_type in ("lokr", "lycoris"):
+            return True
         if not network_type:
             resolved = lora_path(lora)
-            if resolved is not None:
-                network_type = adapter_network_type(resolved)
-        if network_type == "lokr":
-            return True
+            if resolved is not None and classify_adapter_network(resolved) in ("lokr", "lycoris"):
+                return True
     return False
 
 
