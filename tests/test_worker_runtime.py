@@ -3781,7 +3781,13 @@ def test_kolors_run_pose_composes_skeleton_controlnet_and_ip_adapter(tmp_path, m
     )
     skeleton_sentinel = FakeImage()
     reference_sentinel = FakeImage()
-    monkeypatch.setattr(ia, "draw_bodypose", lambda w, h, kps: _np.zeros((h, w, 3), dtype=_np.uint8))
+    # Kolors _run_pose renders the DWPose whole-body skeleton (sc-2289); draw_wholebody
+    # needs cv2 (absent in the CI venv), so stub it (real render covered elsewhere).
+    monkeypatch.setattr(
+        ia,
+        "draw_wholebody",
+        lambda w, h, kps, hands=None, face=None, stickwidth=4: _np.zeros((h, w, 3), dtype=_np.uint8),
+    )
     monkeypatch.setattr("scene_worker.image_adapters.Image", SimpleNamespace(fromarray=lambda arr: skeleton_sentinel))
     monkeypatch.setattr(ia, "load_reference_image", lambda project_path, asset_id: reference_sentinel)
 
@@ -3815,9 +3821,9 @@ def test_kolors_pose_set_loops_poses_with_shared_seed(tmp_path, monkeypatch):
 
     calls: list[dict] = []
 
-    def fake_run_pose(self, settings, pipe, request, seed, project_path, keypoints, cancel_requested=None):
+    def fake_run_pose(self, settings, pipe, request, seed, project_path, keypoints, hands=None, face=None, cancel_requested=None):
         from PIL import Image as _Image
-        calls.append({"seed": seed, "keypoints": keypoints})
+        calls.append({"seed": seed, "keypoints": keypoints, "hands": hands, "face": face})
         return _Image.new("RGB", (8, 8))
 
     monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_run_pose", fake_run_pose)
@@ -3835,10 +3841,15 @@ def test_kolors_pose_set_loops_poses_with_shared_seed(tmp_path, monkeypatch):
     monkeypatch.setattr(ia, "ImageAssetWriter", _FakeWriter)
 
     kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    hands = [[[0.4, 0.4]] * 21, [[0.6, 0.4]] * 21]
+    face = [[0.5, 0.3]] * 68
     job = {"id": "job_kolors_pose", "payload": {
         "projectId": "p", "mode": "character_image", "model": "kolors", "prompt": "the character",
         "referenceAssetId": "ref-1", "count": 1, "width": 64, "height": 64,
-        "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}]},
+        "advanced": {"poses": [
+            {"id": "sit_01", "keypoints": kp},  # body-only
+            {"id": "dance_01", "keypoints": kp, "hands": hands, "face": face},  # whole-body
+        ]},
     }}
     KolorsDiffusersAdapter().generate(
         settings=SimpleNamespace(gpu_id="cpu"), job=job, request=image_request_from_job(job),
@@ -3847,6 +3858,10 @@ def test_kolors_pose_set_loops_poses_with_shared_seed(tmp_path, monkeypatch):
     assert captured["image_count"] == 2  # one per pose, not request.count
     assert len(calls) == 2
     assert calls[0]["seed"] == calls[1]["seed"]  # shared seed across the set
+    # sc-2289: whole-body hands/face thread through to the DWPose-trained Kolors CN;
+    # body-only poses pass None (rendered identically to the old body-only path).
+    assert calls[0]["hands"] is None and calls[0]["face"] is None
+    assert calls[1]["hands"] is not None and len(calls[1]["face"]) == 68
     assert captured["raw_settings"].get("poseLibrary") is True
     assert captured["raw_settings"].get("controlNetPose") == "Kwai-Kolors/Kolors-ControlNet-Pose"
 

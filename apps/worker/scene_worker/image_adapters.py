@@ -4194,6 +4194,8 @@ class KolorsDiffusersAdapter:
             try:
                 image = self._run_pose(
                     settings, pipe, request, set_seed, project_path, pose_keypoints[index],
+                    hands=normalize_hands(pose_entries[index].get("hands")),
+                    face=normalize_face(pose_entries[index].get("face")),
                     cancel_requested=cancel_requested,
                 )
             except Exception as exc:
@@ -4353,18 +4355,25 @@ class KolorsDiffusersAdapter:
         seed: int,
         project_path: Path,
         keypoints: list[Any],
+        hands: list[Any] | None = None,
+        face: list[Any] | None = None,
         cancel_requested: CancelCallback | None = None,
     ) -> Image.Image:
-        """Render the character in one library pose: OpenPose skeleton drives the pose
-        ControlNet, the reference drives identity via IP-Adapter. img2img init is the
-        reference (at full strength it only seeds latent dimensions)."""
+        """Render the character in one library pose: a DWPose whole-body skeleton drives
+        the pose ControlNet, the reference drives identity via IP-Adapter. img2img init is
+        the reference (at full strength it only seeds latent dimensions).
+
+        Kolors-ControlNet-Pose is DWPose-trained (sc-2264), so when a pose carries hand
+        (21x2) / face (68) keypoints we render them too (sc-2289) — more in-distribution.
+        Body-only poses render identically to the previous draw_bodypose path
+        (``draw_wholebody`` with no hands/face == ``draw_bodypose``)."""
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         activate_torch_device(torch, device)
         generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
         model_target = MODEL_TARGETS[request.model]
         width, height = request.width, request.height
-        skeleton = Image.fromarray(draw_bodypose(width, height, keypoints))
+        skeleton = Image.fromarray(draw_wholebody(width, height, keypoints, hands=hands, face=face))
         reference = load_reference_image(project_path, request.reference_asset_id)
         if hasattr(pipe, "set_ip_adapter_scale"):
             pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
