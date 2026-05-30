@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   CharacterAngleSet,
   CharacterAssets,
@@ -13,6 +13,7 @@ import {
 import { CompactSelector } from "../components/CompactSelector.jsx";
 import { assetMatchesCharacter } from "../components/DatasetAddDialog.jsx";
 import { extractFamilies } from "../presetUtils.js";
+import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { useAppContext } from "../context/AppContext.js";
 
 const characterTypes = [
@@ -20,6 +21,18 @@ const characterTypes = [
   ["creature", "Creature"],
   ["object", "Object"],
 ];
+
+// Tab information architecture (epic 2293): the single stacked column is grouped
+// into five focused workspaces. Order is also the keyboard nav order.
+const CHARACTER_TABS = [
+  ["character", "Character"],
+  ["assets", "Assets"],
+  ["angles", "Angles"],
+  ["poses", "Poses"],
+  ["test", "Test"],
+];
+const CHARACTER_TAB_IDS = CHARACTER_TABS.map(([id]) => id);
+const DEFAULT_CHARACTER_TAB = "character";
 
 function typeLabel(value) {
   return characterTypes.find(([id]) => id === value)?.[1] ?? "Person";
@@ -88,6 +101,40 @@ export function CharacterStudio() {
   const [testCount, setTestCount] = useState(4);
   const [testResolution, setTestResolution] = useState("1024x1024");
   const [creatingDataset, setCreatingDataset] = useState(false);
+
+  // Active tab + per-workspace persistence (epic 2293). The component is keyed by
+  // workspace in App.jsx, so this reads the right snapshot per workspace on mount
+  // and remounts (re-running the initializer) when the workspace changes — no tab
+  // bleed across workspaces. Mirrors the studio-settings localStorage pattern.
+  const savedSettings = useMemo(() => loadStudioSettings("character", activeProject?.id ?? null), [activeProject?.id]);
+  const [activeTab, setActiveTab] = useState(() =>
+    CHARACTER_TAB_IDS.includes(savedSettings.activeTab) ? savedSettings.activeTab : DEFAULT_CHARACTER_TAB,
+  );
+  useStudioSettingsWriter("character", activeProject?.id ?? null, { activeTab });
+  const tabRefs = useRef({});
+  const activeTabIndex = CHARACTER_TABS.findIndex(([id]) => id === activeTab);
+  // Roving-tabindex keyboard nav, matching the TrainingStudio tablist: arrows wrap,
+  // Home/End jump to the ends, and focus follows the selected tab.
+  function focusTab(index) {
+    const [nextId] = CHARACTER_TABS[(index + CHARACTER_TABS.length) % CHARACTER_TABS.length];
+    setActiveTab(nextId);
+    window.requestAnimationFrame(() => tabRefs.current[nextId]?.focus());
+  }
+  function onTabKeyDown(event) {
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      focusTab(activeTabIndex + 1);
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      focusTab(activeTabIndex - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      focusTab(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      focusTab(CHARACTER_TABS.length - 1);
+    }
+  }
 
   const imageAssets = useMemo(
     () => assets.filter((asset) => ["image", "frame", "upload"].includes(asset.type)),
@@ -359,174 +406,250 @@ export function CharacterStudio() {
           <div className="empty-panel">No characters yet — use “New character” to start.</div>
         ) : (
           <section className="character-detail">
-            <form className="character-editor" onSubmit={saveCharacter}>
-              <div className="control-grid">
-                <label>
-                  Name
-                  <input onChange={(event) => setDraft((item) => ({ ...item, name: event.target.value }))} value={draft.name} />
-                </label>
-                <label>
-                  Type
-                  <select onChange={(event) => setDraft((item) => ({ ...item, type: event.target.value }))} value={draft.type}>
-                    {characterTypes.map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <label className="prompt-field">
-                Notes
-                <textarea
-                  onChange={(event) => setDraft((item) => ({ ...item, description: event.target.value }))}
-                  value={draft.description}
-                />
-              </label>
-              <div className="detail-actions">
-                <button className="primary-action" type="submit">
-                  Save
-                </button>
-                <button className="secondary-action" onClick={() => archiveCharacter(selectedCharacter.id)} type="button">
-                  Archive
-                </button>
+            <div className="segmented-control character-tabs" role="tablist" aria-label="Character workspace">
+              {CHARACTER_TABS.map(([id, label]) => (
                 <button
-                  className="secondary-action"
-                  onClick={() => onSendImage(selectedCharacter, testLookId || null, approvedReferences[0]?.assetId ?? null)}
+                  aria-controls={activeTab === id ? `character-panel-${id}` : undefined}
+                  aria-selected={activeTab === id}
+                  className={activeTab === id ? "active" : ""}
+                  id={`character-tab-${id}`}
+                  key={id}
+                  onClick={() => setActiveTab(id)}
+                  onKeyDown={onTabKeyDown}
+                  ref={(node) => {
+                    tabRefs.current[id] = node;
+                  }}
+                  role="tab"
+                  tabIndex={activeTab === id ? 0 : -1}
                   type="button"
                 >
-                  Image
+                  {label}
                 </button>
-                <button className="secondary-action" onClick={() => onSendVideo(selectedCharacter, testLookId || null)} type="button">
-                  Video
-                </button>
-              </div>
-            </form>
-            <div className="guidance-strip">
-              <strong>Reference identity</strong>
-              <span>Approve a reference image, then use Generate variations (or the Image button) to create new images that keep this character's appearance with Kolors IP-Adapter. LoRA conditioning activates in a later runtime slice.</span>
+              ))}
             </div>
 
-            <CharacterReferences
-              imageAssets={imageAssets}
-              onGenerateFromReference={(assetId) => onSendImage(selectedCharacter, testLookId || null, assetId)}
-              onPreview={onPreview}
-              referenceMessage={referenceMessage}
-              referenceAssetIds={referenceAssetIds}
-              removeCharacterReference={removeCharacterReference}
-              selectedCharacter={selectedCharacter}
-              setReferenceAssetIds={setReferenceAssetIds}
-              submitReference={submitReference}
-              updateCharacterReference={updateCharacterReference}
-            />
+            {/* Character tab — identity hub: metadata form + references + saved
+                presets (looks) + LoRAs. Every tabpanel stays mounted and is hidden
+                when inactive, so each panel's working state (incl. panel-local
+                state like the angle/pose prompt and selected pose set) survives
+                tab switches. This matches today's all-mounted render cost. */}
+            <div
+              aria-labelledby="character-tab-character"
+              className="character-tabpanel"
+              hidden={activeTab !== "character"}
+              id="character-panel-character"
+              role="tabpanel"
+            >
+              <form className="character-editor" onSubmit={saveCharacter}>
+                <div className="section-heading">
+                  <p className="eyebrow">Identity</p>
+                  <h2>Name, type &amp; notes</h2>
+                </div>
+                <div className="control-grid">
+                  <label>
+                    Name
+                    <input onChange={(event) => setDraft((item) => ({ ...item, name: event.target.value }))} value={draft.name} />
+                  </label>
+                  <label>
+                    Type
+                    <select onChange={(event) => setDraft((item) => ({ ...item, type: event.target.value }))} value={draft.type}>
+                      {characterTypes.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <label className="prompt-field">
+                  Notes
+                  <textarea
+                    onChange={(event) => setDraft((item) => ({ ...item, description: event.target.value }))}
+                    value={draft.description}
+                  />
+                </label>
+                <div className="detail-actions">
+                  <button className="primary-action" type="submit">
+                    Save
+                  </button>
+                  <button className="secondary-action" onClick={() => archiveCharacter(selectedCharacter.id)} type="button">
+                    Archive
+                  </button>
+                  <button
+                    className="secondary-action"
+                    onClick={() => onSendImage(selectedCharacter, testLookId || null, approvedReferences[0]?.assetId ?? null)}
+                    type="button"
+                  >
+                    Image
+                  </button>
+                  <button className="secondary-action" onClick={() => onSendVideo(selectedCharacter, testLookId || null)} type="button">
+                    Video
+                  </button>
+                </div>
+              </form>
+              <div className="guidance-strip">
+                <strong>Reference identity</strong>
+                <span>Approve a reference image, then use Generate variations (or the Image button) to create new images that keep this character's appearance with Kolors IP-Adapter. LoRA conditioning activates in a later runtime slice.</span>
+              </div>
 
-            <CharacterAssets
-              assets={assets}
-              deleteAsset={deleteAsset}
-              onPreview={onPreview}
-              purgeAsset={purgeAsset}
-              selectedCharacter={selectedCharacter}
-              updateAssetStatus={updateAssetStatus}
-            />
+              <CharacterReferences
+                imageAssets={imageAssets}
+                onGenerateFromReference={(assetId) => onSendImage(selectedCharacter, testLookId || null, assetId)}
+                onPreview={onPreview}
+                referenceMessage={referenceMessage}
+                referenceAssetIds={referenceAssetIds}
+                removeCharacterReference={removeCharacterReference}
+                selectedCharacter={selectedCharacter}
+                setReferenceAssetIds={setReferenceAssetIds}
+                submitReference={submitReference}
+                updateCharacterReference={updateCharacterReference}
+              />
 
-            <CharacterAngleSet
-              addCharacterReference={addCharacterReference}
-              angleModel={angleModel}
-              angleModels={angleModels}
-              approvedReferences={approvedReferences}
-              assets={assets}
-              createImageJob={createImageJob}
-              imageLocalJobs={imageLocalJobs}
-              importAsset={importAsset}
-              latestAssets={latestAssets}
-              loras={loras}
-              onCancel={onCancelCharacterJob}
-              onDuplicate={onDuplicateCharacterJob}
-              onOpenQueue={onOpenCharacterJobQueue}
-              onPreview={onPreview}
-              onRetry={onRetryCharacterJob}
-              rememberLocalGenerationJob={rememberLocalGenerationJob}
-              selectedCharacter={selectedCharacter}
-            />
+              <CharacterLooks
+                approvedReferences={approvedReferences}
+                createCharacterLook={createCharacterLook}
+                deleteCharacterLook={deleteCharacterLook}
+                lookDraft={lookDraft}
+                selectedCharacter={selectedCharacter}
+                selectedReferenceIds={selectedReferenceIds}
+                setLookDraft={setLookDraft}
+                setSelectedReferenceIds={setSelectedReferenceIds}
+                setTestLookId={setTestLookId}
+                submitLook={submitLook}
+                updateCharacterLook={updateCharacterLook}
+              />
 
-            <CharacterPoseLibrary
-              addCharacterReference={addCharacterReference}
-              approvedReferences={approvedReferences}
-              assets={assets}
-              createImageJob={createImageJob}
-              imageLocalJobs={imageLocalJobs}
-              importAsset={importAsset}
-              latestAssets={latestAssets}
-              loras={loras}
-              onCancel={onCancelCharacterJob}
-              onDuplicate={onDuplicateCharacterJob}
-              onOpenQueue={onOpenCharacterJobQueue}
-              onPreview={onPreview}
-              onRetry={onRetryCharacterJob}
-              poseModel={poseModel}
-              poseModels={poseModels}
-              rememberLocalGenerationJob={rememberLocalGenerationJob}
-              selectedCharacter={selectedCharacter}
-            />
+              <CharacterLoras
+                detachCharacterLora={detachCharacterLora}
+                loraEdits={loraEdits}
+                loraId={loraId}
+                loras={loras}
+                saveLora={saveLora}
+                selectedCharacter={selectedCharacter}
+                setLoraEdit={setLoraEdit}
+                setLoraId={setLoraId}
+                submitLora={submitLora}
+              />
+            </div>
 
-            <CharacterLooks
-              approvedReferences={approvedReferences}
-              createCharacterLook={createCharacterLook}
-              deleteCharacterLook={deleteCharacterLook}
-              lookDraft={lookDraft}
-              selectedCharacter={selectedCharacter}
-              selectedReferenceIds={selectedReferenceIds}
-              setLookDraft={setLookDraft}
-              setSelectedReferenceIds={setSelectedReferenceIds}
-              setTestLookId={setTestLookId}
-              submitLook={submitLook}
-              updateCharacterLook={updateCharacterLook}
-            />
+            {/* Assets tab — the character asset library (images + frames) +
+                its training datasets. */}
+            <div
+              aria-labelledby="character-tab-assets"
+              className="character-tabpanel"
+              hidden={activeTab !== "assets"}
+              id="character-panel-assets"
+              role="tabpanel"
+            >
+              <CharacterAssets
+                assets={assets}
+                deleteAsset={deleteAsset}
+                onPreview={onPreview}
+                purgeAsset={purgeAsset}
+                selectedCharacter={selectedCharacter}
+                updateAssetStatus={updateAssetStatus}
+              />
 
-            <CharacterLoras
-              detachCharacterLora={detachCharacterLora}
-              loraEdits={loraEdits}
-              loraId={loraId}
-              loras={loras}
-              saveLora={saveLora}
-              selectedCharacter={selectedCharacter}
-              setLoraEdit={setLoraEdit}
-              setLoraId={setLoraId}
-              submitLora={submitLora}
-            />
+              <CharacterDatasets
+                creating={creatingDataset}
+                datasets={characterDatasets}
+                imageCount={characterImageAssetIds.length}
+                onCreateDataset={createDatasetFromCharacter}
+                onOpenDataset={openDatasetInLibrary}
+                projectId={activeProject?.id}
+                selectedCharacter={selectedCharacter}
+              />
+            </div>
 
-            <CharacterDatasets
-              creating={creatingDataset}
-              datasets={characterDatasets}
-              imageCount={characterImageAssetIds.length}
-              onCreateDataset={createDatasetFromCharacter}
-              onOpenDataset={openDatasetInLibrary}
-              projectId={activeProject?.id}
-              selectedCharacter={selectedCharacter}
-            />
+            {/* Angles tab — Angle Set generation. */}
+            <div
+              aria-labelledby="character-tab-angles"
+              className="character-tabpanel"
+              hidden={activeTab !== "angles"}
+              id="character-panel-angles"
+              role="tabpanel"
+            >
+              <CharacterAngleSet
+                addCharacterReference={addCharacterReference}
+                angleModel={angleModel}
+                angleModels={angleModels}
+                approvedReferences={approvedReferences}
+                assets={assets}
+                createImageJob={createImageJob}
+                imageLocalJobs={imageLocalJobs}
+                importAsset={importAsset}
+                latestAssets={latestAssets}
+                loras={loras}
+                onCancel={onCancelCharacterJob}
+                onDuplicate={onDuplicateCharacterJob}
+                onOpenQueue={onOpenCharacterJobQueue}
+                onPreview={onPreview}
+                onRetry={onRetryCharacterJob}
+                rememberLocalGenerationJob={rememberLocalGenerationJob}
+                selectedCharacter={selectedCharacter}
+              />
+            </div>
 
-            <CharacterTest
-              addCharacterReference={addCharacterReference}
-              createCharacterTestJob={createCharacterTestJob}
-              deleteAsset={deleteAsset}
-              imageModels={imageModels}
-              latestAssets={latestAssets}
-              onPreview={onPreview}
-              purgeAsset={purgeAsset}
-              selectedCharacter={selectedCharacter}
-              setTestCount={setTestCount}
-              setTestLookId={setTestLookId}
-              setTestModel={setTestModel}
-              setTestPrompt={setTestPrompt}
-              setTestResolution={setTestResolution}
-              submitTest={submitTest}
-              testCount={testCount}
-              testLookId={testLookId}
-              testModel={testModel}
-              testPrompt={testPrompt}
-              testResolution={testResolution}
-              updateAssetStatus={updateAssetStatus}
-            />
+            {/* Poses tab — Pose generation. */}
+            <div
+              aria-labelledby="character-tab-poses"
+              className="character-tabpanel"
+              hidden={activeTab !== "poses"}
+              id="character-panel-poses"
+              role="tabpanel"
+            >
+              <CharacterPoseLibrary
+                addCharacterReference={addCharacterReference}
+                approvedReferences={approvedReferences}
+                assets={assets}
+                createImageJob={createImageJob}
+                imageLocalJobs={imageLocalJobs}
+                importAsset={importAsset}
+                latestAssets={latestAssets}
+                loras={loras}
+                onCancel={onCancelCharacterJob}
+                onDuplicate={onDuplicateCharacterJob}
+                onOpenQueue={onOpenCharacterJobQueue}
+                onPreview={onPreview}
+                onRetry={onRetryCharacterJob}
+                poseModel={poseModel}
+                poseModels={poseModels}
+                rememberLocalGenerationJob={rememberLocalGenerationJob}
+                selectedCharacter={selectedCharacter}
+              />
+            </div>
+
+            {/* Test tab — Test Character form. */}
+            <div
+              aria-labelledby="character-tab-test"
+              className="character-tabpanel"
+              hidden={activeTab !== "test"}
+              id="character-panel-test"
+              role="tabpanel"
+            >
+              <CharacterTest
+                addCharacterReference={addCharacterReference}
+                createCharacterTestJob={createCharacterTestJob}
+                deleteAsset={deleteAsset}
+                imageModels={imageModels}
+                latestAssets={latestAssets}
+                onPreview={onPreview}
+                purgeAsset={purgeAsset}
+                selectedCharacter={selectedCharacter}
+                setTestCount={setTestCount}
+                setTestLookId={setTestLookId}
+                setTestModel={setTestModel}
+                setTestPrompt={setTestPrompt}
+                setTestResolution={setTestResolution}
+                submitTest={submitTest}
+                testCount={testCount}
+                testLookId={testLookId}
+                testModel={testModel}
+                testPrompt={testPrompt}
+                testResolution={testResolution}
+                updateAssetStatus={updateAssetStatus}
+              />
+            </div>
           </section>
         )}
       </div>

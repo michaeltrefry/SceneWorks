@@ -144,6 +144,9 @@ const navSections = [
     items: [
       { id: "Image", icon: Icon.Image },
       { id: "Video", icon: Icon.Video },
+      // Character Studio is a generative studio (sc-2300) — it sits with Image/Video,
+      // below Video and above Training, not in the Library section.
+      { id: "Characters", icon: Icon.Character },
       { id: "Document", icon: Icon.Wand },
       { id: "Train", icon: Icon.Train },
       { id: "Editor", icon: Icon.Editor },
@@ -154,7 +157,6 @@ const navSections = [
     items: [
       { id: "Library", label: "Assets", icon: Icon.Library },
       { id: "LibraryDataSets", label: "Data Sets", icon: Icon.Train },
-      { id: "Characters", icon: Icon.Character },
       { id: "Presets", icon: Icon.Preset },
       { id: "Models", icon: Icon.Model },
     ],
@@ -1694,7 +1696,7 @@ export function App() {
         ) : null}
 
         {activeView === "Characters" ? (
-          <CharacterStudio />
+          <CharacterStudio key={activeProject?.id ?? "default"} />
         ) : null}
         {activeView === "Settings" ? <SettingsScreen /> : null}
           </>

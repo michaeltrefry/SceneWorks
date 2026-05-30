@@ -4310,6 +4310,23 @@ label {
   gap: 14px;
 }
 
+/* epic 2293: Character Studio tabbed shell. The tab bar reuses .segmented-control;
+   each tabpanel stacks its sections the way the old single column did. Inactive
+   panels stay mounted (so working state survives switches) but carry [hidden] —
+   which must override .character-tabpanel's own display to actually hide. */
+.character-tabs {
+  align-self: start;
+}
+
+.character-tabpanel {
+  display: grid;
+  gap: 14px;
+}
+
+.character-tabpanel[hidden] {
+  display: none;
+}
+
 .character-editor,
 .character-section,
 .reference-card,

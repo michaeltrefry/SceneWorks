@@ -712,7 +712,10 @@ export function CharacterAssets({
   const scopedAssets = (assets ?? [])
     .filter(
       (asset) =>
-        (asset.type === "image" || asset.type === "frame") &&
+        // Images, extracted frames, and generated videos all belong in the
+        // character's asset library (sc-2296) — the Assets tab is the home for
+        // every piece of media made for or referencing this character.
+        (asset.type === "image" || asset.type === "frame" || asset.type === "video") &&
         (asset.recipe?.normalizedSettings?.characterId === characterId ||
           (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === characterId)),
     )
@@ -736,7 +739,7 @@ export function CharacterAssets({
       <div className="trash-controls">
         <div className="segmented-control" role="group" aria-label="Character asset collection">
           <button className={showingTrash ? "" : "active"} onClick={() => setViewMode("active")} type="button">
-            Images ({activeAssets.length})
+            Media ({activeAssets.length})
           </button>
           <button className={showingTrash ? "active" : ""} onClick={() => setViewMode("trashed")} type="button">
             Trashcan ({trashedAssets.length})
@@ -787,8 +790,8 @@ export function CharacterAssets({
       ) : (
         <p className="muted">
           {showingTrash
-            ? "Trashcan is empty — discarded images for this character will appear here."
-            : "No images yet. Angle sets, pose generations, character tests, and any character-image render collect here automatically."}
+            ? "Trashcan is empty — discarded media for this character will appear here."
+            : "No media yet. Angle sets, pose generations, character tests, and any character image or video render collect here automatically."}
         </p>
       )}
     </section>

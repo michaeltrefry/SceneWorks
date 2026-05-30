@@ -2129,6 +2129,172 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Beta");
   });
 
+  it("groups the panels into accessible tabs, preserves working state, and persists the active tab (sc-2294)", async () => {
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      archiveCharacter: () => {},
+      assets: [],
+      attachCharacterLora: () => {},
+      characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+      createCharacter: () => {},
+      createCharacterLook: () => {},
+      createCharacterTestJob: () => {},
+      deleteAsset: () => {},
+      deleteCharacterLook: () => {},
+      detachCharacterLora: () => {},
+      imageModels: [],
+      latestImageAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      sendCharacterToImage: () => {},
+      sendCharacterToVideo: () => {},
+      purgeAsset: () => {},
+      removeCharacterReference: () => {},
+      updateAssetStatus: () => {},
+      updateCharacter: () => {},
+      updateCharacterLook: () => {},
+      updateCharacterLora: () => {},
+      updateCharacterReference: () => {},
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+
+    // Five accessible tabs, Character selected by default.
+    const tablist = container.querySelector('[role="tablist"]');
+    expect(tablist.getAttribute("aria-label")).toBe("Character workspace");
+    expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual([
+      "Character",
+      "Assets",
+      "Angles",
+      "Poses",
+      "Test",
+    ]);
+    expect(container.querySelector("#character-tab-character").getAttribute("aria-selected")).toBe("true");
+
+    // The active panel is shown; the others are mounted but hidden so their state survives.
+    expect(container.querySelector("#character-panel-character").hidden).toBe(false);
+    expect(container.querySelector("#character-panel-assets").hidden).toBe(true);
+    expect(container.querySelector("#character-panel-test").hidden).toBe(true);
+
+    // The identity form carries its own section heading (sc-2295) like its siblings.
+    expect([...container.querySelectorAll("#character-panel-character .eyebrow")].map((node) => node.textContent)).toContain(
+      "Identity",
+    );
+
+    // Edit the lifted character draft, switch tabs, and switch back: the draft survives.
+    await changeField(field(container, "Name"), "Mira Vex");
+    await act(async () => {
+      container.querySelector("#character-tab-test").click();
+    });
+    expect(container.querySelector("#character-panel-test").hidden).toBe(false);
+    expect(container.querySelector("#character-panel-character").hidden).toBe(true);
+    expect(container.querySelector("#character-tab-test").getAttribute("aria-selected")).toBe("true");
+    await act(async () => {
+      container.querySelector("#character-tab-character").click();
+    });
+    expect(field(container, "Name").value).toBe("Mira Vex");
+
+    // Keyboard: arrows move between tabs (and wrap), Home/End jump to the ends.
+    await act(async () => {
+      container
+        .querySelector("#character-tab-character")
+        .dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+    expect(container.querySelector("#character-tab-assets").getAttribute("aria-selected")).toBe("true");
+    await act(async () => {
+      container
+        .querySelector("#character-tab-assets")
+        .dispatchEvent(new window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    });
+    expect(container.querySelector("#character-tab-test").getAttribute("aria-selected")).toBe("true");
+    await act(async () => {
+      container
+        .querySelector("#character-tab-test")
+        .dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+    expect(container.querySelector("#character-tab-character").getAttribute("aria-selected")).toBe("true");
+
+    // The active tab is persisted per workspace and restored on remount.
+    await act(async () => {
+      container.querySelector("#character-tab-poses").click();
+    });
+    expect(window.localStorage.getItem("sceneworks-studio-character-project-1")).toContain('"activeTab":"poses"');
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+    expect(container.querySelector("#character-tab-poses").getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector("#character-panel-poses").hidden).toBe(false);
+  });
+
+  it("surfaces character videos alongside images in the Assets tab (sc-2296)", async () => {
+    const assets = [
+      { id: "img-1", type: "image", displayName: "Still", projectId: "project-1", recipe: { normalizedSettings: { characterId: "char-1" } } },
+      {
+        id: "vid-1",
+        type: "video",
+        displayName: "Clip",
+        projectId: "project-1",
+        file: { mimeType: "video/mp4", path: "clip.mp4" },
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+      },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            addCharacterReference: () => {},
+            archiveCharacter: () => {},
+            assets,
+            attachCharacterLora: () => {},
+            characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+            createCharacter: () => {},
+            createCharacterLook: () => {},
+            createCharacterTestJob: () => {},
+            deleteAsset: () => {},
+            deleteCharacterLook: () => {},
+            detachCharacterLora: () => {},
+            imageModels: [],
+            latestImageAssets: assets,
+            loras: [],
+            setPreviewAsset: () => {},
+            sendCharacterToImage: () => {},
+            sendCharacterToVideo: () => {},
+            purgeAsset: () => {},
+            removeCharacterReference: () => {},
+            updateAssetStatus: () => {},
+            updateCharacter: () => {},
+            updateCharacterLook: () => {},
+            updateCharacterLora: () => {},
+            updateCharacterReference: () => {},
+          },
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    await act(async () => {
+      container.querySelector("#character-tab-assets").click();
+    });
+    const section = [...container.querySelectorAll(".character-section")].find(
+      (item) => item.querySelector(".eyebrow")?.textContent === "Character assets",
+    );
+    expect(section).toBeTruthy();
+    // Both the still and the clip are listed; the clip renders as a <video>.
+    expect(section.querySelectorAll(".character-asset-thumb").length).toBe(2);
+    expect(section.querySelector("video")).toBeTruthy();
+    expect([...section.querySelectorAll("button")].some((button) => button.textContent.startsWith("Media (2)"))).toBe(true);
+  });
+
   it("switches the active character via the compact selector (sc-2025)", async () => {
     const baseContext = {
       activeProject: { id: "project-1", name: "Noir" },
