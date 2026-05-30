@@ -46,7 +46,9 @@ export function CharacterStudio() {
     createImageJob,
     importAsset,
     imageLocalJobs,
+    jobAction,
     rememberLocalGenerationJob,
+    setActiveView,
     deleteAsset,
     purgeAsset,
     imageModels,
@@ -63,6 +65,13 @@ export function CharacterStudio() {
   } = useAppContext();
   const latestAssets = latestImageAssets;
   const onPreview = setPreviewAsset;
+  // Job callbacks for character generation cards (Angle Set / Pose Library).
+  // jobAction may be missing in test contexts that wrap CharacterStudio with a
+  // stub provider; guard so the buttons just no-op there.
+  const onCancelCharacterJob = jobAction ? (job) => jobAction(job, "cancel") : undefined;
+  const onRetryCharacterJob = jobAction ? (job) => jobAction(job, "retry") : undefined;
+  const onDuplicateCharacterJob = jobAction ? (job) => jobAction(job, "duplicate") : undefined;
+  const onOpenCharacterJobQueue = setActiveView ? () => setActiveView("Queue") : undefined;
   const onSendImage = sendCharacterToImage;
   const onSendVideo = sendCharacterToVideo;
   const [selectedCharacterId, setSelectedCharacterId] = useState(characters[0]?.id ?? "");
@@ -425,12 +434,17 @@ export function CharacterStudio() {
               angleModel={angleModel}
               angleModels={angleModels}
               approvedReferences={approvedReferences}
+              assets={assets}
               createImageJob={createImageJob}
               imageLocalJobs={imageLocalJobs}
               importAsset={importAsset}
               latestAssets={latestAssets}
               loras={loras}
+              onCancel={onCancelCharacterJob}
+              onDuplicate={onDuplicateCharacterJob}
+              onOpenQueue={onOpenCharacterJobQueue}
               onPreview={onPreview}
+              onRetry={onRetryCharacterJob}
               rememberLocalGenerationJob={rememberLocalGenerationJob}
               selectedCharacter={selectedCharacter}
             />
@@ -438,12 +452,17 @@ export function CharacterStudio() {
             <CharacterPoseLibrary
               addCharacterReference={addCharacterReference}
               approvedReferences={approvedReferences}
+              assets={assets}
               createImageJob={createImageJob}
               imageLocalJobs={imageLocalJobs}
               importAsset={importAsset}
               latestAssets={latestAssets}
               loras={loras}
+              onCancel={onCancelCharacterJob}
+              onDuplicate={onDuplicateCharacterJob}
+              onOpenQueue={onOpenCharacterJobQueue}
               onPreview={onPreview}
+              onRetry={onRetryCharacterJob}
               poseModel={poseModel}
               poseModels={poseModels}
               rememberLocalGenerationJob={rememberLocalGenerationJob}

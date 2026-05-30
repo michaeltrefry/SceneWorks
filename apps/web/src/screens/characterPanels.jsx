@@ -3,14 +3,17 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField.jsx";
 import { usePoseLibrary } from "../poseLibrary.js";
 import { extractFamilies } from "../presetUtils.js";
 
-// Resolve a character generation job's produced images from the surrounding
-// latestAssets list. The component is propped from above (no AppContext here)
-// so this stays a small local helper instead of pulling in a shared util.
+// Resolve a character generation job's produced images from the full asset
+// catalog. Using the catalog (not just latestAssets, which is the single most
+// recent generation set) is what lets pose / angle previews stream in as each
+// image is saved — otherwise a parallel job's newer generation set hides this
+// job's partial outputs from latestAssets and nothing surfaces in the card.
 function jobImageAssets(job, assets) {
   if (!job?.result || !Array.isArray(assets)) return [];
   const byId = new Map(assets.map((asset) => [asset.id, asset]));
@@ -20,6 +23,33 @@ function jobImageAssets(job, assets) {
     return assets.filter((asset) => asset?.type === "image" && asset.generationSetId === job.result.generationSetId);
   }
   return [];
+}
+
+// True when the job was started from the Angle Set form (advanced.angleSet)
+// rather than the Pose Library (advanced.poses). Keeps the two cards from
+// stealing each other's jobs when both are visible for the same character.
+function isAngleSetJob(job) {
+  return job?.payload?.advanced?.angleSet === true;
+}
+
+function isPoseLibraryJob(job) {
+  return Array.isArray(job?.payload?.advanced?.poses) && job.payload.advanced.poses.length > 0;
+}
+
+// Active jobs for a given character + form-kind predicate, with terminal jobs
+// filtered out. Stack order: oldest-first (running run on top, queued runs
+// follow in execution order), mirroring buildLocalJobStack in App.jsx so the
+// Character Studio matches Image/Video Studio behavior.
+function characterFormJobs(imageLocalJobs, characterId, predicate) {
+  if (!characterId) return [];
+  return (imageLocalJobs ?? [])
+    .filter(
+      (job) =>
+        job?.payload?.characterId === characterId &&
+        predicate(job) &&
+        !terminalStatuses.has(job.status),
+    )
+    .sort((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? ""));
 }
 
 export function editableLora(link) {
@@ -424,6 +454,7 @@ export function CharacterAngleSet({
   angleModel,
   angleModels,
   approvedReferences,
+  assets = [],
   createImageJob,
   importAsset,
   addCharacterReference,
@@ -431,7 +462,11 @@ export function CharacterAngleSet({
   imageLocalJobs = [],
   loras = [],
   rememberLocalGenerationJob,
+  onCancel,
+  onDuplicate,
+  onOpenQueue,
   onPreview,
+  onRetry,
 }) {
   // sc-2003: multi-backbone picker. angleModels is the full list of viewAngles-
   // capable backbones (manifest order: InstantID first, then prompt-driven
@@ -454,7 +489,6 @@ export function CharacterAngleSet({
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [status, setStatus] = React.useState("");
-  const [jobId, setJobId] = React.useState(null);
   const fileInputRef = React.useRef(null);
   const characterId = selectedCharacter?.id;
 
@@ -483,9 +517,11 @@ export function CharacterAngleSet({
     return null;
   }
 
-  // The just-launched batch job (live progress while it runs) + this character's
-  // images (they stream in as the worker writes each angle).
-  const activeJob = imageLocalJobs.find((job) => job.id === jobId);
+  // Active jobs for this character's angle-set form, derived from the
+  // App-level imageLocalJobs so they persist across navigation and stack
+  // when multiple runs are in flight (sc-2092 follow-up). The local jobId
+  // state is gone — there's nothing to remember per mount.
+  const activeJobs = characterFormJobs(imageLocalJobs, characterId, isAngleSetJob);
   const characterImages = (latestAssets ?? []).filter(
     (asset) =>
       asset.recipe?.normalizedSettings?.characterId === characterId ||
@@ -535,7 +571,6 @@ export function CharacterAngleSet({
       });
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
-        setJobId(job.id);
         setStatus("");
       } else {
         setStatus("Could not start the job — check the error banner.");
@@ -602,23 +637,32 @@ export function CharacterAngleSet({
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
-      {activeJob ? (
-        <WorkerProgressCard
-          job={{
-            ...activeJob,
-            payload: {
-              ...activeJob.payload,
-              characterId: selectedCharacter?.id,
-              characterName: selectedCharacter?.name,
-            },
-          }}
-          thumbnailsVariant="image-grid"
-          thumbnailAssets={jobImageAssets(activeJob, latestAssets)}
-          expectedThumbnailCount={angleCount}
-          onThumbnailClick={onPreview}
-        />
+      {activeJobs.length ? (
+        <div className="worker-progress-card-stack local-job-stack">
+          {activeJobs.map((job) => (
+            <WorkerProgressCard
+              key={job.id}
+              job={{
+                ...job,
+                payload: {
+                  ...job.payload,
+                  characterId: selectedCharacter?.id,
+                  characterName: selectedCharacter?.name,
+                },
+              }}
+              thumbnailsVariant="image-grid"
+              thumbnailAssets={jobImageAssets(job, assets)}
+              expectedThumbnailCount={angleCount}
+              onThumbnailClick={onPreview}
+              onCancel={onCancel}
+              onRetry={onRetry}
+              onDuplicate={onDuplicate}
+              onOpenQueue={onOpenQueue}
+            />
+          ))}
+        </div>
       ) : null}
-      {!activeJob && status ? <p className="inline-warning">{status}</p> : null}
+      {!activeJobs.length && status ? <p className="inline-warning">{status}</p> : null}
       {characterImages.length ? (
         <div className="reference-thumb-row">
           {characterImages.map((asset) => (
@@ -806,6 +850,7 @@ export function CharacterPoseLibrary({
   poseModel,
   poseModels,
   approvedReferences,
+  assets = [],
   createImageJob,
   importAsset,
   addCharacterReference,
@@ -813,7 +858,11 @@ export function CharacterPoseLibrary({
   imageLocalJobs = [],
   loras = [],
   rememberLocalGenerationJob,
+  onCancel,
+  onDuplicate,
+  onOpenQueue,
   onPreview,
+  onRetry,
 }) {
   // sc-2003: multi-backbone picker. poseModels is the full list of poseLibrary-
   // capable backbones (manifest order: InstantID strict tier first, then the
@@ -836,7 +885,6 @@ export function CharacterPoseLibrary({
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [status, setStatus] = React.useState("");
-  const [jobId, setJobId] = React.useState(null);
   const fileInputRef = React.useRef(null);
   const characterId = selectedCharacter?.id;
 
@@ -860,7 +908,7 @@ export function CharacterPoseLibrary({
     return null;
   }
 
-  const activeJob = imageLocalJobs.find((job) => job.id === jobId);
+  const activeJobs = characterFormJobs(imageLocalJobs, characterId, isPoseLibraryJob);
   const characterImages = (latestAssets ?? []).filter(
     (asset) =>
       asset.recipe?.normalizedSettings?.characterId === characterId ||
@@ -915,7 +963,6 @@ export function CharacterPoseLibrary({
       });
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
-        setJobId(job.id);
         setStatus("");
       } else {
         setStatus("Could not start the job — check the error banner.");
@@ -994,23 +1041,34 @@ export function CharacterPoseLibrary({
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
-      {activeJob ? (
-        <WorkerProgressCard
-          job={{
-            ...activeJob,
-            payload: {
-              ...activeJob.payload,
-              characterId: selectedCharacter?.id,
-              characterName: selectedCharacter?.name,
-            },
-          }}
-          thumbnailsVariant="image-grid"
-          thumbnailAssets={jobImageAssets(activeJob, latestAssets)}
-          expectedThumbnailCount={selectedPoseIds.length}
-          onThumbnailClick={onPreview}
-        />
+      {activeJobs.length ? (
+        <div className="worker-progress-card-stack local-job-stack">
+          {activeJobs.map((job) => (
+            <WorkerProgressCard
+              key={job.id}
+              job={{
+                ...job,
+                payload: {
+                  ...job.payload,
+                  characterId: selectedCharacter?.id,
+                  characterName: selectedCharacter?.name,
+                },
+              }}
+              thumbnailsVariant="image-grid"
+              thumbnailAssets={jobImageAssets(job, assets)}
+              expectedThumbnailCount={
+                Array.isArray(job.payload?.advanced?.poses) ? job.payload.advanced.poses.length : selectedPoseIds.length
+              }
+              onThumbnailClick={onPreview}
+              onCancel={onCancel}
+              onRetry={onRetry}
+              onDuplicate={onDuplicate}
+              onOpenQueue={onOpenQueue}
+            />
+          ))}
+        </div>
       ) : null}
-      {!activeJob && status ? <p className="inline-warning">{status}</p> : null}
+      {!activeJobs.length && status ? <p className="inline-warning">{status}</p> : null}
       {characterImages.length ? (
         <div className="reference-thumb-row">
           {characterImages.map((asset) => (
