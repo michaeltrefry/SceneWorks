@@ -84,7 +84,11 @@
         // the best-effort tier). Surfaces Z-Image in the Character Studio pose
         // picker. character_image capability is NOT required — poseLibrary alone
         // gates the picker; the worker dispatches by model id.
-        "poseLibrary": true
+        "poseLibrary": true,
+        // Strict ControlNet → expose the pose-lock-strength slider
+        // (advanced.controlScale, read by MlxZImageAdapter._control_scale). The
+        // best-effort tiers have no strength control, so they omit this flag.
+        "poseControlScale": true
       }
     },
     {

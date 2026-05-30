@@ -2427,6 +2427,114 @@ describe("SceneWorks app shell", () => {
     expect(baseContext.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-pose" });
   });
 
+  it("exposes a pose-lock-strength slider for the strict Z-Image tier and threads controlScale (sc-2257)", async () => {
+    const poseKeypoints = Array.from({ length: 18 }, (_, i) => [0.5, i / 18]);
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        version: 1,
+        categories: ["standing"],
+        poses: [
+          { id: "standing_01", category: "standing", label: "Standing 01", preview: "poses/standing_01.png", keypoints: poseKeypoints },
+        ],
+      }),
+    }));
+    const createImageJob = vi.fn(async () => ({ id: "job-zpose" }));
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      archiveCharacter: () => {},
+      assets: [],
+      attachCharacterLora: () => {},
+      characters: [
+        {
+          id: "char-1",
+          name: "Mira",
+          type: "person",
+          references: [],
+          approvedReferences: [{ assetId: "ref-1", role: "hero", asset: { id: "ref-1", type: "image", displayName: "Mira ref" } }],
+          looks: [],
+          loras: [],
+        },
+      ],
+      createCharacter: () => {},
+      createCharacterLook: () => {},
+      createCharacterTestJob: () => {},
+      createImageJob,
+      importAsset: vi.fn(),
+      imageLocalJobs: [],
+      rememberLocalGenerationJob: vi.fn(),
+      deleteAsset: () => {},
+      deleteCharacterLook: () => {},
+      detachCharacterLora: () => {},
+      imageModels: [
+        {
+          id: "z_image_turbo",
+          name: "Z-Image-Turbo",
+          type: "image",
+          ui: { poseLibrary: true, poseControlScale: true },
+        },
+      ],
+      latestImageAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      sendCharacterToImage: () => {},
+      sendCharacterToVideo: () => {},
+      purgeAsset: () => {},
+      removeCharacterReference: () => {},
+      updateAssetStatus: () => {},
+      updateCharacter: () => {},
+      updateCharacterLook: () => {},
+      updateCharacterLora: () => {},
+      updateCharacterReference: () => {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const poseButton = [...container.querySelectorAll("button")].find((button) =>
+      (button.getAttribute("aria-label") ?? "").includes("pose Standing 01"),
+    );
+    expect(poseButton).toBeTruthy();
+    await act(async () => {
+      poseButton.click();
+    });
+
+    // Strict tier exposes the pose-lock-strength slider (best-effort tiers don't).
+    const slider = container.querySelector('input[aria-label="Pose lock strength"]');
+    expect(slider).toBeTruthy();
+
+    // Move it off the 1.0 default; the value must thread into advanced.controlScale.
+    const valueSetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(slider), "value").set;
+    await act(async () => {
+      valueSetter.call(slider, "0.75");
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Generate") && button.textContent.includes("pose"),
+    );
+    expect(generateButton).toBeTruthy();
+    await act(async () => {
+      generateButton.click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "z_image_turbo",
+        advanced: expect.objectContaining({
+          poses: [{ id: "standing_01", keypoints: poseKeypoints }],
+          controlScale: 0.75,
+        }),
+      }),
+    );
+  });
+
   it("threads a selected LoRA into the angle-set payload (sc-2223)", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-angle-lora" }));
     const baseContext = {

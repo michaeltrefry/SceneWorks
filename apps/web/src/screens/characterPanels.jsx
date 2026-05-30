@@ -881,6 +881,11 @@ export function CharacterPoseLibrary({
   const loraSelection = useLoraSelection(loras, activePoseModel);
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
   const [faceRestore, setFaceRestore] = React.useState(false);
+  // Strict ControlNet pose-lock strength (sc-2257). Only the strict tier
+  // (ui.poseControlScale) honours advanced.controlScale; default 1.0 locks
+  // cleanly, 0.65–1.0 is the model-card range, >~1.2 starts to degrade quality.
+  const [controlScale, setControlScale] = React.useState(1.0);
+  const supportsControlScale = Boolean(activePoseModel?.ui?.poseControlScale);
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
@@ -959,7 +964,12 @@ export function CharacterPoseLibrary({
         width: 1024,
         height: 1024,
         loras: loraSelection.serializedLoras,
-        advanced: { poses, ipAdapterScale: 0.8, faceRestore },
+        advanced: {
+          poses,
+          ipAdapterScale: 0.8,
+          faceRestore,
+          ...(supportsControlScale ? { controlScale } : {}),
+        },
       });
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
@@ -1025,6 +1035,27 @@ export function CharacterPoseLibrary({
         <input checked={faceRestore} onChange={(event) => setFaceRestore(event.target.checked)} type="checkbox" />
         Restore face (sharper identity; off keeps the raw render — fewer blend artifacts)
       </label>
+      {supportsControlScale ? (
+        <div className="control-scale-field">
+          <div className="lora-weight-row">
+            <span>Pose lock strength</span>
+            <input
+              aria-label="Pose lock strength"
+              max="1.5"
+              min="0.5"
+              onChange={(event) => setControlScale(Number(event.target.value))}
+              step="0.05"
+              type="range"
+              value={controlScale}
+            />
+            <span className="lora-weight-value">{controlScale.toFixed(2)}</span>
+          </div>
+          <p className="field-hint">
+            How hard the ControlNet locks the pose. 1.0 is a clean lock; lower (toward 0.65) loosens it for
+            more natural variation, higher (&gt;1.2) over-constrains and can degrade quality.
+          </p>
+        </div>
+      ) : null}
       <LoraPickerField selection={loraSelection} />
       <div className="inline-create">
         <button onClick={() => fileInputRef.current?.click()} type="button">

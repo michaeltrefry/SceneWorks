@@ -4679,6 +4679,18 @@ label {
   font-variant-numeric: tabular-nums;
 }
 
+/* Z-Image strict pose-lock strength slider (sc-2257) */
+.control-scale-field {
+  margin-top: 8px;
+}
+
+.control-scale-field .field-hint {
+  margin: 6px 10px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .editable-lora-choice {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;

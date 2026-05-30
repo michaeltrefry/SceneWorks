@@ -41,6 +41,9 @@ export const fallbackModels = [
       // ported Z-Image Fun-Controlnet-Union branch on it (true pose lock). The
       // pose picker gates on this flag alone — no character_image needed.
       poseLibrary: true,
+      // Strict ControlNet → expose a pose-lock-strength slider (advanced.controlScale).
+      // Best-effort tiers (Qwen/Flux2) have no strength control, so they omit this.
+      poseControlScale: true,
     },
   },
   {
