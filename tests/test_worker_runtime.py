@@ -2456,6 +2456,30 @@ def test_should_route_z_image_to_mlx_keeps_lokr_on_mlx(monkeypatch):
     assert _should_route_z_image_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lycoris"}]}) is False
 
 
+def test_should_route_z_image_pose_with_reference_to_mlx(monkeypatch):
+    """sc-2328 regression: a strict pose request carrying a reference MUST route to MLX.
+    The strict Fun-Controlnet-Union pose tier lives only on the MLX backend; the torch
+    adapter has no pose ControlNet, so diverting reference+pose jobs to torch (the old
+    `referenceAssetId -> torch` gate) made it honour count=1 while dropping the poses
+    → the "1 of 1 for N poses" bug. A plain reference (no poses) still falls to torch."""
+    from scene_worker.image_adapters import _should_route_z_image_to_mlx
+
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxZImageAdapter, "_sidecar_available", lambda self: True)
+    model = next(iter(MlxZImageAdapter._supported_models))
+
+    poses = [{"id": "sit_01", "keypoints": []}, {"id": "stand_01", "keypoints": []}]
+    # Reference + poses → MLX (strict pose lives there; reference becomes the identity init).
+    assert _should_route_z_image_to_mlx(
+        {"model": model, "referenceAssetId": "asset_kelsie", "advanced": {"poses": poses}}
+    ) is True
+    # Reference, no poses → still torch (no plain-reference Z-Image path on MLX).
+    assert _should_route_z_image_to_mlx({"model": model, "referenceAssetId": "asset_kelsie"}) is False
+    # Poses, no reference → MLX (the original pose-only sc-2257 path).
+    assert _should_route_z_image_to_mlx({"model": model, "advanced": {"poses": poses}}) is True
+
+
 def test_mlx_flux2_kv_allows_no_reference_txt2img(monkeypatch):
     # sc-2173: -kv is no longer reference-gated. Without a reference it falls
     # through to the txt2img path (the runner routes it to Flux2Klein) instead

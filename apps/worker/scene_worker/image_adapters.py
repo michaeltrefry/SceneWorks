@@ -7096,9 +7096,14 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
       2. Platform == darwin.
       3. Model in MlxZImageAdapter._supported_models.
       4. mode != "edit_image".
-      5. No referenceAssetId (Z-Image has no reference path on either
-         backend; the flag is checked symmetrically with the other mflux
-         families).
+      5. No referenceAssetId — UNLESS the request carries advanced.poses. A
+         plain reference (no poses) has no Z-Image path on either backend, so it
+         falls to torch; but a POSE request must route here regardless of a
+         reference, because the strict Fun-Controlnet-Union pose tier (sc-2257)
+         exists ONLY on MLX (the torch ZImageDiffusersAdapter has no pose
+         ControlNet and would honour count while silently ignoring advanced.poses
+         → "1 of 1" for N poses). MLX consumes the reference as an identity
+         img2img-init (sc-2328) or ignores it (sc-2257).
       6. Sidecar venv exists.
     """
     if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
@@ -7110,7 +7115,14 @@ def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:
         return False
     if payload.get("mode") == "edit_image":
         return False
-    if payload.get("referenceAssetId"):
+    # A pose request belongs on MLX even WITH a reference: the strict pose ControlNet
+    # (sc-2257) lives only here, so diverting reference+pose jobs to torch makes torch
+    # honour count (1) while dropping advanced.poses → "1 of 1" for N poses. The MLX
+    # strict pose path consumes the reference as an identity img2img-init (sc-2328) or
+    # ignores it (sc-2257). Only a plain reference (no poses) falls back to torch.
+    advanced = payload.get("advanced")
+    has_poses = isinstance(advanced, dict) and bool(advanced.get("poses"))
+    if payload.get("referenceAssetId") and not has_poses:
         return False
     # peft-trained LoKr runs natively on MLX for Z-Image (sc-2216: mflux LoKrLoader),
     # so a LoKr job STAYS on the MLX path (Michael's preference) — no torch fallback.
