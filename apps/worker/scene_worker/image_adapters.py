@@ -2630,7 +2630,10 @@ class MlxFluxAdapter:
         # heartbeat thread keeps it alive during the (minutes-long) run. Mirrors
         # LensTurboAdapter._run_sidecar.
         with stdout_log.open("w", encoding="utf-8") as out:
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
+            # leaves a partial traceback we can surface; result.json stays the
+            # authoritative success channel (_read_result prefers it).
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
             while True:
                 try:
                     proc.wait(timeout=2)
@@ -2646,6 +2649,7 @@ class MlxFluxAdapter:
         result = self._read_result(work_dir, stdout_log)
         if proc.returncode != 0 or "error" in result:
             error = result.get("error") or f"MLX FLUX sidecar exited with code {proc.returncode}."
+            error = _mlx_sidecar_failure_detail(error, proc.returncode, stdout_log)
             emit_worker_event(
                 "mlx_flux_sidecar_failed",
                 jobId=job_id,
@@ -2678,6 +2682,40 @@ class MlxFluxAdapter:
             except ValueError:
                 continue
         return {"error": "MLX FLUX sidecar produced no parseable result."}
+
+
+def _mlx_sidecar_failure_detail(error: str, returncode: int, stdout_log: Path) -> str:
+    """Enrich an opaque MLX-sidecar failure with the OS exit signal + output tail.
+
+    A *negative* return code means the OS killed the sidecar with a signal, which
+    bypasses ``mlx_flux_runner``'s ``try/except`` (so it never gets to write a
+    structured error — which is exactly why the only message is "produced no
+    parseable result"). The signal tells us which failure mode it was:
+
+      - ``-9`` (SIGKILL): macOS memory pressure / jetsam — i.e. out of memory.
+      - ``-6`` (SIGABRT) / ``-11`` (SIGSEGV): a native MLX/Metal abort or fault.
+
+    For the abort/fault cases a partial traceback usually lands in the captured
+    output (stderr is now merged into ``stdout.log``), so we append a short tail.
+    """
+    parts: list[str] = [error] if error else []
+    if returncode < 0:
+        sig = -returncode
+        label = {6: "SIGABRT", 9: "SIGKILL", 11: "SIGSEGV"}.get(sig, f"signal {sig}")
+        if sig == 9:
+            parts.append(
+                f"sidecar killed by {label} — almost certainly out of memory; "
+                "try a lower resolution, Q4 quantization, or fewer LoRAs"
+            )
+        else:
+            parts.append(f"sidecar crashed with {label} (native MLX/Metal fault)")
+    try:
+        tail = "\n".join(stdout_log.read_text(encoding="utf-8").splitlines()[-15:]).strip()
+    except OSError:
+        tail = ""
+    if tail:
+        parts.append(f"last sidecar output:\n{tail}")
+    return " — ".join(parts) if parts else "MLX sidecar failed with no output."
 
 
 class MlxQwenAdapter:
@@ -2935,7 +2973,10 @@ class MlxQwenAdapter:
             f"Running {label} ({total} image(s)).",
         )
         with stdout_log.open("w", encoding="utf-8") as out:
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
+            # leaves a partial traceback we can surface; result.json stays the
+            # authoritative success channel (_read_result prefers it).
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
             while True:
                 try:
                     proc.wait(timeout=2)
@@ -2951,6 +2992,7 @@ class MlxQwenAdapter:
         result = self._read_result(work_dir, stdout_log)
         if proc.returncode != 0 or "error" in result:
             error = result.get("error") or f"MLX Qwen sidecar exited with code {proc.returncode}."
+            error = _mlx_sidecar_failure_detail(error, proc.returncode, stdout_log)
             emit_worker_event(
                 "mlx_qwen_sidecar_failed",
                 jobId=job_id,
@@ -3233,7 +3275,10 @@ class MlxZImageAdapter:
             f"Running {label} ({total} image(s)).",
         )
         with stdout_log.open("w", encoding="utf-8") as out:
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
+            # leaves a partial traceback we can surface; result.json stays the
+            # authoritative success channel (_read_result prefers it).
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
             while True:
                 try:
                     proc.wait(timeout=2)
@@ -3249,6 +3294,7 @@ class MlxZImageAdapter:
         result = self._read_result(work_dir, stdout_log)
         if proc.returncode != 0 or "error" in result:
             error = result.get("error") or f"MLX Z-Image sidecar exited with code {proc.returncode}."
+            error = _mlx_sidecar_failure_detail(error, proc.returncode, stdout_log)
             emit_worker_event(
                 "mlx_z_image_sidecar_failed",
                 jobId=job_id,
@@ -3937,7 +3983,10 @@ class MlxFlux2Adapter:
             f"Running {label} ({total} image(s)).",
         )
         with stdout_log.open("w", encoding="utf-8") as out:
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
+            # leaves a partial traceback we can surface; result.json stays the
+            # authoritative success channel (_read_result prefers it).
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
             while True:
                 try:
                     proc.wait(timeout=2)
@@ -3953,6 +4002,7 @@ class MlxFlux2Adapter:
         result = MlxFluxAdapter._read_result(work_dir, stdout_log)
         if proc.returncode != 0 or "error" in result:
             error = result.get("error") or f"MLX FLUX.2 sidecar exited with code {proc.returncode}."
+            error = _mlx_sidecar_failure_detail(error, proc.returncode, stdout_log)
             emit_worker_event(
                 "mlx_flux2_sidecar_failed",
                 jobId=job_id,
@@ -5609,7 +5659,10 @@ class LensTurboAdapter:
         # worker log for diagnostics. Poll so the job stays cancelable; the
         # heartbeat thread keeps it alive during the (minutes-long) run.
         with stdout_log.open("w", encoding="utf-8") as out:
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=None)
+            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
+            # leaves a partial traceback we can surface; result.json stays the
+            # authoritative success channel (_read_result prefers it).
+            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
             while True:
                 try:
                     proc.wait(timeout=2)

@@ -250,8 +250,20 @@ def main() -> int:
         _log(f"generated image {index + 1}/{len(seeds)} -> {path}")
 
     payload = {"images": images}
+    # Self-report the MLX peak unified-memory high-water mark so the worker can
+    # build a real per-(model, quantize, resolution, #loras) memory profile and
+    # warn before a future run OOMs the sidecar (a hard SIGKILL that bypasses the
+    # try/except below and surfaces only as "produced no parseable result").
+    # Telemetry only — never fail a finished run over it.
+    try:
+        import mlx.core as mx
+
+        payload["peakMemoryBytes"] = int(mx.get_peak_memory())
+    except Exception:  # pragma: no cover - older mlx / probe failure
+        pass
     result_path.write_text(json.dumps(payload), encoding="utf-8")
     print(json.dumps(payload))
+    _log(f"done: {len(images)} image(s); peakMemoryBytes={payload.get('peakMemoryBytes')}")
     return 0
 
 
