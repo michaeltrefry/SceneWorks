@@ -256,6 +256,11 @@ MODEL_TARGETS = {
         "steps": 20,
         "repo": "Qwen/Qwen-Image",
         "adapter": "qwen_image",
+        # Strict pose tier (sc-2291): native diffusers QwenImageControlNetPipeline +
+        # InstantX Qwen-Image-ControlNet-Union (DWPose-trained, Apache-2.0). Presence
+        # of this key (base qwen_image only) routes advanced.poses to the strict
+        # ControlNet path — skeleton-driven, pose-from-prompt, no reference identity.
+        "controlNetPose": {"repo": "InstantX/Qwen-Image-ControlNet-Union"},
     },
     # sc-2160: qwen_image_edit (Aug 2025) and qwen_image_edit_2509 (Sep 2025) are
     # aliased to Qwen-Image-Edit-2511 (Dec 2025) — the 2511 weights are a drop-in
@@ -1549,6 +1554,10 @@ class QwenImageAdapter:
         # between fused (Lightning) and unfused base loads on the same repo.
         self._text_distill_key: str | None = None
         self._edit_distill_key: str | None = None
+        # Strict pose tier (sc-2291): a separate QwenImageControlNetPipeline carrying
+        # the extra ControlNet weights, kept apart from the T2I / edit pipes.
+        self._pose_pipe: Any | None = None
+        self._pose_loaded_repo: str | None = None
         self._loaded_model: str | None = None
         self._loaded_lora_states: dict[str, LoraPipelineState] = {}
 
@@ -1570,12 +1579,14 @@ class QwenImageAdapter:
     def unload(self) -> bool:
         """Free any resident pipeline so another family can load (cross-adapter
         eviction). Returns True if it actually freed something."""
-        if self._text_pipe is None and self._edit_pipe is None:
+        if self._text_pipe is None and self._edit_pipe is None and self._pose_pipe is None:
             return False
         self._text_pipe = None
         self._edit_pipe = None
+        self._pose_pipe = None
         self._text_repo = None
         self._edit_repo = None
+        self._pose_loaded_repo = None
         self._text_distill_key = None
         self._edit_distill_key = None
         self._loaded_model = None
@@ -1598,6 +1609,18 @@ class QwenImageAdapter:
             raise RuntimeError(f"{request.model} is not a Qwen Image target.")
         if request.mode == "edit_image" and not model_supports_edit(request.model):
             raise RuntimeError(f"{request.model} does not support image editing.")
+
+        # Strict pose tier (sc-2291): base Qwen-Image + advanced.poses routes to the
+        # native diffusers QwenImageControlNetPipeline (InstantX Qwen-Image-ControlNet-
+        # Union, DWPose) — true skeleton-driven pose, pose-from-prompt, NO reference
+        # identity. A separate pipeline + path from the T2I / edit-best-effort flow
+        # below (the edit tier sc-2256 stays as-is; only base qwen_image declares
+        # controlNetPose). Identity, when wanted, comes from a character LoRA.
+        strict_pose_entries = self._strict_pose_entries(request, model_target)
+        if strict_pose_entries:
+            return self._generate_pose_set(
+                settings, job, request, project_path, progress, cancel_requested, model_target, strict_pose_entries
+            )
 
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
         pipe = self._load_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
@@ -1910,8 +1933,275 @@ class QwenImageAdapter:
             raise InterruptedError("Image generation canceled by user.")
         return output.images[0].convert("RGB")
 
-    def _apply_loras(self, pipe: Any, request: ImageRequest) -> None:
-        key = "edit" if request.mode == "edit_image" else "text"
+    @staticmethod
+    def _strict_pose_entries(request: ImageRequest, model_target: dict[str, Any]) -> list[dict[str, Any]]:
+        """Library pose entries for the base-Qwen strict ControlNet tier (sc-2291).
+        Empty unless the target declares ``controlNetPose`` (base qwen_image only),
+        it is not an edit job, and advanced.poses is present. Unlike the Kolors /
+        InstantID tiers this needs NO reference — it is pose-from-prompt (identity, if
+        wanted, comes from a character LoRA). A reference, if attached, is ignored."""
+        if request.mode == "edit_image" or not model_target.get("controlNetPose"):
+            return []
+        raw = request.advanced.get("poses")
+        return [p for p in raw if isinstance(p, dict)] if isinstance(raw, list) else []
+
+    def _pose_control_scale(self, request: ImageRequest) -> float:
+        """Pose ControlNet conditioning scale (sc-2291). InstantX Qwen-Image-ControlNet-
+        Union locks cleanly near 1.0; default 0.9 mirrors the Z-Image strict default.
+        Overridable via advanced.controlScale (the shared pose-lock slider), clamp [0, 2]."""
+        try:
+            return max(0.0, min(2.0, float(request.advanced.get("controlScale", 0.9))))
+        except (TypeError, ValueError):
+            return 0.9
+
+    def _generate_pose_set(
+        self,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+        model_target: dict[str, Any],
+        pose_entries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Strict pose tier (sc-2291): one image per library pose via the native
+        diffusers QwenImageControlNetPipeline (InstantX Qwen-Image-ControlNet-Union),
+        sharing one seed so noise-derived attributes stay consistent across the set."""
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (pose ControlNet).")
+        pipe = self._load_pose_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        # Apply request.loras once on the pose pipe before the loop (sc-2251/sc-2291),
+        # so the character-LoRA bootstrapping loop supplies identity on the strict pose
+        # tier. The CN pipeline exposes .transformer, so apply_loras_to_pipeline also
+        # routes LoKr via inject_lokr_adapter. Tracked under its own "pose" cache slot.
+        emit_worker_event(
+            "image_lora_apply_start",
+            jobId=job["id"],
+            adapter=self.id,
+            loraCount=len(request.loras),
+        )
+        self._apply_loras(pipe, request, lora_key="pose")
+        emit_worker_event("image_lora_apply_complete", jobId=job["id"], adapter=self.id)
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        total = len(pose_entries)
+        pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries]
+        pose_hands = [normalize_hands(p.get("hands")) for p in pose_entries]
+        pose_faces = [normalize_face(p.get("face")) for p in pose_entries]
+        set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
+        label = f"{model_target['label']} pose"
+
+        def image_at_index(index: int) -> Image.Image:
+            progress(
+                "running",
+                "generating",
+                image_batch_progress(index, total),
+                format_batch_running_message(label, index, total),
+            )
+            emit_worker_event(
+                "image_inference_start",
+                jobId=job["id"],
+                adapter=self.id,
+                model=request.model,
+                imageIndex=index,
+                imageCount=total,
+                poseId=pose_entries[index].get("id"),
+                device=device,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            try:
+                image = self._run_pose(
+                    settings, pipe, request, set_seed, project_path,
+                    pose_keypoints[index], pose_hands[index], pose_faces[index],
+                    cancel_requested=cancel_requested,
+                )
+            except Exception as exc:
+                emit_worker_event(
+                    "image_inference_failed",
+                    jobId=job["id"],
+                    adapter=self.id,
+                    imageIndex=index,
+                    error=str(exc),
+                    errorType=exc.__class__.__name__,
+                )
+                raise
+            emit_worker_event(
+                "image_inference_complete",
+                jobId=job["id"],
+                adapter=self.id,
+                imageIndex=index,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return image
+
+        return ImageAssetWriter().write_incremental_outputs(
+            request=request,
+            project_path=project_path,
+            image_count=total,
+            image_at_index=image_at_index,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={
+                **request.advanced,
+                "repo": self._repo_for_request(request, model_target),
+                "numInferenceSteps": self._num_inference_steps(request, model_target),
+                "guidanceScale": self._guidance_scale(request),
+                "controlNetPose": model_target["controlNetPose"]["repo"],
+                "controlScale": self._pose_control_scale(request),
+                "poseLibrary": True,
+                "realModelInference": True,
+            },
+            settings=settings,
+            job_id=job["id"],
+        )
+
+    def _load_pose_pipeline(
+        self,
+        settings: WorkerSettings,
+        request: ImageRequest,
+        model_target: dict[str, Any],
+        progress: ProgressCallback,
+        *,
+        job_id: str,
+    ) -> Any:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+        repo = self._repo_for_request(request, model_target)
+        cn = model_target.get("controlNetPose") or {}
+        if not cn:
+            raise RuntimeError(f"{request.model} has no Qwen pose ControlNet configuration.")
+        cn_repo = str(cn["repo"])
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        if self._pose_pipe is not None and self._pose_loaded_repo == repo:
+            progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']} pose pipeline.")
+            return self._pose_pipe
+        # Only one large pipeline resident at a time: drop the T2I / edit pipes (and any
+        # stale pose pipe) before loading the base + ControlNet stack.
+        self._text_pipe = None
+        self._edit_pipe = None
+        self._pose_pipe = None
+        self._text_repo = None
+        self._edit_repo = None
+        self._text_distill_key = None
+        self._edit_distill_key = None
+        self._empty_cuda_cache(torch)
+        for slot in ("text", "edit", "pose"):
+            self._forget_loaded_loras(slot)
+
+        QwenImageControlNetModel = getattr(diffusers, "QwenImageControlNetModel", None)
+        QwenImageControlNetPipeline = getattr(diffusers, "QwenImageControlNetPipeline", None)
+        if QwenImageControlNetModel is None or QwenImageControlNetPipeline is None:
+            raise RuntimeError(
+                "The installed diffusers package does not expose QwenImageControlNetModel / "
+                "QwenImageControlNetPipeline. Install the latest diffusers build."
+            )
+        cpu_offload = bool(request.advanced.get("cpuOffload", False))
+        cache_action = "Loading cached" if huggingface_repo_cache_exists(repo) else "Downloading"
+        progress("loading_model", "loading_model", 0.2, f"{cache_action} {model_target['label']} + pose ControlNet.")
+        emit_worker_event(
+            "image_pipeline_load_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            controlNet=cn_repo,
+            device=device,
+            dtype=str(dtype),
+            cpuOffload=cpu_offload,
+            cached=huggingface_repo_cache_exists(repo),
+        )
+        controlnet = QwenImageControlNetModel.from_pretrained(cn_repo, torch_dtype=dtype)
+        pipe = QwenImageControlNetPipeline.from_pretrained(repo, controlnet=controlnet, torch_dtype=dtype)
+        emit_worker_event(
+            "image_pipeline_load_complete",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            componentDevices=pipeline_component_devices(pipe),
+        )
+        offload_enabled = cpu_offload and hasattr(pipe, "enable_model_cpu_offload")
+        if offload_enabled:
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
+        if hasattr(pipe, "enable_vae_tiling"):
+            pipe.enable_vae_tiling()
+        component_devices = verify_pipeline_on_device(
+            pipe,
+            requested_device=device,
+            model_label=model_target["label"],
+            allow_offload=offload_enabled,
+        )
+        emit_worker_event(
+            "image_pipeline_on_device",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            requestedDevice=device,
+            cpuOffload=offload_enabled,
+            componentDevices=component_devices,
+            gpuMemory=gpu_memory_snapshot(torch, device),
+        )
+        self._pose_pipe = pipe
+        self._pose_loaded_repo = repo
+        self._loaded_model = request.model
+        return pipe
+
+    def _run_pose(
+        self,
+        settings: WorkerSettings,
+        pipe: Any,
+        request: ImageRequest,
+        seed: int,
+        project_path: Path,
+        keypoints: list[Any],
+        hands: Any,
+        face: Any,
+        cancel_requested: CancelCallback | None = None,
+    ) -> Image.Image:
+        """Render the character in one library pose: the DWPose whole-body skeleton
+        drives the InstantX Qwen-Image-ControlNet-Union pose head; the prompt drives
+        everything else (pose-from-prompt, no reference identity)."""
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
+        model_target = MODEL_TARGETS[request.model]
+        width, height = request.width, request.height
+        # DWPose-trained head: render body + hands/face when the pose carries them, with
+        # a resolution-proportional stick width for an in-distribution control signal
+        # (mirrors the sc-2257 Z-Image strict tier). Bundled poses are body-only today.
+        stick = max(6, round(min(width, height) * 0.012))
+        skeleton = Image.fromarray(draw_wholebody(width, height, keypoints, hands=hands, face=face, stickwidth=stick))
+        sampler_key, scheduler_key, shift_value = sampler_selection_from_advanced(request.advanced)
+        apply_sampler(pipe, sampler_key, scheduler_key, shift_value, adapter=self.id)
+        kwargs = {
+            "prompt": request.prompt,
+            "control_image": skeleton,
+            "controlnet_conditioning_scale": self._pose_control_scale(request),
+            "height": height,
+            "width": width,
+            "num_inference_steps": self._num_inference_steps(request, model_target),
+            "guidance_scale": self._guidance_scale(request),
+            "generator": generator,
+        }
+        if request.negative_prompt:
+            kwargs["negative_prompt"] = request.negative_prompt
+        step_callback = cancel_step_callback(pipe, cancel_requested)
+        if step_callback is not None:
+            kwargs["callback_on_step_end"] = step_callback
+        output = pipe(**filter_call_kwargs(pipe, kwargs))
+        if cancel_requested is not None and cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+        return output.images[0].convert("RGB")
+
+    def _apply_loras(self, pipe: Any, request: ImageRequest, lora_key: str | None = None) -> None:
+        key = lora_key or ("edit" if request.mode == "edit_image" else "text")
         model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["qwen_image"])
         self._loaded_lora_states[key] = apply_loras_to_pipeline(
             pipe,
@@ -7207,7 +7497,11 @@ def _should_route_qwen_to_mlx(payload: dict[str, Any]) -> bool:
       4. mode != "edit_image".
       5. No referenceAssetId (character/reference flow is on the torch
          path while QwenImageEdit threading is deferred).
-      6. Sidecar venv exists.
+      6. No advanced.poses — the strict pose tier (sc-2291) is a diffusers
+         QwenImageControlNetPipeline (torch only); MLX qwen has no ControlNet and
+         would silently drop the poses (→ "1 of N"). Keep pose jobs on the torch
+         QwenImageAdapter where the ControlNet lives.
+      7. Sidecar venv exists.
     """
     if os.getenv("SCENEWORKS_DISABLE_MLX_FLUX", "").strip().lower() in {"1", "true", "yes"}:
         return False
@@ -7219,6 +7513,9 @@ def _should_route_qwen_to_mlx(payload: dict[str, Any]) -> bool:
     if payload.get("mode") == "edit_image":
         return False
     if payload.get("referenceAssetId"):
+        return False
+    advanced = payload.get("advanced")
+    if isinstance(advanced, dict) and advanced.get("poses"):
         return False
     return MlxQwenAdapter()._sidecar_available()
 

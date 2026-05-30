@@ -64,6 +64,18 @@ try {
   await runDocker([...compose, "up", "--build", "-d", "api"]);
   await waitForHealth();
 } finally {
+  // The api service runs as root in the container, so anything it seeds into the
+  // bind-mounted data dir is root-owned — notably data/projects/global-poses.sceneworks,
+  // the global pose store the API creates on boot (apps/rust-api ensure_global_poses_project).
+  // The host CI user then can't remove those files (EACCES on rmdir; fs.rm's `force`
+  // ignores ENOENT, not EACCES). Delete the root-owned tree from inside a one-off root
+  // container first. Scope it to data/projects so we never touch the Hugging Face cache
+  // bind-mounted under data/cache/huggingface.
+  await runDocker([
+    ...compose, "run", "--rm", "--no-deps", "--entrypoint", "rm", "api", "-rf", "/sceneworks/data/projects",
+  ]).catch((error) => {
+    console.error(error.message);
+  });
   await runDocker([...compose, "down", "--remove-orphans"]).catch((error) => {
     console.error(error.message);
   });
