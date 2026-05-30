@@ -1426,6 +1426,25 @@ def test_lora_compatibility_chroma_accepts_flux_but_not_vice_versa():
         )
 
 
+def test_lora_compatibility_flux2_klein_accepts_flux2_lora():
+    # FLUX.2 [klein] models have family "flux2-klein" but accept "flux2" LoRAs
+    # (loraCompatibility.families = ["flux2"]). The validate guard keys off the
+    # model `family` string, so the klein->flux2 relationship must be declared.
+    validate_lora_compatibility(
+        [{"id": "portrait_engine", "compatibility": {"families": ["flux2"]}}],
+        model_family="flux2-klein",
+        adapter_id="mlx_flux2",
+    )
+    # The relationship is one-directional: a plain flux2 model would reject a
+    # flux2-klein-tagged LoRA (no such model ships today, but keep the gate tight).
+    with pytest.raises(RuntimeError, match="not compatible with model family flux2"):
+        validate_lora_compatibility(
+            [{"id": "klein_only", "compatibility": {"families": ["flux2-klein"]}}],
+            model_family="flux2",
+            adapter_id="mlx_flux2",
+        )
+
+
 def test_lora_weight_defaults_on_unparseable_values():
     assert lora_weight({"weight": "not-a-number"}) == 0.8
 

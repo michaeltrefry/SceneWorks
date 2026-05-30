@@ -68,8 +68,15 @@ def normalize_lora_family(family: Any) -> str:
 # Flux LoRAs load on Chroma — and Chroma LoRAs that carry no chroma metadata are
 # classified as `flux` by the key-based detector (the keys are identical). The
 # relationship is one-directional: a Flux model does not accept chroma LoRAs.
+#
+# FLUX.2 [klein] is a distilled variant whose model family ("flux2-klein") differs
+# from its LoRA-compatible family ("flux2"): klein LoRAs are flux2 LoRAs and are
+# detected/declared as such (see lora_family.rs Bucket::Flux2). The klein models'
+# manifest loraCompatibility.families is ["flux2"], so a klein model must accept
+# flux2 LoRAs even though its own family string is "flux2-klein".
 EXTRA_COMPATIBLE_LORA_FAMILIES: dict[str, set[str]] = {
     "chroma": {"flux"},
+    "flux2-klein": {"flux2"},
 }
 
 
