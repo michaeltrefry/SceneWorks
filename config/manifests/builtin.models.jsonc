@@ -1280,6 +1280,11 @@
         "label": "Kolors",
         "description": "Kwai-Kolors Kolors — photorealistic text-to-image and image-to-image editing with strong Chinese + English prompting and text rendering (Midjourney-v6-level human eval). Apache-2.0 (commercial-safe). ChatGLM3-6B text encoder + SDXL-style UNet; ~16.5GB checkpoint, real CFG + negative prompt. Recommended ~25 steps at guidance 5.0.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image", "style_variations"],
+        // Strict pose tier (sc-2264): the official Kolors-ControlNet-Pose (DWPose)
+        // loaded via the vendored Kolors_ControlNetModel + ControlNet img2img pipeline,
+        // composed with IP-Adapter-Plus identity. Real pose-lock (vs the best-effort
+        // multi-image tiers on Qwen/FLUX.2). Renders the bundled OpenPose skeletons.
+        "poseLibrary": true,
         "promptGuide": {
           "title": "Kolors Prompt Guide",
           "path": "/prompt-guides/kolors.md",

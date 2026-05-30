@@ -459,6 +459,12 @@ MODEL_TARGETS = {
             "weight": "ip_adapter_plus_general.safetensors",
             "revision": "refs/pr/4",
         },
+        # Strict pose tier (sc-2264): official Kolors pose ControlNet (DWPose-trained).
+        # Loaded via the vendored Kolors_ControlNetModel + ControlNet img2img pipeline
+        # (_vendor/kolors) — composes with IP-Adapter-Plus identity in one call.
+        "controlNetPose": {
+            "repo": "Kwai-Kolors/Kolors-ControlNet-Pose",
+        },
     },
     "chroma1_hd": {
         "label": "Chroma1-HD",
@@ -1233,7 +1239,7 @@ class ZImageDiffusersAdapter:
     def unload(self) -> bool:
         """Free any resident pipeline so another family can load (cross-adapter
         eviction). Returns True if it actually freed something."""
-        if self._text_pipe is None and self._img2img_pipe is None:
+        if self._text_pipe is None and self._img2img_pipe is None and getattr(self, "_pose_pipe", None) is None:
             return False
         self._evict_pipelines(importlib.import_module("torch"))
         return True
@@ -3990,6 +3996,11 @@ class KolorsDiffusersAdapter:
         # A plain-T2I pipe and an IP-Adapter pipe are not interchangeable, so this is
         # part of the text-pipe cache key.
         self._text_ip_adapter: bool = False
+        # Strict pose tier (sc-2264): a separate vendored ControlNet img2img pipeline
+        # (pose ControlNet + IP-Adapter identity). Kept apart from the T2I/img2img pipes
+        # since it carries the extra ControlNet weights.
+        self._pose_pipe: Any | None = None
+        self._pose_loaded_repo: str | None = None
         self._loaded_lora_states: dict[str, LoraPipelineState] = {}
 
     @staticmethod
@@ -3998,13 +4009,269 @@ class KolorsDiffusersAdapter:
         # (reference + img2img edit together is a future enhancement).
         return request.mode != "edit_image" and bool(request.reference_asset_id)
 
+    @staticmethod
+    def _pose_entries(request: ImageRequest) -> list[dict[str, Any]]:
+        """Pose-library entries ({id, keypoints}) when this is a character_image pose
+        job with a reference. Empty otherwise (no pose ControlNet path)."""
+        if request.mode == "edit_image" or not request.reference_asset_id:
+            return []
+        raw = request.advanced.get("poses")
+        return [p for p in raw if isinstance(p, dict)] if isinstance(raw, list) else []
+
+    def _openpose_scale(self, request: ImageRequest) -> float:
+        try:
+            return max(0.0, min(2.0, float(request.advanced.get("openPoseScale", 0.7))))
+        except (TypeError, ValueError):
+            return 0.7
+
+    def _generate_pose_set(
+        self,
+        settings: WorkerSettings,
+        job: dict[str, Any],
+        request: ImageRequest,
+        project_path: Path,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+        model_target: dict[str, Any],
+        pose_entries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Strict pose tier (sc-2264): one image per library pose via the vendored
+        Kolors pose ControlNet pipeline (pose ControlNet structure + IP-Adapter
+        identity), sharing one seed so wardrobe/hair stay consistent across the set."""
+        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (pose ControlNet).")
+        pipe = self._load_pose_pipeline(settings, request, model_target, progress=progress, job_id=job["id"])
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        total = len(pose_entries)
+        pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries]
+        set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
+        label = f"{model_target['label']} pose"
+
+        def image_at_index(index: int) -> Image.Image:
+            progress(
+                "running",
+                "generating",
+                image_batch_progress(index, total),
+                format_batch_running_message(label, index, total),
+            )
+            emit_worker_event(
+                "image_inference_start",
+                jobId=job["id"],
+                adapter=self.id,
+                model=request.model,
+                imageIndex=index,
+                imageCount=total,
+                poseId=pose_entries[index].get("id"),
+                device=device,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            try:
+                image = self._run_pose(
+                    settings, pipe, request, set_seed, project_path, pose_keypoints[index],
+                    cancel_requested=cancel_requested,
+                )
+            except Exception as exc:
+                emit_worker_event(
+                    "image_inference_failed",
+                    jobId=job["id"],
+                    adapter=self.id,
+                    imageIndex=index,
+                    error=str(exc),
+                    errorType=exc.__class__.__name__,
+                )
+                raise
+            emit_worker_event(
+                "image_inference_complete",
+                jobId=job["id"],
+                adapter=self.id,
+                imageIndex=index,
+                gpuMemory=gpu_memory_snapshot(torch, device),
+            )
+            return image
+
+        return ImageAssetWriter().write_incremental_outputs(
+            request=request,
+            project_path=project_path,
+            image_count=total,
+            image_at_index=image_at_index,
+            adapter_id=self.id,
+            progress=progress,
+            cancel_requested=cancel_requested,
+            raw_settings={
+                **request.advanced,
+                "repo": self._repo_for_request(request, model_target),
+                "numInferenceSteps": self._num_inference_steps(request, model_target),
+                "guidanceScale": self._guidance_scale(request, model_target),
+                "controlNetPose": model_target["controlNetPose"]["repo"],
+                "openPoseScale": self._openpose_scale(request),
+                "ipAdapterScale": self._ip_adapter_scale(request),
+                "poseLibrary": True,
+                "realModelInference": True,
+            },
+        )
+
+    def _load_pose_pipeline(
+        self,
+        settings: WorkerSettings,
+        request: ImageRequest,
+        model_target: dict[str, Any],
+        progress: ProgressCallback,
+        *,
+        job_id: str,
+    ) -> Any:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+        transformers = importlib.import_module("transformers")
+        repo = self._repo_for_request(request, model_target)
+        cn = model_target.get("controlNetPose") or {}
+        ip_adapter = model_target.get("ipAdapter") or {}
+        if not cn or not ip_adapter:
+            raise RuntimeError(f"{request.model} has no Kolors pose ControlNet / IP-Adapter configuration.")
+        require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        dtype = select_torch_dtype(torch, device, request.advanced.get("dtype"))
+        if self._pose_pipe is not None and self._pose_loaded_repo == repo:
+            progress("loading_model", "loading_model", 0.22, f"Using cached {model_target['label']} pose pipeline.")
+            return self._pose_pipe
+        # Only one ~24GB+ pipeline resident at a time: drop the T2I/img2img pipes (and
+        # any stale pose pipe) before loading the ControlNet + IP-Adapter stack.
+        self._evict_pipelines(torch)
+        # Vendored Kolors ControlNet model + img2img pipeline (sc-2264). The pipeline
+        # drives diffusers' UNet2DConditionModel, so it composes with the same Kolors
+        # components diffusers.KolorsPipeline loads.
+        from ._vendor.kolors.models.controlnet import ControlNetModel as KolorsControlNetModel
+        from ._vendor.kolors.pipelines.pipeline_controlnet_xl_kolors_img2img import (
+            StableDiffusionXLControlNetImg2ImgPipeline as KolorsControlNetPipeline,
+        )
+
+        cache_action = "Loading cached" if huggingface_repo_cache_exists(repo) else "Downloading"
+        progress("loading_model", "loading_model", 0.2, f"{cache_action} {model_target['label']} + pose ControlNet.")
+        emit_worker_event(
+            "image_pipeline_load_start",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            device=device,
+            dtype=str(dtype),
+            controlNetPose=cn["repo"],
+            useIpAdapter=True,
+        )
+        base = diffusers.KolorsPipeline.from_pretrained(
+            repo, torch_dtype=dtype, variant=model_target.get("variant")
+        )
+        controlnet = KolorsControlNetModel.from_pretrained(
+            cn["repo"], revision=cn.get("revision"), torch_dtype=dtype
+        )
+        encoder_class = getattr(transformers, "CLIPVisionModelWithProjection", None)
+        if encoder_class is None:
+            raise RuntimeError(
+                "transformers does not expose CLIPVisionModelWithProjection, "
+                "required for the Kolors IP-Adapter image encoder."
+            )
+        image_encoder = encoder_class.from_pretrained(
+            ip_adapter["repo"],
+            subfolder="image_encoder",
+            revision=ip_adapter.get("revision"),
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        feature_extractor = transformers.CLIPImageProcessor(size=336, crop_size=336)
+        pipe = KolorsControlNetPipeline(
+            vae=base.vae,
+            text_encoder=base.text_encoder,
+            tokenizer=base.tokenizer,
+            unet=base.unet,
+            controlnet=controlnet,
+            scheduler=base.scheduler,
+            feature_extractor=feature_extractor,
+            image_encoder=image_encoder,
+            force_zeros_for_empty_prompt=False,
+        )
+        pipe.load_ip_adapter(
+            ip_adapter["repo"],
+            subfolder="",
+            weight_name=ip_adapter["weight"],
+            revision=ip_adapter.get("revision"),
+            image_encoder_folder=None,
+        )
+        pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
+        cpu_offload = bool(request.advanced.get("cpuOffload", False))
+        offload_enabled = cpu_offload and hasattr(pipe, "enable_model_cpu_offload")
+        if offload_enabled:
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
+        vae = getattr(pipe, "vae", None)
+        if vae is not None and hasattr(vae, "enable_tiling"):
+            vae.enable_tiling()
+        emit_worker_event(
+            "image_pipeline_load_complete",
+            jobId=job_id,
+            adapter=self.id,
+            model=request.model,
+            repo=repo,
+            componentDevices=pipeline_component_devices(pipe),
+        )
+        self._pose_pipe = pipe
+        self._pose_loaded_repo = repo
+        self._loaded_model = request.model
+        return pipe
+
+    def _run_pose(
+        self,
+        settings: WorkerSettings,
+        pipe: Any,
+        request: ImageRequest,
+        seed: int,
+        project_path: Path,
+        keypoints: list[Any],
+        cancel_requested: CancelCallback | None = None,
+    ) -> Image.Image:
+        """Render the character in one library pose: OpenPose skeleton drives the pose
+        ControlNet, the reference drives identity via IP-Adapter. img2img init is the
+        reference (at full strength it only seeds latent dimensions)."""
+        torch = importlib.import_module("torch")
+        device = select_torch_device(torch, settings.gpu_id)
+        activate_torch_device(torch, device)
+        generator = torch.Generator(device if device.startswith("cuda") else "cpu").manual_seed(seed)
+        model_target = MODEL_TARGETS[request.model]
+        width, height = request.width, request.height
+        skeleton = Image.fromarray(draw_bodypose(width, height, keypoints))
+        reference = load_reference_image(project_path, request.reference_asset_id)
+        if hasattr(pipe, "set_ip_adapter_scale"):
+            pipe.set_ip_adapter_scale(self._ip_adapter_scale(request))
+        kwargs = {
+            "prompt": request.prompt,
+            "negative_prompt": request.negative_prompt,
+            "image": reference,
+            "control_image": skeleton,
+            "ip_adapter_image": reference,
+            "controlnet_conditioning_scale": self._openpose_scale(request),
+            "control_guidance_end": 0.9,
+            "strength": float(request.advanced.get("strength", 1.0)),
+            "height": height,
+            "width": width,
+            "num_inference_steps": self._num_inference_steps(request, model_target),
+            "guidance_scale": self._guidance_scale(request, model_target),
+            "generator": generator,
+        }
+        step_callback = cancel_step_callback(pipe, cancel_requested)
+        if step_callback is not None:
+            kwargs["callback_on_step_end"] = step_callback
+        output = pipe(**filter_call_kwargs(pipe, kwargs))
+        if cancel_requested is not None and cancel_requested():
+            raise InterruptedError("Image generation canceled by user.")
+        return output.images[0].convert("RGB")
+
     def loaded_models(self) -> list[str]:
         return sorted({value for value in (self._loaded_repo, self._loaded_model) if value})
 
     def unload(self) -> bool:
         """Free any resident pipeline so another family can load (cross-adapter
         eviction). Returns True if it actually freed something."""
-        if self._text_pipe is None and self._img2img_pipe is None:
+        if self._text_pipe is None and self._img2img_pipe is None and getattr(self, "_pose_pipe", None) is None:
             return False
         self._evict_pipelines(importlib.import_module("torch"))
         return True
@@ -4024,6 +4291,15 @@ class KolorsDiffusersAdapter:
         model_target = MODEL_TARGETS.get(request.model, {})
         if model_target.get("adapter") != self.id:
             raise RuntimeError(f"{request.model} is not a Kolors Diffusers target.")
+
+        # Strict pose tier (sc-2264): advanced.poses + a reference routes to the pose
+        # ControlNet pipeline (pose ControlNet + IP-Adapter identity), a separate path
+        # from the T2I/img2img generate flow below.
+        pose_entries = self._pose_entries(request)
+        if pose_entries and model_target.get("controlNetPose") and model_target.get("ipAdapter"):
+            return self._generate_pose_set(
+                settings, job, request, project_path, progress, cancel_requested, model_target, pose_entries
+            )
 
         use_img2img = request.mode == "edit_image"
         progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']}.")
@@ -4276,6 +4552,8 @@ class KolorsDiffusersAdapter:
         self._text_pipe = None
         self._img2img_pipe = None
         self._text_ip_adapter = False
+        self._pose_pipe = None
+        self._pose_loaded_repo = None
         self._loaded_repo = None
         self._loaded_model = None
         self._loaded_lora_states.clear()
@@ -4419,7 +4697,7 @@ class SdxlDiffusersAdapter:
     def unload(self) -> bool:
         """Free any resident pipeline so another family can load (cross-adapter
         eviction). Returns True if it actually freed something."""
-        if self._text_pipe is None and self._img2img_pipe is None:
+        if self._text_pipe is None and self._img2img_pipe is None and getattr(self, "_pose_pipe", None) is None:
             return False
         self._evict_pipelines(importlib.import_module("torch"))
         return True

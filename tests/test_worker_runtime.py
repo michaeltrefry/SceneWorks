@@ -3637,6 +3637,132 @@ def test_kolors_reference_run_pipeline_passes_ip_adapter_image(tmp_path, monkeyp
     assert result is FakeOutput.images[0]
 
 
+def test_kolors_pose_entries_gating():
+    """sc-2264: the pose ControlNet path engages only for a character_image job WITH a
+    reference and advanced.poses — not for edit_image, and not without a reference."""
+    entries = KolorsDiffusersAdapter._pose_entries
+    kp = [{"id": "sit", "keypoints": [[0.5, 0.5]] * 18}]
+    assert entries(SimpleNamespace(mode="character_image", reference_asset_id="r", advanced={"poses": kp})) == kp
+    assert entries(SimpleNamespace(mode="character_image", reference_asset_id=None, advanced={"poses": kp})) == []
+    assert entries(SimpleNamespace(mode="edit_image", reference_asset_id="r", advanced={"poses": kp})) == []
+    assert entries(SimpleNamespace(mode="character_image", reference_asset_id="r", advanced={})) == []
+
+
+def test_kolors_run_pose_composes_skeleton_controlnet_and_ip_adapter(tmp_path, monkeypatch):
+    """sc-2264 strict tier: _run_pose feeds the rendered skeleton as control_image, the
+    reference as both ip_adapter_image (identity) and img2img init, and the openPoseScale
+    as controlnet_conditioning_scale — pose ControlNet + IP-Adapter in one call."""
+    import numpy as _np
+    from scene_worker import image_adapters as ia
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        def __init__(self):
+            self.last_kwargs: dict = {}
+            self.scales: list = []
+
+        def set_ip_adapter_scale(self, scale):
+            self.scales.append(scale)
+
+        def __call__(self, *, prompt=None, image=None, control_image=None, ip_adapter_image=None,
+                     controlnet_conditioning_scale=None, **kwargs):
+            self.last_kwargs = {
+                "image": image, "control_image": control_image, "ip_adapter_image": ip_adapter_image,
+                "controlnet_conditioning_scale": controlnet_conditioning_scale, **kwargs,
+            }
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+    skeleton_sentinel = FakeImage()
+    reference_sentinel = FakeImage()
+    monkeypatch.setattr(ia, "draw_bodypose", lambda w, h, kps: _np.zeros((h, w, 3), dtype=_np.uint8))
+    monkeypatch.setattr("scene_worker.image_adapters.Image", SimpleNamespace(fromarray=lambda arr: skeleton_sentinel))
+    monkeypatch.setattr(ia, "load_reference_image", lambda project_path, asset_id: reference_sentinel)
+
+    request = image_request_from_job({"payload": {
+        "projectId": "p", "mode": "character_image", "model": "kolors",
+        "prompt": "the character", "referenceAssetId": "asset-ref",
+        "width": 16, "height": 16, "count": 1, "advanced": {"openPoseScale": 0.65, "ipAdapterScale": 0.6},
+    }})
+    pipe = FakePipe()
+    kp = [(0.5, 0.1 + 0.04 * i) for i in range(18)]
+    KolorsDiffusersAdapter()._run_pose(SimpleNamespace(gpu_id="cpu"), pipe, request, 7, tmp_path, kp)
+    assert pipe.last_kwargs["control_image"] is skeleton_sentinel  # pose -> ControlNet
+    assert pipe.last_kwargs["ip_adapter_image"] is reference_sentinel  # identity -> IP-Adapter
+    assert pipe.last_kwargs["image"] is reference_sentinel  # img2img init = reference
+    assert pipe.last_kwargs["controlnet_conditioning_scale"] == 0.65
+    assert pipe.scales == [0.6]
+
+
+def test_kolors_pose_set_loops_poses_with_shared_seed(tmp_path, monkeypatch):
+    """sc-2264: generate() with advanced.poses routes to the ControlNet pose path — one
+    image per library pose, a single shared seed, and poseLibrary recorded in settings."""
+    from scene_worker import image_adapters as ia
+
+    monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_load_pose_pipeline", lambda self, *a, **k: object())
+    monkeypatch.setattr(ia, "select_torch_device", lambda *a, **k: "cpu")
+    monkeypatch.setattr(ia, "gpu_memory_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: SimpleNamespace() if name == "torch" else importlib.import_module(name),
+    )
+
+    calls: list[dict] = []
+
+    def fake_run_pose(self, settings, pipe, request, seed, project_path, keypoints, cancel_requested=None):
+        from PIL import Image as _Image
+        calls.append({"seed": seed, "keypoints": keypoints})
+        return _Image.new("RGB", (8, 8))
+
+    monkeypatch.setattr(ia.KolorsDiffusersAdapter, "_run_pose", fake_run_pose)
+
+    captured: dict = {}
+
+    class _FakeWriter:
+        def write_incremental_outputs(self, *, image_count, image_at_index, raw_settings, **kwargs):
+            captured["raw_settings"] = raw_settings
+            captured["image_count"] = image_count
+            for index in range(image_count):
+                image_at_index(index)
+            return {"images": image_count}
+
+    monkeypatch.setattr(ia, "ImageAssetWriter", _FakeWriter)
+
+    kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    job = {"id": "job_kolors_pose", "payload": {
+        "projectId": "p", "mode": "character_image", "model": "kolors", "prompt": "the character",
+        "referenceAssetId": "ref-1", "count": 1, "width": 64, "height": 64,
+        "advanced": {"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}]},
+    }}
+    KolorsDiffusersAdapter().generate(
+        settings=SimpleNamespace(gpu_id="cpu"), job=job, request=image_request_from_job(job),
+        project_path=tmp_path, progress=lambda *a, **k: None, cancel_requested=lambda: False,
+    )
+    assert captured["image_count"] == 2  # one per pose, not request.count
+    assert len(calls) == 2
+    assert calls[0]["seed"] == calls[1]["seed"]  # shared seed across the set
+    assert captured["raw_settings"].get("poseLibrary") is True
+    assert captured["raw_settings"].get("controlNetPose") == "Kwai-Kolors/Kolors-ControlNet-Pose"
+
+
 def test_create_image_adapter_routes_sdxl(monkeypatch):
     # Pin the auto-dispatch off the MLX path so this asserts the torch
     # fallback on every host (a developer Mac with the mlx-examples vendor
@@ -9952,6 +10078,24 @@ def test_character_image_capability_implies_engine_or_tuning_declaration():
         f"backbone (sc-2017), or drop the capability flag (the z_image_turbo bug, "
         f"sc-2005)."
     )
+
+
+def test_kolors_declares_strict_pose_controlnet():
+    """sc-2264: Kolors is the strict pose tier — the manifest must advertise
+    ui.poseLibrary AND the worker target must carry the controlNetPose config so
+    the pose picker offers it and the adapter can load the pose ControlNet."""
+    manifest = _load_builtin_models_manifest()
+    manifest_by_id = {model["id"]: model for model in manifest.get("models", [])}
+    kolors = manifest_by_id.get("kolors", {})
+    assert kolors.get("ui", {}).get("poseLibrary") is True, (
+        "kolors must declare ui.poseLibrary so the pose picker offers the strict tier (sc-2264)."
+    )
+    target = MODEL_TARGETS.get("kolors", {})
+    assert target.get("controlNetPose", {}).get("repo") == "Kwai-Kolors/Kolors-ControlNet-Pose", (
+        "kolors MODEL_TARGETS must carry the Kolors-ControlNet-Pose repo for the strict pose path."
+    )
+    # Identity still rides the IP-Adapter; the pose path composes both.
+    assert target.get("ipAdapter"), "kolors pose path needs the IP-Adapter for identity."
 
 
 def test_models_with_engine_block_advertise_character_image():

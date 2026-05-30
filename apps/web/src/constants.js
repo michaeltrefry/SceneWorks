@@ -248,6 +248,9 @@ export const fallbackModels = [
     ui: {
       description: "Kwai-Kolors Kolors — photorealistic text-to-image with strong Chinese + English prompting and text rendering. Apache-2.0 (commercial-safe). ChatGLM3-6B + SDXL-style UNet; ~16.5GB, real CFG + negative prompt, ~25 steps at guidance 5.0.",
       promptGuide: { title: "Kolors Prompt Guide", path: "/prompt-guides/kolors.md" },
+      // Strict pose tier (sc-2264): official Kolors-ControlNet-Pose + IP-Adapter
+      // identity via the vendored Kolors ControlNet pipeline. Real pose-lock.
+      poseLibrary: true,
     },
   },
   {
