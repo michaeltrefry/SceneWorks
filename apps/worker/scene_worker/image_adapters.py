@@ -35,7 +35,9 @@ from .character_studio_angles import (
     ANGLE_PROMPT_AUGMENTS,
     ANGLE_SET_ORDER as CHARACTER_ANGLE_SET_ORDER,
     augment_prompt_for_angle,
+    augment_prompt_for_pose,
 )
+from .openpose_skeleton import draw_bodypose, normalize_keypoints
 from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
@@ -1611,15 +1613,39 @@ class QwenImageAdapter:
         # cosine 0.62 on Kelsie). All angles share one seed for noise-derived
         # attribute continuity (hair / wardrobe / lighting) — same trick the
         # InstantID angle set uses.
-        angle_set = self._use_reference(request) and bool(request.advanced.get("angleSet"))
+        # Best-effort pose tier (sc-2256): advanced.poses is a list of {id, keypoints}
+        # from the bundled pose library — render each as an OpenPose skeleton and feed it
+        # as a second edit image alongside the reference (Qwen-Image-Edit-Plus is multi-
+        # image-capable), so the pose comes from the skeleton while identity comes from
+        # the reference. No pose ControlNet exists for the edit model (sc-2250); this is
+        # the native multi-image approximation. Pose takes precedence over angleSet.
+        raw_poses = request.advanced.get("poses")
+        pose_entries = [p for p in raw_poses if isinstance(p, dict)] if isinstance(raw_poses, list) else []
+        pose_set = self._use_reference(request) and len(pose_entries) > 0
+        pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries] if pose_set else []
+        angle_set = self._use_reference(request) and bool(request.advanced.get("angleSet")) and not pose_set
         angles = list(CHARACTER_ANGLE_SET_ORDER) if angle_set else []
-        total = len(angles) if angle_set else request.count
+        grouped = angle_set or pose_set
+        if pose_set:
+            total = len(pose_entries)
+        elif angle_set:
+            total = len(angles)
+        else:
+            total = request.count
         set_seed = resolve_seed(request.seed, request.prompt, 0, request.seeds)
 
         def image_at_index(index: int) -> Image.Image:
-            seed = set_seed if angle_set else resolve_seed(request.seed, request.prompt, index, request.seeds)
+            seed = set_seed if grouped else resolve_seed(request.seed, request.prompt, index, request.seeds)
             angle = angles[index] if angle_set else None
-            prompt_override = augment_prompt_for_angle(request.prompt, angle) if angle else None
+            pose_id = pose_entries[index].get("id") if pose_set else None
+            pose_skeleton = None
+            if pose_set:
+                pose_skeleton = Image.fromarray(
+                    draw_bodypose(request.width, request.height, pose_keypoints[index])
+                )
+                prompt_override = augment_prompt_for_pose(request.prompt)
+            else:
+                prompt_override = augment_prompt_for_angle(request.prompt, angle) if angle else None
             progress(
                 "running",
                 "generating",
@@ -1634,6 +1660,7 @@ class QwenImageAdapter:
                 imageIndex=index,
                 imageCount=total,
                 viewAngle=angle,
+                poseId=pose_id,
                 device=device,
                 gpuMemory=gpu_memory_snapshot(torch, device),
             )
@@ -1646,6 +1673,7 @@ class QwenImageAdapter:
                     project_path,
                     cancel_requested=cancel_requested,
                     prompt_override=prompt_override,
+                    pose_skeleton=pose_skeleton,
                 )
             except Exception as exc:
                 emit_worker_event(
@@ -1681,6 +1709,7 @@ class QwenImageAdapter:
                 "guidanceScale": self._guidance_scale(request),
                 "realModelInference": True,
                 **({"angleSet": True} if angle_set else {}),
+                **({"poseLibrary": True} if pose_set else {}),
             },
             settings=settings,
             job_id=job["id"],
@@ -1820,6 +1849,7 @@ class QwenImageAdapter:
         project_path: Path,
         cancel_requested: CancelCallback | None = None,
         prompt_override: str | None = None,
+        pose_skeleton: Image.Image | None = None,
     ) -> Image.Image:
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
@@ -1855,7 +1885,12 @@ class QwenImageAdapter:
             # knob: high (>4) leans prompt → more variation; low (~1) leans
             # reference → closer to source. negative_prompt is required for true CFG
             # to engage (falls back to a single space when blank).
-            kwargs["image"] = load_reference_image(project_path, request.reference_asset_id)
+            reference = load_reference_image(project_path, request.reference_asset_id)
+            # Best-effort pose tier (sc-2256): pass [reference, skeleton] to the multi-
+            # image edit pipeline so the rendered OpenPose skeleton steers the body pose
+            # (the prompt cue from augment_prompt_for_pose tells the model which image is
+            # the pose target). Single reference otherwise.
+            kwargs["image"] = [reference, pose_skeleton] if pose_skeleton is not None else reference
             kwargs["true_cfg_scale"] = self._reference_true_cfg_scale(request)
             if "negative_prompt" not in kwargs:
                 kwargs["negative_prompt"] = " "

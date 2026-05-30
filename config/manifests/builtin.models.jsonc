@@ -356,11 +356,14 @@
           { "id": "down_right", "label": "Down · right" },
           { "id": "front", "label": "Front" }
         ],
-        // NOTE: pose library deferred to a follow-up PR. The sc-2003 hardware
-        // spike validated Qwen-Lightning's multi-image trick (image=[skeleton,
-        // character]) at sitting 0.68 / standing 0.45 ArcFace cosine, but the
-        // worker dispatch + adapter plumbing for it ships separately so this PR
-        // focuses on shipping the angle picker for all four backbones.
+        // Best-effort pose library (sc-2256): no pose ControlNet exists for the
+        // Qwen edit model (sc-2250 spike), so the worker renders the selected
+        // library pose as an OpenPose skeleton and feeds it as a second edit
+        // image (image=[reference, skeleton]) on the multi-image Plus pipeline.
+        // The sc-2003 hardware spike validated this multi-image trick at sitting
+        // 0.68 / standing 0.45 ArcFace cosine. Strict-tier InstantID pose-lock
+        // stays the higher-fidelity option; this is the fast best-effort tier.
+        "poseLibrary": true,
         "promptGuide": {
           "title": "Qwen Image Edit (2511) Lightning Prompt Guide",
           "path": "/prompt-guides/qwen-image-edit-2511-lightning.md",

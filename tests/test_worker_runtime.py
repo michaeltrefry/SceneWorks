@@ -743,7 +743,93 @@ def test_qwen_reference_run_pipeline_passes_image_and_true_cfg(tmp_path, monkeyp
     assert pipe.last_kwargs["true_cfg_scale"] == 3.0
     assert pipe.last_kwargs["negative_prompt"] == " "
     assert pipe.last_kwargs["image"] is not None
+    assert not isinstance(pipe.last_kwargs["image"], list)  # single reference, no pose
     assert result is FakeOutput.images[0]
+
+
+def test_qwen_reference_run_pipeline_threads_pose_skeleton_as_second_image(tmp_path, monkeypatch):
+    """Best-effort pose tier (sc-2256): when _run_pipeline gets a pose_skeleton,
+    the reference branch passes image=[reference, skeleton] to the multi-image
+    edit pipeline (so the skeleton steers the body pose) and the prompt carries
+    the pose cue. Without a skeleton it's a single-image reference (covered
+    above)."""
+    from scene_worker.character_studio_angles import POSE_SKELETON_PROMPT
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        def __init__(self):
+            self.last_kwargs: dict[str, Any] = {}
+
+        def __call__(self, *, prompt=None, image=None, **kwargs):
+            self.last_kwargs = {"prompt": prompt, "image": image, **kwargs}
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+    reference_sentinel = FakeImage()
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.load_reference_image",
+        lambda project_path, reference_asset_id: reference_sentinel,
+    )
+    monkeypatch.setattr("scene_worker.image_adapters.apply_sampler", lambda *a, **k: None)
+
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    request = image_request_from_job(
+        {
+            "payload": {
+                "projectId": "project-1",
+                "mode": "character_image",
+                "model": "qwen_image_edit_2511_lightning",
+                "prompt": "the same character",
+                "referenceAssetId": "asset-ref",
+                "width": 16,
+                "height": 16,
+                "count": 1,
+                "advanced": {},
+            }
+        }
+    )
+    skeleton_sentinel = FakeImage()
+    pipe = FakePipe()
+    QwenImageAdapter()._run_pipeline(
+        SimpleNamespace(gpu_id="cpu"),
+        pipe,
+        request,
+        7,
+        project_path,
+        prompt_override="the same character, " + POSE_SKELETON_PROMPT,
+        pose_skeleton=skeleton_sentinel,
+    )
+    # Multi-image: reference first (identity), skeleton second (pose target).
+    assert pipe.last_kwargs["image"] == [reference_sentinel, skeleton_sentinel]
+    assert POSE_SKELETON_PROMPT in pipe.last_kwargs["prompt"]
+
+
+def test_augment_prompt_for_pose_appends_skeleton_cue():
+    from scene_worker.character_studio_angles import POSE_SKELETON_PROMPT, augment_prompt_for_pose
+
+    assert augment_prompt_for_pose("a woman at a cafe") == f"a woman at a cafe, {POSE_SKELETON_PROMPT}"
+    # Empty base → just the cue (caller still gets a usable instruction).
+    assert augment_prompt_for_pose("") == POSE_SKELETON_PROMPT
+    assert augment_prompt_for_pose("  a woman.  ") == f"a woman, {POSE_SKELETON_PROMPT}"
 
 
 def test_filter_call_kwargs_preserves_none_for_accepted_parameters():
@@ -9802,6 +9888,21 @@ def test_prompt_driven_angle_backbones_share_the_instantid_angle_pack():
         )
 
 
+def test_qwen_lightning_declares_pose_library_capability():
+    """sc-2256: Qwen-Lightning is the best-effort pose tier — its manifest must
+    advertise ui.poseLibrary so the Character Studio pose picker (poseModels
+    filter) includes it alongside the strict InstantID backbone."""
+    manifest = _load_builtin_models_manifest()
+    manifest_by_id = {model["id"]: model for model in manifest.get("models", [])}
+    instantid = manifest_by_id.get("instantid_realvisxl", {})
+    assert instantid.get("ui", {}).get("poseLibrary") is True, "Baseline pose backbone drifted."
+    qwen = manifest_by_id.get("qwen_image_edit_2511_lightning", {})
+    assert qwen.get("ui", {}).get("poseLibrary") is True, (
+        "qwen_image_edit_2511_lightning must declare ui.poseLibrary so the pose "
+        "picker offers the best-effort Qwen tier (sc-2256)."
+    )
+
+
 def test_qwen_image_adapter_angleset_loop_uses_augmented_prompts(monkeypatch):
     """When advanced.angleSet is set on a character_image request, the
     QwenImageAdapter loops the 11 canonical angles and routes each to
@@ -9825,8 +9926,12 @@ def test_qwen_image_adapter_angleset_loop_uses_augmented_prompts(monkeypatch):
 
     captured: list[str] = []
 
-    def fake_run_pipeline(self, settings, pipe, request, seed, project_path, *, cancel_requested=None, prompt_override=None):
+    def fake_run_pipeline(
+        self, settings, pipe, request, seed, project_path, *, cancel_requested=None, prompt_override=None, pose_skeleton=None
+    ):
         from PIL import Image as _Image
+        # Angle path carries NO skeleton — it's prompt-driven, not multi-image.
+        assert pose_skeleton is None
         captured.append(prompt_override or request.prompt)
         return _Image.new("RGB", (8, 8))
 
@@ -9889,3 +9994,91 @@ def test_qwen_image_adapter_angleset_loop_uses_augmented_prompts(monkeypatch):
             f"angle '{angle}' didn't reach _run_pipeline as an augmented prompt: "
             f"expected snippet {augment!r} in {prompt!r}"
         )
+
+
+def test_qwen_image_adapter_pose_loop_renders_skeleton_and_passes_multi_image(monkeypatch):
+    """sc-2256: advanced.poses loops the selected library poses, renders each as
+    an OpenPose skeleton, and routes it to _run_pipeline as pose_skeleton (so the
+    reference branch builds image=[reference, skeleton]) with the pose prompt cue.
+    Pose takes precedence over angleSet when both are present."""
+    import sys as _sys
+    from types import ModuleType, SimpleNamespace as _SimpleNamespace
+
+    from scene_worker.character_studio_angles import POSE_SKELETON_PROMPT
+    from scene_worker.image_adapters import QwenImageAdapter
+
+    if "torch" not in _sys.modules:
+        torch_stub = ModuleType("torch")
+        torch_stub.cuda = _SimpleNamespace(is_available=lambda: False, empty_cache=lambda: None)
+        torch_stub.backends = _SimpleNamespace(mps=_SimpleNamespace(is_available=lambda: False))
+        torch_stub.mps = _SimpleNamespace(empty_cache=lambda: None)
+        monkeypatch.setitem(_sys.modules, "torch", torch_stub)
+
+    captured: list[dict] = []
+
+    def fake_run_pipeline(
+        self, settings, pipe, request, seed, project_path, *, cancel_requested=None, prompt_override=None, pose_skeleton=None
+    ):
+        from PIL import Image as _Image
+        captured.append({"prompt_override": prompt_override, "pose_skeleton": pose_skeleton})
+        return _Image.new("RGB", (8, 8))
+
+    monkeypatch.setattr(QwenImageAdapter, "_run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(QwenImageAdapter, "_load_pipeline", lambda self, *args, **kwargs: object())
+    monkeypatch.setattr(QwenImageAdapter, "_apply_loras", lambda self, *args, **kwargs: None)
+    from scene_worker import image_adapters as ia
+
+    class _FakeWriter:
+        def write_incremental_outputs(self, *, image_count, image_at_index, **_kwargs):
+            for index in range(image_count):
+                image_at_index(index)
+            return {"images": image_count}
+
+    monkeypatch.setattr(ia, "ImageAssetWriter", _FakeWriter)
+    monkeypatch.setattr(ia, "require_inference_backend_for_gpu_worker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ia, "activate_torch_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ia, "select_torch_device", lambda *args, **kwargs: "cpu")
+    monkeypatch.setattr(ia, "gpu_memory_snapshot", lambda *args, **kwargs: None)
+    # draw_bodypose needs cv2 (not in the requirements-dev CI venv); the actual
+    # render is covered by test_draw_bodypose_renders_colored. Here we only verify
+    # dispatch, so stub it to a tiny array Image.fromarray can consume.
+    import numpy as _np
+    monkeypatch.setattr(ia, "draw_bodypose", lambda w, h, kps: _np.zeros((h, w, 3), dtype=_np.uint8))
+
+    # Two library poses; flat 18-point COCO skeletons (values arbitrary but valid).
+    kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    request = ia.ImageRequest(
+        project_id="p",
+        mode="character_image",
+        prompt="a photo of the character",
+        negative_prompt="",
+        model="qwen_image_edit_2511_lightning",
+        count=1,
+        seed=42,
+        seeds=[],
+        width=64,
+        height=64,
+        style_preset="",
+        loras=[],
+        character_id=None,
+        character_look_id=None,
+        source_asset_id=None,
+        reference_asset_id="ref-asset-id",
+        # angleSet also set to prove pose takes precedence (no angle loop runs).
+        advanced={"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}], "angleSet": True},
+        model_manifest_entry={},
+    )
+    QwenImageAdapter().generate(
+        settings=_SimpleNamespace(gpu_id="cpu"),
+        job={"id": "job_pose", "payload": {}},
+        request=request,
+        project_path=None,
+        progress=lambda *args, **kwargs: None,
+        cancel_requested=lambda: False,
+    )
+    # One image per pose (not the 11-angle loop), each with a rendered skeleton
+    # and the pose cue appended to the prompt.
+    assert len(captured) == 2
+    for entry in captured:
+        assert entry["pose_skeleton"] is not None
+        assert POSE_SKELETON_PROMPT in (entry["prompt_override"] or "")

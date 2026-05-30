@@ -74,4 +74,28 @@ def augment_prompt_for_angle(base_prompt: str, angle: str) -> str:
     return augment or base
 
 
-__all__ = ["ANGLE_SET_ORDER", "ANGLE_PROMPT_AUGMENTS", "augment_prompt_for_angle"]
+# Best-effort pose tier (sc-2250 spike / sc-2256): backbones without a pose
+# ControlNet approximate a library pose by passing the rendered OpenPose skeleton
+# as an extra reference image plus this prompt cue telling the model to adopt that
+# pose. Qwen-Image-Edit drives it through its multi-image edit input (image=[ref,
+# skeleton]). The strict tier (InstantID landmark+OpenPose ControlNet, Z-Image
+# Fun-ControlNet) drives the pose structurally and does NOT use this cue.
+POSE_SKELETON_PROMPT = "matching the exact body pose shown in the OpenPose skeleton reference image"
+
+
+def augment_prompt_for_pose(base_prompt: str) -> str:
+    """Append the pose-skeleton instruction to the user's base prompt for the
+    best-effort multi-image pose tier."""
+    base = (base_prompt or "").strip().rstrip(",.;")
+    if base:
+        return f"{base}, {POSE_SKELETON_PROMPT}"
+    return POSE_SKELETON_PROMPT
+
+
+__all__ = [
+    "ANGLE_SET_ORDER",
+    "ANGLE_PROMPT_AUGMENTS",
+    "augment_prompt_for_angle",
+    "POSE_SKELETON_PROMPT",
+    "augment_prompt_for_pose",
+]

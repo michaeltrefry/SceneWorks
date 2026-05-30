@@ -92,9 +92,7 @@ export const fallbackModels = [
       variationStrength: { label: "Prompt strength", default: 1.0, min: 1.0, max: 2.0, step: 0.25 },
       // Multi-backbone angle set (sc-2003): same 11 canonical angles as the
       // InstantID baseline, driven by prompt rather than landmark pack (worker
-      // resolves via character_studio_angles.ANGLE_PROMPT_AUGMENTS). Pose
-      // library deferred to a follow-up PR; the spike validated the multi-
-      // image trick at sitting 0.68 / standing 0.45 ArcFace cosine.
+      // resolves via character_studio_angles.ANGLE_PROMPT_AUGMENTS).
       viewAngles: [
         { id: "three_quarter_left", label: "Three-quarter left" },
         { id: "three_quarter_right", label: "Three-quarter right" },
@@ -108,6 +106,13 @@ export const fallbackModels = [
         { id: "down_right", label: "Down · right" },
         { id: "front", label: "Front" },
       ],
+      // Best-effort pose library (sc-2256): no pose ControlNet exists for the
+      // Qwen edit model, so the worker renders the selected library pose as an
+      // OpenPose skeleton and feeds it as a second edit image (image=[reference,
+      // skeleton]) on the multi-image Plus pipeline. Strict-tier (InstantID)
+      // pose-lock stays the higher-fidelity option; this is the fast best-effort
+      // tier validated by the sc-2003 spike (sitting 0.68 / standing 0.45).
+      poseLibrary: true,
     },
   },
   {
