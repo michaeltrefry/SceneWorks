@@ -6,7 +6,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField.jsx";
-import { usePoseLibrary } from "../poseLibrary.js";
+import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 import { extractFamilies } from "../presetUtils.js";
 
 // Resolve a character generation job's produced images from the full asset
@@ -901,7 +901,10 @@ export function CharacterPoseLibrary({
   const activePoseModel = availableModels.find((item) => item.id === selectedPoseModelId)
     ?? availableModels[0]
     ?? null;
-  const { byId } = usePoseLibrary();
+  // User-created poses join the built-in library in both the picker and the
+  // id→keypoints resolver used to build the job, so saved poses can generate.
+  const loadUserPoses = useUserPoseLoader();
+  const { byId } = usePoseLibrary({ loadUserPoses });
   // Family-filtered LoRA picker (sc-2223), filtered to the active pose backbone's family.
   const loraSelection = useLoraSelection(loras, activePoseModel);
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
@@ -1059,6 +1062,7 @@ export function CharacterPoseLibrary({
         <p className="inline-warning">No approved reference yet — upload one below or approve a reference above.</p>
       )}
       <PoseLibraryPicker
+        loadUserPoses={loadUserPoses}
         onClear={() => setSelectedPoseIds([])}
         onToggle={togglePose}
         selectedIds={selectedPoseIds}

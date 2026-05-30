@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { apiFetch } from "./api.js";
+import { useAppContext } from "./context/AppContext.js";
 
 // The reserved global project that holds user-created pose assets (epic 2282). Mirrors
 // crates/sceneworks-core::GLOBAL_POSES_PROJECT_ID. Hidden from the project switcher;
@@ -80,6 +82,21 @@ export async function loadPoseLibrary({ loadUserPoses } = {}) {
   const categories = [...new Set(poses.map((pose) => pose.category).filter(Boolean))];
   const byId = Object.fromEntries(poses.map((pose) => [pose.id, pose]));
   return { poses, categories, byId };
+}
+
+// A memoized fetcher for the user's saved poses (the reserved global project),
+// mapped into picker records. Pass its result to BOTH `usePoseLibrary` (so a
+// selected user pose resolves to keypoints when building the job) and
+// `PoseLibraryPicker` (so it appears in the grid). Best-effort: any fetch failure
+// is swallowed by `loadPoseLibrary`, degrading to the built-in library (sc-2287).
+export function useUserPoseLoader() {
+  const { token } = useAppContext();
+  return useCallback(async () => {
+    const items = await apiFetch(`/api/v1/projects/${GLOBAL_POSES_PROJECT_ID}/assets`, token);
+    return (Array.isArray(items) ? items : [])
+      .filter((asset) => asset?.type === "pose")
+      .map(poseAssetToRecord);
+  }, [token]);
 }
 
 // `loadUserPoses` should be a memoized (useCallback) async fetcher or undefined.

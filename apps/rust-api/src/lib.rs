@@ -100,6 +100,8 @@ mod preferences;
 use preferences::*;
 mod prompts;
 use prompts::*;
+mod poses;
+use poses::*;
 
 const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/health",
@@ -596,6 +598,11 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/prompts/refine", post(create_prompt_refine_job))
+        .route("/api/v1/poses", post(create_poses))
+        .route(
+            "/api/v1/poses/preview/:job_id/:file_name",
+            get(get_pose_preview),
+        )
         .route(
             "/api/v1/credentials",
             get(list_credentials).put(set_credential),

@@ -7,7 +7,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
-import { usePoseLibrary } from "../poseLibrary.js";
+import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
   "Barista pouring espresso, morning light",
@@ -248,7 +248,10 @@ export function ImageStudio() {
   const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
   const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
   const [faceRestore, setFaceRestore] = useState(false);
-  const { byId: poseById } = usePoseLibrary();
+  // User-created poses (reserved global project) join the built-in library in both
+  // the picker and the id→keypoints resolver below, so saved poses can generate.
+  const loadUserPoses = useUserPoseLoader();
+  const { byId: poseById } = usePoseLibrary({ loadUserPoses });
   const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
   const [upscaleFactor, setUpscaleFactor] = useState(saved.upscaleFactor ?? 2);
   const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
@@ -927,6 +930,7 @@ export function ImageStudio() {
                             Pose library{selectedPoseIds.length ? ` · ${selectedPoseIds.length} selected` : ""}
                           </summary>
                           <PoseLibraryPicker
+                            loadUserPoses={loadUserPoses}
                             onClear={() => setSelectedPoseIds([])}
                             onToggle={(id) =>
                               setSelectedPoseIds((ids) =>

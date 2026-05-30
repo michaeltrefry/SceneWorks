@@ -236,6 +236,34 @@ def _normalize_sources(payload: dict) -> list[dict]:
     return []
 
 
+def _resolve_source_path(src: dict, project_path) -> str | None:
+    """Resolve a source image to a filesystem path the detector can read.
+
+    Prefers an explicit absolute ``path`` (the spike/tests pass one); otherwise
+    resolves ``assetId`` against the project — the Create tab sends asset ids, not
+    paths, since the browser never knows the on-disk location. Falls back to a
+    project-relative ``path``. Returns ``None`` when nothing resolves so the source
+    is reported as unreadable rather than crashing the whole job.
+    """
+    raw = src.get("path")
+    if raw and os.path.isabs(raw) and os.path.exists(raw):
+        return raw
+    asset_id = src.get("assetId")
+    if asset_id and project_path is not None:
+        try:
+            from sceneworks_shared import load_asset_with_media
+
+            _record, media_path = load_asset_with_media(project_path, asset_id)
+            return str(media_path)
+        except Exception:  # noqa: BLE001 - missing asset -> unreadable below
+            return None
+    if raw and project_path is not None:
+        candidate = Path(project_path) / raw
+        if candidate.exists():
+            return str(candidate)
+    return raw
+
+
 def run_pose_detect(
     settings: Any,
     job: dict[str, Any],
@@ -264,6 +292,22 @@ def run_pose_detect(
     except (TypeError, ValueError):
         min_conf = DEFAULT_POSE_MIN_CONF
 
+    # Sources may be asset ids (Create tab) rather than paths; resolve them against
+    # the originating project (mirrors person_detect). Best-effort: a missing project
+    # leaves project_path None and per-source resolution falls back to raw paths.
+    project_id = payload.get("projectId") or job.get("projectId")
+    project_path = None
+    if project_id:
+        try:
+            from sceneworks_shared import find_project_path
+
+            project_path = find_project_path(
+                Path(getattr(settings, "data_dir", ".")) / "recent-projects.json",
+                project_id,
+            )
+        except Exception:  # noqa: BLE001 - resolve each source individually instead
+            project_path = None
+
     job_id = str(job.get("id") or uuid4().hex)
     out_dir = Path(getattr(settings, "data_dir", ".")) / "cache" / "pose_detect" / job_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -280,7 +324,7 @@ def run_pose_detect(
     for si, src in enumerate(sources):
         if cancel_requested is not None and cancel_requested():
             raise InterruptedError("Pose detection canceled.")
-        path = src.get("path")
+        path = _resolve_source_path(src, project_path)
         img = cv2.imread(path) if path else None
         if img is None:
             out_sources.append({

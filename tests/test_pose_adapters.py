@@ -62,6 +62,33 @@ def test_run_pose_detect_no_sources_raises():
         pa.run_pose_detect(SimpleNamespace(data_dir=".", gpu_id="cpu"), {"id": "j", "payload": {}})
 
 
+def test_resolve_source_path_absolute_asset_and_relative(tmp_path, monkeypatch):
+    # An absolute, existing path is used as-is (spike/tests).
+    direct = tmp_path / "a.png"
+    direct.write_bytes(b"x")
+    assert pa._resolve_source_path({"path": str(direct)}, None) == str(direct)
+
+    # An assetId resolves against the project via the shared loader (Create tab).
+    media = tmp_path / "assets" / "images" / "img.png"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"y")
+    import sceneworks_shared
+
+    monkeypatch.setattr(
+        sceneworks_shared,
+        "load_asset_with_media",
+        lambda project_path, asset_id: ({"id": asset_id}, media),
+        raising=False,
+    )
+    assert pa._resolve_source_path({"assetId": "asset_9"}, tmp_path) == str(media)
+
+    # A project-relative path falls back to a project-root join.
+    assert pa._resolve_source_path({"path": "assets/images/img.png"}, tmp_path) == str(media)
+
+    # Nothing resolvable -> None so the source is reported unreadable, not a crash.
+    assert pa._resolve_source_path({"assetId": "missing"}, None) is None
+
+
 def test_run_pose_detect_with_fake_detector(tmp_path):
     cv2 = pytest.importorskip("cv2")
     # a real (blank) source image on disk so cv2.imread succeeds

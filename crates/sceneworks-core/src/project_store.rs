@@ -22,8 +22,8 @@ pub use crate::character_store::{
 };
 use crate::slug::slugify;
 use crate::store_util::{
-    is_safe_relative_path, lock_project_files, optional_f64, optional_str, optional_u64,
-    random_hex, read_json, relative_string, write_json,
+    is_safe_id, is_safe_relative_path, lock_project_files, optional_f64, optional_str,
+    optional_u64, random_hex, read_json, relative_string, write_json,
 };
 use crate::time::utc_now;
 use crate::training::TrainingDataset;
@@ -1210,6 +1210,167 @@ impl ProjectStore {
         )?;
         index_asset(&project_path, &asset, Some(&sidecar_path))?;
         Ok(asset)
+    }
+
+    /// Resolve + guard a worker pose-detect cache preview
+    /// (`<data_dir>/cache/pose_detect/<jobId>/<file>`). The job id must be a safe
+    /// id and the filename a single normal component; the result is canonicalized
+    /// and asserted to live under the pose-detect cache root, so a caller can never
+    /// reach a file outside it. Shared by the preview endpoint and pose save.
+    pub fn pose_preview_path(&self, job_id: &str, file_name: &str) -> ProjectStoreResult<PathBuf> {
+        if !is_safe_id(job_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid pose jobId".to_owned(),
+            ));
+        }
+        if !is_safe_relative_path(file_name) || Path::new(file_name).components().count() != 1 {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid pose preview filename".to_owned(),
+            ));
+        }
+        let cache_root = self.data_dir.join("cache").join("pose_detect");
+        let candidate = cache_root.join(job_id).join(file_name);
+        // canonicalize resolves any symlink/`..` so the prefix check below is sound.
+        let canonical_root = fs::canonicalize(&cache_root)
+            .map_err(|_| ProjectStoreError::NotFound("Pose cache is unavailable".to_owned()))?;
+        let canonical = fs::canonicalize(&candidate)
+            .map_err(|_| ProjectStoreError::NotFound("Pose preview not found".to_owned()))?;
+        if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
+            return Err(ProjectStoreError::BadRequest(
+                "Pose preview path is invalid".to_owned(),
+            ));
+        }
+        Ok(canonical)
+    }
+
+    /// Persist a curated DWPose skeleton as a `type:"pose"` asset in the reserved
+    /// global pose library (epic 2282, sc-2287). The skeleton PNG was already
+    /// rendered by the worker's `pose_detect` job into
+    /// `<data_dir>/cache/pose_detect/<jobId>/<file>`; here we copy it into
+    /// `assets/poses/`, fold the chosen single `category` into the keypoint
+    /// metadata, attach free `tags`, and write the sidecar + index (mirrors
+    /// `import_asset`/`persist_generated_asset`). The source path is rebuilt from
+    /// `data_dir` + a validated job id/filename and canonicalized under the
+    /// pose-detect cache root, so a client can't copy a file from outside it.
+    /// Returns the normalized asset. The reserved project is created lazily here.
+    pub fn create_pose_asset(&self, spec: &Value) -> ProjectStoreResult<Value> {
+        let job_id = spec
+            .get("jobId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ProjectStoreError::BadRequest("pose spec missing jobId".to_owned()))?;
+        let skeleton_file = spec
+            .get("skeletonFile")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest("pose spec missing skeletonFile".to_owned())
+            })?;
+        // Resolve + guard the cached skeleton path under the pose-detect cache root.
+        let canonical_source = self.pose_preview_path(job_id, skeleton_file)?;
+
+        // Reserved global pose project (created lazily on first save).
+        self.ensure_global_poses_project()?;
+        let (project_path, _project_guard) = self.lock_project(GLOBAL_POSES_PROJECT_ID)?;
+
+        let asset_id = format!("asset_{}", random_hex(16)?);
+        let created_at = utc_now();
+        let poses_dir = project_path.join("assets").join("poses");
+        fs::create_dir_all(&poses_dir)?;
+        let media_path = poses_dir.join(format!("{asset_id}.png"));
+        // Copy (not move): the same cached preview may back other persons/candidates.
+        fs::copy(&canonical_source, &media_path)?;
+        let media_rel = relative_string(&project_path, &media_path)?;
+
+        // Category is single-valued; fold it into the pose metadata so the screen can
+        // group by `pose.category`. Free tags stay top-level (like the rest of the app).
+        let category = spec
+            .get("category")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let mut pose_meta = spec.get("pose").cloned().unwrap_or_else(|| json!({}));
+        if let Some(object) = pose_meta.as_object_mut() {
+            object.insert(
+                "category".to_owned(),
+                category.clone().map(Value::String).unwrap_or(Value::Null),
+            );
+        }
+        let tags = match spec.get("tags").and_then(Value::as_array) {
+            Some(values) => normalize_asset_tags(
+                &values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            )?,
+            None => Vec::new(),
+        };
+        // displayName is required (schema minLength 1) — fall back to category, then a default.
+        let display_name = spec
+            .get("displayName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| category.clone())
+            .unwrap_or_else(|| "Pose".to_owned());
+        let source_asset_id = pose_meta
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                spec.get("sourceAssetId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+        let parents = source_asset_id
+            .clone()
+            .map(|id| vec![Value::String(id)])
+            .unwrap_or_default();
+
+        let asset = json!({
+            "schemaVersion": 1,
+            "id": asset_id,
+            "projectId": GLOBAL_POSES_PROJECT_ID,
+            "generationSetId": Value::Null,
+            "type": "pose",
+            "displayName": display_name,
+            "createdAt": created_at,
+            "origin": "pose_library",
+            "tags": tags,
+            "file": {
+                "path": media_rel,
+                "mimeType": "image/png",
+                "width": spec.get("width").cloned().unwrap_or(Value::Null),
+                "height": spec.get("height").cloned().unwrap_or(Value::Null),
+                "duration": Value::Null,
+                "fps": Value::Null
+            },
+            "status": { "favorite": false, "rating": 0, "rejected": false, "trashed": false },
+            "recipe": {
+                "mode": "upload",
+                "model": "dwpose",
+                "adapter": "api-upload",
+                "prompt": display_name,
+                "negativePrompt": "",
+                "seed": 0,
+                "loras": [],
+                "stylePreset": "none",
+                "normalizedSettings": {},
+                "rawAdapterSettings": { "detector": "dwpose", "jobId": job_id }
+            },
+            "lineage": {
+                "parents": parents,
+                "sourceAssetId": source_asset_id,
+                "sourceTimestamp": Value::Null,
+                "jobId": job_id
+            },
+            "pose": pose_meta
+        });
+        let sidecar_path = media_path.with_extension("sceneworks.json");
+        write_json(&sidecar_path, &asset)?;
+        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        normalize_asset(GLOBAL_POSES_PROJECT_ID, &project_path, &sidecar_path)
     }
 
     /// Write the generation-set JSON for a job from the worker-reported facts.
@@ -2813,7 +2974,7 @@ mod tests {
     use super::{
         build_generated_asset_sidecar, guess_mime_from_filename, is_safe_relative_path,
         normalize_asset_tags, AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore,
-        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
+        ProjectStoreError, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -3124,6 +3285,95 @@ mod tests {
                 .id,
             GLOBAL_POSES_PROJECT_ID
         );
+    }
+
+    #[test]
+    fn create_pose_asset_copies_skeleton_and_writes_pose_sidecar() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+
+        // Simulate the worker's pose_detect output in the shared cache.
+        let job_id = "job_pose_1";
+        let cache_dir = data_dir.join("cache").join("pose_detect").join(job_id);
+        std::fs::create_dir_all(&cache_dir).expect("cache dir");
+        let skeleton = cache_dir.join("photo_p0_skel.png");
+        std::fs::write(&skeleton, b"\x89PNG fake skeleton bytes").expect("skeleton writes");
+
+        let spec = json!({
+            "jobId": job_id,
+            "skeletonFile": "photo_p0_skel.png",
+            "displayName": "Arm Raised",
+            "category": "Dance",
+            "tags": ["Dynamic", "dynamic", "  hero  "],
+            "width": 768,
+            "height": 1280,
+            "pose": {
+                "personIndex": 0,
+                "facing": "front",
+                "bbox": [0.1, 0.1, 0.9, 0.9],
+                "keypoints": [[0.5, 0.1, 0.9]],
+                "hands": [[], []],
+                "face": [],
+                "sourceAspect": 0.6,
+                "sourceAssetId": "asset_src_1"
+            }
+        });
+
+        let asset = store.create_pose_asset(&spec).expect("pose asset creates");
+
+        assert!(asset["id"].as_str().unwrap().starts_with("asset_"));
+        assert_eq!(asset["type"], json!("pose"));
+        assert_eq!(asset["projectId"], json!(GLOBAL_POSES_PROJECT_ID));
+        assert_eq!(asset["displayName"], json!("Arm Raised"));
+        // Category folded into pose metadata for grouping; tags normalized + deduped.
+        assert_eq!(asset["pose"]["category"], json!("Dance"));
+        assert_eq!(asset["pose"]["facing"], json!("front"));
+        assert_eq!(asset["tags"], json!(["dynamic", "hero"]));
+        assert_eq!(asset["lineage"]["jobId"], json!(job_id));
+        assert_eq!(asset["lineage"]["sourceAssetId"], json!("asset_src_1"));
+        assert_eq!(asset["lineage"]["parents"], json!(["asset_src_1"]));
+        assert_eq!(asset["file"]["mimeType"], json!("image/png"));
+        assert_eq!(asset["file"]["width"], json!(768));
+
+        // The PNG was copied into the reserved project's assets/poses folder.
+        let project_path =
+            std::path::PathBuf::from(store.get_project(GLOBAL_POSES_PROJECT_ID).unwrap().path);
+        let rel = asset["file"]["path"].as_str().unwrap();
+        assert!(rel.starts_with("assets/poses/"));
+        assert!(project_path.join(rel).exists());
+
+        // Indexed: it comes back from list_assets on the reserved project, pose intact.
+        let listed = store
+            .list_assets(GLOBAL_POSES_PROJECT_ID, true, true, AssetScope::All)
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], asset["id"]);
+        assert_eq!(listed[0]["pose"]["category"], json!("Dance"));
+    }
+
+    #[test]
+    fn create_pose_asset_rejects_path_traversal() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+
+        // A real file outside the pose cache that traversal would try to reach.
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        std::fs::write(data_dir.join("secret.png"), b"top secret").expect("secret writes");
+        let job_id = "job_pose_evil";
+        std::fs::create_dir_all(data_dir.join("cache").join("pose_detect").join(job_id))
+            .expect("cache dir");
+
+        let spec = json!({
+            "jobId": job_id,
+            "skeletonFile": "../../secret.png",
+            "category": "x"
+        });
+        let err = store
+            .create_pose_asset(&spec)
+            .expect_err("traversal rejected");
+        assert!(matches!(err, ProjectStoreError::BadRequest(_)));
     }
 
     #[test]

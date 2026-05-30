@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
+import { API_BASE_URL, apiFetch, isAbortError } from "../api.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
+import { AssetThumbnail } from "../components/assetMedia.jsx";
+import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { terminalStatuses } from "../jobTypes.js";
 import { GLOBAL_POSES_PROJECT_ID } from "../poseLibrary.js";
 
 // The Pose Library screen (epic 2282). Two tabs:
@@ -9,7 +12,7 @@ import { GLOBAL_POSES_PROJECT_ID } from "../poseLibrary.js";
 //    reserved project, as an image grid + viewer + Trashcan (reusing the shared asset
 //    panels). Built-in poses stay bundled (read-only) and surface in the generation
 //    pose pickers, not here.
-//  - "Create": photo -> DWPose -> categorize -> save (sc-2287; placeholder for now).
+//  - "Create": photo -> DWPose -> categorize -> save (sc-2287).
 // The reserved project is hidden from the project switcher, so these assets never
 // appear in the Assets/Character views; we address it directly here.
 const TABS = [
@@ -18,6 +21,308 @@ const TABS = [
 ];
 
 const UNCATEGORIZED = "uncategorized";
+
+// --- Create tab helpers -----------------------------------------------------
+
+function basename(path) {
+  return String(path || "")
+    .split(/[\\/]/)
+    .pop();
+}
+
+// Flatten a completed pose_detect job result into per-person candidate cards.
+// Each candidate carries everything the save endpoint needs: the cached skeleton
+// (jobId + filename), the source dimensions, and the keypoint metadata.
+function buildCandidates(job) {
+  const out = [];
+  const sources = job?.result?.sources ?? [];
+  sources.forEach((source, sourceIndex) => {
+    (source.poses ?? []).forEach((pose) => {
+      out.push({
+        key: `${sourceIndex}:${pose.personIndex ?? out.length}`,
+        jobId: job.id,
+        skeletonFile: basename(pose.skeletonPreview),
+        sourceDisplayName: source.displayName ?? basename(source.sourcePath) ?? "image",
+        width: source.sourceWidth ?? null,
+        height: source.sourceHeight ?? null,
+        facing: pose.facing ?? "front",
+        pose: {
+          personIndex: pose.personIndex ?? 0,
+          bbox: pose.bbox ?? null,
+          facing: pose.facing ?? "front",
+          meanConf: pose.meanConf ?? null,
+          keypoints: pose.keypoints ?? [],
+          hands: pose.hands ?? [[], []],
+          face: pose.face ?? [],
+          sourceAspect: source.sourceAspect ?? null,
+          sourceAssetId: source.sourceAssetId ?? null,
+        },
+        keep: true,
+        category: "",
+        tagsText: "",
+      });
+    });
+  });
+  return out;
+}
+
+// The "Create" tab body: pick photos (DatasetAddDialog), run DWPose, then review,
+// categorize, and save one whole-body pose per detected person to the store.
+function PoseCreatePanel({ hidden, categories, onSaved }) {
+  const {
+    token,
+    activeProject,
+    assets = [],
+    characters = [],
+    importAsset,
+    requestedGpu,
+    jobs = [],
+  } = useAppContext();
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [sources, setSources] = useState([]); // selected source asset records
+  const [phase, setPhase] = useState("idle"); // idle | detecting | review
+  const [jobId, setJobId] = useState(null);
+  const [candidates, setCandidates] = useState([]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  const addSources = useCallback((records) => {
+    setSources((prev) => {
+      const seen = new Set(prev.map((asset) => asset.id));
+      return [...prev, ...records.filter((asset) => asset && !seen.has(asset.id))];
+    });
+  }, []);
+
+  // File tab: import each dropped/selected image into the active project (which
+  // gives the worker an on-disk asset to read), then treat it like any source.
+  const handleImport = useCallback(
+    async (files) => {
+      if (!importAsset) return;
+      setImporting(true);
+      try {
+        const imported = [];
+        for (const file of Array.from(files)) {
+          if (!file.type?.startsWith("image/")) continue; // pose detection needs images
+          const asset = await importAsset(file, { throwOnError: true });
+          if (asset) imported.push(asset);
+        }
+        addSources(imported);
+        setError("");
+      } catch (err) {
+        setError(String(err?.message ?? err));
+      } finally {
+        setImporting(false);
+      }
+    },
+    [importAsset, addSources],
+  );
+
+  // Library / Character tabs: resolve the picked ids back to asset records.
+  const handleAdd = useCallback(
+    (selectedIds) => {
+      const records = selectedIds.map((id) => assets.find((asset) => asset.id === id)).filter(Boolean);
+      addSources(records);
+    },
+    [assets, addSources],
+  );
+
+  const removeSource = (id) => setSources((prev) => prev.filter((asset) => asset.id !== id));
+
+  const generate = useCallback(async () => {
+    if (!activeProject || !sources.length) return;
+    setError("");
+    setCandidates([]);
+    try {
+      const job = await apiFetch("/api/v1/jobs", token, {
+        method: "POST",
+        body: JSON.stringify({
+          type: "pose_detect",
+          projectId: activeProject.id,
+          projectName: activeProject.name ?? null,
+          requestedGpu,
+          payload: {
+            projectId: activeProject.id,
+            sources: sources.map((asset) => ({ assetId: asset.id, displayName: asset.displayName })),
+          },
+        }),
+      });
+      setJobId(job.id);
+      setPhase("detecting");
+    } catch (err) {
+      setError(String(err?.message ?? err));
+    }
+  }, [activeProject, sources, token, requestedGpu]);
+
+  // Watch the live (SSE-fed) jobs list for the fired detector job to finish.
+  useEffect(() => {
+    if (!jobId) return;
+    const job = jobs.find((item) => item.id === jobId);
+    if (!job || !terminalStatuses.has(job.status)) return;
+    if (job.status === "completed") {
+      const built = buildCandidates(job);
+      setCandidates(built);
+      setPhase("review");
+      if (!built.length) setError("No people were detected in the selected images.");
+    } else {
+      setError(job.error ?? job.message ?? "Pose detection failed.");
+      setPhase("idle");
+    }
+    setJobId(null);
+  }, [jobId, jobs]);
+
+  const updateCandidate = (key, changes) =>
+    setCandidates((prev) => prev.map((candidate) => (candidate.key === key ? { ...candidate, ...changes } : candidate)));
+
+  const keepCount = candidates.filter((candidate) => candidate.keep).length;
+
+  const save = useCallback(async () => {
+    const keep = candidates.filter((candidate) => candidate.keep);
+    if (!keep.length) return;
+    setSaving(true);
+    setError("");
+    try {
+      const poses = keep.map((candidate) => ({
+        jobId: candidate.jobId,
+        skeletonFile: candidate.skeletonFile,
+        category: candidate.category.trim() || null,
+        tags: candidate.tagsText
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        width: candidate.width,
+        height: candidate.height,
+        pose: candidate.pose,
+      }));
+      await apiFetch("/api/v1/poses", token, { method: "POST", body: JSON.stringify({ poses }) });
+      setSources([]);
+      setCandidates([]);
+      setPhase("idle");
+      onSaved?.();
+    } catch (err) {
+      setError(String(err?.message ?? err));
+    } finally {
+      setSaving(false);
+    }
+  }, [candidates, token, onSaved]);
+
+  return (
+    <div aria-labelledby="pose-library-tab-create" hidden={hidden} id="pose-library-panel-create" role="tabpanel">
+      {!activeProject ? (
+        <div className="empty-panel">Open a workspace to create poses from photos.</div>
+      ) : (
+        <div className="pose-create">
+          {error ? <p className="inline-warning">{error}</p> : null}
+
+          <div className="toolbar">
+            <button onClick={() => setDialogOpen(true)} type="button">
+              Add images
+            </button>
+            <button
+              className="primary-action"
+              disabled={!sources.length || phase === "detecting"}
+              onClick={generate}
+              type="button"
+            >
+              {phase === "detecting"
+                ? "Detecting…"
+                : `Generate poses${sources.length ? ` (${sources.length})` : ""}`}
+            </button>
+          </div>
+
+          {sources.length ? (
+            <div className="pose-create-sources">
+              {sources.map((asset) => (
+                <div className="pose-source-chip" key={asset.id}>
+                  <AssetThumbnail asset={asset} className="pose-source-thumb" />
+                  <span>{asset.displayName ?? asset.id}</span>
+                  <button
+                    aria-label={`Remove ${asset.displayName ?? asset.id}`}
+                    onClick={() => removeSource(asset.id)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-panel">Add one or more photos, then generate whole-body pose skeletons.</div>
+          )}
+
+          {phase === "review" && candidates.length ? (
+            <div className="pose-candidates">
+              <div className="toolbar">
+                <p className="eyebrow">
+                  Review {candidates.length} candidate{candidates.length === 1 ? "" : "s"} — {keepCount} kept
+                </p>
+                <button className="primary-action" disabled={!keepCount || saving} onClick={save} type="button">
+                  {saving ? "Saving…" : `Save ${keepCount} pose${keepCount === 1 ? "" : "s"}`}
+                </button>
+              </div>
+              <datalist id="pose-category-suggestions">
+                {categories.map((category) => (
+                  <option key={category} value={category} />
+                ))}
+              </datalist>
+              <div className="pose-candidate-grid">
+                {candidates.map((candidate) => (
+                  <div
+                    className={candidate.keep ? "pose-candidate-card" : "pose-candidate-card discarded"}
+                    key={candidate.key}
+                  >
+                    <img
+                      alt={`Pose skeleton from ${candidate.sourceDisplayName}`}
+                      className="pose-candidate-preview"
+                      src={`${API_BASE_URL}/api/v1/poses/preview/${encodeURIComponent(
+                        candidate.jobId,
+                      )}/${encodeURIComponent(candidate.skeletonFile)}`}
+                    />
+                    <p className="muted">
+                      {candidate.sourceDisplayName} · {candidate.facing}
+                    </p>
+                    <label>
+                      Category
+                      <input
+                        list="pose-category-suggestions"
+                        onChange={(event) => updateCandidate(candidate.key, { category: event.target.value })}
+                        placeholder="e.g. standing"
+                        value={candidate.category}
+                      />
+                    </label>
+                    <label>
+                      Tags
+                      <input
+                        onChange={(event) => updateCandidate(candidate.key, { tagsText: event.target.value })}
+                        placeholder="comma, separated"
+                        value={candidate.tagsText}
+                      />
+                    </label>
+                    <button onClick={() => updateCandidate(candidate.key, { keep: !candidate.keep })} type="button">
+                      {candidate.keep ? "Discard" : "Keep"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {dialogOpen ? (
+            <DatasetAddDialog
+              assets={assets}
+              characters={characters}
+              importing={importing}
+              memberIds={sources.map((asset) => asset.id)}
+              onAdd={handleAdd}
+              onClose={() => setDialogOpen(false)}
+              onImport={handleImport}
+            />
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function PoseLibraryScreen() {
   const { token } = useAppContext();
@@ -94,10 +399,7 @@ export function PoseLibraryScreen() {
   );
 
   const categoryOf = (asset) => asset.pose?.category || UNCATEGORIZED;
-  const categories = useMemo(
-    () => [...new Set(poses.map(categoryOf))].sort(),
-    [poses],
-  );
+  const categories = useMemo(() => [...new Set(poses.map(categoryOf))].sort(), [poses]);
   const availableTags = useMemo(
     () => [...new Set(poses.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort(),
     [poses],
@@ -128,7 +430,8 @@ export function PoseLibraryScreen() {
           <p className="eyebrow">Pose Library</p>
           <h2>Poses</h2>
           <p className="hero-blurb">
-            Manage your whole-body pose skeletons — discard, restore, tag, and categorize. Create new poses from photos in the Create tab.
+            Manage your whole-body pose skeletons — discard, restore, tag, and categorize. Create new poses from photos
+            in the Create tab.
           </p>
         </div>
         <div className="segmented-control" role="tablist" aria-label="Pose Library sections">
@@ -172,7 +475,11 @@ export function PoseLibraryScreen() {
             <button className={assetMode === "assets" ? "active" : ""} onClick={() => setAssetMode("assets")} type="button">
               Poses
             </button>
-            <button className={assetMode === "trashcan" ? "active" : ""} onClick={() => setAssetMode("trashcan")} type="button">
+            <button
+              className={assetMode === "trashcan" ? "active" : ""}
+              onClick={() => setAssetMode("trashcan")}
+              type="button"
+            >
               Trashcan
             </button>
           </div>
@@ -228,14 +535,14 @@ export function PoseLibraryScreen() {
         </div>
       </div>
 
-      <div
-        aria-labelledby="pose-library-tab-create"
+      <PoseCreatePanel
+        categories={categories.filter((category) => category !== UNCATEGORIZED)}
         hidden={activeTab !== "create"}
-        id="pose-library-panel-create"
-        role="tabpanel"
-      >
-        <div className="empty-panel">Pose creation from photos is coming soon.</div>
-      </div>
+        onSaved={() => {
+          setActiveTab("poses");
+          refresh();
+        }}
+      />
     </section>
   );
 }
