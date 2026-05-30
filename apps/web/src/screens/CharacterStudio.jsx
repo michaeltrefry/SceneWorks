@@ -422,6 +422,7 @@ export function CharacterStudio() {
               imageLocalJobs={imageLocalJobs}
               importAsset={importAsset}
               latestAssets={latestAssets}
+              loras={loras}
               onPreview={onPreview}
               rememberLocalGenerationJob={rememberLocalGenerationJob}
               selectedCharacter={selectedCharacter}
@@ -434,6 +435,7 @@ export function CharacterStudio() {
               imageLocalJobs={imageLocalJobs}
               importAsset={importAsset}
               latestAssets={latestAssets}
+              loras={loras}
               onPreview={onPreview}
               poseModel={poseModel}
               poseModels={poseModels}

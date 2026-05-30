@@ -2427,6 +2427,146 @@ describe("SceneWorks app shell", () => {
     expect(baseContext.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-pose" });
   });
 
+  it("threads a selected LoRA into the angle-set payload (sc-2223)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-angle-lora" }));
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      assets: [],
+      characters: [
+        {
+          id: "char-1",
+          name: "Mira",
+          type: "person",
+          references: [],
+          approvedReferences: [{ assetId: "ref-1", role: "hero", asset: { id: "ref-1", type: "image", displayName: "Mira ref" } }],
+          looks: [],
+          loras: [],
+        },
+      ],
+      createImageJob,
+      importAsset: vi.fn(),
+      imageLocalJobs: [],
+      rememberLocalGenerationJob: vi.fn(),
+      imageModels: [
+        {
+          id: "instantid_realvisxl",
+          name: "InstantID (RealVisXL)",
+          type: "image",
+          family: "sdxl",
+          ui: { viewAngles: [{ id: "front", label: "Front" }] },
+        },
+      ],
+      latestImageAssets: [],
+      // A family-matching LoRA the picker should surface + serialize into the payload.
+      loras: [{ id: "kelsie-lora", name: "Kelsie", families: ["sdxl"], scope: "project" }],
+      setPreviewAsset: () => {},
+      removeCharacterReference: () => {},
+      updateCharacter: () => {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+
+    const loraCheckbox = container.querySelector(".character-lora-picker input[type='checkbox']");
+    expect(loraCheckbox).toBeTruthy();
+    await act(async () => {
+      loraCheckbox.click();
+    });
+
+    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Generate angle set"),
+    );
+    await act(async () => {
+      generateButton.click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        model: "instantid_realvisxl",
+        loras: [expect.objectContaining({ id: "kelsie-lora", weight: 0.8 })],
+      }),
+    );
+  });
+
+  it("threads a selected LoRA into the pose-library payload (sc-2223)", async () => {
+    const poseKeypoints = Array.from({ length: 18 }, (_, i) => [0.5, i / 18]);
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        version: 1,
+        categories: ["standing"],
+        poses: [{ id: "standing_01", category: "standing", label: "Standing 01", preview: "poses/standing_01.png", keypoints: poseKeypoints }],
+      }),
+    }));
+    const createImageJob = vi.fn(async () => ({ id: "job-pose-lora" }));
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      assets: [],
+      characters: [
+        {
+          id: "char-1",
+          name: "Mira",
+          type: "person",
+          references: [],
+          approvedReferences: [{ assetId: "ref-1", role: "hero", asset: { id: "ref-1", type: "image", displayName: "Mira ref" } }],
+          looks: [],
+          loras: [],
+        },
+      ],
+      createImageJob,
+      importAsset: vi.fn(),
+      imageLocalJobs: [],
+      rememberLocalGenerationJob: vi.fn(),
+      imageModels: [
+        { id: "instantid_realvisxl", name: "InstantID (RealVisXL)", type: "image", family: "sdxl", ui: { poseLibrary: true } },
+      ],
+      latestImageAssets: [],
+      loras: [{ id: "kelsie-lora", name: "Kelsie", families: ["sdxl"], scope: "project" }],
+      setPreviewAsset: () => {},
+      removeCharacterReference: () => {},
+      updateCharacter: () => {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const poseButton = [...container.querySelectorAll("button")].find((button) =>
+      (button.getAttribute("aria-label") ?? "").includes("pose Standing 01"),
+    );
+    await act(async () => {
+      poseButton.click();
+    });
+    const loraCheckbox = container.querySelector(".character-lora-picker input[type='checkbox']");
+    expect(loraCheckbox).toBeTruthy();
+    await act(async () => {
+      loraCheckbox.click();
+    });
+
+    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Generate") && button.textContent.includes("pose"),
+    );
+    await act(async () => {
+      generateButton.click();
+    });
+
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        model: "instantid_realvisxl",
+        loras: [expect.objectContaining({ id: "kelsie-lora", weight: 0.8 })],
+      }),
+    );
+  });
+
   it("collects all character-associated assets in the Character Studio gallery (sc-2076)", async () => {
     const onPreview = vi.fn();
     const selectedCharacter = { id: "char-1", name: "Mira" };

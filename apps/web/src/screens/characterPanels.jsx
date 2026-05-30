@@ -4,6 +4,7 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
+import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField.jsx";
 import { usePoseLibrary } from "../poseLibrary.js";
 import { extractFamilies } from "../presetUtils.js";
 
@@ -428,6 +429,7 @@ export function CharacterAngleSet({
   addCharacterReference,
   latestAssets = [],
   imageLocalJobs = [],
+  loras = [],
   rememberLocalGenerationJob,
   onPreview,
 }) {
@@ -445,6 +447,9 @@ export function CharacterAngleSet({
     ?? availableModels[0]
     ?? null;
   const angleCount = activeAngleModel?.ui?.viewAngles?.length ?? 0;
+  // Family-filtered LoRA picker (sc-2223): apply an existing LoRA of this character
+  // to its turnaround (the dataset-bootstrapping loop). Filtered to the backbone's family.
+  const loraSelection = useLoraSelection(loras, activeAngleModel);
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
@@ -525,6 +530,7 @@ export function CharacterAngleSet({
         count: 1,
         width: 1024,
         height: 1024,
+        loras: loraSelection.serializedLoras,
         advanced: { angleSet: true, ipAdapterScale: 0.8 },
       });
       if (job?.id) {
@@ -582,6 +588,7 @@ export function CharacterAngleSet({
       ) : (
         <p className="inline-warning">No approved reference yet — upload one below or approve a reference above.</p>
       )}
+      <LoraPickerField selection={loraSelection} />
       <div className="inline-create">
         <button onClick={() => fileInputRef.current?.click()} type="button">
           Upload reference
@@ -762,6 +769,7 @@ export function CharacterPoseLibrary({
   addCharacterReference,
   latestAssets = [],
   imageLocalJobs = [],
+  loras = [],
   rememberLocalGenerationJob,
   onPreview,
 }) {
@@ -778,6 +786,8 @@ export function CharacterPoseLibrary({
     ?? availableModels[0]
     ?? null;
   const { byId } = usePoseLibrary();
+  // Family-filtered LoRA picker (sc-2223), filtered to the active pose backbone's family.
+  const loraSelection = useLoraSelection(loras, activePoseModel);
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
   const [faceRestore, setFaceRestore] = React.useState(true);
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
@@ -858,6 +868,7 @@ export function CharacterPoseLibrary({
         count: 1,
         width: 1024,
         height: 1024,
+        loras: loraSelection.serializedLoras,
         advanced: { poses, ipAdapterScale: 0.8, faceRestore },
       });
       if (job?.id) {
@@ -925,6 +936,7 @@ export function CharacterPoseLibrary({
         <input checked={faceRestore} onChange={(event) => setFaceRestore(event.target.checked)} type="checkbox" />
         Restore face (sharper identity; off keeps the raw render — fewer blend artifacts)
       </label>
+      <LoraPickerField selection={loraSelection} />
       <div className="inline-create">
         <button onClick={() => fileInputRef.current?.click()} type="button">
           Upload reference
