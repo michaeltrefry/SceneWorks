@@ -3687,13 +3687,17 @@ class MlxFlux2Adapter:
                 f"{', '.join(sorted(self._supported_models))}, not {request.model}."
             )
 
-        # Resolve reference image (if any) to a local filesystem path so
-        # mflux's Flux2KleinEdit can read it directly. No PIL round-trip:
-        # find_asset_media_path returns the project-scoped path, and mflux's
-        # image loader handles dtype/resize itself.
+        # Resolve the reference image (if any) to a local filesystem path so
+        # mflux's Flux2KleinEdit can read it directly. Two studios feed the same
+        # single-reference edit path: Character Studio sends it as
+        # referenceAssetId, while the Image Edit studio sends the source image as
+        # sourceAssetId (edit_image mode). No PIL round-trip: find_asset_media_path
+        # returns the project-scoped path and mflux's loader handles dtype/resize.
         reference_paths: list[str] = []
-        if request.reference_asset_id:
-            reference_paths.append(str(find_asset_media_path(project_path, request.reference_asset_id)))
+        edit_source_id = request.source_asset_id if request.mode == "edit_image" else None
+        ref_id = request.reference_asset_id or edit_source_id
+        if ref_id:
+            reference_paths.append(str(find_asset_media_path(project_path, ref_id)))
         has_reference = bool(reference_paths)
 
         validate_lora_compatibility(
