@@ -321,6 +321,7 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
     match bucket {
         Bucket::WanVideo => Some("wan-video".to_owned()),
         Bucket::Flux => Some("flux".to_owned()),
+        Bucket::Flux2 => Some("flux2".to_owned()),
         Bucket::LtxVideo => Some("ltx-video".to_owned()),
         Bucket::Sdxl => Some("sdxl".to_owned()),
         Bucket::Sd15 => Some("sd1.5".to_owned()),
@@ -332,6 +333,7 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
 enum Bucket {
     WanVideo,
     Flux,
+    Flux2,
     LtxVideo,
     MmDit,
     Sdxl,
@@ -387,6 +389,28 @@ const SIGNATURES: &[BucketSignature] = &[
         ],
         disqualifiers: &["single_transformer_blocks.", "single_blocks_"],
         markers: &["double_blocks.", "processor.", "qkv_lora", "proj_lora"],
+    },
+    BucketSignature {
+        bucket: Bucket::Flux2,
+        // FLUX.2 [klein] native/ComfyUI LoRAs share the FLUX.1 `diffusion_model.`
+        // prefix and the same double_blocks/single_blocks split, but FLUX.2 shares
+        // modulation ACROSS all blocks via top-level `double_stream_modulation_img`
+        // / `double_stream_modulation_txt` / `single_stream_modulation` tensors,
+        // whereas FLUX.1 keeps per-block `img_mod`/`txt_mod`/`modulation` inside
+        // each block index. Those shared-modulation keys are unique to FLUX.2 and
+        // never appear in a FLUX.1 LoRA, so requiring one cleanly separates the two
+        // (the primary Flux signature can't fire here anyway — FLUX.2 uses
+        // `single_blocks.` with a dot, not the `single_blocks_` underscore form).
+        require_all_of: &[&["double_stream_modulation_", "single_stream_modulation."]],
+        disqualifiers: &["single_transformer_blocks."],
+        markers: &[
+            "double_stream_modulation_",
+            "single_stream_modulation.",
+            "double_blocks.",
+            "single_blocks.",
+            ".img_attn.",
+            ".txt_attn.",
+        ],
     },
     BucketSignature {
         bucket: Bucket::WanVideo,
@@ -647,6 +671,17 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // transformer blocks), so the key-based detector classifies it as `flux`.
     if normalized.contains("chroma") {
         return Some("chroma".to_owned());
+    }
+    // Check flux2 before flux: FLUX.2 architecture strings ("flux2", "flux-2",
+    // "flux.2", "flux_2") all contain the "flux" substring, so the generic flux
+    // match below would otherwise swallow them. FLUX.2 is a distinct family with
+    // its own MLX adapter — a FLUX.1 ("flux") LoRA is not interchangeable with it.
+    if normalized.contains("flux2")
+        || normalized.contains("flux-2")
+        || normalized.contains("flux.2")
+        || normalized.contains("flux_2")
+    {
+        return Some("flux2".to_owned());
     }
     if normalized.contains("flux") {
         return Some("flux".to_owned());
@@ -948,6 +983,131 @@ mod tests {
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("flux"));
+    }
+
+    fn flux2_klein_native_keys() -> Vec<String> {
+        // Mirrors the real klein_9B_Turbo_r128.safetensors layout: native/ComfyUI
+        // `diffusion_model.` prefix, 8 double blocks + 24 single blocks, and FLUX.2's
+        // shared (per-stream, not per-block) modulation tensors.
+        let mut keys = Vec::new();
+        for block in 0..8 {
+            for module in [
+                "img_attn.proj",
+                "img_attn.qkv",
+                "txt_attn.proj",
+                "txt_attn.qkv",
+            ] {
+                keys.push(format!(
+                    "diffusion_model.double_blocks.{block}.{module}.lora_down.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.double_blocks.{block}.{module}.lora_up.weight"
+                ));
+            }
+            for module in ["img_mlp.0", "img_mlp.2", "txt_mlp.0", "txt_mlp.2"] {
+                keys.push(format!(
+                    "diffusion_model.double_blocks.{block}.{module}.lora_down.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.double_blocks.{block}.{module}.lora_up.weight"
+                ));
+            }
+        }
+        for block in 0..24 {
+            for module in ["linear1", "linear2"] {
+                keys.push(format!(
+                    "diffusion_model.single_blocks.{block}.{module}.lora_down.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.single_blocks.{block}.{module}.lora_up.weight"
+                ));
+            }
+        }
+        for module in [
+            "double_stream_modulation_img.lin",
+            "double_stream_modulation_txt.lin",
+            "single_stream_modulation.lin",
+            "img_in",
+            "txt_in",
+        ] {
+            keys.push(format!("diffusion_model.{module}.lora_down.weight"));
+            keys.push(format!("diffusion_model.{module}.lora_up.weight"));
+        }
+        keys
+    }
+
+    #[test]
+    fn detects_flux2_klein_native() {
+        let keys = flux2_klein_native_keys();
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("flux2"));
+    }
+
+    #[test]
+    fn flux1_native_keys_do_not_detect_as_flux2() {
+        // A FLUX.1 native LoRA shares the double_blocks/single_blocks split but keeps
+        // PER-BLOCK modulation (`img_mod`/`txt_mod`/`modulation`) and has none of the
+        // shared `*_stream_modulation` tensors, so it must not be misread as FLUX.2.
+        let mut keys = Vec::new();
+        for block in 0..19 {
+            for module in ["img_attn.qkv", "txt_attn.qkv", "img_mod.lin", "txt_mod.lin"] {
+                keys.push(format!(
+                    "diffusion_model.double_blocks.{block}.{module}.lora_down.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.double_blocks.{block}.{module}.lora_up.weight"
+                ));
+            }
+        }
+        for block in 0..38 {
+            for module in ["linear1", "modulation.lin"] {
+                keys.push(format!(
+                    "diffusion_model.single_blocks.{block}.{module}.lora_down.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.single_blocks.{block}.{module}.lora_up.weight"
+                ));
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_ne!(detect_lora_family(&header).as_deref(), Some("flux2"));
+    }
+
+    #[test]
+    fn flux2_metadata_wins_over_generic_flux_substring() {
+        // FLUX.2 architecture strings contain "flux"; the flux2 metadata branch must
+        // claim them before the generic flux match (mirrors chroma-before-flux).
+        for arch in ["flux2", "flux-2", "flux.2-klein", "FLUX_2/lora"] {
+            let mut header = header_from_keys(&[
+                "lora_unet_double_blocks_0_img_mlp_0.lora_down.weight",
+                "lora_unet_double_blocks_0_img_mlp_0.lora_up.weight",
+            ]);
+            header["__metadata__"] = json!({ "modelspec.architecture": arch });
+            assert_eq!(
+                detect_lora_family(&header).as_deref(),
+                Some("flux2"),
+                "architecture {arch} should map to flux2"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_toolkit_flux2_klein_base_model_version_detects_flux2() {
+        // Real ai-toolkit klein LoRAs (e.g. V3_flux_klein.safetensors) train only
+        // attn/mlp/linear — no `*_stream_modulation` tensors — so the key signature
+        // can't fire, but they carry `ss_base_model_version: "flux2_klein_9b"`. That
+        // value contains "flux", so the generic flux branch used to swallow it; the
+        // flux2 branch must claim it first.
+        let mut header = header_from_keys(&[
+            "diffusion_model.double_blocks.0.img_attn.qkv.lora_A.weight",
+            "diffusion_model.double_blocks.0.img_attn.qkv.lora_B.weight",
+            "diffusion_model.single_blocks.0.linear1.lora_A.weight",
+        ]);
+        header["__metadata__"] = json!({ "ss_base_model_version": "flux2_klein_9b" });
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("flux2"));
     }
 
     #[test]

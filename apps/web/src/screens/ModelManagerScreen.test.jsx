@@ -271,6 +271,50 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     expect(payload.family).toBe("wan-video");
     expect(payload.baseModel).toBe("wan_2_2_t2v_14b");
   });
+
+  // Distilled variants whose model `family` differs from their LoRA-compatibility
+  // set (FLUX.2 [klein]: family "flux2-klein" but accepts "flux2" LoRAs) must offer
+  // the compatibility family in the dropdown — the import validator + generation
+  // matcher both key off loraCompatibility.families, so offering "flux2-klein"
+  // would let the user pick a family the backend rejects ("Unsupported LoRA family").
+  it("offers the LoRA-compatibility family, not the model identity, for distilled variants", async () => {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras: [],
+      models: [
+        {
+          id: "flux2_klein_9b",
+          name: "FLUX.2 [klein] 9B",
+          type: "image",
+          family: "flux2-klein",
+          loraCompatibility: { families: ["flux2"] },
+          installState: "ready",
+          ui: { description: "Distilled FLUX.2 variant." },
+        },
+      ],
+      presets: [],
+      jobAction: () => {},
+      setActiveView: () => {},
+      deleteLora: () => {},
+      deleteModel: () => {},
+      createModelDownloadJob: () => {},
+      createModelConvertJob: () => {},
+      createLoraImportJob,
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+    const familyOptions = [...labelStartingWith("Family").querySelectorAll("option")].map((option) => option.value);
+    expect(familyOptions).toContain("flux2");
+    expect(familyOptions).not.toContain("flux2-klein");
+  });
 });
 
 describe("ModelManagerScreen type-grouped layout", () => {

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
-import { extractFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
+import { extractFamilies, modelLoraFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
 
 // Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
@@ -210,7 +210,12 @@ export function ModelManagerScreen() {
   const onImportLora = createLoraImportJob;
   const onImportModel = createModelImportJob;
   const onOpenQueue = () => setActiveView("Queue");
-  const families = Array.from(new Set(models.map((model) => model.family).filter(Boolean))).sort();
+  // LoRA families come from each model's LoRA-compatibility set — NOT its model
+  // `family` identity. They usually coincide, but distilled variants differ: e.g.
+  // FLUX.2 [klein] has family "flux2-klein" yet accepts "flux2" LoRAs. The import
+  // validator + generation-time matcher both key off loraCompatibility.families,
+  // so the dropdown must too, or the user picks a family the backend rejects.
+  const families = Array.from(new Set(models.flatMap((model) => modelLoraFamilies(model)).filter(Boolean))).sort();
   const familiesKey = families.join("|");
   const [familyFilter, setFamilyFilter] = useState("all");
   const [importingLora, setImportingLora] = useState(false);
