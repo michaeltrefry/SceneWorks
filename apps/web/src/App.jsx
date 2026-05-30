@@ -416,14 +416,16 @@ export function App() {
   const [studioLaunch, setStudioLaunch] = useState(null);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState(readStoredTheme);
-  // Apply a theme and, on the desktop shell, persist it durably right away. The
-  // webview's localStorage is keyed to the API's per-launch random port, so it
-  // can't carry the choice across restarts; settings.json can.
+  // Apply a theme and persist it through the API. localStorage gives an instant
+  // initial paint, but on the desktop shell the UI runs at the API's per-launch
+  // http://127.0.0.1:<port> origin, where both localStorage and Tauri IPC are
+  // unreliable across launches — so the durable copy lives server-side.
   const changeTheme = (next) => {
     setTheme(next);
-    if (isDesktopShell) {
-      tauriInvoke("save_app_theme", { theme: next }).catch(() => {});
-    }
+    apiFetch("/api/v1/ui-preferences", "", {
+      method: "PUT",
+      body: JSON.stringify({ theme: next }),
+    }).catch(() => {});
   };
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
@@ -691,17 +693,14 @@ export function App() {
     }
   }, [theme]);
 
-  // Desktop: seed the theme from the durable setting on launch (localStorage
-  // can't carry it across restarts — see changeTheme). Each toggle persists
-  // itself, so there's no separate save effect to race with this read.
+  // Seed the theme from the server on launch (the durable copy; localStorage is
+  // only an instant-paint cache). Each toggle persists itself via changeTheme,
+  // so there's no save effect to race with this read.
   useEffect(() => {
-    if (!isDesktopShell) {
-      return;
-    }
     let cancelled = false;
-    tauriInvoke("get_app_settings")
-      .then((settings) => {
-        const stored = settings?.theme;
+    apiFetch("/api/v1/ui-preferences", "")
+      .then((prefs) => {
+        const stored = prefs?.theme;
         if (!cancelled && (stored === "dark" || stored === "light")) {
           setTheme(stored);
         }

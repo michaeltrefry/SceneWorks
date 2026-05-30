@@ -96,6 +96,8 @@ mod recipe_presets;
 use recipe_presets::*;
 mod credentials;
 use credentials::*;
+mod preferences;
+use preferences::*;
 mod prompts;
 use prompts::*;
 
@@ -104,6 +106,8 @@ const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/access",
     "/api/v1/auth/verify",
     "/api/v1/jobs/events",
+    // Non-sensitive UI state (theme); loaded before auth to avoid a flash.
+    "/api/v1/ui-preferences",
 ];
 const DEFAULT_CORS_ORIGINS: &str = concat!(
     "http://localhost:5173,http://127.0.0.1:5173,",
@@ -592,6 +596,10 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
             get(list_credentials).put(set_credential),
         )
         .route("/api/v1/credentials/:host", delete(delete_credential))
+        .route(
+            "/api/v1/ui-preferences",
+            get(get_ui_preferences).put(set_ui_preferences),
+        )
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/:model_id", delete(delete_model))
         .route(
