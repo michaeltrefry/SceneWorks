@@ -2,5 +2,8 @@
   "identifier": "default",
   "description": "Default capability set for the SceneWorks desktop shell window.",
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
   "permissions": ["core:default"]
 }
