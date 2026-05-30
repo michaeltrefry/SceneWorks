@@ -345,6 +345,10 @@ string_enum! {
         // points to an InterleavedDocument JSON in assets/documents/; the images it
         // references are ordinary `image` assets. See sc-1576.
         Document => "document",
+        // A whole-body DWPose skeleton (Pose Library, epic 2282). The asset's `file`
+        // points to the rendered skeleton preview; keypoints/hands/face + category live
+        // in the sidecar's `pose` field. Stored under a reserved global poses project.
+        Pose => "pose",
     }
 }
 

@@ -9,7 +9,7 @@
     "id": { "type": "string", "pattern": "^asset_[a-z0-9_]+$" },
     "projectId": { "type": "string", "pattern": "^project_[a-z0-9_]+$" },
     "generationSetId": { "type": ["string", "null"] },
-    "type": { "enum": ["image", "video", "upload", "frame", "render"] },
+    "type": { "enum": ["image", "video", "upload", "frame", "render", "document", "pose"] },
     "displayName": { "type": "string", "minLength": 1 },
     "tags": {
       "type": "array",
