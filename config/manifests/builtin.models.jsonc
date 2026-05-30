@@ -208,7 +208,18 @@
             { "label": "Qwen Cloud text-to-image docs", "url": "https://docs.qwencloud.com/developer-guides/image-generation/text-to-image" },
             { "label": "Supplemental Qwen-style prompt guide", "url": "https://www.qwenimagen.com/prompt-guide" }
           ]
-        }
+        },
+        // Strict pose tier (sc-2291): the worker renders the selected library pose to
+        // a DWPose skeleton and conditions a native diffusers QwenImageControlNet-
+        // Pipeline (InstantX Qwen-Image-ControlNet-Union) on it — true pose lock,
+        // pose-from-prompt (identity, when wanted, comes from a character LoRA).
+        // Surfaces qwen_image in the Character Studio pose picker; character_image is
+        // NOT required — poseLibrary alone gates the picker, the worker dispatches by
+        // model id. Torch/diffusers path only (MLX qwen has no ControlNet).
+        "poseLibrary": true,
+        // Strict ControlNet → expose the pose-lock-strength slider
+        // (advanced.controlScale, read by QwenImageAdapter._pose_control_scale).
+        "poseControlScale": true
       }
     },
     {

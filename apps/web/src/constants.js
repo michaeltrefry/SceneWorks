@@ -54,6 +54,12 @@ export const fallbackModels = [
     ui: {
       description: "Qwen text-to-image target.",
       promptGuide: { title: "Qwen Image Prompt Guide", path: "/prompt-guides/qwen-image.md" },
+      // Strict pose tier (sc-2291): torch QwenImageControlNetPipeline + InstantX
+      // Qwen-Image-ControlNet-Union (DWPose) — true pose lock, pose-from-prompt.
+      // poseLibrary alone gates the pose picker (no character_image needed).
+      poseLibrary: true,
+      // Strict ControlNet → pose-lock-strength slider (advanced.controlScale).
+      poseControlScale: true,
     },
   },
   {

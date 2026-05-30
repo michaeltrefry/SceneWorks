@@ -853,6 +853,165 @@ def test_augment_prompt_for_pose_appends_skeleton_cue():
     assert augment_prompt_for_pose("  a woman.  ") == f"a woman, {POSE_SKELETON_PROMPT}"
 
 
+def test_qwen_strict_pose_entries_gating():
+    """sc-2291: the base-Qwen strict pose path engages for a target that declares
+    controlNetPose (base qwen_image) with advanced.poses — NOT for edit jobs, NOT for
+    edit targets (no controlNetPose), and (unlike Kolors) with NO reference required."""
+    from scene_worker.image_adapters import MODEL_TARGETS, QwenImageAdapter
+
+    entries = QwenImageAdapter._strict_pose_entries
+    base = MODEL_TARGETS["qwen_image"]  # declares controlNetPose
+    edit = MODEL_TARGETS["qwen_image_edit_2511"]  # no controlNetPose → best-effort tier
+    kp = [{"id": "sit", "keypoints": [[0.5, 0.5]] * 18}]
+    # Base target + poses → fires, with OR without a reference (pose-from-prompt).
+    assert entries(SimpleNamespace(mode="character_image", reference_asset_id="r", advanced={"poses": kp}), base) == kp
+    assert entries(SimpleNamespace(mode="character_image", reference_asset_id=None, advanced={"poses": kp}), base) == kp
+    # Edit mode never takes the strict path.
+    assert entries(SimpleNamespace(mode="edit_image", reference_asset_id="r", advanced={"poses": kp}), base) == []
+    # Edit target (no controlNetPose) stays on the best-effort tier (sc-2256).
+    assert entries(SimpleNamespace(mode="character_image", reference_asset_id="r", advanced={"poses": kp}), edit) == []
+    # No poses → no strict path.
+    assert entries(SimpleNamespace(mode="character_image", reference_asset_id="r", advanced={}), base) == []
+
+
+def test_qwen_strict_pose_set_loops_poses_with_shared_seed(tmp_path, monkeypatch):
+    """sc-2291: generate() on base qwen_image with advanced.poses routes to the strict
+    ControlNet pose path — one image per pose, a single shared seed, hands/face threaded
+    through, and poseLibrary + controlNetPose recorded in settings."""
+    from scene_worker import image_adapters as ia
+
+    monkeypatch.setattr(ia.QwenImageAdapter, "_load_pose_pipeline", lambda self, *a, **k: object())
+    monkeypatch.setattr(ia.QwenImageAdapter, "_apply_loras", lambda self, *a, **k: None)
+    monkeypatch.setattr(ia, "select_torch_device", lambda *a, **k: "cpu")
+    monkeypatch.setattr(ia, "gpu_memory_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: SimpleNamespace() if name == "torch" else importlib.import_module(name),
+    )
+
+    calls: list[dict] = []
+
+    def fake_run_pose(self, settings, pipe, request, seed, project_path, keypoints, hands, face, cancel_requested=None):
+        from PIL import Image as _Image
+        calls.append({"seed": seed, "keypoints": keypoints, "hands": hands, "face": face})
+        return _Image.new("RGB", (8, 8))
+
+    monkeypatch.setattr(ia.QwenImageAdapter, "_run_pose", fake_run_pose)
+
+    captured: dict = {}
+
+    class _FakeWriter:
+        def write_incremental_outputs(self, *, image_count, image_at_index, raw_settings, **kwargs):
+            captured["raw_settings"] = raw_settings
+            captured["image_count"] = image_count
+            for index in range(image_count):
+                image_at_index(index)
+            return {"images": image_count}
+
+    monkeypatch.setattr(ia, "ImageAssetWriter", _FakeWriter)
+
+    kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    hands = [[[0.4, 0.4]] * 21, [[0.6, 0.4]] * 21]
+    face = [[0.5, 0.3]] * 68
+    job = {"id": "job_qwen_pose", "payload": {
+        "projectId": "p", "mode": "character_image", "model": "qwen_image", "prompt": "the character",
+        "count": 1, "width": 64, "height": 64,
+        "advanced": {"poses": [
+            {"id": "sit_01", "keypoints": kp},  # body-only
+            {"id": "dance_01", "keypoints": kp, "hands": hands, "face": face},  # whole-body
+        ]},
+    }}
+    ia.QwenImageAdapter().generate(
+        settings=SimpleNamespace(gpu_id="cpu"), job=job, request=image_request_from_job(job),
+        project_path=tmp_path, progress=lambda *a, **k: None, cancel_requested=lambda: False,
+    )
+    assert captured["image_count"] == 2  # one per pose, not request.count
+    assert len(calls) == 2
+    assert calls[0]["seed"] == calls[1]["seed"]  # shared seed across the set
+    # Whole-body hands/face thread through to the DWPose-trained Qwen CN; body-only → None.
+    assert calls[0]["hands"] is None and calls[0]["face"] is None
+    assert calls[1]["hands"] is not None and len(calls[1]["face"]) == 68
+    assert captured["raw_settings"].get("poseLibrary") is True
+    assert captured["raw_settings"].get("controlNetPose") == "InstantX/Qwen-Image-ControlNet-Union"
+
+
+def test_qwen_run_pose_conditions_controlnet_without_reference(tmp_path, monkeypatch):
+    """sc-2291 strict tier: _run_pose feeds the rendered DWPose skeleton as control_image
+    and controlScale as controlnet_conditioning_scale — pure txt2img + control, with NO
+    reference / ip_adapter / img2img `image` kwarg (pose-from-prompt)."""
+    import numpy as _np
+    from scene_worker import image_adapters as ia
+
+    class FakeImage:
+        def convert(self, _mode):
+            return self
+
+    class FakeOutput:
+        images = [FakeImage()]
+
+    class FakePipe:
+        def __init__(self):
+            self.last_kwargs: dict = {}
+
+        def __call__(self, *, prompt=None, control_image=None, controlnet_conditioning_scale=None, **kwargs):
+            self.last_kwargs = {
+                "prompt": prompt, "control_image": control_image,
+                "controlnet_conditioning_scale": controlnet_conditioning_scale, **kwargs,
+            }
+            return FakeOutput()
+
+    class FakeTorch:
+        @staticmethod
+        def Generator(_device):
+            class Gen:
+                def manual_seed(self, _seed):
+                    return self
+
+            return Gen()
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.importlib.import_module",
+        lambda name: FakeTorch if name == "torch" else importlib.import_module(name),
+    )
+    monkeypatch.setattr("scene_worker.image_adapters.apply_sampler", lambda *a, **k: None)
+    skeleton_sentinel = FakeImage()
+    monkeypatch.setattr(
+        ia, "draw_wholebody", lambda w, h, kps, hands=None, face=None, stickwidth=4: _np.zeros((h, w, 3), dtype=_np.uint8)
+    )
+    monkeypatch.setattr("scene_worker.image_adapters.Image", SimpleNamespace(fromarray=lambda arr: skeleton_sentinel))
+
+    request = image_request_from_job({"payload": {
+        "projectId": "p", "mode": "character_image", "model": "qwen_image",
+        "prompt": "the character", "width": 16, "height": 16, "count": 1,
+        "advanced": {"controlScale": 0.85},
+    }})
+    pipe = FakePipe()
+    kp = [(0.5, 0.1 + 0.04 * i) for i in range(18)]
+    ia.QwenImageAdapter()._run_pose(SimpleNamespace(gpu_id="cpu"), pipe, request, 7, tmp_path, kp, None, None)
+    assert pipe.last_kwargs["control_image"] is skeleton_sentinel  # pose → ControlNet
+    assert pipe.last_kwargs["controlnet_conditioning_scale"] == 0.85  # advanced.controlScale
+    # Pose-from-prompt: no reference / IP-Adapter / img2img image kwarg.
+    assert "image" not in pipe.last_kwargs
+    assert "ip_adapter_image" not in pipe.last_kwargs
+
+
+def test_should_route_qwen_pose_stays_on_torch(monkeypatch):
+    """sc-2291: a base qwen_image pose request must stay on the torch QwenImageAdapter —
+    the strict pose ControlNet (QwenImageControlNetPipeline) is torch-only; MLX qwen
+    would silently drop advanced.poses. Plain txt2img still routes to MLX."""
+    from scene_worker.image_adapters import MlxQwenAdapter, _should_route_qwen_to_mlx
+
+    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_FLUX", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(MlxQwenAdapter, "_sidecar_available", lambda self: True)
+    model = next(iter(MlxQwenAdapter._supported_models))  # qwen_image
+
+    poses = [{"id": "sit", "keypoints": []}]
+    assert _should_route_qwen_to_mlx({"model": model, "advanced": {"poses": poses}}) is False  # pose → torch
+    assert _should_route_qwen_to_mlx({"model": model}) is True  # plain txt2img → MLX
+    assert _should_route_qwen_to_mlx({"model": model, "advanced": {}}) is True  # no poses → MLX
+
+
 def test_qwen_character_image_angle_set_applies_loras_once_then_loops_angles(tmp_path, monkeypatch):
     """sc-2225: a character_image + angleSet job on a diffusers backbone (Qwen) must
     apply request.loras exactly once, BEFORE the per-angle loop, and emit one image per
