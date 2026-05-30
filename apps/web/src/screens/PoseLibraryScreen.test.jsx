@@ -108,6 +108,16 @@ describe("PoseLibraryScreen", () => {
     ).toBe(true);
   });
 
+  it("opens a pose in the shared fullscreen preview on double-click", async () => {
+    poseAssets = [poseAsset()];
+    await render();
+    const tile = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Arm Raised"));
+    await act(async () => {
+      tile.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true }));
+    });
+    expect(container.querySelector(".preview-modal")).toBeTruthy();
+  });
+
   it("switches to the Create tab", async () => {
     poseAssets = [poseAsset()];
     await render();

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { API_BASE_URL, apiFetch, isAbortError } from "../api.js";
-import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
+import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { useAppContext } from "../context/AppContext.js";
@@ -329,6 +329,7 @@ export function PoseLibraryScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedId, setSelectedId] = useState(null);
+  const [previewId, setPreviewId] = useState(null);
   const [assetMode, setAssetMode] = useState("assets");
   const [categoryFilter, setCategoryFilter] = useState("all");
 
@@ -408,7 +409,13 @@ export function PoseLibraryScreen() {
   const visible = poses.filter((asset) => inFilter(asset) && inMode(asset));
   const trashedInView = poses.filter((asset) => inFilter(asset) && asset.status?.trashed);
   const selected = poses.find((asset) => asset.id === selectedId) ?? null;
-  const onPreview = (asset) => setSelectedId(asset.id);
+  // Single click selects (side detail); preview opens the shared fullscreen modal —
+  // same larger view as the rest of the asset library. Arrows step the visible set.
+  const onPreview = (asset) => setPreviewId(asset.id);
+  const previewAsset = poses.find((asset) => asset.id === previewId) ?? null;
+  const previewIndex = visible.findIndex((asset) => asset.id === previewId);
+  const previousAsset = previewIndex > 0 ? visible[previewIndex - 1] : null;
+  const nextAsset = previewIndex >= 0 && previewIndex < visible.length - 1 ? visible[previewIndex + 1] : null;
 
   // Group the visible poses by category for the grid (category + tags shown per tile).
   const groups = useMemo(() => {
@@ -541,6 +548,19 @@ export function PoseLibraryScreen() {
           refresh();
         }}
       />
+
+      {previewAsset ? (
+        <FullscreenPreview
+          asset={previewAsset}
+          deleteAsset={deleteAsset}
+          purgeAsset={purgeAsset}
+          updateAssetStatus={updateAssetStatus}
+          onClose={() => setPreviewId(null)}
+          onPreviewAsset={(asset) => setPreviewId(asset.id)}
+          previousAsset={previousAsset}
+          nextAsset={nextAsset}
+        />
+      ) : null}
     </section>
   );
 }
