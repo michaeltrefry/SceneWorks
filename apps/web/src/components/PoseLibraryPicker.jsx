@@ -4,8 +4,8 @@ import { usePoseLibrary } from "../poseLibrary.js";
 // Multi-select gallery of OpenPose poses, grouped by category. Controlled: the parent
 // owns `selectedIds` (array) and gets toggles via `onToggle(id)` / `onClear()`. Shared
 // by the Character Studio pose panel and the Image Studio pose section.
-export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear }) {
-  const { poses, categories, loading, error } = usePoseLibrary();
+export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUserPoses }) {
+  const { poses, categories, loading, error } = usePoseLibrary({ loadUserPoses });
   const selected = new Set(selectedIds);
 
   if (loading) {
@@ -51,7 +51,7 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear }) {
                     title={pose.label}
                     type="button"
                   >
-                    <img alt={pose.label} loading="lazy" src={`/${pose.preview}`} />
+                    <img alt={pose.label} loading="lazy" src={pose.previewUrl ?? `/${pose.preview}`} />
                     <span className="pose-thumb-label">{pose.label}</span>
                   </button>
                 );
