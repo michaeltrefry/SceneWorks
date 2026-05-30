@@ -117,6 +117,28 @@ def wholebody_to_openpose(kps, sc, w: int, h: int) -> dict:
     }
 
 
+def squareify(rec: dict, w: int, h: int) -> dict:
+    """Re-normalize a source-aspect pose into a centered ``max(w, h)`` SQUARE — pad
+    the short axis, never crop — so the stored pose is aspect-canonical. A later
+    square aspect-fit at generation (``openpose_skeleton.square_fit``) then preserves
+    the captured human proportions at any output aspect, instead of stretching x/y
+    independently (epic 2282). Confidence is carried through unchanged. Operates on
+    the body18 + hands[21,21] + face68 ``[x, y, conf]`` record from
+    ``wholebody_to_openpose``."""
+    side = float(max(w, h))
+    ox = (side - w) / 2.0
+    oy = (side - h) / 2.0
+
+    def _sq(p):
+        return None if p is None else [(p[0] * w + ox) / side, (p[1] * h + oy) / side, p[2]]
+
+    return {
+        "keypoints": [_sq(p) for p in rec["keypoints"]],
+        "hands": [[_sq(p) for p in rec["hands"][0]], [_sq(p) for p in rec["hands"][1]]],
+        "face": [_sq(p) for p in rec["face"]],
+    }
+
+
 def _thresholded(group: list, min_conf: float) -> list:
     """Render-ready copy: drop (None) points below the confidence floor."""
     out = []
@@ -341,6 +363,9 @@ def run_pose_detect(
         ordered = []
         for i in range(n):
             rec = wholebody_to_openpose(keypoints[i], scores[i], w, h)
+            # Store square-canonical (pad short axis): proportions then survive a
+            # square aspect-fit at any generation resolution (epic 2282).
+            rec = squareify(rec, w, h)
             bbox = _bbox(rec["keypoints"], rec["hands"][0], rec["hands"][1], rec["face"], min_conf=min_conf)
             area = 0.0 if bbox is None else (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
             ordered.append((area, rec, bbox))
@@ -352,8 +377,11 @@ def run_pose_detect(
             body_t = _thresholded(rec["keypoints"], min_conf)
             hands_t = [_thresholded(rec["hands"][0], min_conf), _thresholded(rec["hands"][1], min_conf)]
             face_t = _thresholded(rec["face"], min_conf)
-            stick = max(6, round(min(w, h) * 0.012))
-            skel = draw_wholebody(w, h, body_t, hands_t, face_t, stickwidth=stick)
+            # Render the (already square-canonical) skeleton on a SQUARE canvas so
+            # the stored preview/thumbnail is square; square_fit maps it 1:1.
+            side = max(w, h)
+            stick = max(6, round(side * 0.012))
+            skel = draw_wholebody(side, side, body_t, hands_t, face_t, stickwidth=stick)
             preview = out_dir / f"{stem}_p{person_index}_skel.png"
             cv2.imwrite(str(preview), cv2.cvtColor(skel, cv2.COLOR_RGB2BGR))
             poses.append({

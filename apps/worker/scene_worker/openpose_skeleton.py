@@ -97,13 +97,25 @@ def normalize_face(raw: object) -> list[Keypoint] | None:
     return normalize_points(raw, 68)
 
 
+def square_fit(canvas_w: int, canvas_h: int) -> tuple[int, int, int]:
+    """Centered-square placement for normalized [0,1] keypoints, returning
+    ``(side, offset_x, offset_y)``. Poses are stored square-canonical (proportions
+    preserved by padding the short axis at capture — epic 2282), so render them into
+    the largest centered square of a (possibly non-square) canvas and letterbox the
+    margins (black = no control signal). A square canvas (w==h) maps 1:1, so square
+    generations are byte-identical to the old full-canvas mapping (no regression)."""
+    side = min(canvas_w, canvas_h)
+    return side, (canvas_w - side) // 2, (canvas_h - side) // 2
+
+
 def draw_bodypose(canvas_w: int, canvas_h: int, keypoints: list[Keypoint], stickwidth: int = 4) -> np.ndarray:
     """Render an OpenPose (COCO-18) skeleton (black background, colored sticks + joints)
     matching the controlnet_aux format. Returns an RGB uint8 array."""
     import cv2
 
     canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-    pts = [None if p is None else (float(p[0]) * canvas_w, float(p[1]) * canvas_h) for p in keypoints]
+    side, ox, oy = square_fit(canvas_w, canvas_h)
+    pts = [None if p is None else (ox + float(p[0]) * side, oy + float(p[1]) * side) for p in keypoints]
 
     for i, (a, b) in enumerate(LIMB_SEQ):
         if a >= len(pts) or b >= len(pts) or pts[a] is None or pts[b] is None:
@@ -141,10 +153,11 @@ def draw_handpose(canvas: np.ndarray, hands: list[list[Keypoint]], line_width: i
     import cv2
 
     h, w = canvas.shape[:2]
+    side, ox, oy = square_fit(w, h)
     for hand in hands:
         if not hand:
             continue
-        pts = [None if p is None else (int(p[0] * w), int(p[1] * h)) for p in hand]
+        pts = [None if p is None else (int(ox + p[0] * side), int(oy + p[1] * side)) for p in hand]
         for index, (a, b) in enumerate(HAND_EDGES):
             if a >= len(pts) or b >= len(pts) or pts[a] is None or pts[b] is None:
                 continue
@@ -162,13 +175,14 @@ def draw_facepose(canvas: np.ndarray, faces: list[list[Keypoint]], point_radius:
     import cv2
 
     h, w = canvas.shape[:2]
+    side, ox, oy = square_fit(w, h)
     for face in faces:
         if not face:
             continue
         for p in face:
             if p is None:
                 continue
-            cv2.circle(canvas, (int(p[0] * w), int(p[1] * h)), point_radius, (255, 255, 255), thickness=-1)
+            cv2.circle(canvas, (int(ox + p[0] * side), int(oy + p[1] * side)), point_radius, (255, 255, 255), thickness=-1)
     return canvas
 
 
