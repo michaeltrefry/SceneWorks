@@ -294,6 +294,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
         "image_edit",
         "image_generate",
         "image_interleave",
+        "image_upscale",
         "image_vqa",
         "lora_train",
         "lora_train_execute",
@@ -304,6 +305,87 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
         "video_extend",
         "video_generate",
     ]
+
+
+def test_run_image_upscale_writes_single_child_asset(tmp_path, monkeypatch):
+    # sc-2431: standalone upscale of an existing asset. Mock the engine so the
+    # orchestration (source resolve → one child asset + lineage) is exercised
+    # without torch/weights (CI has neither).
+    from scene_worker.image_adapters import run_image_upscale
+
+    source = Image.new("RGB", (8, 6), "blue")
+    source_path = tmp_path / "src.png"
+    source.save(source_path, "PNG")
+
+    class _FakeUpscaler:
+        id = "real-esrgan"
+
+        def upscale(self, image, *, request, cancel_requested):
+            factor = request.upscale.factor
+            return image.resize((image.width * factor, image.height * factor))
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.find_asset_media_path",
+        lambda project_path, asset_id: source_path,
+    )
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.create_image_upscaler",
+        lambda request, **kwargs: _FakeUpscaler(),
+    )
+
+    job = {
+        "id": "job_upscale_1",
+        "payload": {
+            "projectId": "project_1",
+            "sourceAssetId": "asset_src",
+            "factor": 2,
+            "engine": "real-esrgan",
+            "displayName": "Studio still",
+        },
+    }
+    result = run_image_upscale(
+        SimpleNamespace(gpu_id=None),
+        job,
+        project_path=tmp_path,
+        progress=lambda *args: None,
+        cancel_requested=lambda: False,
+    )
+
+    writes = result["assetWrites"]
+    assert len(writes) == 1
+    fact = writes[0]
+    # Upscaled to 2x of the 8x6 source.
+    assert (fact["width"], fact["height"]) == (16, 12)
+    assert fact["mode"] == "image_upscale"
+    assert fact["sourceAssetId"] == "asset_src"
+    assert fact["parents"] == ["asset_src"]
+    assert fact["displayName"] == "Studio still (2x upscaled)"
+    assert fact["extra"] == {
+        "isUpscaled": True,
+        "upscaledFromAssetId": "asset_src",
+        "factor": 2,
+        "engine": "real-esrgan",
+    }
+    # The upscaled PNG was actually written to the reported path at 2x size.
+    written_path = tmp_path / fact["mediaPath"]
+    assert written_path.is_file()
+    assert Image.open(written_path).size == (16, 12)
+    # One generation set wrapping the single child asset.
+    assert result["expectedCount"] == 1
+    assert result["generationSet"]["id"] == result["generationSetId"]
+
+
+def test_run_image_upscale_requires_source_asset(monkeypatch, tmp_path):
+    from scene_worker.image_adapters import run_image_upscale
+
+    with pytest.raises(RuntimeError, match="source image asset"):
+        run_image_upscale(
+            SimpleNamespace(gpu_id=None),
+            {"id": "job_x", "payload": {"projectId": "p"}},
+            project_path=tmp_path,
+            progress=lambda *args: None,
+            cancel_requested=lambda: False,
+        )
 
 
 def test_gpu_worker_advertises_lora_train_execute_only_with_inference_backend(monkeypatch):
@@ -6015,6 +6097,8 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "image_interleave",
         # sc-2041: prompt refinement is dispatched on every Python worker.
         "prompt_refine",
+        # sc-2431: standalone image upscale (Image Editor).
+        "image_upscale",
     ]
     assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
 

@@ -35,6 +35,7 @@ from .image_adapters import (
     evict_other_image_adapters,
     image_request_from_job,
     release_image_worker_memory,
+    run_image_upscale,
     torch_inference_backend_available,
 )
 from .instantid_adapter import InstantIDAdapter
@@ -105,6 +106,12 @@ INTERLEAVE_JOB_TYPES = ("image_interleave",)
 # utility worker never claims it. Keep in sync with
 # crates/sceneworks-core/src/contracts.rs::JobType/WorkerCapability.
 PROMPT_REFINE_JOB_TYPES = ("prompt_refine",)
+# Standalone image upscale (Image Editor, epic 2427): Real-ESRGAN / AuraSR on an
+# existing asset → one child asset. Torch-backed, GPU-required like generation;
+# advertised by a backend-capable Python worker. Keep in sync with
+# contracts.rs::JobType/WorkerCapability, jobs_store::job_requires_gpu, and
+# apps/web/src/jobTypes.js::GPU_REQUIRED_JOB_TYPES.
+IMAGE_UPSCALE_JOB_TYPES = ("image_upscale",)
 # Every runtime-dispatchable job-type group, in a stable order, for the
 # ``--check`` diagnostic. Derived from the groups above so run_check can't drift
 # out of sync and underreport readiness (sc-1635: VQA + interleave were
@@ -120,6 +127,7 @@ ALL_JOB_TYPES = (
     + VQA_JOB_TYPES
     + INTERLEAVE_JOB_TYPES
     + PROMPT_REFINE_JOB_TYPES
+    + IMAGE_UPSCALE_JOB_TYPES
 )
 
 
@@ -158,6 +166,8 @@ def worker_capabilities(gpu: dict) -> list[str]:
             capabilities |= set(CAPTION_JOB_TYPES)
             capabilities |= set(VQA_JOB_TYPES)
             capabilities |= set(INTERLEAVE_JOB_TYPES)
+            # Standalone image upscale reuses the torch-backed engines (sc-2431).
+            capabilities |= set(IMAGE_UPSCALE_JOB_TYPES)
             # Prompt refinement loads a small LLM in-process (like captioning), so
             # it needs the inference backend and is advertised alongside it.
             capabilities |= set(PROMPT_REFINE_JOB_TYPES)
@@ -1248,6 +1258,67 @@ def run_pose_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         heartbeat(api, settings, "idle")
 
 
+def run_upscale_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    """Run an image_upscale job: Real-ESRGAN / AuraSR on one existing asset.
+
+    Torch-backed (the engine is loaded lazily by run_image_upscale), so the worker
+    advertises image_upscale only when the inference backend is installed
+    (worker_capabilities). Writes one child asset with lineage to the source.
+    """
+    job_id = job["id"]
+    peaks: dict[str, float] = {}
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
+        update_job(api, job_id, payload)
+
+    try:
+        progress("preparing", "preparing", 0.06, "Preparing image upscale.")
+        project_id = str(job.get("payload", {}).get("projectId") or "")
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda cancel: run_image_upscale(
+                settings,
+                job,
+                project_path=project_path,
+                progress=progress,
+                cancel_requested=cancel,
+            ),
+            loaded_models=lambda: [],
+            peaks=peaks,
+        )
+        update_job(
+            api,
+            job_id,
+            {"status": "completed", "stage": "completed", "progress": 1,
+             "message": "Upscaled image saved.", "result": result},
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)},
+        )
+    except Exception as exc:
+        needs_oom_restart = is_cuda_oom(exc)
+        message, error = friendly_failure("Image upscale", exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
+        )
+        if needs_oom_restart:
+            release_image_worker_memory()
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def run_lora_train_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     """Run a lora_train job: validate the plan, then either report a dry-run
     summary or execute the real training kernel.
@@ -1570,6 +1641,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
             emit({"event": "claimed", "jobId": job["id"], "gpuId": job["assignedGpu"], "reportedAt": utc_now()})
             if job["type"] in IMAGE_JOB_TYPES:
                 run_image_job(api, settings, job, image_adapters)
+            elif job["type"] in IMAGE_UPSCALE_JOB_TYPES:
+                run_upscale_job(api, settings, job)
             elif job["type"] in VQA_JOB_TYPES:
                 run_vqa_job(api, settings, job, image_adapters)
             elif job["type"] in INTERLEAVE_JOB_TYPES:

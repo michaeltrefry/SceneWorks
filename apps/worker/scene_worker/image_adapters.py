@@ -7921,6 +7921,152 @@ def find_asset_media_path(project_path: Path, asset_id: str) -> Path:
     raise RuntimeError(f"Source image asset not found: {asset_id}.")
 
 
+def _source_display_name(project_path: Path, asset_id: str) -> str | None:
+    sidecar_path = find_asset_sidecar_path(project_path, asset_id)
+    if sidecar_path is None:
+        return None
+    try:
+        return read_json(sidecar_path).get("displayName")
+    except (OSError, ValueError):
+        return None
+
+
+def run_image_upscale(
+    settings: WorkerSettings,
+    job: dict[str, Any],
+    *,
+    project_path: Path,
+    progress: ProgressCallback,
+    cancel_requested: CancelCallback,
+) -> dict[str, Any]:
+    """Standalone upscale of an existing image asset (Image Editor, epic 2427).
+
+    Resolves a `sourceAssetId` to its on-disk image (native resolution — unlike
+    ``load_source_image`` it does not resize to a request W×H), runs the existing
+    Real-ESRGAN / AuraSR engine, and writes exactly one child asset with lineage
+    back to the source (``parents`` + ``extra.isUpscaled``). The asset-write fact
+    mirrors the inline upscale post-step so the Rust persist path is unchanged.
+    """
+    payload = job["payload"]
+    source_asset_id = payload.get("sourceAssetId")
+    if not source_asset_id:
+        raise RuntimeError("Upscale jobs require a source image asset.")
+    factor = safe_int(payload.get("factor"), 2, 2, 4)
+    if factor not in {2, 4}:
+        factor = 2
+    engine = str(payload.get("engine") or "real-esrgan").strip() or "real-esrgan"
+    advanced = payload.get("advanced") if isinstance(payload.get("advanced"), dict) else {}
+    manifest_entry = (
+        payload.get("modelManifestEntry") if isinstance(payload.get("modelManifestEntry"), dict) else {}
+    )
+
+    progress("preparing", "preparing", 0.12, "Loading source image.")
+    source_path = find_asset_media_path(project_path, source_asset_id)
+    try:
+        image = Image.open(source_path).convert("RGB")
+    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise RuntimeError(f"Source image could not be loaded safely: {source_path}") from exc
+
+    # Minimal request: only the upscale machinery (engine + weight resolution) reads
+    # these fields; width/height carry the native source size for telemetry only.
+    request = ImageRequest(
+        project_id=str(payload.get("projectId") or ""),
+        mode="image_upscale",
+        prompt="",
+        negative_prompt="",
+        model=engine,
+        count=1,
+        seed=None,
+        seeds=[],
+        width=image.width,
+        height=image.height,
+        style_preset="",
+        loras=[],
+        character_id=None,
+        character_look_id=None,
+        source_asset_id=source_asset_id,
+        reference_asset_id=None,
+        advanced=advanced,
+        model_manifest_entry=manifest_entry,
+        upscale=UpscaleRequest(enabled=True, factor=factor, engine=engine),
+    )
+    upscaler = create_image_upscaler(request, settings=settings, job_id=job.get("id"))
+    if upscaler is None:
+        raise RuntimeError(f"Unsupported image upscale engine: {engine}.")
+
+    progress("running", "running", 0.45, f"Upscaling {factor}x with {upscaler.id}.")
+    upscaled = upscaler.upscale(image, request=request, cancel_requested=cancel_requested)
+    if cancel_requested():
+        raise InterruptedError("Image upscale canceled by user.")
+
+    created_at = utc_now()
+    generation_set_id = f"genset_{uuid4().hex}"
+    images_dir = project_path / "assets" / "images" / generation_set_id
+    images_dir.mkdir(parents=True, exist_ok=True)
+    asset_id = f"asset_{uuid4().hex}"
+    filename = f"{created_at[:10]}_upscaled_x{factor}_{asset_id[6:14]}.png"
+    media_rel = f"assets/images/{generation_set_id}/{filename}"
+    upscaled.save(project_path / media_rel, "PNG")
+
+    source_name = payload.get("displayName") or _source_display_name(project_path, source_asset_id) or "Image"
+    upscale_settings = {
+        "enabled": True,
+        "engine": upscaler.id,
+        "factor": factor,
+        "sourceWidth": image.width,
+        "sourceHeight": image.height,
+        "width": upscaled.width,
+        "height": upscaled.height,
+    }
+    fact = {
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "image/png",
+        "type": "image",
+        "width": upscaled.width,
+        "height": upscaled.height,
+        "normalizedWidth": upscaled.width,
+        "normalizedHeight": upscaled.height,
+        "count": 1,
+        "seed": 0,
+        "displayName": f"{source_name} ({factor}x upscaled)",
+        "createdAt": created_at,
+        "mode": "image_upscale",
+        "model": upscaler.id,
+        "adapter": upscaler.id,
+        "prompt": "",
+        "negativePrompt": "",
+        "loras": [],
+        "stylePreset": "",
+        "sourceAssetId": source_asset_id,
+        "rawAdapterSettings": {"upscale": upscale_settings},
+        "parents": [source_asset_id],
+        "extra": {
+            "isUpscaled": True,
+            "upscaledFromAssetId": source_asset_id,
+            "factor": factor,
+            "engine": upscaler.id,
+        },
+    }
+    generation_set = {
+        "id": generation_set_id,
+        "mode": "image_upscale",
+        "model": upscaler.id,
+        "prompt": "",
+        "negativePrompt": "",
+        "count": 1,
+        "createdAt": created_at,
+    }
+    return {
+        "generationSetId": generation_set_id,
+        "expectedCount": 1,
+        "adapter": upscaler.id,
+        "model": upscaler.id,
+        "generationSet": generation_set,
+        "assetWrites": [fact],
+    }
+
+
 def render_preview_image(request: ImageRequest, model_target: dict[str, Any], seed: int, index: int) -> Image.Image:
     import numpy as np
 

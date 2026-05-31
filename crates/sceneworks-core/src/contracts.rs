@@ -203,6 +203,10 @@ string_enum! {
         // Pose Library (epic 2282). onnxruntime-backed like person_detect; advertised
         // by the Python worker, routed via requested_gpu (not in NON_GPU_JOB_TYPES).
         PoseDetect => "pose_detect",
+        // Standalone upscale of an existing image asset (Image Editor, epic 2427).
+        // Torch-backed (Real-ESRGAN / AuraSR), GPU-required like generation; reuses
+        // the upscale engines that previously only ran as a generation post-step.
+        ImageUpscale => "image_upscale",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
@@ -299,6 +303,10 @@ string_enum! {
         // replace-person readiness; the Rust worker never emits it. Not dead — see
         // the API "segment" capability mapping.
         PersonSegment => "person_segment",
+        // Standalone image upscale (Image Editor, epic 2427). Advertised by the
+        // Python worker when the torch inference backend is available (runtime.py);
+        // the Rust utility worker never emits it. See jobs_store::job_requires_gpu.
+        ImageUpscale => "image_upscale",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
