@@ -65,12 +65,17 @@ function defaultCharacterPrompt(character) {
   }
 }
 import {
+  applyPresetDefault,
+  buildStudioPresetPayload,
+  finiteNumberOrUndefined,
   loraMatchesModel,
   loraWeight,
+  presetNameTaken,
   serializeLora,
   clearPresetDefault,
   noPresetId,
   rememberPresetDefault,
+  slugifyPresetId,
 } from "../presetUtils.js";
 import {
   onPromptKeyDown,
@@ -94,6 +99,10 @@ import {
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
+// Studio sub-modes a saved preset may restore (the "type") — the tabs the mode
+// segmented control actually exposes. Edit lives in its own workflow; text and
+// character share the text_to_image workflow.
+const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
 const UPSCALE_ENGINES = [
   { id: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
   { id: "aura-sr", label: "AuraSR", factors: [4] },
@@ -159,6 +168,7 @@ export function ImageStudio() {
     assets,
     characters,
     createImageJob,
+    createPreset,
     refinePrompt,
     deleteAsset,
     purgeAsset,
@@ -260,6 +270,13 @@ export function ImageStudio() {
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(saved.showIncompatibleLoras ?? false);
   const [submitting, setSubmitting] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
+  // "Save as Preset" sidebar control — snapshots the current config into the
+  // workspace preset library. Defaults to project scope, falling back to global
+  // when no project is open (project-scoped presets require a project).
+  const [presetName, setPresetName] = useState("");
+  const [presetScope, setPresetScope] = useState(activeProject ? "project" : "global");
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
   const presetDefaultSnapshots = useRef({});
   const editImageAssets = useMemo(
     () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
@@ -533,38 +550,56 @@ export function ImageStudio() {
   const skipPresetDefaultsOnHydrate = useRef(
     Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
   );
+  // [defaults key, setter] pairs restored through the remember/clear snapshot
+  // machinery, so switching to None (or another preset) puts the user's prior
+  // value back. Only keys the preset actually carries are applied, so older
+  // presets (which only stored count/resolution/negativePrompt) keep working and
+  // full-snapshot presets restore the prompt, cfg, sampler, reference + upscale
+  // knobs. The model is intentionally absent — presets never switch the model.
+  const presetDefaultFields = [
+    ["prompt", setPrompt],
+    ["negativePrompt", setNegativePrompt],
+    ["resolution", setResolution],
+    ["count", setCount],
+    ["guidanceScale", setGuidanceOverride],
+    ["steps", setStepsOverride],
+    ["sampler", setSampler],
+    ["scheduler", setScheduler],
+    ["schedulerShift", setSchedulerShift],
+    ["ipAdapterScale", setIpAdapterScale],
+    ["controlnetScale", setControlnetScale],
+    ["trueCfgScale", setTrueCfgScale],
+    ["viewAngle", setViewAngle],
+    ["upscaleEnabled", setUpscaleEnabled],
+    ["upscaleFactor", setUpscaleFactor],
+    ["upscaleEngine", setUpscaleEngine],
+  ];
   useEffect(() => {
     if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
       skipPresetDefaultsOnHydrate.current = false;
       return;
     }
     if (!selectedPreset) {
-      clearPresetDefault(setCount, presetDefaultSnapshots, "count");
-      clearPresetDefault(setResolution, presetDefaultSnapshots, "resolution");
-      clearPresetDefault(setNegativePrompt, presetDefaultSnapshots, "negativePrompt");
+      for (const [key, setter] of presetDefaultFields) {
+        clearPresetDefault(setter, presetDefaultSnapshots, key);
+      }
       return;
     }
     const defaults = selectedPreset.defaults ?? {};
-    if (defaults.count) {
-      const appliedValue = Number(defaults.count);
-      setCount((current) => {
-        rememberPresetDefault(presetDefaultSnapshots, "count", current, appliedValue);
-        return appliedValue;
-      });
+    for (const [key, setter] of presetDefaultFields) {
+      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
+        applyPresetDefault(presetDefaultSnapshots, key, setter, defaults[key]);
+      }
     }
-    if (defaults.resolution) {
-      const appliedValue = defaults.resolution;
-      setResolution((current) => {
-        rememberPresetDefault(presetDefaultSnapshots, "resolution", current, appliedValue);
-        return appliedValue;
-      });
+    // Filling the prompt box counts as a user edit, so character mode's default
+    // prompt won't clobber the restored prompt.
+    if (Object.prototype.hasOwnProperty.call(defaults, "prompt")) {
+      promptEdited.current = true;
     }
-    if (Object.prototype.hasOwnProperty.call(defaults, "negativePrompt")) {
-      const appliedValue = defaults.negativePrompt ?? "";
-      setNegativePrompt((current) => {
-        rememberPresetDefault(presetDefaultSnapshots, "negativePrompt", current, appliedValue);
-        return appliedValue;
-      });
+    // Restore the saved sub-mode ("type"). Edit presets only surface in edit
+    // mode, so this only ever flips between text/character within one workflow.
+    if (IMAGE_MODES.includes(defaults.mode)) {
+      setMode(defaults.mode);
     }
   }, [selectedPreset?.id]);
 
@@ -620,6 +655,73 @@ export function ImageStudio() {
   function effectiveLoraWeight(lora) {
     const override = loraWeights[lora.id];
     return Number.isFinite(override) ? override : loraWeight(lora);
+  }
+
+  // Snapshot the current working config into a named recipe preset in the
+  // workspace library. Captures the literal prompt + every visible knob + the
+  // selected LoRAs with their weights; the seed is intentionally left out so the
+  // preset stays reusable. The backend additionally enforces id uniqueness and
+  // model/workflow + LoRA compatibility, surfaced here via err.message.
+  async function handleSaveAsPreset() {
+    const trimmed = presetName.trim();
+    if (!trimmed) {
+      setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
+      return;
+    }
+    if (!slugifyPresetId(trimmed)) {
+      setPresetSaveMessage({ tone: "error", text: "Use letters or numbers in the preset name." });
+      return;
+    }
+    if (presetScope === "project" && !activeProject) {
+      setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
+      return;
+    }
+    if (presetNameTaken(trimmed, presets)) {
+      setPresetSaveMessage({ tone: "error", text: `"${trimmed}" already exists — pick a unique name.` });
+      return;
+    }
+    const payload = buildStudioPresetPayload({
+      name: trimmed,
+      scope: presetScope,
+      mode,
+      model,
+      loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
+      defaults: {
+        prompt,
+        negativePrompt,
+        resolution,
+        count,
+        mode,
+        guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+        steps: finiteNumberOrUndefined(stepsOverride),
+        sampler,
+        scheduler,
+        schedulerShift,
+        upscaleEnabled,
+        upscaleFactor,
+        upscaleEngine,
+        // Reference/identity knobs only matter for the character flow; keep them
+        // out of plain text/edit presets so they don't carry irrelevant state.
+        ...(mode === "character_image"
+          ? { ipAdapterScale, controlnetScale, trueCfgScale, viewAngle }
+          : {}),
+      },
+    });
+    setSavingPreset(true);
+    setPresetSaveMessage({ tone: "neutral", text: "" });
+    try {
+      const created = await createPreset(payload);
+      setSelectedPresetId(created?.id ?? payload.id);
+      setPresetName("");
+      setPresetSaveMessage({
+        tone: "success",
+        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
+      });
+    } catch (err) {
+      setPresetSaveMessage({ tone: "error", text: err.message });
+    } finally {
+      setSavingPreset(false);
+    }
   }
 
   function setLoraWeight(id, value) {
@@ -1061,6 +1163,64 @@ export function ImageStudio() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            <div className="save-preset">
+              <div className="save-preset-row">
+                <input
+                  aria-label="Preset name"
+                  className="save-preset-name"
+                  disabled={savingPreset}
+                  onChange={(event) => {
+                    setPresetName(event.target.value);
+                    if (presetSaveMessage.text) {
+                      setPresetSaveMessage({ tone: "neutral", text: "" });
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      handleSaveAsPreset();
+                    }
+                  }}
+                  placeholder="Name this setup…"
+                  value={presetName}
+                />
+                <button
+                  className="save-preset-btn"
+                  disabled={savingPreset || !presetName.trim()}
+                  onClick={handleSaveAsPreset}
+                  type="button"
+                >
+                  <Icon.Preset size={14} /> {savingPreset ? "Saving…" : "Save as Preset"}
+                </button>
+              </div>
+              <div className="save-preset-scope scope-segment" role="radiogroup" aria-label="Preset scope">
+                <button
+                  aria-checked={presetScope === "project"}
+                  className={presetScope === "project" ? "active" : ""}
+                  disabled={!activeProject}
+                  onClick={() => setPresetScope("project")}
+                  role="radio"
+                  type="button"
+                >
+                  <Icon.Folder size={13} /> This project
+                </button>
+                <button
+                  aria-checked={presetScope === "global"}
+                  className={presetScope === "global" ? "active" : ""}
+                  onClick={() => setPresetScope("global")}
+                  role="radio"
+                  type="button"
+                >
+                  <Icon.Stars size={13} /> All projects
+                </button>
+              </div>
+              {presetSaveMessage.text ? (
+                <p className={presetSaveMessage.tone === "success" ? "inline-success" : "inline-warning"}>
+                  {presetSaveMessage.text}
+                </p>
+              ) : null}
             </div>
 
             <div className="control-grid preset-rail-row">

@@ -753,7 +753,57 @@ pub(crate) fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(
             ));
         }
     }
+    // Studio "Save as Preset" snapshots carry generation knobs in defaults. Each
+    // is range-checked only when present and numeric; non-numeric values are left
+    // to forward-compat (never panics), and non-finite or out-of-range values are
+    // rejected so a malformed payload can't be persisted.
+    if let Some(steps) = recipe_preset_default_number(object, "steps") {
+        if steps.fract() != 0.0 || !(1.0..=200.0).contains(&steps) {
+            return Err(ApiError::bad_request(
+                "Recipe preset steps must be a whole number between 1 and 200",
+            ));
+        }
+    }
+    for (key, min, max) in RECIPE_PRESET_DEFAULT_RANGES {
+        if let Some(number) = recipe_preset_default_number(object, key) {
+            if number < *min || number > *max {
+                return Err(ApiError::bad_request(format!(
+                    "Recipe preset {key} must be between {min} and {max}"
+                )));
+            }
+        }
+    }
     Ok(())
+}
+
+// Numeric generation knobs a studio snapshot may store in `defaults`, with the
+// inclusive range each must fall in. Ranges are deliberately generous so valid
+// model-specific values are never rejected — they only catch clearly bad input.
+const RECIPE_PRESET_DEFAULT_RANGES: &[(&str, f64, f64)] = &[
+    ("guidanceScale", 0.0, 60.0),
+    ("schedulerShift", 0.0, 20.0),
+    ("trueCfgScale", 0.0, 30.0),
+    ("ipAdapterScale", 0.0, 2.0),
+    ("controlnetScale", 0.0, 4.0),
+    ("upscaleFactor", 1.0, 8.0),
+    ("duration", 1.0, 120.0),
+    ("fps", 1.0, 240.0),
+    ("videoCfgGuidanceScale", 0.0, 60.0),
+    ("videoStgGuidanceScale", 0.0, 60.0),
+    ("videoRescaleScale", 0.0, 10.0),
+];
+
+// Read a defaults knob as a finite f64 whether stored as a JSON number or a
+// numeric string (older studio snapshots stringified text inputs). Returns None
+// for absent, non-numeric, or non-finite values so callers simply skip them.
+fn recipe_preset_default_number(object: &JsonObject, key: &str) -> Option<f64> {
+    let value = object.get(key)?;
+    let number = value.as_f64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| text.trim().parse::<f64>().ok())
+    })?;
+    number.is_finite().then_some(number)
 }
 
 pub(crate) fn validate_recipe_preset_model_workflow(

@@ -60,13 +60,18 @@ function jobVideoResultAssets(job, assets) {
   return [];
 }
 import {
+  applyPresetDefault,
+  buildStudioPresetPayload,
   clearPresetDefault,
+  finiteNumberOrUndefined,
   loraLooksLikeIcLora,
   loraMatchesModel,
   loraWeight,
   noPresetId,
+  presetNameTaken,
   rememberPresetDefault,
   serializeLora,
+  slugifyPresetId,
 } from "../presetUtils.js";
 import {
   onPromptKeyDown,
@@ -92,6 +97,10 @@ import {
 const ltxVideoModelId = "ltx_2_3";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
 
+// Video sub-modes that map onto a recipe workflow. extend_clip / replace_person
+// aren't recipe workflows, so "Save as Preset" is gated to these.
+const VIDEO_PRESET_MODES = ["image_to_video", "text_to_video", "first_last_frame"];
+
 export function VideoStudio() {
   const {
     activeProject,
@@ -100,6 +109,7 @@ export function VideoStudio() {
     createPersonDetectionJob,
     createPersonTrackJob,
     createVideoJob,
+    createPreset,
     refinePrompt,
     deleteAsset,
     purgeAsset,
@@ -203,6 +213,13 @@ export function VideoStudio() {
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewTime, setPreviewTime] = useState(0);
   const [previewDuration, setPreviewDuration] = useState(0);
+  // "Save as Preset" sidebar control — snapshots the current config into the
+  // workspace preset library. Defaults to project scope, falling back to global
+  // when no project is open (project-scoped presets require a project).
+  const [presetName, setPresetName] = useState("");
+  const [presetScope, setPresetScope] = useState(activeProject ? "project" : "global");
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
   const presetDefaultSnapshots = useRef({});
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
@@ -330,6 +347,79 @@ export function VideoStudio() {
     return Number.isFinite(override) ? override : loraWeight(lora);
   }
 
+  // Snapshot the current working config into a named recipe preset in the
+  // workspace library. Captures the literal prompt + every visible knob + the
+  // selected LoRAs with their weights; the seed is intentionally left out so the
+  // preset stays reusable. The backend additionally enforces id uniqueness and
+  // model/workflow + LoRA compatibility, surfaced here via err.message.
+  async function handleSaveAsPreset() {
+    const trimmed = presetName.trim();
+    if (!trimmed) {
+      setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
+      return;
+    }
+    if (!slugifyPresetId(trimmed)) {
+      setPresetSaveMessage({ tone: "error", text: "Use letters or numbers in the preset name." });
+      return;
+    }
+    if (!VIDEO_PRESET_MODES.includes(mode)) {
+      setPresetSaveMessage({ tone: "error", text: "Switch to Image, Text, or First/Last mode to save a preset." });
+      return;
+    }
+    if (presetScope === "project" && !activeProject) {
+      setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
+      return;
+    }
+    if (presetNameTaken(trimmed, presets)) {
+      setPresetSaveMessage({ tone: "error", text: `"${trimmed}" already exists — pick a unique name.` });
+      return;
+    }
+    const payload = buildStudioPresetPayload({
+      name: trimmed,
+      scope: presetScope,
+      mode,
+      model,
+      loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
+      defaults: {
+        prompt,
+        negativePrompt,
+        resolution,
+        duration,
+        fps,
+        quality,
+        mode,
+        guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+        steps: finiteNumberOrUndefined(stepsOverride),
+        sampler,
+        scheduler,
+        schedulerShift,
+        precision,
+        quantization,
+        ltxPipeline,
+        distilledVariant,
+        motion,
+        videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
+        videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
+        videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
+      },
+    });
+    setSavingPreset(true);
+    setPresetSaveMessage({ tone: "neutral", text: "" });
+    try {
+      const created = await createPreset(payload);
+      setSelectedPresetId(created?.id ?? payload.id);
+      setPresetName("");
+      setPresetSaveMessage({
+        tone: "success",
+        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
+      });
+    } catch (err) {
+      setPresetSaveMessage({ tone: "error", text: err.message });
+    } finally {
+      setSavingPreset(false);
+    }
+  }
+
   function setLoraWeight(id, value) {
     setLoraWeights((current) => ({ ...current, [id]: value }));
   }
@@ -422,54 +512,53 @@ export function VideoStudio() {
   const skipPresetDefaultsOnHydrate = useRef(
     Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
   );
+  // [defaults key, setter] pairs restored through the remember/clear snapshot
+  // machinery, so switching to None (or another preset) puts the user's prior
+  // value back. Only keys the preset carries are applied, so older presets keep
+  // working and full-snapshot presets restore the prompt, cfg, sampler, and the
+  // native LTX guidance knobs. The model is intentionally absent — presets never
+  // switch the model.
+  const presetDefaultFields = [
+    ["prompt", setPrompt],
+    ["negativePrompt", setNegativePrompt],
+    ["resolution", setResolution],
+    ["duration", setDuration],
+    ["fps", setFps],
+    ["quality", setQuality],
+    ["guidanceScale", setGuidanceOverride],
+    ["steps", setStepsOverride],
+    ["sampler", setSampler],
+    ["scheduler", setScheduler],
+    ["schedulerShift", setSchedulerShift],
+    ["precision", setPrecision],
+    ["quantization", setQuantization],
+    ["ltxPipeline", setLtxPipeline],
+    ["distilledVariant", setDistilledVariant],
+    ["motion", setMotion],
+    ["videoCfgGuidanceScale", setLtxVideoCfg],
+    ["videoStgGuidanceScale", setLtxVideoStg],
+    ["videoRescaleScale", setLtxVideoRescale],
+  ];
   useEffect(() => {
     if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
       skipPresetDefaultsOnHydrate.current = false;
       return;
     }
     if (!selectedPreset) {
-      clearPresetDefault(setDuration, presetDefaultSnapshots, "duration");
-      clearPresetDefault(setFps, presetDefaultSnapshots, "fps");
-      clearPresetDefault(setQuality, presetDefaultSnapshots, "quality");
-      clearPresetDefault(setResolution, presetDefaultSnapshots, "resolution");
-      clearPresetDefault(setNegativePrompt, presetDefaultSnapshots, "negativePrompt");
+      for (const [key, setter] of presetDefaultFields) {
+        clearPresetDefault(setter, presetDefaultSnapshots, key);
+      }
       return;
     }
     const defaults = selectedPreset.defaults ?? {};
-    if (defaults.duration) {
-      const appliedValue = Number(defaults.duration);
-      setDuration((current) => {
-        rememberPresetDefault(presetDefaultSnapshots, "duration", current, appliedValue);
-        return appliedValue;
-      });
+    for (const [key, setter] of presetDefaultFields) {
+      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
+        applyPresetDefault(presetDefaultSnapshots, key, setter, defaults[key]);
+      }
     }
-    if (defaults.fps) {
-      const appliedValue = Number(defaults.fps);
-      setFps((current) => {
-        rememberPresetDefault(presetDefaultSnapshots, "fps", current, appliedValue);
-        return appliedValue;
-      });
-    }
-    if (defaults.quality) {
-      const appliedValue = defaults.quality;
-      setQuality((current) => {
-        rememberPresetDefault(presetDefaultSnapshots, "quality", current, appliedValue);
-        return appliedValue;
-      });
-    }
-    if (defaults.resolution) {
-      const appliedValue = defaults.resolution;
-      setResolution((current) => {
-        rememberPresetDefault(presetDefaultSnapshots, "resolution", current, appliedValue);
-        return appliedValue;
-      });
-    }
-    if (Object.prototype.hasOwnProperty.call(defaults, "negativePrompt")) {
-      const appliedValue = defaults.negativePrompt ?? "";
-      setNegativePrompt((current) => {
-        rememberPresetDefault(presetDefaultSnapshots, "negativePrompt", current, appliedValue);
-        return appliedValue;
-      });
+    // Restore the saved sub-mode ("type") when it's a generatable video workflow.
+    if (VIDEO_PRESET_MODES.includes(defaults.mode)) {
+      setMode(defaults.mode);
     }
   }, [selectedPreset?.id]);
 
@@ -1004,6 +1093,65 @@ export function VideoStudio() {
                     </button>
                   ))}
                 </div>
+              </div>
+
+              <div className="save-preset">
+                <div className="save-preset-row">
+                  <input
+                    aria-label="Preset name"
+                    className="save-preset-name"
+                    disabled={savingPreset}
+                    onChange={(event) => {
+                      setPresetName(event.target.value);
+                      if (presetSaveMessage.text) {
+                        setPresetSaveMessage({ tone: "neutral", text: "" });
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        handleSaveAsPreset();
+                      }
+                    }}
+                    placeholder="Name this setup…"
+                    value={presetName}
+                  />
+                  <button
+                    className="save-preset-btn"
+                    disabled={savingPreset || !presetName.trim() || !VIDEO_PRESET_MODES.includes(mode)}
+                    onClick={handleSaveAsPreset}
+                    title={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
+                    type="button"
+                  >
+                    <Icon.Preset size={14} /> {savingPreset ? "Saving…" : "Save as Preset"}
+                  </button>
+                </div>
+                <div className="save-preset-scope scope-segment" role="radiogroup" aria-label="Preset scope">
+                  <button
+                    aria-checked={presetScope === "project"}
+                    className={presetScope === "project" ? "active" : ""}
+                    disabled={!activeProject}
+                    onClick={() => setPresetScope("project")}
+                    role="radio"
+                    type="button"
+                  >
+                    <Icon.Folder size={13} /> This project
+                  </button>
+                  <button
+                    aria-checked={presetScope === "global"}
+                    className={presetScope === "global" ? "active" : ""}
+                    onClick={() => setPresetScope("global")}
+                    role="radio"
+                    type="button"
+                  >
+                    <Icon.Stars size={13} /> All projects
+                  </button>
+                </div>
+                {presetSaveMessage.text ? (
+                  <p className={presetSaveMessage.tone === "success" ? "inline-success" : "inline-warning"}>
+                    {presetSaveMessage.text}
+                  </p>
+                ) : null}
               </div>
 
               <label>

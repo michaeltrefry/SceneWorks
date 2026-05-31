@@ -5165,6 +5165,167 @@ async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
 }
 
 #[tokio::test]
+async fn recipe_preset_accepts_full_studio_snapshot_and_rejects_bad_defaults() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [
+                {
+                  "id": "z_image_turbo",
+                  "name": "Z Image Turbo",
+                  "family": "z-image",
+                  "type": "image",
+                  "adapter": "z_image_diffusers",
+                  "capabilities": ["text_to_image"],
+                  "downloads": [],
+                  "paths": {},
+                  "defaults": {},
+                  "limits": {},
+                  "loraCompatibility": {},
+                  "ui": {}
+                }
+              ]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "loras": [
+                {
+                  "id": "style_lora",
+                  "name": "Style LoRA",
+                  "family": "z-image",
+                  "triggerWords": [],
+                  "compatibility": { "families": ["z-image"] },
+                  "source": { "provider": "local", "path": "loras/style.safetensors" }
+                }
+              ]
+            }
+            "#,
+    )
+    .expect("user loras writes");
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    write_test_safetensors(&lora_dir.join("style.safetensors"));
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // A full studio snapshot: literal prompt + cfg/steps/sampler + a weighted LoRA.
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({
+            "name": "Atrium Look",
+            "model": "z_image_turbo",
+            "workflow": "text_to_image",
+            "modes": ["text_to_image", "character_image", "style_variations"],
+            "defaults": {
+                "prompt": "a portrait in the atrium",
+                "negativePrompt": "blurry",
+                "resolution": "1024x1024",
+                "count": 4,
+                "mode": "character_image",
+                "guidanceScale": 5.0,
+                "steps": 28,
+                "sampler": "default",
+                "ipAdapterScale": 0.8
+            },
+            "loras": [{ "id": "style_lora", "weight": 0.65 }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["id"], "atrium_look");
+    // The flatten-extra defaults round-trip intact through persistence.
+    assert_eq!(created["defaults"]["prompt"], "a portrait in the atrium");
+    assert_eq!(created["defaults"]["guidanceScale"], 5.0);
+    assert_eq!(created["defaults"]["steps"], 28);
+    assert_eq!(created["defaults"]["sampler"], "default");
+    assert_eq!(created["defaults"]["mode"], "character_image");
+    assert_eq!(created["builtInLoras"][0]["id"], "style_lora");
+    assert_eq!(created["builtInLoras"][0]["weight"], 0.65);
+
+    // Re-reading the catalog returns the persisted snapshot.
+    let (status, listed) = request(app.clone(), "GET", "/api/v1/recipe-presets", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let saved = listed
+        .as_array()
+        .expect("presets array")
+        .iter()
+        .find(|preset| preset["id"] == "atrium_look")
+        .expect("saved preset listed");
+    assert_eq!(saved["defaults"]["prompt"], "a portrait in the atrium");
+    assert_eq!(saved["defaults"]["steps"], 28);
+
+    // An out-of-range guidance scale is rejected.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({
+            "name": "Too Hot",
+            "model": "z_image_turbo",
+            "workflow": "text_to_image",
+            "defaults": { "guidanceScale": 999.0 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("guidanceScale"),
+        "unexpected error: {error}"
+    );
+
+    // A non-integer steps value is rejected.
+    let (status, _error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({
+            "name": "Bad Steps",
+            "model": "z_image_turbo",
+            "workflow": "text_to_image",
+            "defaults": { "steps": 3.5 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn empty_builtin_preset_and_lora_manifests_ship_empty_catalogs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");

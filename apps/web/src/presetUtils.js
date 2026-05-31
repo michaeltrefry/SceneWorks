@@ -274,3 +274,102 @@ export function presetValidationMessage(validation) {
   }
   return `Save blocked: ${parts.join("; ")}. Wait for imports to finish, remove incompatible LoRAs, or choose a matching model.`;
 }
+
+// ── Studio "Save as Preset" round-trip helpers ───────────────────────────────
+// The Image/Video studios snapshot their current working state into a recipe
+// preset and restore it on apply. These helpers keep that round-trip in one
+// tested place so both studios stay thin.
+
+// Slugify a preset name into a valid recipe-preset id (lowercase letters,
+// digits, dash, underscore). Mirrors the backend's slugify_preset_id so the id
+// the client previews matches what the server stores.
+export function slugifyPresetId(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "");
+}
+
+// Map an active studio mode to the recipe workflow it persists under. Inverts
+// defaultModesByWorkflow, so character_image / style_variations both fold into
+// text_to_image (the only workflow whose modes include them).
+export function workflowForMode(mode) {
+  for (const [workflow, modes] of Object.entries(defaultModesByWorkflow)) {
+    if (modes.includes(mode)) {
+      return workflow;
+    }
+  }
+  return mode;
+}
+
+// True when `name` collides with an existing preset by case-insensitive name or
+// by slugged id — the two ways the backend rejects a duplicate. Powers a friendly
+// client-side check before POSTing.
+export function presetNameTaken(name, presets = []) {
+  const trimmed = String(name ?? "").trim().toLowerCase();
+  if (!trimmed) {
+    return false;
+  }
+  const id = slugifyPresetId(name);
+  return presets.some((preset) => {
+    const presetName = String(preset?.name ?? "").trim().toLowerCase();
+    return presetName === trimmed || (Boolean(id) && preset?.id === id);
+  });
+}
+
+// Coerce a possibly-stringy numeric input ("30", 4.5) to a finite number, or
+// undefined when blank or non-numeric — so cleanPresetDefaults drops it and the
+// stored default stays a real number the backend can range-check.
+export function finiteNumberOrUndefined(value) {
+  if (value === "" || value === null || value === undefined) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+// Drop keys whose value is null, undefined, or an empty string (the studios'
+// "use the model default" sentinel). Numbers (including 0) and booleans survive
+// so 0-valued knobs and `false` toggles round-trip intact.
+export function cleanPresetDefaults(defaults = {}) {
+  const cleaned = {};
+  for (const [key, value] of Object.entries(defaults)) {
+    if (value === null || value === undefined || value === "") {
+      continue;
+    }
+    cleaned[key] = value;
+  }
+  return cleaned;
+}
+
+// Build the createPreset payload from a studio's current state. `defaults` is the
+// raw snapshot of visible knobs (including the literal `prompt`); callers must
+// never include the seed. Top-level model/workflow/loras carry the fields the
+// backend validates (model<->workflow capability, lora<->model compatibility).
+export function buildStudioPresetPayload({ name, scope = "project", mode, model, loras = [], defaults = {} }) {
+  const workflow = workflowForMode(mode);
+  return {
+    id: slugifyPresetId(name),
+    name: String(name ?? "").trim(),
+    scope,
+    workflow,
+    modes: workflowModes(workflow),
+    model,
+    loras: loras.map((lora) => ({
+      id: lora.id,
+      weight: Number.isFinite(Number(lora.weight)) ? Number(lora.weight) : loraWeight(lora),
+    })),
+    defaults: cleanPresetDefaults(defaults),
+  };
+}
+
+// Apply one preset-default value through the remember/restore snapshot machinery
+// so switching back to None (or another preset) restores the user's prior value.
+// Generalizes the inline pattern the studios already use for count/resolution.
+export function applyPresetDefault(snapshots, key, setter, value) {
+  setter((current) => {
+    rememberPresetDefault(snapshots, key, current, value);
+    return value;
+  });
+}
