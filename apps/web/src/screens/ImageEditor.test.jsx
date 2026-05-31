@@ -21,6 +21,10 @@ import {
   buildUpscaleJobBody,
   editedFilename,
   buildSaveProvenance,
+  gradePixel,
+  applyColorAdjustments,
+  isIdentityAdjust,
+  IDENTITY_COLOR_ADJUST,
 } from "./ImageEditor.jsx";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
@@ -189,5 +193,56 @@ describe("save / export", () => {
     });
     expect(provenance.source).toEqual({ kind: "upload", name: "drag.png" });
     expect(provenance.edits).toEqual([]);
+  });
+});
+
+describe("color grade", () => {
+  it("treats an all-zero adjustment as the identity", () => {
+    expect(isIdentityAdjust(IDENTITY_COLOR_ADJUST)).toBe(true);
+    expect(isIdentityAdjust(null)).toBe(true);
+    expect(isIdentityAdjust({ brightness: 0.1 })).toBe(false);
+    expect(isIdentityAdjust({ contrast: 0, saturation: 0, temperature: 0.01 })).toBe(false);
+  });
+
+  it("leaves a pixel unchanged at the identity", () => {
+    expect(gradePixel([100, 150, 200], IDENTITY_COLOR_ADJUST)).toEqual([100, 150, 200]);
+  });
+
+  it("brightness pushes toward white / black and clamps to [0,255]", () => {
+    expect(gradePixel([100, 100, 100], { brightness: 1 })).toEqual([255, 255, 255]);
+    expect(gradePixel([100, 100, 100], { brightness: -1 })).toEqual([0, 0, 0]);
+  });
+
+  it("contrast keeps mid-gray fixed and spreads extremes", () => {
+    // 128 is the pivot — unchanged by any contrast.
+    expect(gradePixel([128, 128, 128], { contrast: 0.5 })).toEqual([128, 128, 128]);
+    // A darker pixel gets darker as contrast increases.
+    expect(gradePixel([100, 100, 100], { contrast: 0.5 })[0]).toBeLessThan(100);
+  });
+
+  it("saturation of -1 fully desaturates to a single luma value", () => {
+    const [r, g, b] = gradePixel([200, 50, 50], { saturation: -1 });
+    expect(r).toBe(g);
+    expect(g).toBe(b);
+  });
+
+  it("temperature warms (R up, B down) and cools (R down, B up)", () => {
+    const warm = gradePixel([120, 120, 120], { temperature: 1 });
+    expect(warm[0]).toBeGreaterThan(120);
+    expect(warm[2]).toBeLessThan(120);
+    const cool = gradePixel([120, 120, 120], { temperature: -1 });
+    expect(cool[0]).toBeLessThan(120);
+    expect(cool[2]).toBeGreaterThan(120);
+  });
+
+  it("applyColorAdjustments edits RGB in place, leaves alpha untouched, and no-ops at identity", () => {
+    const data = new Uint8ClampedArray([100, 100, 100, 42]);
+    applyColorAdjustments(data, { brightness: 1 });
+    expect([data[0], data[1], data[2]]).toEqual([255, 255, 255]);
+    expect(data[3]).toBe(42); // alpha preserved
+
+    const untouched = new Uint8ClampedArray([10, 20, 30, 40]);
+    applyColorAdjustments(untouched, IDENTITY_COLOR_ADJUST);
+    expect([...untouched]).toEqual([10, 20, 30, 40]);
   });
 });

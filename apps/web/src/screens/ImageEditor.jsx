@@ -12,12 +12,71 @@ const ZOOM_STEP = 1.2;
 const MIN_CROP_PX = 8;
 
 // Tools still to come in epic 2427 — rendered as an inert scaffold so the frame
-// (and the next slices' insertion points) are in place. Move + Crop + Upscale are live.
+// (and the next slices' insertion points) are in place. Move + Crop + Upscale +
+// Color are live.
 const UPCOMING_TOOLS = [
   { id: "edit", label: "AI Edit", story: "sc-2435" },
   { id: "detail", label: "Detail", story: "sc-2438" },
-  { id: "color", label: "Color", story: "sc-2439" },
 ];
+
+// Color-grade controls (sc-2439). Each is a normalized −1..1 slider where 0 is the
+// identity; `gradePixel` defines the math. Pure data so the panel + reset are trivial.
+const COLOR_ADJUSTMENTS = [
+  { key: "brightness", label: "Brightness" },
+  { key: "contrast", label: "Contrast" },
+  { key: "saturation", label: "Saturation" },
+  { key: "temperature", label: "Temperature" },
+];
+
+export const IDENTITY_COLOR_ADJUST = { brightness: 0, contrast: 0, saturation: 0, temperature: 0 };
+
+const clamp8 = (value) => (value < 0 ? 0 : value > 255 ? 255 : Math.round(value));
+
+// True when no grade is applied (all sliders at 0) — lets the preview/Apply skip work.
+export function isIdentityAdjust(adjust) {
+  return COLOR_ADJUSTMENTS.every(({ key }) => !(adjust?.[key]));
+}
+
+// Grade one RGB pixel by the −1..1 adjustments, in a fixed order: temperature
+// (warm raises R / lowers B), brightness (additive), contrast (around mid-gray),
+// then saturation (blend toward/away from luma). Pure + clamped for unit testing.
+export function gradePixel([r, g, b], adjust) {
+  const { brightness = 0, contrast = 0, saturation = 0, temperature = 0 } = adjust ?? {};
+  r += temperature * 30;
+  b -= temperature * 30;
+  const add = brightness * 255;
+  r += add;
+  g += add;
+  b += add;
+  const cf = 1 + contrast;
+  r = (r - 128) * cf + 128;
+  g = (g - 128) * cf + 128;
+  b = (b - 128) * cf + 128;
+  const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+  const sf = 1 + saturation;
+  r = luma + sf * (r - luma);
+  g = luma + sf * (g - luma);
+  b = luma + sf * (b - luma);
+  return [clamp8(r), clamp8(g), clamp8(b)];
+}
+
+// Apply the grade to a flat RGBA buffer in place (alpha untouched). Shared by the
+// Konva live-preview filter and the Apply bake, so preview === baked result.
+export function applyColorAdjustments(data, adjust) {
+  if (isIdentityAdjust(adjust)) return;
+  for (let i = 0; i < data.length; i += 4) {
+    const [r, g, b] = gradePixel([data[i], data[i + 1], data[i + 2]], adjust);
+    data[i] = r;
+    data[i + 1] = g;
+    data[i + 2] = b;
+  }
+}
+
+// Konva custom filter for the live preview — reads the grade from the node's
+// `colorAdjust` attr (set declaratively by react-konva) and runs the shared math.
+function konvaColorFilter(imageData) {
+  applyColorAdjustments(imageData.data, this.getAttr("colorAdjust"));
+}
 
 // Upscale engines + their valid factors (sc-2433). Mirrors the engines the worker
 // supports (image_adapters.create_image_upscaler): Real-ESRGAN 2x/4x, AuraSR 4x.
@@ -168,6 +227,10 @@ export function ImageEditor() {
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
   const [upscaleFactor, setUpscaleFactor] = useState(2);
 
+  // Color grade (sc-2439): non-destructive −1..1 adjustments previewed live via a
+  // Konva filter, baked into the working image on Apply.
+  const [colorAdjust, setColorAdjust] = useState(IDENTITY_COLOR_ADJUST);
+
   // Save / export (sc-2434). `dirty` tracks edits not yet persisted to the Library;
   // `edits` is the ordered provenance chain; `savedAssetId` flags a completed Save
   // for the bar's "Saved" hint. A fresh open clears all three.
@@ -186,6 +249,7 @@ export function ImageEditor() {
   const needsFitRef = useRef(false);
   const cropRectRef = useRef(null);
   const transformerRef = useRef(null);
+  const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 
   const imageAssets = (assets ?? []).filter(assetCanRenderAsImage);
@@ -238,6 +302,7 @@ export function ImageEditor() {
     needsFitRef.current = true;
     setTool("move");
     setCropRect(null);
+    setColorAdjust(IDENTITY_COLOR_ADJUST);
     setWorking({
       image,
       width: image.naturalWidth,
@@ -346,6 +411,7 @@ export function ImageEditor() {
   function cancelCrop() {
     setTool("move");
     setCropRect(null);
+    setColorAdjust(IDENTITY_COLOR_ADJUST); // discard any unbaked color preview
   }
 
   function chooseRatio(key) {
@@ -423,6 +489,55 @@ export function ImageEditor() {
       transformer.getLayer()?.batchDraw();
     }
   }, [tool, cropRect]);
+
+  // ── Color grade (sc-2439) ─────────────────────────────────────────────────
+  function startColorGrade() {
+    if (!working) return;
+    setTool("color");
+    setColorAdjust(IDENTITY_COLOR_ADJUST);
+  }
+
+  const setAdjustValue = (key, value) => setColorAdjust((prev) => ({ ...prev, [key]: value }));
+  const resetAdjust = (key) => setAdjustValue(key, 0);
+  const resetAllAdjust = () => setColorAdjust(IDENTITY_COLOR_ADJUST);
+
+  // Live preview: Konva applies filters only on a cached node, and re-running them
+  // needs a re-cache. Cache the image node (re-caching when the grade changes) while
+  // the color tool is active with a non-identity grade; clear it otherwise so Move/
+  // other tools see the untouched bitmap. The filter reads the `colorAdjust` attr.
+  useEffect(() => {
+    const node = imageNodeRef.current;
+    if (!node) return;
+    const active = tool === "color" && !isIdentityAdjust(colorAdjust);
+    if (active) {
+      node.cache();
+    } else {
+      node.clearCache();
+    }
+    node.getLayer()?.batchDraw();
+  }, [tool, colorAdjust, working]);
+
+  // Apply: bake the grade into a fresh working image using the SAME pixel math as the
+  // preview (a 2D-canvas pass, no Konva-cache readback). Keeps the source provenance
+  // so lineage survives to Save; records the grade in the edit chain.
+  const applyColorGrade = useCallback(async () => {
+    if (!working || isIdentityAdjust(colorAdjust)) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = working.width;
+    canvas.height = working.height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(working.image, 0, 0);
+    const imageData = ctx.getImageData(0, 0, working.width, working.height);
+    applyColorAdjustments(imageData.data, colorAdjust);
+    ctx.putImageData(imageData, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) return;
+    const baked = { ...colorAdjust };
+    const { image, objectUrl } = await blobToImage(blob);
+    installWorkingImage(image, objectUrl, working.source);
+    setEdits((prev) => [...prev, { op: "color", ...baked }]);
+    setDirty(true);
+  }, [working, colorAdjust, installWorkingImage]);
 
   // ── AI ops on the working image (sc-2432 seam) ────────────────────────────
   // Rasterize the current working image to a PNG File. `filename` overrides the
@@ -682,7 +797,16 @@ export function ImageEditor() {
                 x={0}
                 y={0}
               />
-              <KonvaImage height={working.height} image={working.image} width={working.width} x={0} y={0} />
+              <KonvaImage
+                colorAdjust={colorAdjust}
+                filters={[konvaColorFilter]}
+                height={working.height}
+                image={working.image}
+                ref={imageNodeRef}
+                width={working.width}
+                x={0}
+                y={0}
+              />
               {tool === "crop" && cropRect ? (
                 <>
                   {cropOverlayRects(working.width, working.height, cropRect).map((rect, index) => (
@@ -770,6 +894,15 @@ export function ImageEditor() {
             >
               Upscale
             </button>
+            <button
+              className={tool === "color" ? "image-editor-tool active" : "image-editor-tool"}
+              disabled={!!aiOp}
+              onClick={startColorGrade}
+              title="Color grade"
+              type="button"
+            >
+              Color
+            </button>
             {UPCOMING_TOOLS.map((upcoming) => (
               <button
                 className="image-editor-tool"
@@ -855,6 +988,36 @@ export function ImageEditor() {
               Upscale
             </button>
             <button onClick={() => setTool("move")} type="button">
+              Cancel
+            </button>
+          </div>
+        ) : null}
+
+        {tool === "color" && working ? (
+          <div className="image-editor-cropbar image-editor-colorbar">
+            {COLOR_ADJUSTMENTS.map(({ key, label }) => (
+              <label className="image-editor-slider" key={key} title="Double-click the slider to reset">
+                <span className="image-editor-slider-label">{label}</span>
+                <input
+                  aria-label={label}
+                  max={1}
+                  min={-1}
+                  onChange={(event) => setAdjustValue(key, Number(event.target.value))}
+                  onDoubleClick={() => resetAdjust(key)}
+                  step={0.01}
+                  type="range"
+                  value={colorAdjust[key]}
+                />
+                <span className="image-editor-slider-value">{Math.round(colorAdjust[key] * 100)}</span>
+              </label>
+            ))}
+            <button disabled={isIdentityAdjust(colorAdjust)} onClick={resetAllAdjust} type="button">
+              Reset
+            </button>
+            <button className="primary" disabled={isIdentityAdjust(colorAdjust)} onClick={applyColorGrade} type="button">
+              Apply
+            </button>
+            <button onClick={cancelCrop} type="button">
               Cancel
             </button>
           </div>

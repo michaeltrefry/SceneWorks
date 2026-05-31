@@ -5258,6 +5258,29 @@ label {
   font-variant-numeric: tabular-nums;
 }
 
+/* Color-grade bar (sc-2439): a row of compact slider columns + actions. */
+.image-editor-slider {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.image-editor-slider-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.image-editor-slider input[type="range"] {
+  width: 96px;
+}
+
+.image-editor-slider-value {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
 /* In-flight AI op (upscale, later edit/detail): a blocking overlay over the canvas. */
 .image-editor-busy {
   position: absolute;
