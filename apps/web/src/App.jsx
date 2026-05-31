@@ -26,7 +26,7 @@ import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { AppContext } from "./context/AppContext.js";
-import { findFoldedAssetById, foldUpscaledAssetVariants } from "./assetVariants.js";
+import { dropUpscaledVariants, findFoldedAssetById, foldUpscaledAssetVariants } from "./assetVariants.js";
 import { buildWorkersById } from "./workers.js";
 
 // Desktop (Tauri) shell detection. The first-run setup wizard is desktop-only;
@@ -590,9 +590,9 @@ export function App() {
   // set) as the studio "what just came out" list. Sorted newest-first.
   const recentImageAssets = useMemo(
     () =>
-      assets
-        .filter((asset) => asset.type === "image" && (!activeProject?.id || asset.projectId === activeProject.id))
-        .slice()
+      dropUpscaledVariants(
+        assets.filter((asset) => asset.type === "image" && (!activeProject?.id || asset.projectId === activeProject.id)),
+      )
         .sort(sortNewest)
         .slice(0, 20),
     [assets, activeProject?.id],

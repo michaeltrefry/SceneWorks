@@ -5,7 +5,7 @@ import { App, ErrorBoundary, eventUrl } from "./main.jsx";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
 import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
-import { foldUpscaledAssetVariants } from "./assetVariants.js";
+import { dropUpscaledVariants, foldUpscaledAssetVariants } from "./assetVariants.js";
 import { extractFamilies } from "./presetUtils.js";
 import { CharacterStudio } from "./screens/CharacterStudio.jsx";
 import { CharacterAssets, CharacterDatasets } from "./screens/characterPanels.jsx";
@@ -8298,6 +8298,28 @@ describe("SceneWorks app shell", () => {
         },
       }),
     );
+  });
+
+  it("drops upscaled variants from Recent Batches so a generation is not shown twice", () => {
+    const original = { id: "asset-original", type: "image" };
+    const upscaled = {
+      id: "asset-upscaled",
+      type: "image",
+      extra: { isUpscaled: true, upscaledFromAssetId: "asset-original" },
+    };
+    const other = { id: "asset-other", type: "image" };
+
+    // Original present -> keep the original tile, hide its upscaled duplicate.
+    expect(dropUpscaledVariants([original, upscaled, other]).map((asset) => asset.id)).toEqual([
+      "asset-original",
+      "asset-other",
+    ]);
+
+    // Original gone (e.g. purged) -> the upscale stays so it doesn't vanish entirely.
+    expect(dropUpscaledVariants([upscaled, other]).map((asset) => asset.id)).toEqual([
+      "asset-upscaled",
+      "asset-other",
+    ]);
   });
 
   it("shows discarded assets in Trashcan and exposes restore and purge actions", async () => {
