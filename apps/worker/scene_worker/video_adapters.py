@@ -33,7 +33,7 @@ from sceneworks_shared import (
 from .adapter_utils import cancel_step_callback, filter_call_kwargs
 from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .hf_cache import huggingface_cache_root, huggingface_cache_roots, huggingface_repo_cache_path_for_root
-from .image_adapters import emit_worker_event, empty_torch_cache, gpu_memory_snapshot, require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
+from .image_adapters import _request_has_lokr_lora, emit_worker_event, empty_torch_cache, gpu_memory_snapshot, require_inference_backend_for_gpu_worker, select_torch_device, select_torch_dtype, write_json
 from .lora_adapters import (
     LoraPipelineState,
     LoraSpec,
@@ -41,6 +41,7 @@ from .lora_adapters import (
     lora_cache_key_for_specs,
     lora_looks_like_ic_lora,
     normalize_lora_specs,
+    reject_lokr_loras,
     reject_loras_if_unsupported,
     validate_lora_compatibility,
 )
@@ -2211,7 +2212,13 @@ class MlxVideoAdapter(VideoGenerationAdapter):
         high: list[tuple[str, float]] = []
         low: list[tuple[str, float]] = []
         shared: list[tuple[str, float]] = []
-        for spec in normalize_lora_specs(request.loras):
+        specs = normalize_lora_specs(request.loras)
+        # Backstop (sc-2211): the mlx-video loader can't merge LoKr/LyCORIS keys.
+        # create_video_adapter already diverts LoKr jobs to the torch path, but guard
+        # the env-override route (SCENEWORKS_VIDEO_ADAPTER=mlx_video) so a LoKr fails
+        # loudly here rather than silently mis-applying as a plain LoRA.
+        reject_lokr_loras(specs, self.id)
+        for spec in specs:
             if spec.secondary_path:
                 high.append((spec.path, spec.weight))
                 low.append((spec.secondary_path, spec.weight))
@@ -2879,6 +2886,14 @@ def create_video_adapter(job: dict[str, Any] | None = None) -> VideoGenerationAd
             and model in MlxVideoAdapter._supported_models
             and mode in MlxVideoAdapter._supported_modes
         )
+        # epic 2193 (sc-2211), video companion to sc-2209: the mlx-video LoRA loader
+        # merges plain B@A deltas and can't apply a LoKr (Kronecker) adapter, so a job
+        # carrying one must run on the torch path that loads LoKr via PEFT injection
+        # (apply_loras_to_pipeline). Only the diffusers backend (Wan family) has that
+        # loader — the LTX torch path doesn't — so scope the fallback to it; LTX LoKr
+        # is native-MLX-only (sc-2214) and stays on MLX here.
+        if mlx_eligible and target["adapter"] != "ltx_video" and _request_has_lokr_lora(payload):
+            mlx_eligible = False
         if mlx_eligible:
             return MlxVideoAdapter()
         if target["adapter"] == "ltx_video":

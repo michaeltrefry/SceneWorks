@@ -450,7 +450,8 @@
           "cosine"
         ],
         "networkTypes": [
-          "lora"
+          "lora",
+          "lokr"
         ],
         "optimizers": [
           "adamw8bit",

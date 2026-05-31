@@ -1186,9 +1186,11 @@ fn wan_lora_target() -> TrainingTarget {
             "resolutions": [512, 768],
             "batchSize": [1, 2],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Wan is a torch backend, but epic 2193 v1 validates LoKr on the
-            // image backends (Z-Image/SDXL) first; video stays `lora`-only.
-            "networkTypes": ["lora"],
+            // Wan2.2 TI2V-5B is a torch/diffusers backend: the PEFT LoKr trainer
+            // (sc-2196) applies and the diffusers video inference loads it via PEFT
+            // injection (sc-2197/2211). MLX video has no Kronecker merge yet, so a
+            // LoKr Wan job falls back to the torch path (sc-2211; native MLX is sc-2213).
+            "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]

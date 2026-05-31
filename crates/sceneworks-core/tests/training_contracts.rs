@@ -105,8 +105,9 @@ fn builtin_targets_gate_network_types() {
             .is_some_and(|types| types.iter().any(|entry| entry.as_str() == Some(value)))
     };
 
-    // Every target advertises `lora`; only the spike-validated torch image
-    // backends (epic 2193) advertise `lokr`.
+    // Every target advertises `lora`; only the validated torch/PEFT backends
+    // (epic 2193) advertise `lokr`: the Z-Image/SDXL image backends (v1) plus the
+    // Wan2.2 5B video backend (sc-2211). MLX-only and MoE targets stay lora-only.
     let lokr_targets: Vec<&str> = registry
         .targets
         .iter()
@@ -121,7 +122,10 @@ fn builtin_targets_gate_network_types() {
         .map(|target| target.id.as_str())
         .collect();
 
-    assert_eq!(lokr_targets, ["z_image_turbo_lora", "sdxl_lora"]);
+    assert_eq!(
+        lokr_targets,
+        ["z_image_turbo_lora", "sdxl_lora", "wan_lora"]
+    );
 }
 
 #[test]

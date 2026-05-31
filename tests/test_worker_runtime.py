@@ -4639,6 +4639,90 @@ def test_sdxl_backend_save_lora_writes_unet_diffusers_format(tmp_path, monkeypat
     assert output_path == str(tmp_path / "aurora_style.safetensors")
 
 
+def test_wan_backend_save_lora_writes_transformer_diffusers_format(tmp_path, monkeypatch):
+    # Default (lora) network: the Wan trainer saves via WanPipeline.save_lora_weights
+    # (transformer_lora_layers=...), the diffusers format the video loader round-trips.
+    # Torch-free: fake peft + pipeline (sc-2211).
+    import sys
+    import types as types_module
+
+    fake_state = {"transformer.blocks.0.attn1.to_q.lora_A.weight": "tensor"}
+    fake_peft_utils = types_module.ModuleType("peft.utils")
+    fake_peft_utils.get_peft_model_state_dict = lambda _module: fake_state
+    monkeypatch.setitem(sys.modules, "peft.utils", fake_peft_utils)
+
+    saved: dict[str, object] = {}
+
+    class FakeWanPipeline:
+        @staticmethod
+        def save_lora_weights(
+            output_dir, *, transformer_lora_layers=None, weight_name=None, safe_serialization=None, **_kwargs
+        ):
+            saved["transformer_lora_layers"] = transformer_lora_layers
+            saved["weight_name"] = weight_name
+            saved["safe_serialization"] = safe_serialization
+
+    backend = _WanLoraBackend()
+    backend._transformer = object()
+    backend._pipeline = FakeWanPipeline()
+    output_path = backend._save_lora(output_dir=str(tmp_path), file_name="motion.safetensors")
+
+    assert saved["transformer_lora_layers"] is fake_state
+    assert saved["weight_name"] == "motion.safetensors"
+    assert saved["safe_serialization"] is True
+    assert output_path == str(tmp_path / "motion.safetensors")
+
+
+def test_wan_backend_save_lora_lokr_routes_to_write_lokr_adapter(tmp_path, monkeypatch):
+    # LoKr network (sc-2211): LoKr keys (lokr_w1/lokr_w2) aren't save_lora_weights-
+    # compatible, so the Wan trainer serializes raw via write_lokr_adapter with the
+    # routing metadata the video inference loader (PEFT injection) needs — exactly
+    # like the SDXL/Z-Image backends. save_lora_weights must NOT be called.
+    import sys
+    import types as types_module
+
+    fake_state = {"transformer.blocks.0.attn1.to_q.lokr_w1": "tensor"}
+    fake_peft_utils = types_module.ModuleType("peft.utils")
+    fake_peft_utils.get_peft_model_state_dict = lambda _module: fake_state
+    monkeypatch.setitem(sys.modules, "peft.utils", fake_peft_utils)
+
+    captured: dict[str, object] = {}
+
+    def fake_write_lokr_adapter(state_dict, output_dir, file_name, **kwargs):
+        captured["state_dict"] = state_dict
+        captured["file_name"] = file_name
+        captured["kwargs"] = kwargs
+        return str(Path(output_dir) / file_name)
+
+    monkeypatch.setattr(
+        "scene_worker.training_adapters.write_lokr_adapter", fake_write_lokr_adapter
+    )
+
+    class FakeWanPipeline:
+        @staticmethod
+        def save_lora_weights(*_args, **_kwargs):
+            raise AssertionError("LoKr must not save via save_lora_weights")
+
+    backend = _WanLoraBackend()
+    backend._transformer = object()
+    backend._pipeline = FakeWanPipeline()
+    backend._network_type = "lokr"
+    save_kwargs = {
+        "rank": 16,
+        "alpha": 16,
+        "decompose_factor": -1,
+        "target_modules": ["to_q", "to_k", "to_v", "to_out.0"],
+    }
+    backend._lokr_save_kwargs = save_kwargs
+
+    output_path = backend._save_lora(output_dir=str(tmp_path), file_name="motion.safetensors")
+
+    assert captured["state_dict"] is fake_state
+    assert captured["file_name"] == "motion.safetensors"
+    assert captured["kwargs"] == save_kwargs
+    assert output_path == str(tmp_path / "motion.safetensors")
+
+
 def test_create_image_adapter_routes_sensenova_u1():
     adapter = create_image_adapter({"payload": {"model": "sensenova_u1_8b"}})
     assert adapter.__class__.__name__ == "SenseNovaU1Adapter"
@@ -7937,6 +8021,30 @@ def test_mlx_routing_is_mode_aware_on_mps(monkeypatch):
     assert adapter("ltx_2_3", "video_bridge") == "LtxPipelinesVideoAdapter"
     assert adapter("wan_2_2", "video_bridge") == "DiffusersVideoAdapter"
     assert adapter("wan_2_2", "replace_person") == "DiffusersVideoAdapter"
+
+
+def test_wan_lokr_lora_falls_back_off_mlx_to_torch(monkeypatch):
+    # sc-2211 (video companion to sc-2209): the mlx-video LoRA loader merges plain
+    # B@A deltas and can't apply a LoKr (Kronecker) adapter, so a Wan job carrying one
+    # falls back to the diffusers torch path (which loads LoKr via PEFT injection). A
+    # plain LoRA stays on MLX. networkType is read with no file I/O (top-level or
+    # nested in compatibility), mirroring the image dispatch gate.
+    monkeypatch.delenv("SCENEWORKS_VIDEO_ADAPTER", raising=False)
+    monkeypatch.setattr("scene_worker.video_adapters._mps_available", lambda: True)
+
+    def adapter(model, loras):
+        job = {"payload": {"model": model, "mode": "image_to_video", "loras": loras}}
+        return create_video_adapter(job).__class__.__name__
+
+    # Plain LoRA (or none) stays on MLX; a LoKr LoRA diverts to the torch path.
+    assert adapter("wan_2_2", []) == "MlxVideoAdapter"
+    assert adapter("wan_2_2", [{"id": "a", "networkType": "lora"}]) == "MlxVideoAdapter"
+    assert adapter("wan_2_2", [{"id": "a", "networkType": "lokr"}]) == "DiffusersVideoAdapter"
+    assert adapter("wan_2_2", [{"id": "a", "compatibility": {"networkType": "lokr"}}]) == "DiffusersVideoAdapter"
+
+    # Scoped to the diffusers torch path: an LTX LoKr stays on MLX (the LTX torch path
+    # has no LoKr loader; native-MLX LoKr for LTX is sc-2214).
+    assert adapter("ltx_2_3", [{"id": "a", "networkType": "lokr"}]) == "MlxVideoAdapter"
 
 
 def test_video_pipeline_evicts_previous_pipeline_and_loaded_models():

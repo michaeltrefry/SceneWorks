@@ -2099,14 +2099,16 @@ class _WanLoraBackend:
             text_encoder.requires_grad_(False)
 
         progress("loading_model", "loading_model", 0.16, "Attaching LoRA adapter to the transformer.")
-        lora_config = peft.LoraConfig(
-            r=config.rank,
-            lora_alpha=config.alpha,
-            init_lora_weights="gaussian",
-            target_modules=list(config.lora_target_modules)
-            if isinstance(config.lora_target_modules, (list, tuple))
-            else config.lora_target_modules,
-        )
+        self._network_type = config.network_type
+        # Stashed for the save path: everything write_lokr_adapter needs to stamp
+        # into the file so inference can rebuild the matching LoKrConfig (epic 2193).
+        self._lokr_save_kwargs = {
+            "rank": config.rank,
+            "alpha": config.alpha,
+            "decompose_factor": config.decompose_factor,
+            "target_modules": config.lora_target_modules,
+        }
+        lora_config = build_peft_network_config(peft, config)
         transformer.add_adapter(lora_config)
         self._activate_lora_adapter(transformer)
         if config.gradient_checkpointing:
@@ -2330,12 +2332,22 @@ class _WanLoraBackend:
 
         os.makedirs(output_dir, exist_ok=True)
         lora_state_dict = get_peft_model_state_dict(self._transformer)
-        type(self._pipeline).save_lora_weights(
-            output_dir,
-            transformer_lora_layers=lora_state_dict,
-            weight_name=file_name,
-            safe_serialization=True,
-        )
+        if getattr(self, "_network_type", "lora") == "lokr":
+            # LoKr keys (lokr_w1/lokr_w2) are not save_lora_weights-compatible;
+            # write raw with routing metadata (epic 2193).
+            write_lokr_adapter(
+                lora_state_dict,
+                output_dir,
+                file_name,
+                **getattr(self, "_lokr_save_kwargs", {}),
+            )
+        else:
+            type(self._pipeline).save_lora_weights(
+                output_dir,
+                transformer_lora_layers=lora_state_dict,
+                weight_name=file_name,
+                safe_serialization=True,
+            )
         lora_a_norm, lora_b_norm = self._lora_param_norms()
         emit_worker_event(
             "training_lora_weight_norm",
