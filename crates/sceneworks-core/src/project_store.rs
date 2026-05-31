@@ -188,6 +188,13 @@ pub struct UploadAsset {
     pub filename: String,
     pub content_type: Option<String>,
     pub source_path: PathBuf,
+    /// Optional source asset this upload was derived from (Image Editor Save,
+    /// sc-2434). Sets `lineage.parents`/`sourceAssetId` so the saved edit links
+    /// back to the asset it was opened from; the source is never modified.
+    pub source_asset_id: Option<String>,
+    /// Optional free-form provenance (e.g. the Image Editor edit chain) stored
+    /// under the asset's top-level `extra`, mirroring generated-asset extras.
+    pub provenance: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -1124,7 +1131,7 @@ impl ProjectStore {
             })
             .to_owned();
 
-        let asset = json!({
+        let mut asset = json!({
             "schemaVersion": 1,
             "id": asset_id,
             "projectId": project_id,
@@ -1161,12 +1168,27 @@ impl ProjectStore {
                 "rawAdapterSettings": { "contentType": content_type }
             },
             "lineage": {
-                "parents": [],
-                "sourceAssetId": Value::Null,
+                "parents": upload
+                    .source_asset_id
+                    .clone()
+                    .map(|id| vec![Value::String(id)])
+                    .unwrap_or_default(),
+                "sourceAssetId": upload
+                    .source_asset_id
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
                 "sourceTimestamp": Value::Null,
                 "jobId": Value::Null
             }
         });
+        // Provenance (e.g. the Image Editor edit chain) rides the same top-level
+        // `extra` slot generated assets use, so the Library/lineage UI can read it.
+        if let Some(provenance) = &upload.provenance {
+            if let Some(object) = asset.as_object_mut() {
+                object.insert("extra".to_owned(), provenance.clone());
+            }
+        }
         let sidecar_path = media_path.with_extension("sceneworks.json");
         write_json(&sidecar_path, &asset)?;
         index_asset(&project_path, &asset, Some(&sidecar_path))?;
@@ -2974,7 +2996,7 @@ mod tests {
     use super::{
         build_generated_asset_sidecar, guess_mime_from_filename, is_safe_relative_path,
         normalize_asset_tags, AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore,
-        ProjectStoreError, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
+        ProjectStoreError, UploadAsset, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -3350,6 +3372,70 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["id"], asset["id"]);
         assert_eq!(listed[0]["pose"]["category"], json!("Dance"));
+    }
+
+    #[test]
+    fn import_asset_records_source_lineage_and_provenance() {
+        // Image Editor Save (sc-2434): a rasterized edit is uploaded with the id
+        // of the asset it was opened from + an edit-chain provenance blob. The new
+        // asset must link back via lineage and carry the provenance in `extra`,
+        // while the original source asset is left untouched.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Edits").expect("project creates");
+
+        // The original source asset (a plain import, no lineage).
+        let src_file = temp_dir.path().join("source.png");
+        std::fs::write(&src_file, b"\x89PNG source bytes").expect("source writes");
+        let source = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: src_file,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("source imports");
+        let source_id = source["id"].as_str().expect("source id").to_owned();
+        assert_eq!(source["lineage"]["sourceAssetId"], Value::Null);
+
+        // The edited bitmap saved from the editor, derived from the source.
+        let edited_file = temp_dir.path().join("source-edited.png");
+        std::fs::write(&edited_file, b"\x89PNG edited bytes").expect("edited writes");
+        let provenance = json!({
+            "editor": "image_editor",
+            "edits": [{ "op": "crop" }, { "op": "upscale", "engine": "real-esrgan", "factor": 4 }],
+        });
+        let edited = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "source-edited.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: edited_file,
+                    source_asset_id: Some(source_id.clone()),
+                    provenance: Some(provenance.clone()),
+                },
+            )
+            .expect("edited imports");
+
+        // New, distinct asset that links back to the source and is Library-visible.
+        assert_ne!(edited["id"], source["id"]);
+        assert_eq!(edited["origin"], json!("upload"));
+        assert_eq!(edited["lineage"]["sourceAssetId"], json!(source_id));
+        assert_eq!(edited["lineage"]["parents"], json!([source_id]));
+        // Provenance survives normalization in the top-level `extra` slot.
+        assert_eq!(edited["extra"], provenance);
+
+        // The source asset itself is untouched: still no lineage.
+        let source_after = store
+            .get_asset(&project.id, &source_id)
+            .expect("source still present");
+        assert_eq!(source_after["lineage"]["sourceAssetId"], Value::Null);
+        assert!(source_after.get("extra").is_none());
     }
 
     #[test]

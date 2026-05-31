@@ -44,6 +44,29 @@ export function buildUpscaleJobBody({ project, requestedGpu, sourceAssetId, fact
   };
 }
 
+// Filename for a Save / Download export (sc-2434): the source name with an
+// "-edited" suffix before the extension, always .png — the working image is
+// rasterized to PNG, so the original extension would be misleading. Pure.
+export function editedFilename(source) {
+  const base = (source?.name || "image").replace(/\.[^./\\]+$/, "").trim() || "image";
+  return `${base}-edited.png`;
+}
+
+// Provenance for a saved edit, stored under the new asset's top-level `extra`
+// (sc-2434): which source it was derived from + the ordered edit chain
+// (crop/upscale/…) applied this session. Pure for unit testing.
+export function buildSaveProvenance({ source, edits, width, height }) {
+  return {
+    editor: "image_editor",
+    source: source?.assetId
+      ? { kind: "asset", assetId: source.assetId, name: source.name ?? null }
+      : { kind: "upload", name: source?.name ?? null },
+    edits: edits ?? [],
+    width: width ?? null,
+    height: height ?? null,
+  };
+}
+
 // Predefined crop ratios (width / height). Rotate swaps to the transpose; 1:1 and
 // Freeform are unaffected.
 const CROP_RATIOS = [
@@ -124,6 +147,7 @@ export function ImageEditor() {
     jobs,
     importAsset,
     purgeAsset,
+    registerLeaveGuard,
   } = useAppContext();
 
   // The working-image session: the single bitmap every tool operates on, plus its
@@ -143,6 +167,14 @@ export function ImageEditor() {
   // Upscale tool (sc-2433): engine + factor for the in-flight request.
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
   const [upscaleFactor, setUpscaleFactor] = useState(2);
+
+  // Save / export (sc-2434). `dirty` tracks edits not yet persisted to the Library;
+  // `edits` is the ordered provenance chain; `savedAssetId` flags a completed Save
+  // for the bar's "Saved" hint. A fresh open clears all three.
+  const [dirty, setDirty] = useState(false);
+  const [edits, setEdits] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [savedAssetId, setSavedAssetId] = useState(null);
   // An in-flight AI op (upscale now; AI-edit / detail later) on the working image.
   // The seam (sc-2432): stage the working bitmap as a scratch asset, run a worker
   // job against it, load the result back, then purge the scratch + result so the
@@ -220,6 +252,10 @@ export function ImageEditor() {
       try {
         const { image, objectUrl } = await blobToImage(blob);
         installWorkingImage(image, objectUrl, source);
+        // A freshly opened image is a clean session — clear edit/provenance state.
+        setEdits([]);
+        setDirty(false);
+        setSavedAssetId(null);
         setStatus({ loading: false, error: "" });
       } catch (err) {
         setStatus({ loading: false, error: err.message || "Could not open image" });
@@ -268,7 +304,7 @@ export function ImageEditor() {
   function handleDrop(event) {
     event.preventDefault();
     const file = event.dataTransfer?.files?.[0];
-    if (file) openFile(file);
+    if (file && confirmDiscardEdits()) openFile(file);
   }
 
   function handleWheel(event) {
@@ -374,6 +410,8 @@ export function ImageEditor() {
     if (!blob) return;
     const { image, objectUrl } = await blobToImage(blob);
     installWorkingImage(image, objectUrl, working.source);
+    setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh }]);
+    setDirty(true);
   }, [working, cropRect, installWorkingImage]);
 
   // Bind the transformer to the crop rect whenever crop mode is active.
@@ -387,33 +425,38 @@ export function ImageEditor() {
   }, [tool, cropRect]);
 
   // ── AI ops on the working image (sc-2432 seam) ────────────────────────────
-  // Rasterize the current working image to a PNG File for upload.
-  const workingImageToFile = useCallback(() => {
-    return new Promise((resolve, reject) => {
-      if (!working) {
-        reject(new Error("No working image."));
-        return;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = working.width;
-      canvas.height = working.height;
-      canvas.getContext("2d").drawImage(working.image, 0, 0);
-      const base = (working.source.name || "image").replace(/\.[^./\\]+$/, "");
-      canvas.toBlob((blob) => {
-        if (!blob) {
-          reject(new Error("Could not encode the working image."));
+  // Rasterize the current working image to a PNG File. `filename` overrides the
+  // name (Save/Download use the "-edited" name; the AI-op scratch upload doesn't care).
+  const workingImageToFile = useCallback(
+    (filename) => {
+      return new Promise((resolve, reject) => {
+        if (!working) {
+          reject(new Error("No working image."));
           return;
         }
-        resolve(new File([blob], `${base}.png`, { type: "image/png" }));
-      }, "image/png");
-    });
-  }, [working]);
+        const canvas = document.createElement("canvas");
+        canvas.width = working.width;
+        canvas.height = working.height;
+        canvas.getContext("2d").drawImage(working.image, 0, 0);
+        const base = (working.source.name || "image").replace(/\.[^./\\]+$/, "");
+        const name = filename || `${base}.png`;
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error("Could not encode the working image."));
+            return;
+          }
+          resolve(new File([blob], name, { type: "image/png" }));
+        }, "image/png");
+      });
+    },
+    [working],
+  );
 
   // Stage the working image as a scratch asset, start a worker job against it, and
   // track it. The watcher below loads the result back and purges scratch + result —
   // intermediates never persist; only Save (sc-2434) lands a Library asset.
   const runAiOp = useCallback(
-    async ({ buildBody, label }) => {
+    async ({ buildBody, label, edit }) => {
       if (!working || aiOp || !activeProject) return;
       setStatus({ loading: false, error: "" });
       let scratch;
@@ -429,7 +472,7 @@ export function ImageEditor() {
           method: "POST",
           body: JSON.stringify(buildBody(scratch)),
         });
-        setAiOp({ jobId: job.id, scratch, source: working.source, label });
+        setAiOp({ jobId: job.id, scratch, source: working.source, label, edit });
         setTool("move");
       } catch (err) {
         purgeAsset(scratch).catch(() => {});
@@ -444,6 +487,7 @@ export function ImageEditor() {
     const factor = valid.includes(upscaleFactor) ? upscaleFactor : valid[0];
     runAiOp({
       label: "upscale",
+      edit: { op: "upscale", engine: upscaleEngine, factor },
       buildBody: (scratch) =>
         buildUpscaleJobBody({
           project: activeProject,
@@ -462,7 +506,7 @@ export function ImageEditor() {
     if (!aiOp?.jobId) return;
     const job = jobs?.find((item) => item.id === aiOp.jobId);
     if (!job || !terminalStatuses.has(job.status)) return;
-    const { scratch, source } = aiOp;
+    const { scratch, source, edit } = aiOp;
     setAiOp(null); // stop tracking immediately so this can't re-enter on the next jobs tick
     const resultAsset = job.status === "completed" ? job.result?.assets?.[0] ?? null : null;
     (async () => {
@@ -472,6 +516,8 @@ export function ImageEditor() {
           if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
           const { image, objectUrl } = await blobToImage(await res.blob());
           installWorkingImage(image, objectUrl, source);
+          if (edit) setEdits((prev) => [...prev, edit]);
+          setDirty(true);
         } else {
           setStatus({ loading: false, error: job.error ?? job.message ?? "The operation failed." });
         }
@@ -484,6 +530,83 @@ export function ImageEditor() {
     })();
   }, [aiOp, jobs, installWorkingImage, purgeAsset]);
 
+  // ── Save / export (sc-2434) ───────────────────────────────────────────────
+  // Persist the working image as a NEW Library asset, never overwriting the
+  // source. Lineage links it back to the asset it was opened from (uploads have
+  // no source to link); the edit chain rides along as provenance.
+  const runSave = useCallback(async () => {
+    if (!working || saving) return;
+    setSaving(true);
+    setStatus({ loading: false, error: "" });
+    try {
+      const file = await workingImageToFile(editedFilename(working.source));
+      const saved = await importAsset(file, {
+        throwOnError: true,
+        sourceAssetId: working.source.assetId,
+        provenance: buildSaveProvenance({
+          source: working.source,
+          edits,
+          width: working.width,
+          height: working.height,
+        }),
+      });
+      setSavedAssetId(saved?.id ?? null);
+      setDirty(false);
+    } catch (err) {
+      setStatus({ loading: false, error: `Could not save: ${err.message || err}` });
+    } finally {
+      setSaving(false);
+    }
+  }, [working, saving, workingImageToFile, importAsset, edits]);
+
+  // Export the working image straight to disk as a PNG (no project involvement).
+  const runDownload = useCallback(async () => {
+    if (!working) return;
+    try {
+      const file = await workingImageToFile(editedFilename(working.source));
+      const url = URL.createObjectURL(file);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = file.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setStatus({ loading: false, error: `Could not export: ${err.message || err}` });
+    }
+  }, [working, workingImageToFile]);
+
+  // Confirm before an action that would discard unsaved edits (Open / drag-drop a
+  // new image while dirty). Returns true when it's safe to proceed.
+  function confirmDiscardEdits() {
+    if (!dirty) return true;
+    return (
+      typeof window.confirm !== "function" ||
+      window.confirm("You have unsaved edits. Open a new image and discard them?")
+    );
+  }
+
+  // Warn before leaving with unsaved edits: a browser unload (close/refresh) and an
+  // in-app navigation away (the App nav consults this guard, sc-2434).
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const onBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    const unregister = registerLeaveGuard?.(
+      () =>
+        typeof window.confirm !== "function" ||
+        window.confirm("You have unsaved edits in the Image Editor. Leave and discard them?"),
+    );
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      if (typeof unregister === "function") unregister();
+    };
+  }, [dirty, registerLeaveGuard]);
+
   const activeAiJob = aiOp ? jobs?.find((item) => item.id === aiOp.jobId) : null;
 
   return (
@@ -493,7 +616,7 @@ export function ImageEditor() {
           {working ? working.source.name : "No image open"}
         </span>
         <div className="image-editor-bar-actions">
-          <button className="primary" onClick={() => setPickerOpen(true)} type="button">
+          <button className={working ? "" : "primary"} onClick={() => setPickerOpen(true)} type="button">
             Open
           </button>
           {working && working.source.assetId ? (
@@ -504,6 +627,23 @@ export function ImageEditor() {
             >
               Source
             </button>
+          ) : null}
+          {working ? (
+            <>
+              <button onClick={runDownload} title="Download a PNG to your computer" type="button">
+                Download
+              </button>
+              {savedAssetId && !dirty ? <span className="image-editor-saved">Saved ✓</span> : null}
+              <button
+                className="primary"
+                disabled={!dirty || saving}
+                onClick={runSave}
+                title="Save a new image to the project Library"
+                type="button"
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+            </>
           ) : null}
         </div>
       </div>
@@ -772,13 +912,13 @@ export function ImageEditor() {
           multiple={false}
           onAdd={(ids) => {
             setPickerOpen(false);
-            if (ids[0]) openAsset(ids[0]);
+            if (ids[0] && confirmDiscardEdits()) openAsset(ids[0]);
           }}
           onClose={() => setPickerOpen(false)}
           onImport={(files) => {
             const file = files?.[0];
             setPickerOpen(false);
-            if (file) openFile(file);
+            if (file && confirmDiscardEdits()) openFile(file);
           }}
           title="Open image"
         />

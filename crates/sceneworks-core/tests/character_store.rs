@@ -153,6 +153,8 @@ fn references_sync_asset_metadata_and_character_reference_table() {
                 filename: "reference.png".to_owned(),
                 content_type: Some("image/png".to_owned()),
                 source_path: source,
+                source_asset_id: None,
+                provenance: None,
             },
         )
         .expect("asset imports");

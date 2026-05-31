@@ -19,6 +19,8 @@ import {
   centeredCropRect,
   upscaleFactorsForEngine,
   buildUpscaleJobBody,
+  editedFilename,
+  buildSaveProvenance,
 } from "./ImageEditor.jsx";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
@@ -37,6 +39,7 @@ function baseContext(overrides = {}) {
     jobs: [],
     importAsset: vi.fn(),
     purgeAsset: vi.fn(),
+    registerLeaveGuard: vi.fn(),
     ...overrides,
   };
 }
@@ -148,5 +151,43 @@ describe("upscale job", () => {
         displayName: "shot.png",
       },
     });
+  });
+});
+
+describe("save / export", () => {
+  it("derives an -edited.png export filename, always PNG", () => {
+    expect(editedFilename({ name: "shot.jpg" })).toBe("shot-edited.png");
+    expect(editedFilename({ name: "portrait.png" })).toBe("portrait-edited.png");
+    expect(editedFilename({ name: "no-extension" })).toBe("no-extension-edited.png");
+    // Falls back to a default when the source has no usable name.
+    expect(editedFilename(null)).toBe("image-edited.png");
+    expect(editedFilename({})).toBe("image-edited.png");
+  });
+
+  it("builds provenance that links a saved edit to its asset source + edit chain", () => {
+    const provenance = buildSaveProvenance({
+      source: { kind: "asset", assetId: "asset_src", name: "shot.png" },
+      edits: [{ op: "crop", width: 100, height: 100 }, { op: "upscale", engine: "real-esrgan", factor: 4 }],
+      width: 400,
+      height: 400,
+    });
+    expect(provenance).toEqual({
+      editor: "image_editor",
+      source: { kind: "asset", assetId: "asset_src", name: "shot.png" },
+      edits: [{ op: "crop", width: 100, height: 100 }, { op: "upscale", engine: "real-esrgan", factor: 4 }],
+      width: 400,
+      height: 400,
+    });
+  });
+
+  it("records uploads as a source kind with no asset id (nothing to link)", () => {
+    const provenance = buildSaveProvenance({
+      source: { kind: "upload", name: "drag.png" },
+      edits: [],
+      width: 10,
+      height: 20,
+    });
+    expect(provenance.source).toEqual({ kind: "upload", name: "drag.png" });
+    expect(provenance.edits).toEqual([]);
   });
 });

@@ -5117,8 +5117,16 @@ label {
 
 .image-editor-bar-actions {
   display: flex;
+  align-items: center;
   flex-shrink: 0;
   gap: 8px;
+}
+
+/* "Saved ✓" hint shown after a successful Save, until the next edit (sc-2434). */
+.image-editor-saved {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .image-editor-notice {

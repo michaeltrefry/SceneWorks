@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, eventUrl, isAbortError } from "./api.js";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
@@ -476,6 +476,22 @@ export function App() {
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const generatedAssetRefreshesRef = useRef(new Map());
+  // A screen (the Image Editor, sc-2434) can register a guard that runs before a
+  // user-initiated navigation leaves it — e.g. to confirm discarding unsaved edits.
+  // Programmatic setActiveView calls (post-generation hops) deliberately bypass it.
+  const leaveGuardRef = useRef(null);
+  const registerLeaveGuard = useCallback((guard) => {
+    leaveGuardRef.current = guard;
+    return () => {
+      if (leaveGuardRef.current === guard) leaveGuardRef.current = null;
+    };
+  }, []);
+  const navTo = useCallback((viewId) => {
+    if (viewId === activeViewRef.current) return;
+    const guard = leaveGuardRef.current;
+    if (guard && !guard()) return; // guard returned false → user cancelled the leave
+    setActiveView(viewId);
+  }, []);
 
   const {
     characters,
@@ -1417,6 +1433,10 @@ export function App() {
     }
     const body = new FormData();
     body.append("file", file);
+    // Optional lineage for derived imports (Image Editor Save, sc-2434): link the
+    // new asset to the source it was opened from + record the edit-chain provenance.
+    if (options.sourceAssetId) body.append("sourceAssetId", options.sourceAssetId);
+    if (options.provenance) body.append("provenance", JSON.stringify(options.provenance));
     try {
       const imported = await apiFetch(`/api/v1/projects/${activeProject.id}/assets`, token, {
         method: "POST",
@@ -1565,6 +1585,7 @@ export function App() {
     trainingTargetsError,
     // Navigation
     setActiveView,
+    registerLeaveGuard,
     // Characters
     characters,
     createCharacter,
@@ -1619,7 +1640,7 @@ export function App() {
                   <button
                     className={activeView === item.id ? "nav-item active" : "nav-item"}
                     key={item.id}
-                    onClick={() => setActiveView(item.id)}
+                    onClick={() => navTo(item.id)}
                     title={label}
                     type="button"
                   >

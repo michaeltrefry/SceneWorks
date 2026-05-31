@@ -69,35 +69,69 @@ pub(crate) async fn import_asset(
     Path(project_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Gather all fields: the `file` (required) plus optional `sourceAssetId` and
+    // `provenance` carried by the Image Editor's Save (sc-2434) to record lineage.
+    // Field order isn't guaranteed, so collect everything before importing.
+    let mut file: Option<(String, Option<String>, PathBuf)> = None;
+    let mut source_asset_id: Option<String> = None;
+    let mut provenance: Option<serde_json::Value> = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?
     {
-        if field.name() != Some("file") {
-            continue;
+        match field.name() {
+            Some("file") => {
+                let filename = field.file_name().unwrap_or("upload").to_owned();
+                let content_type = field.content_type().map(str::to_owned);
+                let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+                file = Some((filename, content_type, temp_path));
+            }
+            Some("sourceAssetId") => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+                let value = value.trim();
+                if !value.is_empty() {
+                    source_asset_id = Some(value.to_owned());
+                }
+            }
+            Some("provenance") => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+                if !value.trim().is_empty() {
+                    provenance = Some(serde_json::from_str(&value).map_err(|error| {
+                        ApiError::bad_request(format!("Invalid provenance JSON: {error}"))
+                    })?);
+                }
+            }
+            _ => {}
         }
-        let filename = field.file_name().unwrap_or("upload").to_owned();
-        let content_type = field.content_type().map(str::to_owned);
-        let temp_path = write_upload_field_to_temp_file(&state, field).await?;
-        let source_path = temp_path.clone();
-        let asset = project_call(state, move |store| {
-            store.import_asset(
-                &project_id,
-                UploadAsset {
-                    filename,
-                    content_type,
-                    source_path,
-                },
-            )
-        })
-        .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&temp_path);
-        })?;
-        return Ok((StatusCode::CREATED, Json(asset)));
     }
-    Err(ApiError::bad_request("Upload file field is required"))
+
+    let (filename, content_type, temp_path) =
+        file.ok_or_else(|| ApiError::bad_request("Upload file field is required"))?;
+    let source_path = temp_path.clone();
+    let asset = project_call(state, move |store| {
+        store.import_asset(
+            &project_id,
+            UploadAsset {
+                filename,
+                content_type,
+                source_path,
+                source_asset_id,
+                provenance,
+            },
+        )
+    })
+    .await
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })?;
+    Ok((StatusCode::CREATED, Json(asset)))
 }
 
 pub(crate) async fn write_upload_field_to_temp_file(
