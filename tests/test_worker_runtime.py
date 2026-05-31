@@ -2995,7 +2995,21 @@ def test_mlx_flux2_pose_set_builds_per_iteration_skeleton_specs(tmp_path, monkey
 
     def fake_run_sidecar(self, *, job_id, work_dir, label, total, spec, progress, cancel_requested):
         captured["spec"] = spec
-        return [str(work_dir / f"out_{i}.png") for i in range(total)]
+
+        # _run_sidecar now returns a streaming controller (sc-2412) rather than a
+        # list; these spec-building tests also stub write_incremental_outputs, so
+        # wait_for_image is never called — finish()/shutdown() just no-op.
+        class _Stream:
+            def wait_for_image(self, index):
+                return str(work_dir / f"out_{index}.png")
+
+            def finish(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+        return _Stream()
 
     monkeypatch.setattr(ia.MlxFlux2Adapter, "_run_sidecar", fake_run_sidecar)
 
@@ -3066,7 +3080,21 @@ def test_mlx_z_image_pose_set_builds_control_skeleton_specs(tmp_path, monkeypatc
 
     def fake_run_sidecar(self, *, job_id, work_dir, label, total, spec, progress, cancel_requested):
         captured["spec"] = spec
-        return [str(work_dir / f"out_{i}.png") for i in range(total)]
+
+        # _run_sidecar now returns a streaming controller (sc-2412) rather than a
+        # list; these spec-building tests also stub write_incremental_outputs, so
+        # wait_for_image is never called — finish()/shutdown() just no-op.
+        class _Stream:
+            def wait_for_image(self, index):
+                return str(work_dir / f"out_{index}.png")
+
+            def finish(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+        return _Stream()
 
     monkeypatch.setattr(ia.MlxZImageAdapter, "_run_sidecar", fake_run_sidecar)
 
@@ -3140,7 +3168,21 @@ def test_mlx_z_image_pose_set_reference_identity_init_is_opt_in(tmp_path, monkey
 
     def fake_run_sidecar(self, *, job_id, work_dir, label, total, spec, progress, cancel_requested):
         captured["spec"] = spec
-        return [str(work_dir / f"out_{i}.png") for i in range(total)]
+
+        # _run_sidecar now returns a streaming controller (sc-2412) rather than a
+        # list; these spec-building tests also stub write_incremental_outputs, so
+        # wait_for_image is never called — finish()/shutdown() just no-op.
+        class _Stream:
+            def wait_for_image(self, index):
+                return str(work_dir / f"out_{index}.png")
+
+            def finish(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+        return _Stream()
 
     monkeypatch.setattr(ia.MlxZImageAdapter, "_run_sidecar", fake_run_sidecar)
     monkeypatch.setattr(

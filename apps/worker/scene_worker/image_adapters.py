@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import warnings
 from pathlib import Path
 from textwrap import wrap
@@ -2785,8 +2786,9 @@ class MlxFluxAdapter:
         )
         work_dir = Path(tempfile.mkdtemp(prefix="mlx_flux_sidecar_"))
         self._scratch_dir = work_dir
+        stream: _MlxSidecarStream | None = None
         try:
-            images = self._run_sidecar(
+            stream = self._run_sidecar(
                 job_id=job["id"],
                 work_dir=work_dir,
                 label=model_target["label"],
@@ -2817,10 +2819,13 @@ class MlxFluxAdapter:
                     image_batch_progress(index, total),
                     format_batch_running_message(model_target["label"], index, total),
                 )
-                with Image.open(images[index]) as handle:
+                # Blocks only until image `index` lands (sc-2412) so the writer
+                # streams each asset as the sidecar produces it, instead of all
+                # appearing at once when the process exits.
+                with Image.open(stream.wait_for_image(index)) as handle:
                     return handle.convert("RGB")
 
-            return ImageAssetWriter().write_incremental_outputs(
+            outputs = ImageAssetWriter().write_incremental_outputs(
                 request=request,
                 project_path=project_path,
                 image_count=total,
@@ -2840,7 +2845,11 @@ class MlxFluxAdapter:
                 settings=settings,
                 job_id=job["id"],
             )
+            stream.finish()
+            return outputs
         finally:
+            if stream is not None:
+                stream.shutdown()
             # The writer has read every PNG into the project by now; drop the
             # sidecar's scratch dir regardless of success/failure (also clears
             # the force-cancel registry).
@@ -2897,7 +2906,7 @@ class MlxFluxAdapter:
         spec: dict[str, Any],
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
-    ) -> list[str]:
+    ) -> _MlxSidecarStream:
         spec = {**spec, "outDir": str(work_dir)}
         spec_path = work_dir / "spec.json"
         spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -2918,44 +2927,24 @@ class MlxFluxAdapter:
             image_batch_progress(0, total),
             f"Running {label} ({total} image(s)).",
         )
-        # stdout -> file (avoids any pipe-fill deadlock); stderr inherits to the
-        # worker log for diagnostics. Poll so the job stays cancelable; the
-        # heartbeat thread keeps it alive during the (minutes-long) run. Mirrors
-        # LensTurboAdapter._run_sidecar.
-        with stdout_log.open("w", encoding="utf-8") as out:
-            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
-            # leaves a partial traceback we can surface; result.json stays the
-            # authoritative success channel (_read_result prefers it).
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
-            while True:
-                try:
-                    proc.wait(timeout=2)
-                    break
-                except subprocess.TimeoutExpired:
-                    if cancel_requested():
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        raise InterruptedError("Image generation canceled by user.")
-        result = self._read_result(work_dir, stdout_log)
-        if proc.returncode != 0 or "error" in result:
-            error = result.get("error") or f"MLX FLUX sidecar exited with code {proc.returncode}."
-            error = _mlx_sidecar_failure_detail(error, proc.returncode, stdout_log)
-            emit_worker_event(
-                "mlx_flux_sidecar_failed",
-                jobId=job_id,
-                adapter=self.id,
-                error=error,
-                returnCode=proc.returncode,
-            )
-            raise RuntimeError(f"MLX FLUX generation failed in the sidecar venv: {error}")
-        images = [str(path) for path in result.get("images", [])]
-        if len(images) != total:
-            raise RuntimeError(f"MLX FLUX sidecar produced {len(images)} image(s); expected {total}.")
-        emit_worker_event("mlx_flux_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
-        return images
+        # Stream images as the sidecar writes them (sc-2412) rather than blocking
+        # until it exits. A daemon reader thread drains stdout (no pipe-fill
+        # deadlock), mirrors it into stdout.log so a native crash still leaves a
+        # partial traceback, and parses per-image markers; result.json stays the
+        # authoritative success channel.
+        return _MlxSidecarStream(
+            cmd=cmd,
+            job_id=job_id,
+            adapter_id=self.id,
+            work_dir=work_dir,
+            stdout_log=stdout_log,
+            total=total,
+            cancel_requested=cancel_requested,
+            read_result=self._read_result,
+            complete_event="mlx_flux_sidecar_complete",
+            failed_event="mlx_flux_sidecar_failed",
+            fail_label="MLX FLUX",
+        ).start()
 
     @staticmethod
     def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
@@ -3009,6 +2998,222 @@ def _mlx_sidecar_failure_detail(error: str, returncode: int, stdout_log: Path) -
     if tail:
         parts.append(f"last sidecar output:\n{tail}")
     return " — ".join(parts) if parts else "MLX sidecar failed with no output."
+
+
+class _MlxSidecarStream:
+    """Streams images out of a running mflux sidecar as they're produced (sc-2412).
+
+    Shared by every mflux sidecar adapter (FLUX.1, Qwen-Image, Z-Image, FLUX.2).
+    The former ``_run_sidecar`` blocked on ``proc.wait()`` until the process
+    exited and then handed back ALL image paths at once, so a multi-image batch
+    only appeared in the UI in one burst at job end. This class instead launches
+    the sidecar with a piped stdout and a daemon reader thread that:
+
+      * mirrors every line to ``stdout.log`` (so a native crash — SIGABRT /
+        SIGSEGV / SIGKILL — still leaves a partial traceback for
+        ``_mlx_sidecar_failure_detail``), and
+      * parses the runner's per-image markers
+        (``{"event":"image","index":i,"path":...}``) into a thread-safe map.
+
+    ``wait_for_image(index)`` then blocks only until *that* image lands, so the
+    pull-based ``ImageAssetWriter.write_incremental_outputs`` loop writes + reports
+    each asset the instant it's ready — identical streaming to the in-process torch
+    adapters, with no change to the writer.
+
+    Degrades gracefully: if the runner emits no markers (older runner, or a future
+    path that forgets them) ``wait_for_image`` falls back to the authoritative
+    ``result.json`` image list once the process exits — i.e. the old all-at-once
+    behavior — so correctness never depends on the markers. Continuously draining
+    the pipe on the reader thread also removes the pipe-fill deadlock risk that
+    motivated the original stdout-to-file approach.
+    """
+
+    def __init__(
+        self,
+        *,
+        cmd: list[str],
+        job_id: str,
+        adapter_id: str,
+        work_dir: Path,
+        stdout_log: Path,
+        total: int,
+        cancel_requested: CancelCallback,
+        read_result: Callable[[Path, Path], dict[str, Any]],
+        complete_event: str,
+        failed_event: str,
+        fail_label: str,
+    ) -> None:
+        self._cmd = cmd
+        self._job_id = job_id
+        self._adapter_id = adapter_id
+        self._work_dir = work_dir
+        self._stdout_log = stdout_log
+        self._total = total
+        self._cancel_requested = cancel_requested
+        self._read_result = read_result
+        self._complete_event = complete_event
+        self._failed_event = failed_event
+        self._fail_label = fail_label
+        self._proc: subprocess.Popen[str] | None = None
+        self._reader: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._images: dict[int, str] = {}
+        self._tick = threading.Event()
+        self._finished = False
+
+    def start(self) -> "_MlxSidecarStream":
+        self._proc = subprocess.Popen(
+            self._cmd,
+            env=os.environ.copy(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self._reader = threading.Thread(
+            target=self._pump_stdout, name="mlx-sidecar-reader", daemon=True
+        )
+        self._reader.start()
+        return self
+
+    def _pump_stdout(self) -> None:
+        proc = self._proc
+        assert proc is not None and proc.stdout is not None
+        try:
+            with self._stdout_log.open("w", encoding="utf-8") as out:
+                for raw in proc.stdout:
+                    out.write(raw)
+                    out.flush()
+                    line = raw.strip()
+                    if not line or '"event"' not in line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(msg, dict) or msg.get("event") != "image":
+                        continue
+                    try:
+                        idx = int(msg["index"])
+                        path = str(msg["path"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    with self._lock:
+                        self._images[idx] = path
+                    self._tick.set()
+        finally:
+            # Wake any waiter that's parked past EOF / process exit.
+            self._tick.set()
+
+    def wait_for_image(self, index: int) -> str:
+        """Block until image ``index`` is available, returning its PNG path.
+
+        Raises ``InterruptedError`` on cancel and ``RuntimeError`` if the sidecar
+        failed before producing it. Falls back to ``result.json`` ordering when
+        the run finished without per-image markers.
+        """
+        while True:
+            with self._lock:
+                if index in self._images:
+                    return self._images[index]
+            if self._cancel_requested():
+                self._terminate()
+                raise InterruptedError("Image generation canceled by user.")
+            proc = self._proc
+            if proc is not None and proc.poll() is not None:
+                # Process exited. Drain the reader, re-check markers, then fall
+                # back to the authoritative result.json ordering.
+                if self._reader is not None:
+                    self._reader.join(timeout=10)
+                with self._lock:
+                    if index in self._images:
+                        return self._images[index]
+                self._raise_if_failed(proc.returncode)
+                images = [
+                    str(p)
+                    for p in self._read_result(self._work_dir, self._stdout_log).get("images", [])
+                ]
+                if index < len(images):
+                    return images[index]
+                raise RuntimeError(
+                    f"{self._fail_label} sidecar produced {len(images)} image(s); "
+                    f"expected at least {index + 1}."
+                )
+            # Park until the reader signals a new image or the process exits.
+            self._tick.wait(timeout=1.0)
+            self._tick.clear()
+
+    def _raise_if_failed(self, returncode: int | None) -> None:
+        result = self._read_result(self._work_dir, self._stdout_log)
+        if (returncode == 0) and "error" not in result:
+            return
+        code = returncode if returncode is not None else -1
+        error = result.get("error") or f"{self._fail_label} sidecar exited with code {code}."
+        error = _mlx_sidecar_failure_detail(error, code, self._stdout_log)
+        emit_worker_event(
+            self._failed_event,
+            jobId=self._job_id,
+            adapter=self._adapter_id,
+            error=error,
+            returnCode=code,
+        )
+        raise RuntimeError(f"{self._fail_label} generation failed in the sidecar venv: {error}")
+
+    def _terminate(self) -> None:
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if self._reader is not None:
+            self._reader.join(timeout=10)
+
+    def finish(self) -> None:
+        """Success-path finalize: confirm a clean exit, validate the image count,
+        and emit the completion event. Raises ``RuntimeError`` on sidecar failure.
+        """
+        proc = self._proc
+        if proc is None:
+            return
+        # Poll so the job stays cancelable in the brief window between the last
+        # image and the sidecar writing result.json + exiting (parity with the
+        # former blocking wait loop).
+        while True:
+            try:
+                proc.wait(timeout=2)
+                break
+            except subprocess.TimeoutExpired:
+                if self._cancel_requested():
+                    self._terminate()
+                    raise InterruptedError("Image generation canceled by user.")
+        if self._reader is not None:
+            self._reader.join(timeout=10)
+        self._raise_if_failed(proc.returncode)
+        images = [
+            str(p) for p in self._read_result(self._work_dir, self._stdout_log).get("images", [])
+        ]
+        if len(images) != self._total:
+            raise RuntimeError(
+                f"{self._fail_label} sidecar produced {len(images)} image(s); expected {self._total}."
+            )
+        self._finished = True
+        emit_worker_event(
+            self._complete_event,
+            jobId=self._job_id,
+            adapter=self._adapter_id,
+            imageCount=len(images),
+        )
+
+    def shutdown(self) -> None:
+        """Idempotent cleanup for a ``finally`` block — never raises. Ensures the
+        sidecar process is gone and the reader thread joined, even if the consumer
+        bailed early (error / cancel) before reading every image."""
+        try:
+            self._terminate()
+        except Exception:  # noqa: BLE001 - cleanup must not mask the real error
+            pass
 
 
 class MlxQwenAdapter:
@@ -3145,8 +3350,9 @@ class MlxQwenAdapter:
         )
         work_dir = Path(tempfile.mkdtemp(prefix="mlx_qwen_sidecar_"))
         self._scratch_dir = work_dir
+        stream: _MlxSidecarStream | None = None
         try:
-            images = self._run_sidecar(
+            stream = self._run_sidecar(
                 job_id=job["id"],
                 work_dir=work_dir,
                 label=model_target["label"],
@@ -3177,10 +3383,13 @@ class MlxQwenAdapter:
                     image_batch_progress(index, total),
                     format_batch_running_message(model_target["label"], index, total),
                 )
-                with Image.open(images[index]) as handle:
+                # Blocks only until image `index` lands (sc-2412) so the writer
+                # streams each asset as the sidecar produces it, instead of all
+                # appearing at once when the process exits.
+                with Image.open(stream.wait_for_image(index)) as handle:
                     return handle.convert("RGB")
 
-            return ImageAssetWriter().write_incremental_outputs(
+            outputs = ImageAssetWriter().write_incremental_outputs(
                 request=request,
                 project_path=project_path,
                 image_count=total,
@@ -3200,7 +3409,11 @@ class MlxQwenAdapter:
                 settings=settings,
                 job_id=job["id"],
             )
+            stream.finish()
+            return outputs
         finally:
+            if stream is not None:
+                stream.shutdown()
             self.discard_temp_outputs(job["id"])
 
     def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
@@ -3245,7 +3458,7 @@ class MlxQwenAdapter:
         spec: dict[str, Any],
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
-    ) -> list[str]:
+    ) -> _MlxSidecarStream:
         spec = {**spec, "outDir": str(work_dir)}
         spec_path = work_dir / "spec.json"
         spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -3266,40 +3479,20 @@ class MlxQwenAdapter:
             image_batch_progress(0, total),
             f"Running {label} ({total} image(s)).",
         )
-        with stdout_log.open("w", encoding="utf-8") as out:
-            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
-            # leaves a partial traceback we can surface; result.json stays the
-            # authoritative success channel (_read_result prefers it).
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
-            while True:
-                try:
-                    proc.wait(timeout=2)
-                    break
-                except subprocess.TimeoutExpired:
-                    if cancel_requested():
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        raise InterruptedError("Image generation canceled by user.")
-        result = self._read_result(work_dir, stdout_log)
-        if proc.returncode != 0 or "error" in result:
-            error = result.get("error") or f"MLX Qwen sidecar exited with code {proc.returncode}."
-            error = _mlx_sidecar_failure_detail(error, proc.returncode, stdout_log)
-            emit_worker_event(
-                "mlx_qwen_sidecar_failed",
-                jobId=job_id,
-                adapter=self.id,
-                error=error,
-                returnCode=proc.returncode,
-            )
-            raise RuntimeError(f"MLX Qwen generation failed in the sidecar venv: {error}")
-        images = [str(path) for path in result.get("images", [])]
-        if len(images) != total:
-            raise RuntimeError(f"MLX Qwen sidecar produced {len(images)} image(s); expected {total}.")
-        emit_worker_event("mlx_qwen_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
-        return images
+        # Stream images as the sidecar writes them (sc-2412); see MlxFluxAdapter.
+        return _MlxSidecarStream(
+            cmd=cmd,
+            job_id=job_id,
+            adapter_id=self.id,
+            work_dir=work_dir,
+            stdout_log=stdout_log,
+            total=total,
+            cancel_requested=cancel_requested,
+            read_result=self._read_result,
+            complete_event="mlx_qwen_sidecar_complete",
+            failed_event="mlx_qwen_sidecar_failed",
+            fail_label="MLX Qwen",
+        ).start()
 
     @staticmethod
     def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
@@ -3526,8 +3719,9 @@ class MlxZImageAdapter:
                     draw_wholebody(request.width, request.height, keypoints, hands=hands, face=face, stickwidth=stick)
                 ).save(skeleton_path, "PNG")
                 control_image_paths.append(str(skeleton_path))
+        stream: _MlxSidecarStream | None = None
         try:
-            images = self._run_sidecar(
+            stream = self._run_sidecar(
                 job_id=job["id"],
                 work_dir=work_dir,
                 label=model_target["label"],
@@ -3568,10 +3762,13 @@ class MlxZImageAdapter:
                     image_batch_progress(index, total),
                     format_batch_running_message(model_target["label"], index, total),
                 )
-                with Image.open(images[index]) as handle:
+                # Blocks only until image `index` lands (sc-2412) so the writer
+                # streams each asset as the sidecar produces it, instead of all
+                # appearing at once when the process exits.
+                with Image.open(stream.wait_for_image(index)) as handle:
                     return handle.convert("RGB")
 
-            return ImageAssetWriter().write_incremental_outputs(
+            outputs = ImageAssetWriter().write_incremental_outputs(
                 request=request,
                 project_path=project_path,
                 image_count=total,
@@ -3592,7 +3789,11 @@ class MlxZImageAdapter:
                 settings=settings,
                 job_id=job["id"],
             )
+            stream.finish()
+            return outputs
         finally:
+            if stream is not None:
+                stream.shutdown()
             self.discard_temp_outputs(job["id"])
 
     def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
@@ -3675,7 +3876,7 @@ class MlxZImageAdapter:
         spec: dict[str, Any],
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
-    ) -> list[str]:
+    ) -> _MlxSidecarStream:
         spec = {**spec, "outDir": str(work_dir)}
         spec_path = work_dir / "spec.json"
         spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -3696,40 +3897,20 @@ class MlxZImageAdapter:
             image_batch_progress(0, total),
             f"Running {label} ({total} image(s)).",
         )
-        with stdout_log.open("w", encoding="utf-8") as out:
-            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
-            # leaves a partial traceback we can surface; result.json stays the
-            # authoritative success channel (_read_result prefers it).
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
-            while True:
-                try:
-                    proc.wait(timeout=2)
-                    break
-                except subprocess.TimeoutExpired:
-                    if cancel_requested():
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        raise InterruptedError("Image generation canceled by user.")
-        result = self._read_result(work_dir, stdout_log)
-        if proc.returncode != 0 or "error" in result:
-            error = result.get("error") or f"MLX Z-Image sidecar exited with code {proc.returncode}."
-            error = _mlx_sidecar_failure_detail(error, proc.returncode, stdout_log)
-            emit_worker_event(
-                "mlx_z_image_sidecar_failed",
-                jobId=job_id,
-                adapter=self.id,
-                error=error,
-                returnCode=proc.returncode,
-            )
-            raise RuntimeError(f"MLX Z-Image generation failed in the sidecar venv: {error}")
-        images = [str(path) for path in result.get("images", [])]
-        if len(images) != total:
-            raise RuntimeError(f"MLX Z-Image sidecar produced {len(images)} image(s); expected {total}.")
-        emit_worker_event("mlx_z_image_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
-        return images
+        # Stream images as the sidecar writes them (sc-2412); see MlxFluxAdapter.
+        return _MlxSidecarStream(
+            cmd=cmd,
+            job_id=job_id,
+            adapter_id=self.id,
+            work_dir=work_dir,
+            stdout_log=stdout_log,
+            total=total,
+            cancel_requested=cancel_requested,
+            read_result=self._read_result,
+            complete_event="mlx_z_image_sidecar_complete",
+            failed_event="mlx_z_image_sidecar_failed",
+            fail_label="MLX Z-Image",
+        ).start()
 
     @staticmethod
     def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
@@ -4261,8 +4442,9 @@ class MlxFlux2Adapter:
                 # Order [skeleton, reference] mirrors the sc-2003 spike's validated
                 # FLUX.2 multi-image config (image_paths=[skeleton, character]).
                 image_paths_per_iter.append([str(skeleton_path), reference_paths[0]])
+        stream: _MlxSidecarStream | None = None
         try:
-            images = self._run_sidecar(
+            stream = self._run_sidecar(
                 job_id=job["id"],
                 work_dir=work_dir,
                 label=model_target["label"],
@@ -4303,10 +4485,13 @@ class MlxFlux2Adapter:
                     image_batch_progress(index, total),
                     format_batch_running_message(model_target["label"], index, total),
                 )
-                with Image.open(images[index]) as handle:
+                # Blocks only until image `index` lands (sc-2412) so the writer
+                # streams each asset as the sidecar produces it, instead of all
+                # appearing at once when the process exits.
+                with Image.open(stream.wait_for_image(index)) as handle:
                     return handle.convert("RGB")
 
-            return ImageAssetWriter().write_incremental_outputs(
+            outputs = ImageAssetWriter().write_incremental_outputs(
                 request=request,
                 project_path=project_path,
                 image_count=total,
@@ -4330,7 +4515,11 @@ class MlxFlux2Adapter:
                 settings=settings,
                 job_id=job["id"],
             )
+            stream.finish()
+            return outputs
         finally:
+            if stream is not None:
+                stream.shutdown()
             self.discard_temp_outputs(job["id"])
 
     def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
@@ -4384,7 +4573,7 @@ class MlxFlux2Adapter:
         spec: dict[str, Any],
         progress: ProgressCallback,
         cancel_requested: CancelCallback,
-    ) -> list[str]:
+    ) -> _MlxSidecarStream:
         spec = {**spec, "outDir": str(work_dir)}
         spec_path = work_dir / "spec.json"
         spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -4406,40 +4595,21 @@ class MlxFlux2Adapter:
             image_batch_progress(0, total),
             f"Running {label} ({total} image(s)).",
         )
-        with stdout_log.open("w", encoding="utf-8") as out:
-            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
-            # leaves a partial traceback we can surface; result.json stays the
-            # authoritative success channel (_read_result prefers it).
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
-            while True:
-                try:
-                    proc.wait(timeout=2)
-                    break
-                except subprocess.TimeoutExpired:
-                    if cancel_requested():
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        raise InterruptedError("Image generation canceled by user.")
-        result = MlxFluxAdapter._read_result(work_dir, stdout_log)
-        if proc.returncode != 0 or "error" in result:
-            error = result.get("error") or f"MLX FLUX.2 sidecar exited with code {proc.returncode}."
-            error = _mlx_sidecar_failure_detail(error, proc.returncode, stdout_log)
-            emit_worker_event(
-                "mlx_flux2_sidecar_failed",
-                jobId=job_id,
-                adapter=self.id,
-                error=error,
-                returnCode=proc.returncode,
-            )
-            raise RuntimeError(f"MLX FLUX.2 generation failed in the sidecar venv: {error}")
-        images = [str(path) for path in result.get("images", [])]
-        if len(images) != total:
-            raise RuntimeError(f"MLX FLUX.2 sidecar produced {len(images)} image(s); expected {total}.")
-        emit_worker_event("mlx_flux2_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
-        return images
+        # Stream images as the sidecar writes them (sc-2412); see MlxFluxAdapter.
+        # FLUX.2 shares MlxFluxAdapter's result reader.
+        return _MlxSidecarStream(
+            cmd=cmd,
+            job_id=job_id,
+            adapter_id=self.id,
+            work_dir=work_dir,
+            stdout_log=stdout_log,
+            total=total,
+            cancel_requested=cancel_requested,
+            read_result=MlxFluxAdapter._read_result,
+            complete_event="mlx_flux2_sidecar_complete",
+            failed_event="mlx_flux2_sidecar_failed",
+            fail_label="MLX FLUX.2",
+        ).start()
 
 
 class KolorsDiffusersAdapter:

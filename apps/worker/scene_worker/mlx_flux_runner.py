@@ -18,8 +18,14 @@ template). Adding a new mflux family is a one-arm extension to
 Contract: argv[1] is a path to a JSON spec; the runner writes one PNG per seed
 into spec["outDir"] and prints a single result JSON object to stdout:
     {"images": ["<outDir>/mlx_<family>_0000.png", ...]}
-Progress and diagnostics go to stderr (captured into the worker log). A non-zero
-exit code with an "error" JSON on stdout signals failure to the adapter.
+Additionally, as each PNG is written the runner prints a per-image stream marker
+on its own stdout line (sc-2412) so the adapter can surface images one-by-one
+instead of all at job end:
+    {"event": "image", "index": 0, "path": "<outDir>/mlx_<family>_0000.png"}
+These markers are advisory — result.json / the final {"images": [...]} line stay
+the authoritative success channel, and the adapter degrades to that ordered list
+if markers are missing. Progress and diagnostics go to stderr (captured into the
+worker log). A non-zero exit code with an "error" JSON on stdout signals failure.
 
 Spec keys:
     model: e.g. "flux_schnell" | "flux_dev" | "qwen_image" | "flux2_klein_9b"
@@ -66,6 +72,21 @@ from pathlib import Path
 def _log(message: str) -> None:
     sys.stderr.write(f"[mlx_flux_runner] {message}\n")
     sys.stderr.flush()
+
+
+def _emit_image(index: int, path: Path) -> None:
+    """Per-image stream marker on stdout (sc-2412).
+
+    The orchestrating adapter (`scene_worker.image_adapters`) tails the sidecar's
+    stdout and parses these markers so each finished image streams into the UI
+    immediately, instead of all appearing at once when the process exits. This is
+    advisory only: ``result.json`` (and the final ``{"images": [...]}`` line) stay
+    the authoritative success channel, and the adapter degrades to that ordered
+    list when markers are absent. One JSON object per line, flushed so the parent
+    sees it the instant the PNG is written.
+    """
+    sys.stdout.write(json.dumps({"event": "image", "index": int(index), "path": str(path)}) + "\n")
+    sys.stdout.flush()
 
 
 def _resolve_model_handle(model_id: str, has_reference: bool) -> tuple[type, object, str, str]:  # noqa: C901
@@ -252,6 +273,7 @@ def _run_z_image_control(
         path = out_dir / f"mlx_z_image_control_{index:04d}.png"
         result.image.save(path, "PNG")
         images.append(str(path))
+        _emit_image(index, path)
         _log(f"generated control image {index + 1}/{len(seeds)} -> {path}")
 
     payload = {"images": images}
@@ -403,6 +425,7 @@ def main() -> int:
         path = out_dir / f"{filename_prefix}_{index:04d}.png"
         result.image.save(path, "PNG")
         images.append(str(path))
+        _emit_image(index, path)
         _log(f"generated image {index + 1}/{len(seeds)} -> {path}")
 
     payload = {"images": images}
