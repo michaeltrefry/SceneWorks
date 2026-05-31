@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Stage, Layer, Image as KonvaImage, Rect, Transformer } from "react-konva";
+import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -29,8 +29,8 @@ export function editCapableModels(imageModels) {
 // the existing `mode:"edit_image"` flow: the working bitmap is staged as a scratch
 // asset (sc-2432) and referenced by `sourceAssetId`; the result is the new working
 // image at the same dimensions. Pure for unit testing.
-export function buildEditJobBody({ project, requestedGpu, sourceAssetId, model, prompt, seed, width, height }) {
-  return {
+export function buildEditJobBody({ project, requestedGpu, sourceAssetId, maskAssetId, model, prompt, seed, width, height }) {
+  const body = {
     projectId: project.id,
     projectName: project.name ?? null,
     requestedGpu,
@@ -45,6 +45,22 @@ export function buildEditJobBody({ project, requestedGpu, sourceAssetId, model, 
     count: 1,
     advanced: {},
   };
+  // Inpaint mask (sc-2436): only sent for inpaint-capable models with a painted
+  // region; the worker confines the edit to it. Omitted entirely otherwise.
+  if (maskAssetId) body.maskAssetId = maskAssetId;
+  return body;
+}
+
+// Whether a model accepts an inpaint mask — the manifest tags it `image_inpaint`
+// (sc-2476). Gates the mask tool in the editor. Pure.
+export function modelIsInpaintCapable(model) {
+  return (model?.capabilities ?? []).includes("image_inpaint");
+}
+
+// Whether the brush strokes form an actual mask region (at least one non-erase
+// stroke with a drawn segment). Erase-only strokes don't count. Pure.
+export function maskHasContent(lines) {
+  return (lines ?? []).some((line) => !line.erase && (line.points?.length ?? 0) >= 2);
 }
 
 // Color-grade controls (sc-2439). Each is a normalized −1..1 slider where 0 is the
@@ -267,12 +283,31 @@ export function ImageEditor() {
   const [editPrompt, setEditPrompt] = useState("");
   const [editSeed, setEditSeed] = useState("");
 
+  // Inpaint mask (sc-2436): freehand brush strokes in image-pixel coords, rasterized
+  // to a mask asset on Run for inpaint-capable models. `maskMode` is the paint sub-mode
+  // of the AI Edit tool (Stage panning is suspended while it's on).
+  const [maskLines, setMaskLines] = useState([]); // [{ points:[x,y,…], size, erase }]
+  const [maskMode, setMaskMode] = useState(false);
+  const [maskBrush, setMaskBrush] = useState(64);
+  const [maskErase, setMaskErase] = useState(false);
+  const maskPaintingRef = useRef(false);
+
   // Default the edit-model selection to the first edit-capable model once the model
   // list loads, and recover if the current pick stops being edit-capable.
   useEffect(() => {
     const caps = editCapableModels(imageModels);
     if (caps.length && !caps.some((model) => model.id === editModel)) setEditModel(caps[0].id);
   }, [imageModels, editModel]);
+
+  // The chosen edit model + whether it accepts an inpaint mask (gates the mask tool).
+  const selectedEditModel = editModels.find((model) => model.id === editModel) ?? null;
+  const canMask = modelIsInpaintCapable(selectedEditModel);
+
+  // Leave paint mode (restoring Stage panning) when the edit tool is closed or the
+  // model can't inpaint — otherwise the canvas would stay in a paint state with no UI.
+  useEffect(() => {
+    if (maskMode && (tool !== "edit" || !canMask)) setMaskMode(false);
+  }, [tool, canMask, maskMode]);
 
   // Save / export (sc-2434). `dirty` tracks edits not yet persisted to the Library;
   // `edits` is the ordered provenance chain; `savedAssetId` flags a completed Save
@@ -346,6 +381,9 @@ export function ImageEditor() {
     setTool("move");
     setCropRect(null);
     setColorAdjust(IDENTITY_COLOR_ADJUST);
+    // A new working bitmap invalidates the mask (dims/content changed).
+    setMaskLines([]);
+    setMaskMode(false);
     setWorking({
       image,
       width: image.naturalWidth,
@@ -582,6 +620,92 @@ export function ImageEditor() {
     setDirty(true);
   }, [working, colorAdjust, installWorkingImage]);
 
+  // ── Inpaint mask brush (sc-2436) ──────────────────────────────────────────
+  // Pointer position in image-pixel coords (undo the stage pan/zoom), clamped.
+  function stagePointToImage(event) {
+    const stage = event.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer || !working) return null;
+    return {
+      x: clamp((pointer.x - view.x) / view.scale, 0, working.width),
+      y: clamp((pointer.y - view.y) / view.scale, 0, working.height),
+    };
+  }
+
+  function maskPointerDown(event) {
+    if (!maskMode || !working) return;
+    const pt = stagePointToImage(event);
+    if (!pt) return;
+    maskPaintingRef.current = true;
+    setMaskLines((prev) => [...prev, { points: [pt.x, pt.y], size: maskBrush, erase: maskErase }]);
+  }
+
+  function maskPointerMove(event) {
+    if (!maskMode || !maskPaintingRef.current) return;
+    const pt = stagePointToImage(event);
+    if (!pt) return;
+    setMaskLines((prev) => {
+      if (!prev.length) return prev;
+      const last = prev[prev.length - 1];
+      return [...prev.slice(0, -1), { ...last, points: [...last.points, pt.x, pt.y] }];
+    });
+  }
+
+  function maskPointerUp() {
+    maskPaintingRef.current = false;
+  }
+
+  function clearMask() {
+    setMaskLines([]);
+  }
+
+  // Rasterize the brush strokes to a mask PNG File aligned to the working bitmap:
+  // white = edit region on black. Erase strokes punch holes (destination-out on a
+  // transparent scratch), then it's flattened onto black so the worker's convert("L")
+  // reads white-on-black. Mirrors the same compositing as the on-canvas preview.
+  function rasterizeMaskToFile() {
+    return new Promise((resolve, reject) => {
+      const scratch = document.createElement("canvas");
+      scratch.width = working.width;
+      scratch.height = working.height;
+      const sctx = scratch.getContext("2d");
+      sctx.lineCap = "round";
+      sctx.lineJoin = "round";
+      sctx.strokeStyle = "#ffffff";
+      sctx.fillStyle = "#ffffff";
+      for (const line of maskLines) {
+        sctx.globalCompositeOperation = line.erase ? "destination-out" : "source-over";
+        sctx.lineWidth = line.size;
+        const p = line.points;
+        if (p.length === 2) {
+          sctx.beginPath();
+          sctx.arc(p[0], p[1], line.size / 2, 0, Math.PI * 2);
+          sctx.fill();
+          continue;
+        }
+        sctx.beginPath();
+        sctx.moveTo(p[0], p[1]);
+        for (let i = 2; i < p.length; i += 2) sctx.lineTo(p[i], p[i + 1]);
+        sctx.stroke();
+      }
+      // Flatten onto black so erased/holes read as black (= keep).
+      const out = document.createElement("canvas");
+      out.width = working.width;
+      out.height = working.height;
+      const octx = out.getContext("2d");
+      octx.fillStyle = "#000000";
+      octx.fillRect(0, 0, out.width, out.height);
+      octx.drawImage(scratch, 0, 0);
+      out.toBlob((blob) => {
+        if (!blob) {
+          reject(new Error("Could not encode the mask."));
+          return;
+        }
+        resolve(new File([blob], "mask.png", { type: "image/png" }));
+      }, "image/png");
+    });
+  }
+
   // ── AI ops on the working image (sc-2432 seam) ────────────────────────────
   // Rasterize the current working image to a PNG File. `filename` overrides the
   // name (Save/Download use the "-edited" name; the AI-op scratch upload doesn't care).
@@ -614,27 +738,31 @@ export function ImageEditor() {
   // track it. The watcher below loads the result back and purges scratch + result —
   // intermediates never persist; only Save (sc-2434) lands a Library asset.
   const runAiOp = useCallback(
-    async ({ buildBody, label, edit, endpoint = "/api/v1/jobs" }) => {
+    async ({ buildBody, label, edit, endpoint = "/api/v1/jobs", maskFile = null }) => {
       if (!working || aiOp || !activeProject) return;
       setStatus({ loading: false, error: "" });
+      // Stage the working bitmap (and, for a masked edit, the mask) as scratch assets.
       let scratch;
+      let maskScratch = null;
       try {
-        const file = await workingImageToFile();
-        scratch = await importAsset(file, { throwOnError: true });
+        scratch = await importAsset(await workingImageToFile(), { throwOnError: true });
+        if (maskFile) maskScratch = await importAsset(maskFile, { throwOnError: true });
       } catch (err) {
+        if (scratch) purgeAsset(scratch).catch(() => {});
         setStatus({ loading: false, error: `Could not stage image: ${err.message || err}` });
         return;
       }
       try {
         const job = await apiFetch(endpoint, token, {
           method: "POST",
-          body: JSON.stringify(buildBody(scratch)),
+          body: JSON.stringify(buildBody(scratch, maskScratch)),
         });
         if (!job?.id) throw new Error("The job was not created.");
-        setAiOp({ jobId: job.id, scratch, source: working.source, label, edit });
+        setAiOp({ jobId: job.id, scratch, maskScratch, source: working.source, label, edit });
         setTool("move");
       } catch (err) {
         purgeAsset(scratch).catch(() => {});
+        if (maskScratch) purgeAsset(maskScratch).catch(() => {});
         setStatus({ loading: false, error: `Could not start ${label}: ${err.message || err}` });
       }
     },
@@ -659,18 +787,32 @@ export function ImageEditor() {
     });
   }
 
-  function runEdit() {
+  async function runEdit() {
     const prompt = editPrompt.trim();
     if (!prompt || !editModel || !working) return;
+    // A painted mask is sent only for inpaint-capable models; otherwise it's a
+    // whole-image edit (the mask stays as a local guide but isn't uploaded).
+    const masked = canMask && maskHasContent(maskLines);
+    let maskFile = null;
+    if (masked) {
+      try {
+        maskFile = await rasterizeMaskToFile();
+      } catch (err) {
+        setStatus({ loading: false, error: `Could not prepare the mask: ${err.message || err}` });
+        return;
+      }
+    }
     runAiOp({
       label: "edit",
       endpoint: "/api/v1/image/jobs",
-      edit: { op: "edit", model: editModel, prompt },
-      buildBody: (scratch) =>
+      edit: { op: "edit", model: editModel, prompt, ...(masked ? { masked: true } : {}) },
+      maskFile,
+      buildBody: (scratch, maskScratch) =>
         buildEditJobBody({
           project: activeProject,
           requestedGpu,
           sourceAssetId: scratch.id,
+          maskAssetId: maskScratch?.id,
           model: editModel,
           prompt,
           seed: editSeed,
@@ -686,7 +828,7 @@ export function ImageEditor() {
     if (!aiOp?.jobId) return;
     const job = jobs?.find((item) => item.id === aiOp.jobId);
     if (!job || !terminalStatuses.has(job.status)) return;
-    const { scratch, source, edit } = aiOp;
+    const { scratch, maskScratch, source, edit } = aiOp;
     setAiOp(null); // stop tracking immediately so this can't re-enter on the next jobs tick
     const resultAsset = job.status === "completed" ? job.result?.assets?.[0] ?? null : null;
     (async () => {
@@ -705,6 +847,7 @@ export function ImageEditor() {
         setStatus({ loading: false, error: err.message || "The operation failed." });
       } finally {
         if (scratch) purgeAsset(scratch).catch(() => {});
+        if (maskScratch) purgeAsset(maskScratch).catch(() => {});
         if (resultAsset) purgeAsset(resultAsset).catch(() => {});
       }
     })();
@@ -838,13 +981,19 @@ export function ImageEditor() {
       >
         {working && stageSize.width > 0 && stageSize.height > 0 ? (
           <Stage
-            draggable={tool !== "crop"}
+            draggable={tool !== "crop" && !maskMode}
             height={stageSize.height}
             onDragEnd={(event) => {
               if (event.target !== event.target.getStage()) return;
               const stage = event.target.getStage();
               setView((prev) => ({ ...prev, x: stage.x(), y: stage.y() }));
             }}
+            onMouseDown={maskPointerDown}
+            onMouseMove={maskPointerMove}
+            onMouseUp={maskPointerUp}
+            onTouchStart={maskPointerDown}
+            onTouchMove={maskPointerMove}
+            onTouchEnd={maskPointerUp}
             onWheel={handleWheel}
             scaleX={view.scale}
             scaleY={view.scale}
@@ -917,6 +1066,23 @@ export function ImageEditor() {
                 </>
               ) : null}
             </Layer>
+            {maskLines.length && canMask ? (
+              // Isolated layer so the eraser's destination-out clears only the mask
+              // overlay, never the image beneath it.
+              <Layer listening={false}>
+                {maskLines.map((line, index) => (
+                  <Line
+                    globalCompositeOperation={line.erase ? "destination-out" : "source-over"}
+                    key={index}
+                    lineCap="round"
+                    lineJoin="round"
+                    points={line.points}
+                    stroke="rgba(255,40,120,0.5)"
+                    strokeWidth={line.size}
+                  />
+                ))}
+              </Layer>
+            ) : null}
           </Stage>
         ) : (
           <div className="image-editor-empty">
@@ -1135,12 +1301,57 @@ export function ImageEditor() {
                   type="number"
                   value={editSeed}
                 />
+                {canMask ? (
+                  <>
+                    <button
+                      className={maskMode ? "active" : ""}
+                      onClick={() => setMaskMode((on) => !on)}
+                      title="Paint a mask to confine the edit to a region (inpaint)"
+                      type="button"
+                    >
+                      {maskHasContent(maskLines) ? "Mask ✓" : "Mask"}
+                    </button>
+                    {maskMode ? (
+                      <>
+                        <label className="image-editor-slider" title="Brush size">
+                          <span className="image-editor-slider-label">Brush</span>
+                          <input
+                            aria-label="Brush size"
+                            max={300}
+                            min={5}
+                            onChange={(event) => setMaskBrush(Number(event.target.value))}
+                            step={1}
+                            type="range"
+                            value={maskBrush}
+                          />
+                        </label>
+                        <button
+                          className={maskErase ? "active" : ""}
+                          onClick={() => setMaskErase((on) => !on)}
+                          title="Eraser"
+                          type="button"
+                        >
+                          Eraser
+                        </button>
+                        <button disabled={!maskLines.length} onClick={clearMask} type="button">
+                          Clear
+                        </button>
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
                 <button className="primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
-                  Edit
+                  {canMask && maskHasContent(maskLines) ? "Inpaint" : "Edit"}
                 </button>
               </>
             )}
-            <button onClick={() => setTool("move")} type="button">
+            <button
+              onClick={() => {
+                setTool("move");
+                setMaskMode(false);
+              }}
+              type="button"
+            >
               Cancel
             </button>
           </div>

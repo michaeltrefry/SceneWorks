@@ -27,6 +27,8 @@ import {
   IDENTITY_COLOR_ADJUST,
   editCapableModels,
   buildEditJobBody,
+  modelIsInpaintCapable,
+  maskHasContent,
 } from "./ImageEditor.jsx";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
@@ -304,5 +306,39 @@ describe("AI prompt edit", () => {
     expect(buildEditJobBody({ ...base, seed: "" }).seed).toBeNull();
     expect(buildEditJobBody({ ...base, seed: null }).seed).toBeNull();
     expect(buildEditJobBody({ ...base, seed: 7 }).seed).toBe(7);
+  });
+
+  it("includes maskAssetId only when an inpaint mask is supplied", () => {
+    const base = {
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "a",
+      model: "sdxl",
+      prompt: "x",
+      width: 10,
+      height: 10,
+    };
+    expect("maskAssetId" in buildEditJobBody(base)).toBe(false);
+    expect("maskAssetId" in buildEditJobBody({ ...base, maskAssetId: undefined })).toBe(false);
+    expect(buildEditJobBody({ ...base, maskAssetId: "asset_mask" }).maskAssetId).toBe("asset_mask");
+  });
+});
+
+describe("inpaint mask", () => {
+  it("flags only models tagged image_inpaint as mask-capable", () => {
+    expect(modelIsInpaintCapable({ capabilities: ["edit_image", "image_inpaint"] })).toBe(true);
+    expect(modelIsInpaintCapable({ capabilities: ["edit_image"] })).toBe(false);
+    expect(modelIsInpaintCapable(null)).toBe(false);
+    expect(modelIsInpaintCapable({})).toBe(false);
+  });
+
+  it("treats a mask as having content only with a non-erase stroke", () => {
+    expect(maskHasContent([])).toBe(false);
+    expect(maskHasContent(null)).toBe(false);
+    // A single tap paints a dot — that counts as a mask region.
+    expect(maskHasContent([{ points: [10, 10], size: 40, erase: false }])).toBe(true);
+    // Erase-only strokes don't make a mask.
+    expect(maskHasContent([{ points: [0, 0, 5, 5], size: 40, erase: true }])).toBe(false);
+    expect(maskHasContent([{ points: [0, 0, 5, 5], size: 40, erase: false }])).toBe(true);
   });
 });
