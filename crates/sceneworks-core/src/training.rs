@@ -1018,9 +1018,10 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
 /// via `advanced.baseModelRepo` (sc-1584).
 ///
 /// Unlike Z-Image's separate `to_q/to_k/to_v`, Lens uses *fused* QKV attention
-/// (`img_qkv`/`txt_qkv`) plus joint-attention output projections
-/// (`to_out`/`to_add_out`), so the default `loraTargetModules` must name those —
-/// the Z-Image defaults would match nothing and inject no adapter.
+/// (`img_qkv`/`txt_qkv`) plus joint-attention output projections. The image output
+/// `to_out` is an `nn.ModuleList([Linear, Identity])`, so the trainable Linear is
+/// `to_out.0` (PEFT errors if pointed at the ModuleList — sc-2218); `to_add_out` is
+/// a plain Linear. The Z-Image defaults would match nothing and inject no adapter.
 fn lens_turbo_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "lens_turbo_lora".to_owned(),
@@ -1057,10 +1058,11 @@ fn lens_turbo_lora_target() -> TrainingTarget {
                 // honors `constant`/`linear`/`cosine` with an optional warmup.
                 "lrScheduler": "constant",
                 // Lens uses fused QKV attention plus joint-attention output
-                // projections, NOT Z-Image's separate to_q/to_k/to_v. These
-                // suffixes must match the LensTransformer2DModel module names or
-                // PEFT injects nothing.
-                "loraTargetModules": ["img_qkv", "txt_qkv", "to_out", "to_add_out"],
+                // projections, NOT Z-Image's separate to_q/to_k/to_v. ``to_out`` is
+                // a ModuleList, so its Linear is ``to_out.0`` — PEFT (LoRA + LoKr)
+                // errors on the ModuleList itself (sc-2218). Suffixes must match the
+                // LensTransformer2DModel module names or PEFT injects nothing.
+                "loraTargetModules": ["img_qkv", "txt_qkv", "to_out.0", "to_add_out"],
                 // Non-distilled training base; override with "microsoft/Lens-Base"
                 // to train on the 50-step supervised checkpoint instead (sc-1584).
                 "baseModelRepo": "microsoft/Lens",
@@ -1086,9 +1088,11 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             "resolutions": [768, 1024, 1440],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Lens trains in a separate sidecar venv; LoKr is not validated there
-            // yet (epic 2193 v1 targets Z-Image/SDXL), so only `lora`.
-            "networkTypes": ["lora"],
+            // Lens trains + infers in a separate sidecar venv; both the trainer
+            // (lens_train_runner) and inference (lens_runner) gained PEFT LoKr
+            // build/save + injection (epic 2193, sc-2218), keyed off the fused-QKV
+            // target modules above.
+            "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]

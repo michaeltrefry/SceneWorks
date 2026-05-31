@@ -44,24 +44,76 @@ def _log(message: str) -> None:
     sys.stderr.flush()
 
 
+def _adapter_network_type(path: str) -> str:
+    """Return the adapter's recorded ``networkType`` ('lora' default) from its
+    safetensors header. A ``lokr`` stamp routes to PEFT injection because
+    ``load_lora_adapter`` cannot consume LoKr (``lokr_w1``/``lokr_w2``) keys
+    (epic 2193, sc-2218)."""
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path, framework="pt") as handle:
+            meta = handle.metadata() or {}
+        return str(meta.get("networkType") or "lora").strip().lower()
+    except Exception:  # noqa: BLE001 - a missing/plain header reads as a normal LoRA
+        return "lora"
+
+
+def _inject_lokr(transformer, path: str, name: str) -> None:
+    """Rebuild a LoKr adapter's ``LoKrConfig`` from its file metadata and inject +
+    load it onto the transformer — the LoKr equivalent of ``load_lora_adapter``.
+    Mirrors ``lora_adapters.inject_lokr_adapter`` (epic 2193); lives here because the
+    Lens inference sidecar venv is isolated from the main worker module."""
+    import peft
+    from peft.utils import set_peft_model_state_dict
+    from safetensors import safe_open
+    from safetensors.torch import load_file
+
+    with safe_open(path, framework="pt") as handle:
+        meta = handle.metadata() or {}
+    rank = int(meta.get("rank") or 16)
+    target_modules = json.loads(meta.get("targetModules") or "null")
+    config = peft.LoKrConfig(
+        r=rank,
+        alpha=int(meta.get("alpha") or rank),
+        decompose_factor=int(meta.get("decomposeFactor") or -1),
+        target_modules=target_modules,
+        init_weights=True,
+    )
+    peft.inject_adapter_in_model(config, transformer, adapter_name=name)
+    state = load_file(path)
+    reference = next(transformer.parameters(), None)
+    if reference is not None:
+        state = {
+            key: value.to(device=reference.device, dtype=reference.dtype)
+            for key, value in state.items()
+        }
+    set_peft_model_state_dict(transformer, state, adapter_name=name)
+
+
 def _apply_loras(transformer, loras) -> None:
     """Inject + scale trained `lens` LoRAs on the transformer (PeftAdapterMixin).
 
     Each ``loras`` entry is ``{"path", "weight", "name"}``, already resolved to a
-    concrete .safetensors file by the adapter. ``save_lora_adapter`` (training
-    kernel) and ``load_lora_adapter`` are the symmetric PeftAdapterMixin pair; the
-    ``prefix=None`` retry covers builds that saved the adapter without a
-    ``transformer.`` key prefix.
+    concrete .safetensors file by the adapter. For a plain LoRA, ``save_lora_adapter``
+    (training kernel) and ``load_lora_adapter`` are the symmetric PeftAdapterMixin
+    pair; the ``prefix=None`` retry covers builds that saved the adapter without a
+    ``transformer.`` key prefix. A ``networkType=lokr`` adapter (epic 2193, sc-2218)
+    can't load that way, so it's rebuilt + injected via PEFT; either kind then scales
+    through ``set_adapters``.
     """
     names: list[str] = []
     weights: list[float] = []
     for index, lora in enumerate(loras):
         name = str(lora.get("name") or f"lora_{index}")
         path = str(lora["path"])
-        try:
-            transformer.load_lora_adapter(path, adapter_name=name)
-        except Exception:  # noqa: BLE001 - retry with no key prefix before failing
-            transformer.load_lora_adapter(path, adapter_name=name, prefix=None)
+        if _adapter_network_type(path) == "lokr":
+            _inject_lokr(transformer, path, name)
+        else:
+            try:
+                transformer.load_lora_adapter(path, adapter_name=name)
+            except Exception:  # noqa: BLE001 - retry with no key prefix before failing
+                transformer.load_lora_adapter(path, adapter_name=name, prefix=None)
         names.append(name)
         try:
             weights.append(float(lora.get("weight", 1.0)))

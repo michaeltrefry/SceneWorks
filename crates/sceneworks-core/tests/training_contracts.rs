@@ -107,8 +107,9 @@ fn builtin_targets_gate_network_types() {
 
     // Every target advertises `lora`; only the validated torch/PEFT backends
     // (epic 2193) advertise `lokr`: the Z-Image/SDXL image backends (v1), the
-    // Kolors image backend (SDXL-architecture, epic 1929 / sc-2217), and the
-    // Wan2.2 5B video backend (sc-2211). MLX-only and MoE targets stay lora-only.
+    // Kolors image backend (SDXL-architecture, epic 1929 / sc-2217), the Lens
+    // sidecar backend (sc-2218), and the Wan2.2 5B video backend (sc-2211).
+    // MLX-only and MoE targets stay lora-only.
     let lokr_targets: Vec<&str> = registry
         .targets
         .iter()
@@ -125,7 +126,13 @@ fn builtin_targets_gate_network_types() {
 
     assert_eq!(
         lokr_targets,
-        ["z_image_turbo_lora", "sdxl_lora", "kolors_lora", "wan_lora"]
+        [
+            "z_image_turbo_lora",
+            "sdxl_lora",
+            "kolors_lora",
+            "lens_turbo_lora",
+            "wan_lora"
+        ]
     );
 }
 

@@ -83,7 +83,11 @@ class _Progress:
 # Report a training tick at most this often (in steps); the final step always
 # reports. Mirrors training_adapters.PROGRESS_STEP_INTERVAL.
 PROGRESS_STEP_INTERVAL = 10
-DEFAULT_LORA_TARGET_MODULES = ["img_qkv", "txt_qkv", "to_out", "to_add_out"]
+# LensTransformer2DModel attention: fused QKV projections (img_qkv/txt_qkv), the
+# joint-attention output (to_add_out, a Linear), and to_out — which is an
+# ``nn.ModuleList([Linear, Identity])``, so the Linear is ``to_out.0``. PEFT
+# (LoRA + LoKr) errors if pointed at the ModuleList, so target ``to_out.0`` (sc-2218).
+DEFAULT_LORA_TARGET_MODULES = ["img_qkv", "txt_qkv", "to_out.0", "to_add_out"]
 
 
 def _read_config(spec: dict[str, Any]) -> dict[str, Any]:
@@ -105,6 +109,56 @@ def _target_modules(config: dict[str, Any]) -> list[str]:
     if isinstance(modules, (list, tuple)) and modules:
         return [str(token) for token in modules]
     return list(DEFAULT_LORA_TARGET_MODULES)
+
+
+def _network_type(config: dict[str, Any]) -> str:
+    """Adapter parameterization: ``lora`` (default) or ``lokr`` (LyCORIS Kronecker,
+    epic 2193). Gated per target by the contract's ``limits.networkTypes``."""
+    raw = _advanced(config).get("networkType") or config.get("network_type") or "lora"
+    return str(raw).strip().lower()
+
+
+def _decompose_factor(config: dict[str, Any]) -> int:
+    """LoKr block-decomposition factor (``-1`` = auto); ignored for plain LoRA."""
+    raw = _advanced(config).get("decomposeFactor")
+    if raw is None:
+        raw = config.get("decompose_factor")
+    try:
+        return int(raw) if raw is not None else -1
+    except (TypeError, ValueError):
+        return -1
+
+
+def _build_network_config(
+    peft: Any,
+    *,
+    network_type: str,
+    rank: int,
+    alpha: int,
+    decompose_factor: int,
+    target_modules: list[str],
+) -> Any:
+    """Build the PEFT adapter config for the requested network type.
+
+    Mirrors ``training_adapters.build_peft_network_config``; duplicated here because
+    the Lens sidecar venv is isolated from the main worker module (epic 2193, sc-2218).
+    The LensTransformer2DModel attaches both via ``add_adapter`` and saves via
+    ``get_peft_model_state_dict`` — only the on-disk key layout + inference loader differ.
+    """
+    if network_type == "lokr":
+        return peft.LoKrConfig(
+            r=rank,
+            alpha=alpha,
+            decompose_factor=decompose_factor,
+            init_weights=True,
+            target_modules=list(target_modules),
+        )
+    return peft.LoraConfig(
+        r=rank,
+        lora_alpha=alpha,
+        init_lora_weights="gaussian",
+        target_modules=list(target_modules),
+    )
 
 
 def _select_dtype(torch: Any, device: str, mixed_precision: Any) -> Any:
@@ -294,13 +348,68 @@ def _encode_latents(torch, lens_pipeline_cls, pipe: Any, pixel: Any, generator: 
     return latents.contiguous()
 
 
-def _save_lora(transformer: Any, output_dir: str, file_name: str) -> str:
+def _save_lora(
+    transformer: Any,
+    output_dir: str,
+    file_name: str,
+    *,
+    network_type: str = "lora",
+    rank: int = 16,
+    alpha: int = 16,
+    decompose_factor: int = -1,
+    target_modules: list[str] | None = None,
+) -> str:
     os.makedirs(output_dir, exist_ok=True)
+    if network_type == "lokr":
+        return _save_lokr_adapter(
+            transformer,
+            output_dir,
+            file_name,
+            rank=rank,
+            alpha=alpha,
+            decompose_factor=decompose_factor,
+            target_modules=target_modules or [],
+        )
     # LensPipeline has no LoRA loader mixin, but LensTransformer2DModel inherits
     # diffusers' PeftAdapterMixin, so save/load the adapter directly on it. The
     # inference path (sc-1587) loads the same file with ``load_lora_adapter``.
     transformer.save_lora_adapter(output_dir, weight_name=file_name, safe_serialization=True)
     return str(Path(output_dir) / file_name)
+
+
+def _save_lokr_adapter(
+    transformer: Any,
+    output_dir: str,
+    file_name: str,
+    *,
+    rank: int,
+    alpha: int,
+    decompose_factor: int,
+    target_modules: list[str],
+) -> str:
+    """Write a LoKr adapter raw with routing + reconstruction metadata.
+
+    ``save_lora_adapter`` only round-trips LoRA (``lora_A``/``lora_B``) keys — LoKr
+    emits ``lokr_w1``/``lokr_w2`` — so serialize ``get_peft_model_state_dict``
+    directly and stamp the header the inference loader (``lens_runner._apply_loras``)
+    rebuilds the matching ``peft.LoKrConfig`` from. Mirrors
+    ``training_adapters.write_lokr_adapter`` (epic 2193, sc-2218)."""
+    from peft.utils import get_peft_model_state_dict
+    from safetensors.torch import save_file
+
+    state = get_peft_model_state_dict(transformer)
+    tensors = {key: value.detach().cpu().contiguous() for key, value in state.items()}
+    metadata = {
+        "format": "pt",
+        "networkType": "lokr",
+        "rank": str(int(rank)),
+        "alpha": str(int(alpha)),
+        "decomposeFactor": str(int(decompose_factor)),
+        "targetModules": json.dumps(list(target_modules)),
+    }
+    path = str(Path(output_dir) / file_name)
+    save_file(tensors, path, metadata=metadata)
+    return path
 
 
 def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
@@ -351,6 +460,15 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
     lr_warmup_steps = int(advanced.get("lrWarmupSteps") or config.get("lr_warmup_steps") or 0)
     gradient_checkpointing = bool(advanced.get("gradientCheckpointing", config.get("gradient_checkpointing", True)))
     target_modules = _target_modules(config)
+    network_type = _network_type(config)
+    decompose_factor = _decompose_factor(config)
+    save_kwargs = {
+        "network_type": network_type,
+        "rank": rank,
+        "alpha": alpha,
+        "decompose_factor": decompose_factor,
+        "target_modules": target_modules,
+    }
 
     _log(
         f"torch {torch.__version__} transformers {transformers.__version__} device={device} dtype={dtype} "
@@ -411,11 +529,13 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
 
     # ---- Attach the trainable LoRA -----------------------------------------
     progress.emit(event="stage", stage="loading_model", message="Attaching LoRA adapter to the transformer.")
-    lora_config = peft.LoraConfig(
-        r=rank,
-        lora_alpha=alpha,
-        init_lora_weights="gaussian",
-        target_modules=list(target_modules),
+    lora_config = _build_network_config(
+        peft,
+        network_type=network_type,
+        rank=rank,
+        alpha=alpha,
+        decompose_factor=decompose_factor,
+        target_modules=target_modules,
     )
     transformer.add_adapter(lora_config)
     for method_name in ("set_adapter", "enable_adapters"):
@@ -445,7 +565,7 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
         raise RuntimeError(
             "LoRA adapter attached no trainable parameters; the target modules "
             f"{target_modules} matched no LensTransformer2DModel layers. Lens uses fused "
-            "QKV (img_qkv/txt_qkv) plus to_out/to_add_out — adjust advanced.loraTargetModules."
+            "QKV (img_qkv/txt_qkv) plus to_out.0/to_add_out — adjust advanced.loraTargetModules."
         )
     _log(f"trainable LoRA tensors: {len(trainable)}")
 
@@ -510,7 +630,7 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
             stem = Path(file_name).stem or "lora"
             checkpoint_name = f"{stem}-step{step:06d}.safetensors"
             progress.emit(event="stage", stage="checkpointing", step=step, message=f"Saving checkpoint at step {step}.")
-            checkpoint_path = _save_lora(transformer, output_dir, checkpoint_name)
+            checkpoint_path = _save_lora(transformer, output_dir, checkpoint_name, **save_kwargs)
             checkpoints.append({"step": step, "path": checkpoint_path})
 
         if sample_every and sample_prompts and step % sample_every == 0:
@@ -528,7 +648,7 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
 
     # ---- Save final adapter -------------------------------------------------
     progress.emit(event="stage", stage="saving", message="Saving trained LoRA weights.")
-    output_path = _save_lora(transformer, output_dir, file_name)
+    output_path = _save_lora(transformer, output_dir, file_name, **save_kwargs)
     progress.emit(event="saved", path=output_path)
 
     return {
@@ -544,6 +664,7 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
         "learningRate": learning_rate,
         "resolution": _bucket_resolution(resolution),
         "loraTargetModules": list(target_modules),
+        "networkType": network_type,
         "baseModelSource": source,
     }
 

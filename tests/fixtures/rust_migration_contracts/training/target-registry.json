@@ -323,7 +323,7 @@
           "loraTargetModules": [
             "img_qkv",
             "txt_qkv",
-            "to_out",
+            "to_out.0",
             "to_add_out"
           ],
           "lossType": "mse",
@@ -356,7 +356,8 @@
           "cosine"
         ],
         "networkTypes": [
-          "lora"
+          "lora",
+          "lokr"
         ],
         "optimizers": [
           "adamw8bit",

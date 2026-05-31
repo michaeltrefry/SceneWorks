@@ -1915,6 +1915,171 @@ def test_lens_turbo_requires_sidecar_when_missing(monkeypatch):
         raise AssertionError("Lens generation must fail clearly when the sidecar venv is unavailable.")
 
 
+def test_lens_train_runner_reads_network_type_and_factor():
+    from scene_worker import lens_train_runner as lt
+
+    assert lt._network_type({}) == "lora"
+    assert lt._decompose_factor({}) == -1
+    assert lt._network_type({"advanced": {"networkType": "LoKr"}}) == "lokr"
+    assert lt._decompose_factor({"advanced": {"decomposeFactor": 8}}) == 8
+    # Bad factor falls back to auto (-1).
+    assert lt._decompose_factor({"advanced": {"decomposeFactor": "x"}}) == -1
+    # Default targets point at the Linear `to_out.0`, not the `to_out` ModuleList
+    # (PEFT errors on the ModuleList — sc-2218).
+    assert lt._target_modules({}) == ["img_qkv", "txt_qkv", "to_out.0", "to_add_out"]
+    assert "to_out" not in lt._target_modules({})  # the bare ModuleList name is gone
+
+
+def test_lens_train_runner_build_network_config():
+    from scene_worker import lens_train_runner as lt
+
+    fake_peft = SimpleNamespace(
+        LoraConfig=lambda **kw: ("lora", kw),
+        LoKrConfig=lambda **kw: ("lokr", kw),
+    )
+    kind, _ = lt._build_network_config(
+        fake_peft, network_type="lora", rank=8, alpha=8, decompose_factor=-1,
+        target_modules=["img_qkv", "txt_qkv"],
+    )
+    assert kind == "lora"
+
+    kind, kwargs = lt._build_network_config(
+        fake_peft, network_type="lokr", rank=8, alpha=16, decompose_factor=4,
+        target_modules=["img_qkv", "txt_qkv", "to_out.0", "to_add_out"],
+    )
+    assert kind == "lokr"
+    assert kwargs["r"] == 8 and kwargs["alpha"] == 16
+    assert kwargs["decompose_factor"] == 4
+    assert kwargs["target_modules"] == ["img_qkv", "txt_qkv", "to_out.0", "to_add_out"]
+
+
+def test_lens_save_lora_routes_by_network_type(monkeypatch, tmp_path):
+    from scene_worker import lens_train_runner as lt
+
+    # Plain LoRA: delegates to the transformer's diffusers PeftAdapterMixin saver.
+    saved: dict[str, object] = {}
+
+    class FakeTransformer:
+        def save_lora_adapter(self, output_dir, *, weight_name=None, safe_serialization=None):
+            saved["output_dir"] = output_dir
+            saved["weight_name"] = weight_name
+
+    out = lt._save_lora(FakeTransformer(), str(tmp_path), "lens.safetensors", network_type="lora")
+    assert saved["weight_name"] == "lens.safetensors"
+    assert out == str(tmp_path / "lens.safetensors")
+
+    # LoKr: routes to the raw metadata writer instead (lokr_w1/w2 aren't
+    # save_lora_adapter-compatible), and never calls save_lora_adapter.
+    captured: dict[str, object] = {}
+
+    def fake_save_lokr(transformer, output_dir, file_name, **kwargs):
+        captured["file_name"] = file_name
+        captured["kwargs"] = kwargs
+        return str(tmp_path / file_name)
+
+    monkeypatch.setattr(lt, "_save_lokr_adapter", fake_save_lokr)
+
+    class ExplodingTransformer:
+        def save_lora_adapter(self, *a, **k):
+            raise AssertionError("LoKr must not save via save_lora_adapter")
+
+    out = lt._save_lora(
+        ExplodingTransformer(), str(tmp_path), "lens.safetensors",
+        network_type="lokr", rank=8, alpha=8, decompose_factor=4,
+        target_modules=["img_qkv", "txt_qkv"],
+    )
+    assert captured["file_name"] == "lens.safetensors"
+    assert captured["kwargs"] == {
+        "rank": 8, "alpha": 8, "decompose_factor": 4,
+        "target_modules": ["img_qkv", "txt_qkv"],
+    }
+
+
+def test_lens_save_lokr_adapter_stamps_metadata(monkeypatch, tmp_path):
+    import sys
+    import types as types_module
+
+    from scene_worker import lens_train_runner as lt
+
+    fake_state = {"transformer.x.lokr_w1": "t1", "transformer.x.lokr_w2": "t2"}
+    fake_peft_utils = types_module.ModuleType("peft.utils")
+    fake_peft_utils.get_peft_model_state_dict = lambda _m: fake_state
+    monkeypatch.setitem(sys.modules, "peft.utils", fake_peft_utils)
+
+    written: dict[str, object] = {}
+
+    class FakeTensor:
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def contiguous(self):
+            return self
+
+    fake_st_torch = types_module.ModuleType("safetensors.torch")
+
+    def fake_save_file(tensors, path, metadata=None):
+        written["tensors"] = dict(tensors)
+        written["metadata"] = metadata
+
+    fake_st_torch.save_file = fake_save_file
+    monkeypatch.setitem(sys.modules, "safetensors", types_module.ModuleType("safetensors"))
+    monkeypatch.setitem(sys.modules, "safetensors.torch", fake_st_torch)
+
+    # get_peft_model_state_dict returns our fake tensors; patch their .detach chain.
+    monkeypatch.setattr(fake_peft_utils, "get_peft_model_state_dict", lambda _m: {
+        "transformer.x.lokr_w1": FakeTensor(), "transformer.x.lokr_w2": FakeTensor(),
+    })
+
+    out = lt._save_lokr_adapter(
+        object(), str(tmp_path), "lens_lokr.safetensors",
+        rank=8, alpha=16, decompose_factor=4, target_modules=["img_qkv", "txt_qkv"],
+    )
+    assert out == str(tmp_path / "lens_lokr.safetensors")
+    meta = written["metadata"]
+    assert meta["networkType"] == "lokr"
+    assert meta["rank"] == "8" and meta["alpha"] == "16" and meta["decomposeFactor"] == "4"
+    assert json.loads(meta["targetModules"]) == ["img_qkv", "txt_qkv"]
+    assert set(written["tensors"]) == {"transformer.x.lokr_w1", "transformer.x.lokr_w2"}
+
+
+def test_lens_runner_apply_loras_routes_lokr_to_injection(monkeypatch):
+    from scene_worker import lens_runner as lr
+
+    # Classify by recorded networkType (stubbed so the test needs no real files).
+    kinds = {"/lora.safetensors": "lora", "/lokr.safetensors": "lokr"}
+    monkeypatch.setattr(lr, "_adapter_network_type", lambda path: kinds[path])
+
+    injected: list[str] = []
+    monkeypatch.setattr(lr, "_inject_lokr", lambda t, path, name: injected.append(name))
+
+    loaded: list[str] = []
+    set_calls: dict[str, object] = {}
+
+    class FakeTransformer:
+        def load_lora_adapter(self, path, adapter_name=None, prefix="__unset__"):
+            loaded.append(adapter_name)
+
+        def set_adapters(self, names, weights=None):
+            set_calls["names"] = names
+            set_calls["weights"] = weights
+
+    lr._apply_loras(
+        FakeTransformer(),
+        [
+            {"path": "/lora.safetensors", "weight": 0.8, "name": "a"},
+            {"path": "/lokr.safetensors", "weight": 1.0, "name": "b"},
+        ],
+    )
+    # LoKr → PEFT injection; plain LoRA → load_lora_adapter; both then scaled together.
+    assert injected == ["b"]
+    assert loaded == ["a"]
+    assert set_calls["names"] == ["a", "b"]
+    assert set_calls["weights"] == [0.8, 1.0]
+
+
 def test_lens_resolution_for_snaps_to_buckets():
     # Square requests pick the base by area: <1024*1440 px -> 1024, else 1440.
     assert lens_resolution_for(1024, 1024) == (1024, "1:1")
@@ -6918,7 +7083,7 @@ def _lens_train_plan(tmp_path, *, steps=4):
             "optimizer": "adamw8bit",
             "advanced": {
                 "lrScheduler": "constant",
-                "loraTargetModules": ["img_qkv", "txt_qkv", "to_out", "to_add_out"],
+                "loraTargetModules": ["img_qkv", "txt_qkv", "to_out.0", "to_add_out"],
             },
         },
         "output": {
