@@ -405,6 +405,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         targets: vec![
             z_image_turbo_lora_target(),
             sdxl_lora_target(),
+            kolors_lora_target(),
             lens_turbo_lora_target(),
             ltx_video_lora_target(),
             wan_lora_target(),
@@ -419,6 +420,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
 pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let target = z_image_turbo_lora_target();
     let sdxl_target = sdxl_lora_target();
+    let kolors_target = kolors_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -603,6 +605,72 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 },
                 object(json!({
                     "description": "768px preset for tighter-VRAM SDXL training.",
+                    "order": 40
+                })),
+            ),
+            // Kolors reuses the SDXL preset recipe (same U-Net architecture); only
+            // the target (pipeline + ChatGLM3 encoder) and the LoRA family differ.
+            sdxl_preset(
+                &kolors_target,
+                "kolors_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on Kolors.",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            sdxl_preset(
+                &kolors_target,
+                "kolors_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            sdxl_preset(
+                &kolors_target,
+                "kolors_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity style LoRA defaults for texture and look transfer.",
+                    "order": 30
+                })),
+            ),
+            sdxl_preset(
+                &kolors_target,
+                "kolors_lora.character.adamw8bit.low_vram",
+                "Low VRAM character",
+                &["character"],
+                ("adamw8bit", "low_vram"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.resolution = 768;
+                    config.steps = 1200;
+                    config
+                },
+                object(json!({
+                    "description": "768px preset for tighter-VRAM Kolors training.",
                     "order": 40
                 })),
             ),
@@ -1382,6 +1450,81 @@ fn sdxl_lora_target() -> TrainingTarget {
         ui: object(json!({
             "label": "Stable Diffusion XL LoRA",
             "description": "Train an image LoRA for Stable Diffusion XL. The generic SDXL-UNet trainer and the shared foundation for SDXL-family models.",
+            "recommendedFor": ["character", "style"]
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Kolors LoRA training target (epic 1929).
+///
+/// Kolors (Kwai-Kolors) is an SDXL-architecture U-Net with a ChatGLM3-6B text
+/// encoder + SDXL VAE and the same epsilon/v-prediction objective, so it reuses
+/// the generic SDXL-UNet trainer wholesale (same DDPM loop, same `added_cond_kwargs`,
+/// same `to_q`/`to_k`/`to_v`/`to_out.0` attention target modules) via a thin
+/// `kolors_lora` kernel that only swaps the pipeline class + the ChatGLM3 prompt
+/// encoder. The output registers as a `kolors` family LoRA the Kolors image
+/// adapter loads at generation time.
+fn kolors_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "kolors_lora".to_owned(),
+        name: "Kolors LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "kolors".to_owned(),
+        base_model: "kolors".to_owned(),
+        base_model_repo: Some("Kwai-Kolors/Kolors-diffusers".to_owned()),
+        kernel: "kolors_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 1500,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // Kolors shares the SDXL UNet attention module names.
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+                "sampleEvery": 250,
+                "sampleSteps": 30,
+                "sampleGuidanceScale": 7.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [768, 1024],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Kolors is an SDXL-architecture torch/PEFT backend, so it advertises
+            // `lokr` like the SDXL target — inherited from the shared SDXL backend's
+            // LoKr save + PEFT-injection inference path (epic 2193, sc-2217).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Kolors LoRA",
+            "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon (MPS).",
             "recommendedFor": ["character", "style"]
         })),
         extra: ExtraFields::new(),

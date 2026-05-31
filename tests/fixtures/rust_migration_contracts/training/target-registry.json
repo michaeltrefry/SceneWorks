@@ -197,6 +197,105 @@
       }
     },
     {
+      "id": "kolors_lora",
+      "name": "Kolors LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "kolors",
+      "baseModel": "kolors",
+      "baseModelRepo": "Kwai-Kolors/Kolors-diffusers",
+      "kernel": "kolors_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon (MPS).",
+        "label": "Kolors LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
       "id": "lens_turbo_lora",
       "name": "Lens LoRA",
       "modality": "image",

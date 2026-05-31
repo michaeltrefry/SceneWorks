@@ -43,6 +43,7 @@ from sceneworks_shared import utc_now
 from .adapter_utils import filter_call_kwargs
 from .image_adapters import (
     activate_torch_device,
+    empty_torch_cache,
     emit_worker_event,
     gpu_memory_snapshot,
     require_inference_backend_for_gpu_worker,
@@ -1993,6 +1994,96 @@ class SdxlLoraTrainer(ZImageLoraTrainer):
 
 
 # --------------------------------------------------------------------------- #
+# Kolors LoRA backend (epic 1929) — the SDXL-UNet trainer with the Kolors pipeline
+# --------------------------------------------------------------------------- #
+
+
+class _KolorsLoraBackend(_SdxlLoraBackend):
+    """Kolors LoRA training backend — the SDXL-UNet trainer with the Kolors pipeline.
+
+    Kolors (Kwai-Kolors) is an SDXL-architecture U-Net with a **ChatGLM3-6B** text
+    encoder + SDXL VAE and the same epsilon/v-prediction objective, so it reuses
+    every part of :class:`_SdxlLoraBackend` — the U-Net LoRA injection via
+    ``build_peft_network_config`` (so LoKr is inherited for free, epic 2193), the
+    DDPM loop with the SDXL ``added_cond_kwargs``, and the save path — and only
+    swaps the two documented seams: the pipeline class and the prompt encoder
+    (``KolorsPipeline.encode_prompt`` — ChatGLM3, ``max_sequence_length=256``, no
+    second CLIP ``prompt_2``). After caching the prompt embeddings it releases the
+    ~6B-param ChatGLM3 encoder when no live sampling will re-encode prompts,
+    keeping the Mac memory envelope to U-Net + LoRA + VAE.
+    """
+
+    kernel_id = "kolors_lora"
+    pipeline_class_name = "KolorsPipeline"
+    # Kolors-diffusers ships fp16-variant weights only (like the SDXL base).
+    load_variant = "fp16"
+
+    def _encode_prompt(self, pipe: Any, caption: str, device: str) -> tuple[Any, Any]:
+        # Kolors uses a single ChatGLM3 encoder (no SDXL ``prompt_2``) and a GLM
+        # sequence length of 256; the 4-tuple return order matches SDXL.
+        prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
+            prompt=caption,
+            device=device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=False,
+            max_sequence_length=256,
+        )
+        return prompt_embeds, pooled_prompt_embeds
+
+    def prepare_dataset(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        config: TrainingRunConfig,
+        progress: ProgressCallback,
+        cancel_requested: CancelCallback,
+    ) -> dict[str, Any]:
+        result = super().prepare_dataset(
+            items=items, config=config, progress=progress, cancel_requested=cancel_requested
+        )
+        # ChatGLM3-6B (~12 GB fp16) is only used to encode prompts. The embeddings
+        # are now cached and the training loop never touches the encoder, so unless
+        # live sampling will re-encode prompts mid-run, release it to keep the Mac
+        # memory envelope to U-Net + LoRA + VAE (epic 1929).
+        if not config.sample_every:
+            self._release_text_encoder()
+        return result
+
+    def _release_text_encoder(self) -> None:
+        pipe = self._pipeline
+        if pipe is None:
+            return
+        released: list[str] = []
+        for attr in ("text_encoder", "text_encoder_2"):
+            if getattr(pipe, attr, None) is not None:
+                setattr(pipe, attr, None)
+                released.append(attr)
+        if released:
+            empty_torch_cache(self._torch)
+            emit_worker_event(
+                "training_text_encoder_released",
+                kernel=self.kernel_id,
+                released=",".join(released),
+            )
+
+
+class KolorsLoraTrainer(SdxlLoraTrainer):
+    """Kolors LoRA trainer (epic 1929).
+
+    Thin extension of the generic SDXL-UNet trainer: the same staged orchestration
+    and SDXL training loop with the Kolors pipeline + ChatGLM3 prompt encoder via
+    :class:`_KolorsLoraBackend`. Output registers as a ``kolors`` family LoRA the
+    Kolors image adapter loads at generation time; LoKr support is inherited from
+    the shared SDXL backend (epic 2193, sc-2217).
+    """
+
+    kernel_id = "kolors_lora"
+
+    def _create_backend(self) -> _KolorsLoraBackend:
+        return _KolorsLoraBackend()
+
+
+# --------------------------------------------------------------------------- #
 # Real torch/diffusers/peft backend for Wan2.2 video
 # --------------------------------------------------------------------------- #
 
@@ -3863,6 +3954,7 @@ class LensLoraTrainer:
 _TRAINING_KERNELS: dict[str, Callable[[], Any]] = {
     ZImageLoraTrainer.kernel_id: ZImageLoraTrainer,
     SdxlLoraTrainer.kernel_id: SdxlLoraTrainer,
+    KolorsLoraTrainer.kernel_id: KolorsLoraTrainer,
     WanLoraTrainer.kernel_id: WanLoraTrainer,
     WanMoeLoraTrainer.kernel_id: WanMoeLoraTrainer,
     LensLoraTrainer.kernel_id: LensLoraTrainer,

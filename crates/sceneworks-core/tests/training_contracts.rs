@@ -106,7 +106,8 @@ fn builtin_targets_gate_network_types() {
     };
 
     // Every target advertises `lora`; only the validated torch/PEFT backends
-    // (epic 2193) advertise `lokr`: the Z-Image/SDXL image backends (v1) plus the
+    // (epic 2193) advertise `lokr`: the Z-Image/SDXL image backends (v1), the
+    // Kolors image backend (SDXL-architecture, epic 1929 / sc-2217), and the
     // Wan2.2 5B video backend (sc-2211). MLX-only and MoE targets stay lora-only.
     let lokr_targets: Vec<&str> = registry
         .targets
@@ -124,7 +125,7 @@ fn builtin_targets_gate_network_types() {
 
     assert_eq!(
         lokr_targets,
-        ["z_image_turbo_lora", "sdxl_lora", "wan_lora"]
+        ["z_image_turbo_lora", "sdxl_lora", "kolors_lora", "wan_lora"]
     );
 }
 
@@ -137,6 +138,18 @@ fn regen_target_registry_fixture() {
     let pretty = serde_json::to_string_pretty(&builtin_training_targets())
         .expect("builtin registry serializes");
     fs::write(fixture_path("target-registry.json"), pretty + "\n").expect("write fixture");
+}
+
+#[test]
+#[ignore = "regen helper: run with REGEN_FIXTURE=1 to rewrite preset-registry.json"]
+fn regen_preset_registry_fixture() {
+    if std::env::var("REGEN_FIXTURE").is_err() {
+        return;
+    }
+    let pretty =
+        serde_json::to_string_pretty(&sceneworks_core::training::builtin_training_presets())
+            .expect("builtin preset registry serializes");
+    fs::write(fixture_path("preset-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]
@@ -230,6 +243,38 @@ fn builtin_registry_exposes_sdxl_target() {
     assert_eq!(
         target.defaults.advanced.get("loraTargetModules"),
         Some(&serde_json::json!(["to_q", "to_k", "to_v", "to_out.0"]))
+    );
+}
+
+#[test]
+fn builtin_registry_exposes_kolors_target() {
+    // Kolors (epic 1929) is an SDXL-architecture U-Net target served by the
+    // `kolors_lora` kernel; it reuses the SDXL attention modules + LoKr support
+    // (epic 2193 / sc-2217) and resolves the Kolors-diffusers base.
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "kolors_lora")
+        .expect("kolors_lora target present");
+
+    assert_eq!(target.modality, TrainingModality::Image);
+    assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+    assert_eq!(target.family, "kolors");
+    assert_eq!(target.base_model, "kolors");
+    assert_eq!(target.kernel, "kolors_lora");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("Kwai-Kolors/Kolors-diffusers")
+    );
+    // SDXL-shared attention modules + LoKr advertised (sc-2217).
+    assert_eq!(
+        target.defaults.advanced.get("loraTargetModules"),
+        Some(&serde_json::json!(["to_q", "to_k", "to_v", "to_out.0"]))
+    );
+    assert_eq!(
+        target.limits.get("networkTypes"),
+        Some(&serde_json::json!(["lora", "lokr"]))
     );
 }
 

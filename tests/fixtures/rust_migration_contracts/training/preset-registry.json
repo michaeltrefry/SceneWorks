@@ -6,7 +6,9 @@
       "version": 1,
       "targetId": "z_image_turbo_lora",
       "name": "Character balanced",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw8bit",
       "qualityPreset": "balanced",
       "config": {
@@ -21,29 +23,29 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "high_noise",
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "sampleEvery": 250,
-          "sampleSteps": 8,
-          "sampleGuidanceScale": 0.0,
-          "qualityPreset": "balanced",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
+          "qualityPreset": "balanced",
           "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 0.0,
+          "sampleSteps": 8,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
           "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
-          "trainingAdapterVersion": "v2-default"
+          "trainingAdapterVersion": "v2-default",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
-        "description": "Research-backed first run for 12-25 clean character images.",
         "default": true,
+        "description": "Research-backed first run for 12-25 clean character images.",
         "order": 10
       }
     },
@@ -52,7 +54,9 @@
       "version": 1,
       "targetId": "z_image_turbo_lora",
       "name": "Character conservative",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw8bit",
       "qualityPreset": "conservative",
       "config": {
@@ -67,24 +71,24 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "high_noise",
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "sampleEvery": 250,
-          "sampleSteps": 8,
-          "sampleGuidanceScale": 0.0,
-          "qualityPreset": "conservative",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
+          "qualityPreset": "conservative",
           "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 0.0,
+          "sampleSteps": 8,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
           "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
-          "trainingAdapterVersion": "v2-default"
+          "trainingAdapterVersion": "v2-default",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -97,7 +101,9 @@
       "version": 1,
       "targetId": "z_image_turbo_lora",
       "name": "Character balanced (AdamW)",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw",
       "qualityPreset": "balanced",
       "config": {
@@ -112,24 +118,24 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "high_noise",
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "sampleEvery": 250,
-          "sampleSteps": 8,
-          "sampleGuidanceScale": 0.0,
-          "qualityPreset": "balanced",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
+          "qualityPreset": "balanced",
           "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 0.0,
+          "sampleSteps": 8,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
           "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
-          "trainingAdapterVersion": "v2-default"
+          "trainingAdapterVersion": "v2-default",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -142,7 +148,9 @@
       "version": 1,
       "targetId": "z_image_turbo_lora",
       "name": "Prodigy character (experimental)",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "prodigyopt",
       "qualityPreset": "balanced",
       "config": {
@@ -157,25 +165,25 @@
         "seed": 42,
         "optimizer": "prodigyopt",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "high_noise",
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "sampleEvery": 200,
-          "sampleSteps": 8,
-          "sampleGuidanceScale": 0.0,
-          "qualityPreset": "balanced",
-          "outputScope": "project",
-          "requestedGpu": "auto",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "optimizerDCoef": 1.0,
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 200,
+          "sampleGuidanceScale": 0.0,
+          "sampleSteps": 8,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
           "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
-          "trainingAdapterVersion": "v2-default"
+          "trainingAdapterVersion": "v2-default",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -189,7 +197,9 @@
       "version": 1,
       "targetId": "z_image_turbo_lora",
       "name": "Style balanced",
-      "recommendedFor": ["style"],
+      "recommendedFor": [
+        "style"
+      ],
       "optimizer": "adamw8bit",
       "qualityPreset": "balanced",
       "config": {
@@ -204,24 +214,24 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "high_noise",
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "sampleEvery": 250,
-          "sampleSteps": 8,
-          "sampleGuidanceScale": 0.0,
-          "qualityPreset": "balanced",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
+          "qualityPreset": "balanced",
           "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 0.0,
+          "sampleSteps": 8,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
           "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
-          "trainingAdapterVersion": "v2-default"
+          "trainingAdapterVersion": "v2-default",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -234,7 +244,9 @@
       "version": 1,
       "targetId": "z_image_turbo_lora",
       "name": "Low VRAM character",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw8bit",
       "qualityPreset": "low_vram",
       "config": {
@@ -249,24 +261,24 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "high_noise",
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "sampleEvery": 250,
-          "sampleSteps": 8,
-          "sampleGuidanceScale": 0.0,
-          "qualityPreset": "low_vram",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
+          "qualityPreset": "low_vram",
           "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 0.0,
+          "sampleSteps": 8,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
           "trainingAdapterRepo": "ostris/zimage_turbo_training_adapter",
-          "trainingAdapterVersion": "v2-default"
+          "trainingAdapterVersion": "v2-default",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -279,7 +291,9 @@
       "version": 1,
       "targetId": "sdxl_lora",
       "name": "Character balanced",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw8bit",
       "qualityPreset": "balanced",
       "config": {
@@ -294,26 +308,31 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 250,
-          "sampleSteps": 30,
-          "sampleGuidanceScale": 7.0,
-          "qualityPreset": "balanced",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
         }
       },
       "ui": {
-        "description": "Balanced first run for 12-25 clean character images on SDXL.",
         "default": true,
+        "description": "Balanced first run for 12-25 clean character images on SDXL.",
         "order": 10
       }
     },
@@ -322,7 +341,9 @@
       "version": 1,
       "targetId": "sdxl_lora",
       "name": "Character conservative",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw8bit",
       "qualityPreset": "conservative",
       "config": {
@@ -337,21 +358,26 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 250,
-          "sampleSteps": 30,
-          "sampleGuidanceScale": 7.0,
-          "qualityPreset": "conservative",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "conservative",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -364,7 +390,9 @@
       "version": 1,
       "targetId": "sdxl_lora",
       "name": "Style balanced",
-      "recommendedFor": ["style"],
+      "recommendedFor": [
+        "style"
+      ],
       "optimizer": "adamw8bit",
       "qualityPreset": "balanced",
       "config": {
@@ -379,21 +407,26 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 250,
-          "sampleSteps": 30,
-          "sampleGuidanceScale": 7.0,
-          "qualityPreset": "balanced",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -406,7 +439,9 @@
       "version": 1,
       "targetId": "sdxl_lora",
       "name": "Low VRAM character",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw8bit",
       "qualityPreset": "low_vram",
       "config": {
@@ -421,21 +456,26 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 250,
-          "sampleSteps": 30,
-          "sampleGuidanceScale": 7.0,
-          "qualityPreset": "low_vram",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "low_vram",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -444,11 +484,210 @@
       }
     },
     {
+      "id": "kolors_lora.character.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "kolors_lora",
+      "name": "Character balanced",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "default": true,
+        "description": "Balanced first run for 12-25 clean character images on Kolors.",
+        "order": 10
+      }
+    },
+    {
+      "id": "kolors_lora.character.adamw8bit.conservative",
+      "version": 1,
+      "targetId": "kolors_lora",
+      "name": "Character conservative",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "conservative",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.00005,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "conservative",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+        "order": 20
+      }
+    },
+    {
+      "id": "kolors_lora.style.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "kolors_lora",
+      "name": "Style balanced",
+      "recommendedFor": [
+        "style"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Higher-capacity style LoRA defaults for texture and look transfer.",
+        "order": 30
+      }
+    },
+    {
+      "id": "kolors_lora.character.adamw8bit.low_vram",
+      "version": 1,
+      "targetId": "kolors_lora",
+      "name": "Low VRAM character",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "low_vram",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.0001,
+        "steps": 1200,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 768,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "low_vram",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "768px preset for tighter-VRAM Kolors training.",
+        "order": 40
+      }
+    },
+    {
       "id": "wan_lora.character.adamw.balanced",
       "version": 1,
       "targetId": "wan_lora",
       "name": "Character balanced",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw",
       "qualityPreset": "balanced",
       "config": {
@@ -463,27 +702,32 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
-        "description": "Balanced first run for 12-25 clean character stills on Wan2.2-TI2V-5B.",
         "default": true,
+        "description": "Balanced first run for 12-25 clean character stills on Wan2.2-TI2V-5B.",
         "order": 10
       }
     },
@@ -492,7 +736,9 @@
       "version": 1,
       "targetId": "wan_lora",
       "name": "Character conservative",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw",
       "qualityPreset": "conservative",
       "config": {
@@ -507,22 +753,27 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "conservative",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "conservative",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -535,7 +786,9 @@
       "version": 1,
       "targetId": "wan_lora",
       "name": "Style balanced",
-      "recommendedFor": ["style"],
+      "recommendedFor": [
+        "style"
+      ],
       "optimizer": "adamw",
       "qualityPreset": "balanced",
       "config": {
@@ -550,22 +803,27 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -578,7 +836,9 @@
       "version": 1,
       "targetId": "wan_t2v_14b_lora",
       "name": "Character balanced",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw",
       "qualityPreset": "balanced",
       "config": {
@@ -593,27 +853,32 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
-        "description": "Balanced first run for character stills on Wan2.2 14B T2V (both noise experts).",
         "default": true,
+        "description": "Balanced first run for character stills on Wan2.2 14B T2V (both noise experts).",
         "order": 10
       }
     },
@@ -622,7 +887,9 @@
       "version": 1,
       "targetId": "wan_t2v_14b_lora",
       "name": "Style balanced",
-      "recommendedFor": ["style"],
+      "recommendedFor": [
+        "style"
+      ],
       "optimizer": "adamw",
       "qualityPreset": "balanced",
       "config": {
@@ -637,22 +904,27 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
@@ -665,7 +937,9 @@
       "version": 1,
       "targetId": "wan_i2v_14b_lora",
       "name": "Character balanced",
-      "recommendedFor": ["character"],
+      "recommendedFor": [
+        "character"
+      ],
       "optimizer": "adamw",
       "qualityPreset": "balanced",
       "config": {
@@ -680,27 +954,32 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "ui": {
-        "description": "Balanced first run for character stills on Wan2.2 14B I2V (both noise experts).",
         "default": true,
+        "description": "Balanced first run for character stills on Wan2.2 14B I2V (both noise experts).",
         "order": 10
       }
     },
@@ -709,7 +988,9 @@
       "version": 1,
       "targetId": "wan_i2v_14b_lora",
       "name": "Style balanced",
-      "recommendedFor": ["style"],
+      "recommendedFor": [
+        "style"
+      ],
       "optimizer": "adamw",
       "qualityPreset": "balanced",
       "config": {
@@ -724,22 +1005,27 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "networkType": "lora",
-          "timestepType": "sigmoid",
-          "timestepBias": "balanced",
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
           "lossType": "mse",
-          "weightDecay": 0.0001,
           "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "numFrames": 1,
-          "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-          "sampleEvery": 0,
-          "qualityPreset": "balanced",
           "outputScope": "project",
-          "requestedGpu": "auto"
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
         }
       },
       "ui": {

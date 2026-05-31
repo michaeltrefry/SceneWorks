@@ -113,10 +113,12 @@ from scene_worker.training_adapters import (
     LensLoraTrainer,
     LtxMlxLoraTrainer,
     SdxlLoraTrainer,
+    KolorsLoraTrainer,
     TrainingKernelError,
     WanLoraTrainer,
     WanMoeLoraTrainer,
     ZImageLoraTrainer,
+    _KolorsLoraBackend,
     _SdxlLoraBackend,
     _WanLoraBackend,
     _WanMoeLoraBackend,
@@ -6650,11 +6652,73 @@ def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
 def test_create_training_kernel_resolves_known_and_rejects_unknown():
     assert isinstance(create_training_kernel("z_image_lora"), ZImageLoraTrainer)
     assert isinstance(create_training_kernel("sdxl_lora"), SdxlLoraTrainer)
+    assert isinstance(create_training_kernel("kolors_lora"), KolorsLoraTrainer)
     assert isinstance(create_training_kernel("wan_lora"), WanLoraTrainer)
     assert isinstance(create_training_kernel("wan_moe_lora"), WanMoeLoraTrainer)
     assert isinstance(create_training_kernel("lens_lora"), LensLoraTrainer)
     with pytest.raises(TrainingKernelError, match="No training kernel"):
         create_training_kernel("not_a_kernel")
+
+
+def test_kolors_lora_trainer_reuses_sdxl_backend_with_kolors_seams():
+    # KolorsLoraTrainer (epic 1929) is a thin extension of the generic SDXL-UNet
+    # trainer: same orchestration + SDXL training loop, swapping only the pipeline
+    # class + ChatGLM3 prompt encoder. LoKr is inherited from the SDXL backend.
+    trainer = create_training_kernel("kolors_lora")
+    assert isinstance(trainer, SdxlLoraTrainer)
+    assert trainer.kernel_id == "kolors_lora"
+    backend = trainer._create_backend()
+    assert isinstance(backend, _KolorsLoraBackend)
+    assert isinstance(backend, _SdxlLoraBackend)  # inherits the LoKr-wired save/load
+    assert backend.kernel_id == "kolors_lora"
+    assert backend.pipeline_class_name == "KolorsPipeline"
+
+
+def test_kolors_encode_prompt_uses_chatglm_seam():
+    # The only forward-pass seam: Kolors uses a single ChatGLM3 encoder (no SDXL
+    # prompt_2) at GLM sequence length 256; the 4-tuple return order matches SDXL.
+    captured: dict[str, object] = {}
+
+    def fake_encode_prompt(**kwargs):
+        captured.update(kwargs)
+        return ("PROMPT_EMBEDS", "NEG", "POOLED", "NEG_POOLED")
+
+    pipe = SimpleNamespace(encode_prompt=fake_encode_prompt)
+    backend = _KolorsLoraBackend()
+    prompt_embeds, pooled = backend._encode_prompt(pipe, "a calico cat", "cpu")
+
+    assert prompt_embeds == "PROMPT_EMBEDS"
+    assert pooled == "POOLED"
+    assert captured["prompt"] == "a calico cat"
+    assert captured["max_sequence_length"] == 256
+    assert captured["do_classifier_free_guidance"] is False
+    # Kolors has no second CLIP encoder — the SDXL `prompt_2` arg must be absent.
+    assert "prompt_2" not in captured
+
+
+def test_kolors_backend_releases_chatglm_encoder_when_not_sampling(monkeypatch):
+    # ChatGLM3-6B is only needed to cache prompt embeddings. With no live sampling
+    # the encoder is released after caching (Mac memory envelope, epic 1929); with
+    # sampling on it's retained because generate_samples re-encodes prompts.
+    monkeypatch.setattr(_SdxlLoraBackend, "prepare_dataset", lambda self, **kw: {"itemCount": 0})
+    monkeypatch.setattr("scene_worker.training_adapters.empty_torch_cache", lambda _torch: None)
+
+    def run(sample_every):
+        backend = _KolorsLoraBackend()
+        encoder = object()
+        backend._pipeline = SimpleNamespace(text_encoder=encoder, text_encoder_2=None)
+        backend.prepare_dataset(
+            items=[],
+            config=SimpleNamespace(sample_every=sample_every),
+            progress=lambda *a, **k: None,
+            cancel_requested=lambda: False,
+        )
+        return backend._pipeline.text_encoder, encoder
+
+    released, _ = run(0)
+    assert released is None  # released when not sampling
+    retained, encoder = run(250)
+    assert retained is encoder  # kept for live sampling
 
 
 def test_wan_lora_trainer_reuses_zimage_orchestration_with_wan_backend():
