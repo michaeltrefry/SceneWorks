@@ -102,9 +102,21 @@ pub(crate) async fn import_asset(
 
 pub(crate) async fn write_upload_field_to_temp_file(
     state: &AppState,
-    mut field: axum::extract::multipart::Field<'_>,
+    field: axum::extract::multipart::Field<'_>,
 ) -> Result<PathBuf, ApiError> {
-    let upload_dir = state.settings.data_dir.join("cache").join("uploads");
+    write_upload_field_to_dir(state, field, "uploads").await
+}
+
+/// Stream a multipart field to a unique temp file under `<data_dir>/cache/<subdir>`,
+/// enforcing the upload size cap. Callers own the returned path (move it into place
+/// or delete it). `subdir` lets transient flows isolate their staging area (e.g.
+/// pose-source uploads use `pose-uploads` so they can be swept independently).
+pub(crate) async fn write_upload_field_to_dir(
+    state: &AppState,
+    mut field: axum::extract::multipart::Field<'_>,
+    subdir: &str,
+) -> Result<PathBuf, ApiError> {
+    let upload_dir = state.settings.data_dir.join("cache").join(subdir);
     tokio::fs::create_dir_all(&upload_dir)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;

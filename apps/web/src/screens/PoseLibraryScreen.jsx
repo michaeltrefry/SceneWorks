@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL, apiFetch, isAbortError } from "../api.js";
 import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetThumbnail } from "../components/assetMedia.jsx";
@@ -69,15 +69,7 @@ function buildCandidates(job) {
 // The "Create" tab body: pick photos (DatasetAddDialog), run DWPose, then review,
 // categorize, and save one whole-body pose per detected person to the store.
 function PoseCreatePanel({ hidden, categories, onSaved }) {
-  const {
-    token,
-    activeProject,
-    assets = [],
-    characters = [],
-    importAsset,
-    requestedGpu,
-    jobs = [],
-  } = useAppContext();
+  const { token, activeProject, assets = [], characters = [], requestedGpu, jobs = [] } = useAppContext();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sources, setSources] = useState([]); // selected source asset records
   const [phase, setPhase] = useState("idle"); // idle | detecting | review
@@ -87,27 +79,37 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
 
-  const addSources = useCallback((records) => {
+  // Sources are normalized entries (deduped by `key`): either an asset-backed pick
+  // ({kind:"asset", asset, assetId}) or a transient File-Upload ({kind:"upload",
+  // path, objectUrl}).
+  const mergeSources = useCallback((entries) => {
     setSources((prev) => {
-      const seen = new Set(prev.map((asset) => asset.id));
-      return [...prev, ...records.filter((asset) => asset && !seen.has(asset.id))];
+      const seen = new Set(prev.map((source) => source.key));
+      return [...prev, ...entries.filter((source) => source && !seen.has(source.key))];
     });
   }, []);
 
-  // File tab: import each dropped/selected image into the active project (which
-  // gives the worker an on-disk asset to read), then treat it like any source.
+  // File tab: stage each image to the TRANSIENT pose-source area (NOT a workspace
+  // asset) — the worker reads it by path and deletes it after detection (epic 2282).
   const handleImport = useCallback(
     async (files) => {
-      if (!importAsset) return;
+      const images = Array.from(files).filter((file) => file.type?.startsWith("image/"));
+      if (!images.length) return;
       setImporting(true);
       try {
-        const imported = [];
-        for (const file of Array.from(files)) {
-          if (!file.type?.startsWith("image/")) continue; // pose detection needs images
-          const asset = await importAsset(file, { throwOnError: true });
-          if (asset) imported.push(asset);
-        }
-        addSources(imported);
+        const body = new FormData();
+        for (const file of images) body.append("file", file);
+        const result = await apiFetch("/api/v1/poses/sources", token, { method: "POST", body });
+        const staged = Array.isArray(result?.sources) ? result.sources : [];
+        mergeSources(
+          staged.map((src, index) => ({
+            key: src.path,
+            kind: "upload",
+            path: src.path,
+            displayName: src.displayName ?? images[index]?.name ?? "image",
+            objectUrl: images[index] ? URL.createObjectURL(images[index]) : undefined,
+          })),
+        );
         setError("");
       } catch (err) {
         setError(String(err?.message ?? err));
@@ -115,19 +117,44 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
         setImporting(false);
       }
     },
-    [importAsset, addSources],
+    [token, mergeSources],
   );
 
-  // Library / Character tabs: resolve the picked ids back to asset records.
+  // Library / Character tabs: resolve the picked ids to asset records.
   const handleAdd = useCallback(
     (selectedIds) => {
-      const records = selectedIds.map((id) => assets.find((asset) => asset.id === id)).filter(Boolean);
-      addSources(records);
+      mergeSources(
+        selectedIds
+          .map((id) => assets.find((asset) => asset.id === id))
+          .filter(Boolean)
+          .map((asset) => ({
+            key: asset.id,
+            kind: "asset",
+            asset,
+            assetId: asset.id,
+            displayName: asset.displayName ?? asset.id,
+          })),
+      );
     },
-    [assets, addSources],
+    [assets, mergeSources],
   );
 
-  const removeSource = (id) => setSources((prev) => prev.filter((asset) => asset.id !== id));
+  const removeSource = (key) =>
+    setSources((prev) => {
+      const target = prev.find((source) => source.key === key);
+      if (target?.objectUrl) URL.revokeObjectURL(target.objectUrl);
+      return prev.filter((source) => source.key !== key);
+    });
+
+  // Revoke any object URLs on unmount (latest set via ref).
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
+  useEffect(
+    () => () => {
+      for (const source of sourcesRef.current) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
+    },
+    [],
+  );
 
   const generate = useCallback(async () => {
     if (!activeProject || !sources.length) return;
@@ -143,7 +170,11 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
           requestedGpu,
           payload: {
             projectId: activeProject.id,
-            sources: sources.map((asset) => ({ assetId: asset.id, displayName: asset.displayName })),
+            sources: sources.map((source) =>
+              source.kind === "upload"
+                ? { path: source.path, displayName: source.displayName, temp: true }
+                : { assetId: source.assetId, displayName: source.displayName },
+            ),
           },
         }),
       });
@@ -195,7 +226,10 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
         pose: candidate.pose,
       }));
       await apiFetch("/api/v1/poses", token, { method: "POST", body: JSON.stringify({ poses }) });
-      setSources([]);
+      setSources((prev) => {
+        for (const source of prev) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
+        return [];
+      });
       setCandidates([]);
       setPhase("idle");
       onSaved?.();
@@ -232,11 +266,15 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
 
           {sources.length ? (
             <div className="dataset-add-grid">
-              {sources.map((asset) => (
-                <div className="dataset-add-card" key={asset.id}>
-                  <AssetThumbnail asset={asset} />
-                  <span>{asset.displayName ?? asset.id}</span>
-                  <button onClick={() => removeSource(asset.id)} type="button">
+              {sources.map((source) => (
+                <div className="dataset-add-card" key={source.key}>
+                  {source.kind === "upload" ? (
+                    <img alt="" src={source.objectUrl} />
+                  ) : (
+                    <AssetThumbnail asset={source.asset} />
+                  )}
+                  <span>{source.displayName}</span>
+                  <button onClick={() => removeSource(source.key)} type="button">
                     Remove
                   </button>
                 </div>
@@ -310,7 +348,7 @@ function PoseCreatePanel({ hidden, categories, onSaved }) {
               assets={assets}
               characters={characters}
               importing={importing}
-              memberIds={sources.map((asset) => asset.id)}
+              memberIds={sources.filter((source) => source.kind === "asset").map((source) => source.assetId)}
               onAdd={handleAdd}
               onClose={() => setDialogOpen(false)}
               onImport={handleImport}

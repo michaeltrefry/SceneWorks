@@ -419,6 +419,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         let _ = std::fs::create_dir_all(jobs_db_parent);
     }
     let _ = sweep_stale_lora_uploads(&settings.data_dir);
+    let _ = sweep_stale_pose_uploads(&settings.data_dir);
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
@@ -599,6 +600,7 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/prompts/refine", post(create_prompt_refine_job))
         .route("/api/v1/poses", post(create_poses))
+        .route("/api/v1/poses/sources", post(create_pose_sources))
         .route(
             "/api/v1/poses/preview/:job_id/:file_name",
             get(get_pose_preview),

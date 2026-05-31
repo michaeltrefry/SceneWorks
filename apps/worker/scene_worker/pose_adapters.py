@@ -286,6 +286,19 @@ def _resolve_source_path(src: dict, project_path) -> str | None:
     return raw
 
 
+def _cleanup_temp_sources(paths: list[str], uploads_root: Path) -> None:
+    """Delete pose-source temp uploads after detection. File-Upload sources are
+    transient — never workspace assets (epic 2282). Guarded to the pose-uploads
+    cache so a project asset resolved by id can never be removed."""
+    for raw in paths:
+        try:
+            resolved = Path(raw).resolve()
+            if uploads_root in resolved.parents:
+                resolved.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def run_pose_detect(
     settings: Any,
     job: dict[str, Any],
@@ -342,11 +355,15 @@ def run_pose_detect(
     runtime = detector_factory(settings)
 
     out_sources: list[dict] = []
+    uploads_root = (Path(getattr(settings, "data_dir", ".")) / "cache" / "pose-uploads").resolve()
+    temp_sources: list[str] = []
     total = len(sources)
     for si, src in enumerate(sources):
         if cancel_requested is not None and cancel_requested():
             raise InterruptedError("Pose detection canceled.")
         path = _resolve_source_path(src, project_path)
+        if src.get("temp") and path:
+            temp_sources.append(path)
         img = cv2.imread(path) if path else None
         if img is None:
             out_sources.append({
@@ -410,6 +427,10 @@ def run_pose_detect(
         })
         _p("running", 0.08 + 0.9 * (si + 1) / total,
            f"Detected {len(poses)} pose(s) in image {si + 1}/{total}.")
+
+    # File-Upload sources are transient — delete them now detection is done (the
+    # startup sweep backstops canceled/failed jobs). epic 2282.
+    _cleanup_temp_sources(temp_sources, uploads_root)
 
     return {
         "sources": out_sources,

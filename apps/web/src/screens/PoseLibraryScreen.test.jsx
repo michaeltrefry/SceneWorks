@@ -20,6 +20,9 @@ vi.mock("../api.js", async (importOriginal) => {
       if (method === "POST" && path === "/api/v1/jobs") {
         return { id: "job_pose_1", status: "queued" };
       }
+      if (method === "POST" && path === "/api/v1/poses/sources") {
+        return { sources: [{ path: "/data/cache/pose-uploads/upload-x.png", displayName: "photo.png" }] };
+      }
       return {};
     }),
   };
@@ -278,6 +281,33 @@ describe("PoseLibraryScreen — Create tab", () => {
     expect(body.type).toBe("pose_detect");
     expect(body.projectId).toBe("project_1");
     expect(body.payload.sources).toEqual([{ assetId: "asset_lib_1", displayName: "Photo" }]);
+  });
+
+  it("stages File-Upload sources as temporary uploads, not workspace assets", async () => {
+    window.URL.createObjectURL = () => "blob:test";
+    window.URL.revokeObjectURL = () => {};
+    await render();
+    await click(container.querySelector("#pose-library-tab-create"));
+    await click(byText("Add images"));
+    // File tab is the default; fire a change on its <input type=file> with an image.
+    const fileInput = container.querySelector('input[type="file"]');
+    const file = new File(["x"], "photo.png", { type: "image/png" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+
+    // Staged via the transient endpoint — NEVER imported as a workspace asset.
+    expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/poses/sources")).toBe(true);
+    expect(apiCalls.some((c) => c.method === "POST" && c.path.includes("/assets"))).toBe(false);
+
+    // Generate forwards it as a temp path source (not an assetId).
+    await click(byText("Generate poses"));
+    const job = apiCalls.find((c) => c.method === "POST" && c.path === "/api/v1/jobs");
+    expect(JSON.parse(job.body).payload.sources[0]).toMatchObject({
+      path: "/data/cache/pose-uploads/upload-x.png",
+      temp: true,
+    });
   });
 
   it("requires a workspace before creating poses", async () => {

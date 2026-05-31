@@ -158,3 +158,28 @@ def test_run_pose_detect_with_fake_detector(tmp_path):
     prev = cv2.imread(pose["skeletonPreview"])
     assert prev is not None and prev.shape[0] == prev.shape[1]
     assert events  # progress was reported
+
+
+def test_run_pose_detect_deletes_temp_uploads(tmp_path):
+    cv2 = pytest.importorskip("cv2")
+    # A File-Upload source staged under <data_dir>/cache/pose-uploads (transient).
+    uploads = tmp_path / "cache" / "pose-uploads"
+    uploads.mkdir(parents=True)
+    temp_src = uploads / "upload-abc.png"
+    cv2.imwrite(str(temp_src), np.full((480, 320, 3), 30, dtype=np.uint8))
+    # A non-temp source elsewhere must be left untouched.
+    keep = tmp_path / "keep.png"
+    cv2.imwrite(str(keep), np.full((480, 320, 3), 30, dtype=np.uint8))
+
+    runtime = pa.PoseDetectorRuntime(
+        model=lambda img: _fake_wholebody(1), device="cpu", detector_id="fake/test"
+    )
+    settings = SimpleNamespace(data_dir=str(tmp_path), gpu_id="cpu")
+    job = {
+        "id": "job_pose_temp",
+        "payload": {"sources": [{"path": str(temp_src), "temp": True}, {"path": str(keep)}]},
+    }
+    pa.run_pose_detect(settings, job, detector_factory=lambda s: runtime)
+
+    assert not temp_src.exists()  # temp upload removed after detection
+    assert keep.exists()  # non-temp source untouched
