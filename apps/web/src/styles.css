@@ -209,7 +209,11 @@ button:focus-visible {
 .app {
   display: grid;
   grid-template-columns: var(--side-w) minmax(0, 1fr);
-  min-height: 100vh;
+  /* Lock the shell to the viewport so the page itself never scrolls; the sidebar
+     and the workspace each scroll independently within their own region. */
+  grid-template-rows: minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -220,6 +224,7 @@ button:focus-visible {
   padding: 18px 14px;
   background: var(--bg-2);
   border-right: 1px solid var(--border);
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -705,6 +710,8 @@ button:focus-visible {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
   background: var(--bg);
 }
 
@@ -5118,11 +5125,14 @@ label {
   margin: 8px 16px 0;
 }
 
-/* The tool palette floats over the canvas on the right, like the zoom bar. */
+/* The tool palette floats over the canvas on the right, like the zoom bar. It
+   scrolls within itself if it ever outgrows the canvas height (more tools/panels). */
 .image-editor-toolbar {
   position: absolute;
   top: 12px;
   right: 12px;
+  max-height: calc(100% - 24px);
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
