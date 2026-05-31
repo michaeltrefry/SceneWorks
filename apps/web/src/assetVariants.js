@@ -42,6 +42,21 @@ export function foldUpscaledAssetVariants(assets = []) {
     });
 }
 
+// The studios' "Recent Assets" / Recent Batches list shows freshly generated
+// assets. An upscale shares its generation with the original image, so listing
+// both makes every generation look duplicated. Drop the upscaled variant when its
+// original is present and keep the original as the visible tile — the fullscreen
+// preview still exposes the upscaled image via foldUpscaledAssetVariants and the
+// Original/Upscaled toggle. (An upscale whose original is gone stays, so it never
+// vanishes entirely.)
+export function dropUpscaledVariants(assets = []) {
+  const presentIds = new Set(assets.map((asset) => asset.id));
+  return assets.filter((asset) => {
+    const originalId = upscaledFromAssetId(asset);
+    return !(originalId && presentIds.has(originalId));
+  });
+}
+
 export function findFoldedAssetById(foldedAssets, assetId) {
   return foldedAssets.find(
     (asset) =>
