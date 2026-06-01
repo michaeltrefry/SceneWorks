@@ -207,6 +207,11 @@ string_enum! {
         // Torch-backed (Real-ESRGAN / AuraSR), GPU-required like generation; reuses
         // the upscale engines that previously only ran as a generation post-step.
         ImageUpscale => "image_upscale",
+        // Standalone tile-ControlNet detail refine of an existing image asset (Image
+        // Editor, epic 2427; spike sc-2437). Torch-backed SDXL/RealVisXL img2img + a
+        // tile ControlNet run over feathered tiles to add micro-texture; GPU-required
+        // like generation. Composes after image_upscale (creative upscale).
+        ImageDetail => "image_detail",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
@@ -307,6 +312,11 @@ string_enum! {
         // Python worker when the torch inference backend is available (runtime.py);
         // the Rust utility worker never emits it. See jobs_store::job_requires_gpu.
         ImageUpscale => "image_upscale",
+        // Standalone tile-ControlNet detail refine (Image Editor, epic 2427; spike
+        // sc-2437). Advertised by the Python worker only when the torch inference
+        // backend is available (runtime.py); the Rust utility worker never emits it.
+        // See jobs_store::job_requires_gpu.
+        ImageDetail => "image_detail",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",

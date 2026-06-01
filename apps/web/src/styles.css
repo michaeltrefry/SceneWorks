@@ -5295,6 +5295,11 @@ label {
   max-width: 200px;
 }
 
+/* Detail-enhance bar (sc-2438): backbone picker + strength/structure sliders. */
+.image-editor-detailbar .image-editor-editmodel {
+  max-width: 200px;
+}
+
 /* In-flight AI op (upscale, later edit/detail): a blocking overlay over the canvas. */
 .image-editor-busy {
   position: absolute;

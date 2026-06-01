@@ -11,10 +11,10 @@ const MAX_SCALE = 16;
 const ZOOM_STEP = 1.2;
 const MIN_CROP_PX = 8;
 
-// Tools still to come in epic 2427 — rendered as an inert scaffold so the frame
-// (and the next slices' insertion points) are in place. Move + Crop + Upscale +
-// Color + AI Edit are live.
-const UPCOMING_TOOLS = [{ id: "detail", label: "Detail", story: "sc-2438" }];
+// Future-tool scaffold (epic 2427) — rendered as inert buttons so the frame + the
+// next slices' insertion points stay in place. All current epic-2427 tools are live
+// (Move + Crop + Upscale + Color + AI Edit + Detail), so this is empty for now.
+const UPCOMING_TOOLS = [];
 
 // Models that can edit an existing image with a prompt — the manifest tags them
 // with an `edit_image`/`image_edit` capability (same filter the Image Studio uses).
@@ -23,6 +23,13 @@ export function editCapableModels(imageModels) {
     const caps = model.capabilities ?? [];
     return caps.includes("edit_image") || caps.includes("image_edit");
   });
+}
+
+// Models that can run the tile-ControlNet detail refine — the manifest tags them
+// `image_detail` (sc-2437/sc-2438; SDXL/RealVisXL only). RealVisXL is the recommended
+// photoreal backbone per the spike.
+export function detailCapableModels(imageModels) {
+  return (imageModels ?? []).filter((model) => (model.capabilities ?? []).includes("image_detail"));
 }
 
 // The `POST /api/v1/image/jobs` body for an in-editor prompt edit (sc-2435). Reuses
@@ -144,6 +151,25 @@ export function buildUpscaleJobBody({ project, requestedGpu, sourceAssetId, fact
     projectName: project.name ?? null,
     requestedGpu,
     payload: { projectId: project.id, sourceAssetId, factor, engine, displayName },
+  };
+}
+
+// The `POST /api/v1/jobs` body for a standalone image_detail job (sc-2438). Same
+// generic-jobs shape as upscale; the worker reads model + advanced.strength/cnScale
+// from the payload (recipe defaults locked by the sc-2437 spike). Pure for testing.
+export function buildDetailJobBody({ project, requestedGpu, sourceAssetId, model, strength, cnScale, displayName }) {
+  return {
+    type: "image_detail",
+    projectId: project.id,
+    projectName: project.name ?? null,
+    requestedGpu,
+    payload: {
+      projectId: project.id,
+      sourceAssetId,
+      model,
+      displayName,
+      advanced: { strength, cnScale },
+    },
   };
 }
 
@@ -283,6 +309,14 @@ export function ImageEditor() {
   const [editPrompt, setEditPrompt] = useState("");
   const [editSeed, setEditSeed] = useState("");
 
+  // Detail enhance (sc-2438): tile-ControlNet refine over the working image. Backbone
+  // (SDXL/RealVisXL) + strength (the "detail amount" — higher invents more texture) +
+  // structure-lock (controlnet scale). Defaults are the sc-2437 spike's locked recipe.
+  const detailModels = detailCapableModels(imageModels);
+  const [detailModel, setDetailModel] = useState("");
+  const [detailStrength, setDetailStrength] = useState(0.55);
+  const [detailCnScale, setDetailCnScale] = useState(0.7);
+
   // Inpaint mask (sc-2436): freehand brush strokes in image-pixel coords, rasterized
   // to a mask asset on Run for inpaint-capable models. `maskMode` is the paint sub-mode
   // of the AI Edit tool (Stage panning is suspended while it's on).
@@ -298,6 +332,12 @@ export function ImageEditor() {
     const caps = editCapableModels(imageModels);
     if (caps.length && !caps.some((model) => model.id === editModel)) setEditModel(caps[0].id);
   }, [imageModels, editModel]);
+
+  // Same default/self-heal for the detail backbone.
+  useEffect(() => {
+    const caps = detailCapableModels(imageModels);
+    if (caps.length && !caps.some((model) => model.id === detailModel)) setDetailModel(caps[0].id);
+  }, [imageModels, detailModel]);
 
   // The chosen edit model + whether it accepts an inpaint mask (gates the mask tool).
   const selectedEditModel = editModels.find((model) => model.id === editModel) ?? null;
@@ -787,6 +827,24 @@ export function ImageEditor() {
     });
   }
 
+  function runDetail() {
+    if (!detailModel) return;
+    runAiOp({
+      label: "detail",
+      edit: { op: "detail", model: detailModel, strength: detailStrength, cnScale: detailCnScale },
+      buildBody: (scratch) =>
+        buildDetailJobBody({
+          project: activeProject,
+          requestedGpu,
+          sourceAssetId: scratch.id,
+          model: detailModel,
+          strength: detailStrength,
+          cnScale: detailCnScale,
+          displayName: working?.source?.name,
+        }),
+    });
+  }
+
   async function runEdit() {
     const prompt = editPrompt.trim();
     if (!prompt || !editModel || !working) return;
@@ -1126,6 +1184,15 @@ export function ImageEditor() {
               Upscale
             </button>
             <button
+              className={tool === "detail" ? "image-editor-tool active" : "image-editor-tool"}
+              disabled={!!aiOp || detailModels.length === 0}
+              onClick={() => setTool("detail")}
+              title="Detail enhance (tile-ControlNet refine)"
+              type="button"
+            >
+              Detail
+            </button>
+            <button
               className={tool === "color" ? "image-editor-tool active" : "image-editor-tool"}
               disabled={!!aiOp}
               onClick={startColorGrade}
@@ -1227,6 +1294,61 @@ export function ImageEditor() {
             <button className="primary" disabled={!!aiOp} onClick={runUpscale} type="button">
               Upscale
             </button>
+            <button onClick={() => setTool("move")} type="button">
+              Cancel
+            </button>
+          </div>
+        ) : null}
+
+        {tool === "detail" && working ? (
+          <div className="image-editor-cropbar image-editor-detailbar">
+            {detailModels.length === 0 ? (
+              <span className="image-editor-cropdims">No detail-capable models installed</span>
+            ) : (
+              <>
+                <select
+                  aria-label="Detail backbone"
+                  className="image-editor-editmodel"
+                  onChange={(event) => setDetailModel(event.target.value)}
+                  value={detailModel}
+                >
+                  {detailModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label ?? model.id}
+                    </option>
+                  ))}
+                </select>
+                <label className="image-editor-slider" title="Detail amount — higher invents more texture">
+                  <span className="image-editor-slider-label">Detail</span>
+                  <input
+                    aria-label="Detail strength"
+                    max={0.8}
+                    min={0.3}
+                    onChange={(event) => setDetailStrength(Number(event.target.value))}
+                    step={0.05}
+                    type="range"
+                    value={detailStrength}
+                  />
+                  <span className="image-editor-slider-value">{Math.round(detailStrength * 100)}</span>
+                </label>
+                <label className="image-editor-slider" title="Structure lock — higher keeps the result closer to the source">
+                  <span className="image-editor-slider-label">Structure</span>
+                  <input
+                    aria-label="Structure lock"
+                    max={1}
+                    min={0.4}
+                    onChange={(event) => setDetailCnScale(Number(event.target.value))}
+                    step={0.05}
+                    type="range"
+                    value={detailCnScale}
+                  />
+                  <span className="image-editor-slider-value">{Math.round(detailCnScale * 100)}</span>
+                </label>
+                <button className="primary" disabled={!!aiOp || !detailModel} onClick={runDetail} type="button">
+                  Enhance
+                </button>
+              </>
+            )}
             <button onClick={() => setTool("move")} type="button">
               Cancel
             </button>
@@ -1361,7 +1483,13 @@ export function ImageEditor() {
           <div className="image-editor-busy">
             <div className="image-editor-busy-card">
               <p className="image-editor-busy-title">
-                {aiOp.label === "upscale" ? "Upscaling…" : aiOp.label === "edit" ? "Editing…" : "Working…"}
+                {aiOp.label === "upscale"
+                  ? "Upscaling…"
+                  : aiOp.label === "edit"
+                    ? "Editing…"
+                    : aiOp.label === "detail"
+                      ? "Enhancing detail…"
+                      : "Working…"}
               </p>
               <p className="image-editor-busy-msg">
                 {activeAiJob?.message ||

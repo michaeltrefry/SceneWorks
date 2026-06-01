@@ -52,6 +52,7 @@ from scene_worker.image_adapters import (
     lens_resolution_for,
     load_mask_image,
     load_reference_image,
+    model_supports_detail,
     model_supports_edit,
     model_supports_inpaint,
     pipeline_component_devices,
@@ -293,6 +294,7 @@ def test_python_worker_only_advertises_inference_job_capabilities(monkeypatch):
     job_capabilities = [capability for capability in capabilities if capability != "gpu"]
 
     assert job_capabilities == [
+        "image_detail",
         "image_edit",
         "image_generate",
         "image_interleave",
@@ -428,6 +430,108 @@ def test_run_image_upscale_requires_source_asset(monkeypatch, tmp_path):
         run_image_upscale(
             SimpleNamespace(gpu_id=None),
             {"id": "job_x", "payload": {"projectId": "p"}},
+            project_path=tmp_path,
+            progress=lambda *args: None,
+            cancel_requested=lambda: False,
+        )
+
+
+def test_model_supports_detail_matrix():
+    # sc-2438: tile-ControlNet detail refine is SDXL-family only.
+    assert model_supports_detail("sdxl") is True
+    assert model_supports_detail("realvisxl") is True
+    assert model_supports_detail("qwen_image_edit_2511") is False
+    assert model_supports_detail("unknown_model") is False
+
+
+def test_run_image_detail_writes_single_child_asset(tmp_path, monkeypatch):
+    # sc-2438: standalone tile-ControlNet detail refine of an existing asset. Mock the
+    # pipeline load + the tiled refine so the orchestration (source resolve → one child
+    # asset + lineage + fact shape) runs without torch/diffusers/weights (CI has none).
+    from scene_worker.image_adapters import run_image_detail
+
+    source = Image.new("RGB", (12, 9), "green")
+    source_path = tmp_path / "src.png"
+    source.save(source_path, "PNG")
+    refined = Image.new("RGB", (12, 9), "white")
+
+    monkeypatch.setattr(
+        "scene_worker.image_adapters.find_asset_media_path",
+        lambda project_path, asset_id: source_path,
+    )
+    monkeypatch.setattr(
+        "scene_worker.image_adapters._load_detail_pipeline",
+        lambda settings, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "scene_worker.image_adapters._refine_tiled_detail",
+        lambda pipe, image, **kwargs: (refined, 1),
+    )
+
+    job = {
+        "id": "job_detail_1",
+        "payload": {
+            "projectId": "project_1",
+            "sourceAssetId": "asset_src",
+            "model": "realvisxl",
+            "displayName": "Studio still",
+            "advanced": {"strength": 0.6, "cnScale": 0.8},
+        },
+    }
+    result = run_image_detail(
+        SimpleNamespace(gpu_id=None),
+        job,
+        project_path=tmp_path,
+        progress=lambda *args: None,
+        cancel_requested=lambda: False,
+    )
+
+    writes = result["assetWrites"]
+    assert len(writes) == 1
+    fact = writes[0]
+    # Detail refine preserves dimensions (refines in place — unlike upscale).
+    assert (fact["width"], fact["height"]) == (12, 9)
+    assert fact["mode"] == "image_detail"
+    assert fact["model"] == "realvisxl"
+    assert fact["sourceAssetId"] == "asset_src"
+    assert fact["parents"] == ["asset_src"]
+    assert fact["displayName"] == "Studio still (detail enhanced)"
+    assert fact["extra"] == {
+        "isDetailEnhanced": True,
+        "detailFromAssetId": "asset_src",
+        "backbone": "realvisxl",
+        "strength": 0.6,
+        "cnScale": 0.8,
+    }
+    written_path = tmp_path / fact["mediaPath"]
+    assert written_path.is_file()
+    assert Image.open(written_path).size == (12, 9)
+    assert result["expectedCount"] == 1
+    assert result["generationSet"]["id"] == result["generationSetId"]
+
+
+def test_run_image_detail_requires_source_asset(tmp_path):
+    from scene_worker.image_adapters import run_image_detail
+
+    with pytest.raises(RuntimeError, match="source image asset"):
+        run_image_detail(
+            SimpleNamespace(gpu_id=None),
+            {"id": "job_x", "payload": {"projectId": "p"}},
+            project_path=tmp_path,
+            progress=lambda *args: None,
+            cancel_requested=lambda: False,
+        )
+
+
+def test_run_image_detail_rejects_non_detail_model(tmp_path):
+    # A non-SDXL model is rejected before any pipeline load (no mocking needed).
+    from scene_worker.image_adapters import run_image_detail
+
+    with pytest.raises(RuntimeError, match="does not support detail"):
+        run_image_detail(
+            SimpleNamespace(gpu_id=None),
+            {"id": "job_x", "payload": {"projectId": "p", "sourceAssetId": "asset_src",
+                                        "model": "qwen_image_edit_2511"}},
             project_path=tmp_path,
             progress=lambda *args: None,
             cancel_requested=lambda: False,
@@ -6145,6 +6249,8 @@ def test_worker_check_reports_inference_sidecar_capabilities(monkeypatch):
         "prompt_refine",
         # sc-2431: standalone image upscale (Image Editor).
         "image_upscale",
+        # sc-2438: standalone tile-ControlNet detail refine (Image Editor).
+        "image_detail",
     ]
     assert events[0]["supportedJobTypes"] == events[0]["jobTypes"]
 

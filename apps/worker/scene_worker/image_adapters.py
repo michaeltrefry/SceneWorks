@@ -516,6 +516,10 @@ MODEL_TARGETS = {
         # (masked edit when a maskAssetId is present — sc-2476).
         "supportsEdit": True,
         "supportsInpaint": True,
+        # Tile-ControlNet detail refine (image_detail job, sc-2437/sc-2438): the
+        # standalone run_image_detail builds StableDiffusionXLControlNetImg2ImgPipeline
+        # on this checkpoint + xinsir/controlnet-tile-sdxl-1.0.
+        "supportsDetail": True,
         # Real CFG with negative prompt (not distilled): ~30 steps at guidance
         # 7.0, native 1024x1024. Two CLIP text encoders, so no max_seq_len knob.
         # Ships EulerDiscreteScheduler, which we keep (scheduler UI is epic 1753).
@@ -549,6 +553,9 @@ MODEL_TARGETS = {
         "family": "sdxl",
         "supportsEdit": True,
         "supportsInpaint": True,
+        # Tile-ControlNet detail refine (image_detail job, sc-2437/sc-2438) — the
+        # photoreal SDXL prior is the recommended detail backbone per the spike.
+        "supportsDetail": True,
         # Real CFG with negative prompt: ~30 steps at guidance 7.0, native 1024.
         "steps": 30,
         "guidanceScale": 7.0,
@@ -7756,6 +7763,13 @@ def model_supports_inpaint(model_id: str) -> bool:
     return bool(MODEL_TARGETS.get(model_id, {}).get("supportsInpaint"))
 
 
+def model_supports_detail(model_id: str) -> bool:
+    """Whether the model can run the tile-ControlNet detail refine (image_detail job,
+    sc-2437/sc-2438). SDXL family only — run_image_detail builds
+    StableDiffusionXLControlNetImg2ImgPipeline on the checkpoint + a tile ControlNet."""
+    return bool(MODEL_TARGETS.get(model_id, {}).get("supportsDetail"))
+
+
 def resolve_seed(seed: int | None, prompt: str, index: int, seeds: list[int] | None = None) -> int:
     if seed is not None:
         return int(seed) + index
@@ -8116,6 +8130,332 @@ def run_image_upscale(
         "expectedCount": 1,
         "adapter": upscaler.id,
         "model": upscaler.id,
+        "generationSet": generation_set,
+        "assetWrites": [fact],
+    }
+
+
+# xinsir tile ControlNet (Apache-2.0, ~2.5 GB, ungated) — locks structure so the
+# tiled img2img refine can run high denoise and add micro-texture without drifting
+# (sc-2437 round-2 spike = GO). Self-downloads on first use (no manifest entry).
+TILE_CONTROLNET_REPO = "xinsir/controlnet-tile-sdxl-1.0"
+
+
+def _clamp_float(value: Any, default: float, lo: float, hi: float) -> float:
+    try:
+        result = float(value) if value is not None else default
+    except (TypeError, ValueError):
+        result = default
+    return max(lo, min(hi, result))
+
+
+def _detail_feather(tile_w: int, tile_h: int, overlap: int) -> Any:
+    """Raised-cosine alpha ramp over the overlap borders so tiles blend seamlessly
+    (proven no-seams in the sc-2437 spike, including on the tile-CN path)."""
+    import numpy as np
+
+    def ramp(n: int) -> Any:
+        w = np.ones(n, dtype=np.float32)
+        if overlap > 0 and n > overlap:
+            idx = np.arange(overlap, dtype=np.float32)
+            edge = 0.5 - 0.5 * np.cos(np.pi * (idx + 0.5) / overlap)
+            w[:overlap] = edge
+            w[-overlap:] = edge[::-1]
+        return w
+
+    return np.outer(ramp(tile_h), ramp(tile_w))
+
+
+def _refine_tiled_detail(
+    pipe: Any,
+    image: Image.Image,
+    *,
+    prompt: str,
+    negative: str,
+    strength: float,
+    cn_scale: float,
+    tile: int,
+    overlap: int,
+    steps: int,
+    guidance: float,
+    seed: int,
+    cancel_requested: CancelCallback | None,
+    on_tile: Any = None,
+) -> tuple[Image.Image, int]:
+    """Tile-ControlNet img2img refine with raised-cosine feather blend (sc-2437 round-2).
+
+    Each tile is refined by StableDiffusionXLControlNetImg2ImgPipeline with the tile
+    itself as both the img2img init and the ControlNet conditioning (control=same — the
+    spike showed pre-blurring drags detail down). The tile CN locks composition so the
+    high denoise adds SDXL-prior micro-texture without rewriting the picture; tiles are
+    blended with a raised-cosine feather over the overlap (no visible seams)."""
+    import numpy as np
+
+    torch = importlib.import_module("torch")
+    width, height = image.size
+    step = max(tile - overlap, 1)
+    acc = np.zeros((height, width, 3), dtype=np.float32)
+    wsum = np.zeros((height, width, 1), dtype=np.float32)
+    xs = list(range(0, max(width - overlap, 1), step))
+    ys = list(range(0, max(height - overlap, 1), step))
+    total = len(xs) * len(ys)
+    done = 0
+    for y in ys:
+        for x in xs:
+            if cancel_requested is not None and cancel_requested():
+                raise InterruptedError("Detail enhancement canceled by user.")
+            x0 = min(x, max(width - tile, 0))
+            y0 = min(y, max(height - tile, 0))
+            crop = image.crop((x0, y0, x0 + tile, y0 + tile))
+            tile_w, tile_h = crop.size
+            generator = torch.Generator(device="cpu").manual_seed(seed + done)
+            refined = pipe(
+                prompt=prompt,
+                negative_prompt=negative,
+                image=crop,
+                control_image=crop,
+                strength=strength,
+                controlnet_conditioning_scale=cn_scale,
+                num_inference_steps=steps,
+                guidance_scale=guidance,
+                generator=generator,
+            ).images[0]
+            if refined.size != (tile_w, tile_h):
+                refined = refined.resize((tile_w, tile_h))
+            feather = _detail_feather(tile_w, tile_h, overlap)[:, :, None]
+            acc[y0:y0 + tile_h, x0:x0 + tile_w] += np.asarray(refined.convert("RGB"), dtype=np.float32) * feather
+            wsum[y0:y0 + tile_h, x0:x0 + tile_w] += feather
+            done += 1
+            if on_tile is not None:
+                on_tile(done, total)
+    wsum[wsum == 0] = 1.0
+    out = np.clip(acc / wsum, 0, 255).astype(np.uint8)
+    return Image.fromarray(out, "RGB"), total
+
+
+def _load_detail_pipeline(
+    settings: WorkerSettings,
+    *,
+    model: str,
+    advanced: dict[str, Any],
+    job_id: str | None,
+    progress: ProgressCallback,
+) -> Any:
+    """Build the tile-ControlNet img2img pipeline for run_image_detail. Extracted as a
+    seam so the orchestration is unit-testable without torch/diffusers/weights (the
+    test mocks this + _refine_tiled_detail, like run_image_upscale mocks the engine)."""
+    torch = importlib.import_module("torch")
+    diffusers = importlib.import_module("diffusers")
+    require_inference_backend_for_gpu_worker(torch, settings.gpu_id)
+    device = select_torch_device(torch, settings.gpu_id)
+    activate_torch_device(torch, device)
+    dtype = select_torch_dtype(torch, device, advanced.get("dtype"))
+    model_target = MODEL_TARGETS[model]
+    repo = advanced.get("modelRepo") or model_target["repo"]
+    variant = model_target.get("variant")
+
+    cn_class = getattr(diffusers, "ControlNetModel", None)
+    pipeline_class = getattr(diffusers, "StableDiffusionXLControlNetImg2ImgPipeline", None)
+    if cn_class is None or pipeline_class is None:
+        raise RuntimeError(
+            "The installed diffusers package does not expose "
+            "StableDiffusionXLControlNetImg2ImgPipeline / ControlNetModel; "
+            "install diffusers >= 0.25 for tile-ControlNet detail refine."
+        )
+    cache_action = "Loading cached" if huggingface_repo_cache_exists(repo) else "Downloading"
+    progress("loading_model", "loading_model", 0.2, f"{cache_action} {model_target['label']} + tile ControlNet.")
+    emit_worker_event(
+        "image_detail_load_start",
+        jobId=job_id,
+        model=model,
+        repo=repo,
+        controlNet=TILE_CONTROLNET_REPO,
+        device=device,
+        dtype=str(dtype),
+    )
+    controlnet = cn_class.from_pretrained(TILE_CONTROLNET_REPO, torch_dtype=dtype)
+    try:
+        pipe = pipeline_class.from_pretrained(repo, controlnet=controlnet, torch_dtype=dtype, variant=variant)
+    except Exception:
+        # Checkpoints without an fp16-variant subfolder fall back to default precision.
+        pipe = pipeline_class.from_pretrained(repo, controlnet=controlnet, torch_dtype=dtype)
+    pipe.to(device)
+    if hasattr(pipe, "set_progress_bar_config"):
+        pipe.set_progress_bar_config(disable=True)
+    vae = getattr(pipe, "vae", None)
+    if vae is not None and hasattr(vae, "enable_tiling"):
+        vae.enable_tiling()
+    elif hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    emit_worker_event(
+        "image_detail_load_complete",
+        jobId=job_id,
+        model=model,
+        componentDevices=pipeline_component_devices(pipe),
+    )
+    return pipe
+
+
+def _release_detail_pipeline() -> None:
+    """Free the detail pipeline's inference memory after a tiled refine. Self-guards so
+    the no-torch unit-test path (which mocks the pipeline load) is unaffected."""
+    try:
+        torch = importlib.import_module("torch")
+    except ImportError:
+        return
+    release_inference_memory(torch)
+
+
+def run_image_detail(
+    settings: WorkerSettings,
+    job: dict[str, Any],
+    *,
+    project_path: Path,
+    progress: ProgressCallback,
+    cancel_requested: CancelCallback,
+) -> dict[str, Any]:
+    """Standalone tile-ControlNet detail refine of an existing image asset (Image
+    Editor, epic 2427; spike sc-2437 = GO).
+
+    Resolves a ``sourceAssetId`` to its on-disk image at native resolution, builds a
+    StableDiffusionXLControlNetImg2ImgPipeline on the requested SDXL/RealVisXL
+    checkpoint + the xinsir tile ControlNet, runs a feathered tiled img2img refine, and
+    writes exactly one child asset with lineage back to the source (``parents`` +
+    ``extra.isDetailEnhanced``). Mirrors run_image_upscale; composes after it (refine
+    after upscale = "creative upscale"). Generative: higher ``strength`` invents more
+    plausible texture into smooth/ambiguous regions (Magnific/SUPIR-style)."""
+    payload = job["payload"]
+    source_asset_id = payload.get("sourceAssetId")
+    if not source_asset_id:
+        raise RuntimeError("Detail-enhance jobs require a source image asset.")
+    model = str(payload.get("model") or "realvisxl").strip() or "realvisxl"
+    if not model_supports_detail(model):
+        raise RuntimeError(f"{model} does not support detail enhancement.")
+    advanced = payload.get("advanced") if isinstance(payload.get("advanced"), dict) else {}
+    # Recipe defaults locked by the sc-2437 round-2 spike (RealVisXL + control=same):
+    # strength ~0.55 adds texture while the tile CN holds composition (higher invents
+    # more); cn_scale ~0.7 locks structure (avoid high-cn x high-strength = softens).
+    strength = _clamp_float(advanced.get("strength"), 0.55, 0.2, 1.0)
+    cn_scale = _clamp_float(advanced.get("cnScale"), 0.7, 0.1, 1.5)
+    steps = safe_int(advanced.get("steps"), 24, 1, 60)
+    guidance = _clamp_float(advanced.get("guidanceScale"), 5.0, 1.0, 15.0)
+    tile = safe_int(advanced.get("tile"), 1024, 512, 1536)
+    overlap = safe_int(advanced.get("overlap"), 128, 0, 512)
+    prompt = str(advanced.get("prompt") or "ultra detailed, sharp focus, fine texture, high quality")
+    negative = str(advanced.get("negativePrompt") or "blurry, soft, lowres, smooth, plastic")
+    try:
+        seed = int(payload.get("seed")) if payload.get("seed") is not None else 7
+    except (TypeError, ValueError):
+        seed = 7
+
+    progress("preparing", "preparing", 0.12, "Loading source image.")
+    source_path = find_asset_media_path(project_path, source_asset_id)
+    try:
+        image = Image.open(source_path).convert("RGB")
+    except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise RuntimeError(f"Source image could not be loaded safely: {source_path}") from exc
+
+    pipe = _load_detail_pipeline(
+        settings, model=model, advanced=advanced, job_id=job.get("id"), progress=progress
+    )
+
+    def on_tile(done: int, total: int) -> None:
+        progress(
+            "running", "running", 0.45 + 0.5 * (done / max(total, 1)),
+            f"Refining detail tile {done}/{total}.",
+        )
+
+    try:
+        refined, tiles = _refine_tiled_detail(
+            pipe,
+            image,
+            prompt=prompt,
+            negative=negative,
+            strength=strength,
+            cn_scale=cn_scale,
+            tile=tile,
+            overlap=overlap,
+            steps=steps,
+            guidance=guidance,
+            seed=seed,
+            cancel_requested=cancel_requested,
+            on_tile=on_tile,
+        )
+    finally:
+        _release_detail_pipeline()
+    if cancel_requested():
+        raise InterruptedError("Detail enhancement canceled by user.")
+
+    progress("saving", "saving", 0.96, "Saving detail-enhanced image.")
+    created_at = utc_now()
+    generation_set_id = f"genset_{uuid4().hex}"
+    images_dir = project_path / "assets" / "images" / generation_set_id
+    images_dir.mkdir(parents=True, exist_ok=True)
+    asset_id = f"asset_{uuid4().hex}"
+    filename = f"{created_at[:10]}_detail_{asset_id[6:14]}.png"
+    media_rel = f"assets/images/{generation_set_id}/{filename}"
+    refined.save(project_path / media_rel, "PNG")
+
+    source_name = payload.get("displayName") or _source_display_name(project_path, source_asset_id) or "Image"
+    detail_settings = {
+        "enabled": True,
+        "backbone": model,
+        "controlNet": TILE_CONTROLNET_REPO,
+        "strength": strength,
+        "cnScale": cn_scale,
+        "steps": steps,
+        "guidanceScale": guidance,
+        "tile": tile,
+        "overlap": overlap,
+        "tiles": tiles,
+        "width": refined.width,
+        "height": refined.height,
+    }
+    fact = {
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "image/png",
+        "type": "image",
+        "width": refined.width,
+        "height": refined.height,
+        "normalizedWidth": refined.width,
+        "normalizedHeight": refined.height,
+        "count": 1,
+        "seed": seed,
+        "displayName": f"{source_name} (detail enhanced)",
+        "createdAt": created_at,
+        "mode": "image_detail",
+        "model": model,
+        "adapter": "sdxl_diffusers",
+        "prompt": prompt,
+        "negativePrompt": negative,
+        "loras": [],
+        "stylePreset": "",
+        "sourceAssetId": source_asset_id,
+        "rawAdapterSettings": {"detail": detail_settings},
+        "parents": [source_asset_id],
+        "extra": {
+            "isDetailEnhanced": True,
+            "detailFromAssetId": source_asset_id,
+            "backbone": model,
+            "strength": strength,
+            "cnScale": cn_scale,
+        },
+    }
+    generation_set = {
+        "id": generation_set_id,
+        "mode": "image_detail",
+        "model": model,
+        "prompt": prompt,
+        "negativePrompt": negative,
+        "count": 1,
+        "createdAt": created_at,
+    }
+    return {
+        "generationSetId": generation_set_id,
+        "expectedCount": 1,
+        "adapter": "sdxl_diffusers",
+        "model": model,
         "generationSet": generation_set,
         "assetWrites": [fact],
     }

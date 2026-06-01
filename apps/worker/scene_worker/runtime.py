@@ -35,6 +35,7 @@ from .image_adapters import (
     evict_other_image_adapters,
     image_request_from_job,
     release_image_worker_memory,
+    run_image_detail,
     run_image_upscale,
     torch_inference_backend_available,
 )
@@ -112,6 +113,12 @@ PROMPT_REFINE_JOB_TYPES = ("prompt_refine",)
 # contracts.rs::JobType/WorkerCapability, jobs_store::job_requires_gpu, and
 # apps/web/src/jobTypes.js::GPU_REQUIRED_JOB_TYPES.
 IMAGE_UPSCALE_JOB_TYPES = ("image_upscale",)
+# Standalone tile-ControlNet detail refine (Image Editor, epic 2427; spike sc-2437):
+# SDXL/RealVisXL img2img + a tile ControlNet over feathered tiles on an existing
+# asset → one child asset. Torch-backed, GPU-required like generation; advertised by
+# a backend-capable Python worker. Keep in sync with contracts.rs::JobType/
+# WorkerCapability, jobs_store::job_requires_gpu, and apps/web/src/jobTypes.js.
+IMAGE_DETAIL_JOB_TYPES = ("image_detail",)
 # Every runtime-dispatchable job-type group, in a stable order, for the
 # ``--check`` diagnostic. Derived from the groups above so run_check can't drift
 # out of sync and underreport readiness (sc-1635: VQA + interleave were
@@ -128,6 +135,7 @@ ALL_JOB_TYPES = (
     + INTERLEAVE_JOB_TYPES
     + PROMPT_REFINE_JOB_TYPES
     + IMAGE_UPSCALE_JOB_TYPES
+    + IMAGE_DETAIL_JOB_TYPES
 )
 
 
@@ -168,6 +176,9 @@ def worker_capabilities(gpu: dict) -> list[str]:
             capabilities |= set(INTERLEAVE_JOB_TYPES)
             # Standalone image upscale reuses the torch-backed engines (sc-2431).
             capabilities |= set(IMAGE_UPSCALE_JOB_TYPES)
+            # Standalone tile-ControlNet detail refine: SDXL/RealVisXL img2img + tile
+            # CN, so it needs the same torch inference backend (sc-2437/sc-2438).
+            capabilities |= set(IMAGE_DETAIL_JOB_TYPES)
             # Prompt refinement loads a small LLM in-process (like captioning), so
             # it needs the inference backend and is advertised alongside it.
             capabilities |= set(PROMPT_REFINE_JOB_TYPES)
@@ -1319,6 +1330,68 @@ def run_upscale_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None
         heartbeat(api, settings, "idle")
 
 
+def run_detail_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+    """Run an image_detail job: tile-ControlNet detail refine on one existing asset.
+
+    Torch-backed (the SDXL/RealVisXL img2img pipe + tile ControlNet are loaded lazily
+    by run_image_detail), so the worker advertises image_detail only when the
+    inference backend is installed (worker_capabilities). Writes one child asset with
+    lineage to the source. Mirrors run_upscale_job (sc-2431); composes after it.
+    """
+    job_id = job["id"]
+    peaks: dict[str, float] = {}
+
+    def progress(status: str, stage: str, value: float, message: str) -> None:
+        heartbeat(api, settings, "busy", job_id)
+        payload = {"status": status, "stage": stage, "progress": value, "message": message}
+        track_job_peaks(payload, peaks, settings, backend=adapter_backend(None, settings))
+        update_job(api, job_id, payload)
+
+    try:
+        progress("preparing", "preparing", 0.06, "Preparing detail enhancement.")
+        project_id = str(job.get("payload", {}).get("projectId") or "")
+        project_path = find_project_path(settings.data_dir / "recent-projects.json", project_id)
+        result = run_blocking_job_step(
+            api,
+            settings,
+            job_id,
+            "busy",
+            lambda cancel: run_image_detail(
+                settings,
+                job,
+                project_path=project_path,
+                progress=progress,
+                cancel_requested=cancel,
+            ),
+            loaded_models=lambda: [],
+            peaks=peaks,
+        )
+        update_job(
+            api,
+            job_id,
+            {"status": "completed", "stage": "completed", "progress": 1,
+             "message": "Detail-enhanced image saved.", "result": result},
+        )
+    except InterruptedError as exc:
+        update_job(
+            api,
+            job_id,
+            {"status": "canceled", "stage": "canceled", "progress": 1, "message": str(exc)},
+        )
+    except Exception as exc:
+        needs_oom_restart = is_cuda_oom(exc)
+        message, error = friendly_failure("Detail enhancement", exc)
+        update_job(
+            api,
+            job_id,
+            {"status": "failed", "stage": "failed", "progress": 1, "message": message, "error": error},
+        )
+        if needs_oom_restart:
+            release_image_worker_memory()
+    finally:
+        heartbeat(api, settings, "idle")
+
+
 def run_lora_train_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
     """Run a lora_train job: validate the plan, then either report a dry-run
     summary or execute the real training kernel.
@@ -1643,6 +1716,8 @@ def run_worker_loop(settings: WorkerSettings) -> None:
                 run_image_job(api, settings, job, image_adapters)
             elif job["type"] in IMAGE_UPSCALE_JOB_TYPES:
                 run_upscale_job(api, settings, job)
+            elif job["type"] in IMAGE_DETAIL_JOB_TYPES:
+                run_detail_job(api, settings, job)
             elif job["type"] in VQA_JOB_TYPES:
                 run_vqa_job(api, settings, job, image_adapters)
             elif job["type"] in INTERLEAVE_JOB_TYPES:

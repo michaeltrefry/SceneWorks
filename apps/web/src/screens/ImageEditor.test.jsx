@@ -29,6 +29,8 @@ import {
   buildEditJobBody,
   modelIsInpaintCapable,
   maskHasContent,
+  detailCapableModels,
+  buildDetailJobBody,
 } from "./ImageEditor.jsx";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
@@ -158,6 +160,44 @@ describe("upscale job", () => {
         factor: 4,
         engine: "real-esrgan",
         displayName: "shot.png",
+      },
+    });
+  });
+});
+
+describe("detail job", () => {
+  it("filters to image_detail-capable models", () => {
+    const models = [
+      { id: "realvisxl", capabilities: ["text_to_image", "edit_image", "image_detail"] },
+      { id: "flux", capabilities: ["text_to_image"] },
+      { id: "sdxl", capabilities: ["image_detail"] },
+    ];
+    expect(detailCapableModels(models).map((m) => m.id)).toEqual(["realvisxl", "sdxl"]);
+    expect(detailCapableModels([])).toEqual([]);
+    expect(detailCapableModels(undefined)).toEqual([]);
+  });
+
+  it("builds the image_detail job body the worker expects (model + advanced.strength/cnScale)", () => {
+    const body = buildDetailJobBody({
+      project: { id: "project_1", name: "My Project" },
+      requestedGpu: "auto",
+      sourceAssetId: "asset_scratch",
+      model: "realvisxl",
+      strength: 0.55,
+      cnScale: 0.7,
+      displayName: "shot.png",
+    });
+    expect(body).toEqual({
+      type: "image_detail",
+      projectId: "project_1",
+      projectName: "My Project",
+      requestedGpu: "auto",
+      payload: {
+        projectId: "project_1",
+        sourceAssetId: "asset_scratch",
+        model: "realvisxl",
+        displayName: "shot.png",
+        advanced: { strength: 0.55, cnScale: 0.7 },
       },
     });
   });
