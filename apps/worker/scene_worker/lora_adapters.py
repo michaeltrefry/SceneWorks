@@ -352,17 +352,47 @@ def reject_lycoris_loras(specs: list[LoraSpec], adapter_id: str) -> None:
             )
 
 
-def _lycoris_module_prefix(path: str | Path) -> str:
+def _lycoris_module_prefix(path: str | Path, module: Any = None) -> str:
     """The ``LycorisNetwork.LORA_PREFIX`` that maps this file's keys onto a denoiser
-    module. kohya/ai-toolkit DiT adapters prefix denoiser keys with ``lora_unet``
-    (the lycoris loader matches ``f"{PREFIX}_{module_name}"``)."""
+    module — the lycoris loader matches each key as ``f"{PREFIX}_{module_name}"``
+    (the submodule path with ``.`` rewritten to ``_``).
 
-    for name in _adapter_tensor_names(path, limit=8):
-        head = name.split(".", 1)[0]
+    Exporters disagree on the prefix: kohya / musubi use ``lora_unet``, some
+    diffusers-based trainers ``lora_transformer``, and the ``lycoris-lora`` library's
+    own ``save_weights`` defaults to ``lycoris``. When ``module`` is given, recover
+    the prefix exactly by stripping a real (underscored) submodule name off the
+    file's keys — this works for any convention, including ones not enumerated here.
+    Falls back to a known-prefix sniff (default ``lora_unet``) when no module is
+    available or nothing lines up."""
+
+    heads = [name.split(".", 1)[0] for name in _adapter_tensor_names(path)]
+    if module is not None:
+        # Longest submodule names first so e.g. ``transformer_blocks_0_attn_to_q`` is
+        # stripped before the bare ``transformer_blocks_0`` that also prefixes it,
+        # yielding the shortest (correct) leading prefix.
+        module_names = sorted(
+            {name.replace(".", "_") for name, _ in module.named_modules() if name},
+            key=len,
+            reverse=True,
+        )
+        votes: dict[str, int] = {}
+        for head in heads:
+            for mod_name in module_names:
+                if head.endswith("_" + mod_name):
+                    prefix = head[: -len(mod_name) - 1]
+                    if prefix:
+                        votes[prefix] = votes.get(prefix, 0) + 1
+                    break
+        if votes:
+            # Most-matched prefix wins; ties broken toward the most specific (longest).
+            return max(votes, key=lambda candidate: (votes[candidate], len(candidate)))
+    for head in heads[:8]:
         if head.startswith("lora_unet"):
             return "lora_unet"
         if head.startswith("lora_transformer"):
             return "lora_transformer"
+        if head.startswith("lycoris"):
+            return "lycoris"
     return "lora_unet"
 
 
@@ -442,7 +472,7 @@ def apply_lycoris_adapter(pipe: Any, spec: LoraSpec, *, adapter_id: str) -> None
             "(epic 2193)."
         ) from exc
 
-    prefix = _lycoris_module_prefix(spec.path)
+    prefix = _lycoris_module_prefix(spec.path, module)
     saved_prefix = LycorisNetwork.LORA_PREFIX
     try:
         LycorisNetwork.LORA_PREFIX = prefix
