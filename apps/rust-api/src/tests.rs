@@ -4434,7 +4434,9 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
     }
     for dir in ["text_encoder", "transformer", "vae"] {
         std::fs::write(
-            cache_dir.join(dir).join("diffusion_pytorch_model.safetensors"),
+            cache_dir
+                .join(dir)
+                .join("diffusion_pytorch_model.safetensors"),
             "weights",
         )
         .expect("component weights write");
