@@ -4357,6 +4357,101 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
 }
 
 #[tokio::test]
+async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components() {
+    // Chroma's model_index.json declares `feature_extractor` and `image_encoder`
+    // as `[null, null]` — diffusers' sentinel for optional components the pipeline
+    // doesn't use, which have no files on disk by design. The health check must
+    // not report them as missing, otherwise a fully-installed model is flagged
+    // incomplete on every platform.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "chroma1_base",
+                "name": "Chroma1-Base",
+                "type": "image",
+                "family": "chroma",
+                "downloads": [{ "provider": "huggingface", "repo": "lodestones/Chroma1-Base" }]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+    let cache_dir = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--lodestones--Chroma1-Base/snapshots/abc123");
+    std::fs::create_dir_all(&cache_dir).expect("hf cache creates");
+    std::fs::write(
+        cache_dir.join("model_index.json"),
+        r#"{
+          "_class_name": "ChromaPipeline",
+          "feature_extractor": [null, null],
+          "image_encoder": [null, null],
+          "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+          "text_encoder": ["transformers", "T5EncoderModel"],
+          "tokenizer": ["transformers", "T5Tokenizer"],
+          "transformer": ["diffusers", "ChromaTransformer2DModel"],
+          "vae": ["diffusers", "AutoencoderKL"]
+        }"#,
+    )
+    .expect("model index writes");
+    for (dir, file) in [
+        ("scheduler", "scheduler_config.json"),
+        ("text_encoder", "config.json"),
+        ("tokenizer", "tokenizer_config.json"),
+        ("transformer", "config.json"),
+        ("vae", "config.json"),
+    ] {
+        let component_dir = cache_dir.join(dir);
+        std::fs::create_dir_all(&component_dir).expect("component dir creates");
+        std::fs::write(component_dir.join(file), "{}").expect("component config writes");
+    }
+    for dir in ["text_encoder", "transformer", "vae"] {
+        std::fs::write(
+            cache_dir.join(dir).join("diffusion_pytorch_model.safetensors"),
+            "weights",
+        )
+        .expect("component weights write");
+    }
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "chroma1_base");
+    assert_eq!(models[0]["installState"], "installed");
+    assert_eq!(models[0]["cacheState"], "complete");
+    assert_eq!(models[0]["repairAvailable"], false);
+    assert_eq!(models[0]["missingRequiredFiles"], json!([]));
+}
+
+#[tokio::test]
 async fn model_download_job_forwards_catalog_family_for_worker_reconciliation() {
     // sc-1663: the download job must carry the catalog-declared family so the
     // worker can re-verify the downloaded weights match it (parity with import).

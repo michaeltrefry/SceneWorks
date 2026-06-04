@@ -1145,6 +1145,14 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
             .and_then(|items| items.get(1))
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // diffusers records optional components that the pipeline doesn't use
+        // as `[null, null]` (e.g. ChromaPipeline's `feature_extractor` and
+        // `image_encoder`). These have no directory or files on disk by design,
+        // so an empty class name means "absent" — skip it rather than reporting
+        // its config/weights as missing and marking the whole model incomplete.
+        if class_name.is_empty() {
+            continue;
+        }
         for required in required_diffusers_component_files(component, class_name) {
             if !snapshot.join(&required).is_file() {
                 missing.push(required);
