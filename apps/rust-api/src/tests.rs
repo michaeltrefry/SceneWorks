@@ -4553,6 +4553,141 @@ async fn downloadable_model_catalog_treats_processor_components_as_weightless() 
     assert_eq!(models[0]["missingRequiredFiles"], json!([]));
 }
 
+// Helper: write a minimal but COMPLETE set of weight-bearing components
+// (text_encoder / transformer / vae, each with config.json + a weight file) into
+// a diffusers snapshot dir, so a test can focus on a single weightless component.
+fn write_complete_weight_bearing_components(cache_dir: &std::path::Path) {
+    for dir in ["text_encoder", "transformer", "vae"] {
+        let component_dir = cache_dir.join(dir);
+        std::fs::create_dir_all(&component_dir).expect("component dir creates");
+        std::fs::write(component_dir.join("config.json"), "{}").expect("config writes");
+        std::fs::write(
+            component_dir.join("diffusion_pytorch_model.safetensors"),
+            "weights",
+        )
+        .expect("weights write");
+    }
+}
+
+fn single_model_manifest(config_dir: &std::path::Path, id: &str, repo: &str) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{ "schemaVersion": 1, "models": [{{
+                "id": "{id}", "name": "{id}", "type": "image", "family": "test",
+                "downloads": [{{ "provider": "huggingface", "repo": "{repo}" }}]
+            }}] }}"#
+        ),
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+}
+
+#[tokio::test]
+async fn downloadable_model_catalog_accepts_weightless_component_with_nonstandard_config_name() {
+    // Hardening: completeness for weightless auxiliary components is keyed on
+    // "the directory exists and holds a file", not a hard-coded config filename.
+    // A processor that ships an unexpected config name must still read complete,
+    // so future class variants can't re-trigger a permanent false "incomplete".
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    single_model_manifest(
+        &temp_dir.path().join("config/manifests"),
+        "weightless_model",
+        "owner/weightless",
+    );
+    let cache_dir = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--owner--weightless/snapshots/abc123");
+    std::fs::create_dir_all(&cache_dir).expect("hf cache creates");
+    std::fs::write(
+        cache_dir.join("model_index.json"),
+        r#"{
+          "_class_name": "SomePipeline",
+          "processor": ["transformers", "SomeFutureProcessor"],
+          "text_encoder": ["transformers", "T5EncoderModel"],
+          "transformer": ["diffusers", "SomeTransformer2DModel"],
+          "vae": ["diffusers", "AutoencoderKL"]
+        }"#,
+    )
+    .expect("model index writes");
+    write_complete_weight_bearing_components(&cache_dir);
+    // processor dir exists with a config whose name we do NOT special-case.
+    let processor_dir = cache_dir.join("processor");
+    std::fs::create_dir_all(&processor_dir).expect("processor dir creates");
+    std::fs::write(processor_dir.join("processor_config.json"), "{}").expect("processor config");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["cacheState"], "complete");
+    assert_eq!(models[0]["repairAvailable"], false);
+    assert_eq!(models[0]["missingRequiredFiles"], json!([]));
+}
+
+#[tokio::test]
+async fn downloadable_model_catalog_flags_empty_weightless_component_dir() {
+    // The hardening must not silently pass everything: a genuinely absent/empty
+    // weightless component directory still reports incomplete (partial download).
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    single_model_manifest(
+        &temp_dir.path().join("config/manifests"),
+        "partial_model",
+        "owner/partial",
+    );
+    let cache_dir = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--owner--partial/snapshots/abc123");
+    std::fs::create_dir_all(&cache_dir).expect("hf cache creates");
+    std::fs::write(
+        cache_dir.join("model_index.json"),
+        r#"{
+          "_class_name": "SomePipeline",
+          "tokenizer": ["transformers", "T5Tokenizer"],
+          "text_encoder": ["transformers", "T5EncoderModel"],
+          "transformer": ["diffusers", "SomeTransformer2DModel"],
+          "vae": ["diffusers", "AutoencoderKL"]
+        }"#,
+    )
+    .expect("model index writes");
+    write_complete_weight_bearing_components(&cache_dir);
+    // tokenizer dir is created but left EMPTY (partial download).
+    std::fs::create_dir_all(cache_dir.join("tokenizer")).expect("empty tokenizer dir");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["cacheState"], "incomplete");
+    assert_eq!(models[0]["repairAvailable"], true);
+    assert_eq!(
+        models[0]["missingRequiredFiles"],
+        json!(["tokenizer/<config>"])
+    );
+}
+
 #[tokio::test]
 async fn model_download_job_forwards_catalog_family_for_worker_reconciliation() {
     // sc-1663: the download job must carry the catalog-declared family so the

@@ -1153,15 +1153,26 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
         if class_name.is_empty() {
             continue;
         }
-        for required in required_diffusers_component_files(component, class_name) {
-            if !snapshot.join(&required).is_file() {
-                missing.push(required);
+        if diffusers_component_requires_weights(component, class_name) {
+            // Weight-bearing components (unet, transformer, vae, text_encoder,
+            // controlnet, …) reliably ship a `config.json` alongside their
+            // weight files, so require both.
+            if !snapshot.join(format!("{component}/config.json")).is_file() {
+                missing.push(format!("{component}/config.json"));
             }
-        }
-        if diffusers_component_requires_weights(component, class_name)
-            && !diffusers_component_has_weight_file(snapshot, component)
-        {
-            missing.push(format!("{component}/<weights>"));
+            if !diffusers_component_has_weight_file(snapshot, component) {
+                missing.push(format!("{component}/<weights>"));
+            }
+        } else if !diffusers_component_dir_nonempty(snapshot, component) {
+            // Weightless auxiliary components (scheduler, tokenizer, feature
+            // extractors, and image/video/composite processors) ship config
+            // files whose names vary by class — scheduler_config.json,
+            // tokenizer_config.json, preprocessor_config.json, and more. Hard
+            // coding each variant is what produced repeated false "incomplete"
+            // reports (Chroma's null optionals, Qwen2VLProcessor), so only
+            // require the component directory to exist and hold at least one
+            // file. A genuinely missing/partial component still trips this.
+            missing.push(format!("{component}/<config>"));
         }
     }
     if missing.is_empty() {
@@ -1173,31 +1184,10 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
     }
 }
 
-fn required_diffusers_component_files(component: &str, class_name: &str) -> Vec<String> {
-    let class = class_name.to_ascii_lowercase();
-    if component.contains("scheduler") || class.contains("scheduler") {
-        return vec![format!("{component}/scheduler_config.json")];
-    }
-    if class.contains("tokenizer") {
-        return vec![format!("{component}/tokenizer_config.json")];
-    }
-    // Transformers preprocessing wrappers (feature extractors, image processors,
-    // and composite `*Processor` classes like Qwen2VLProcessor) carry no model
-    // weights and ship a `preprocessor_config.json` rather than a `config.json`.
-    // `contains("processor")` subsumes `imageprocessor` and also catches the
-    // composite processors that would otherwise fall through to the weight-bearing
-    // default and be reported as permanently missing config.json + weights.
-    if class.contains("featureextractor") || class.contains("processor") {
-        return vec![format!("{component}/preprocessor_config.json")];
-    }
-    let component_dir = component.trim();
-    if component_dir.is_empty() {
-        Vec::new()
-    } else {
-        vec![format!("{component_dir}/config.json")]
-    }
-}
-
+/// Classifies a diffusers `model_index.json` component as weight-bearing.
+/// Schedulers, tokenizers, feature extractors, and composite `*Processor`
+/// wrappers (e.g. Qwen2VLProcessor) carry no model weights — `contains("processor")`
+/// subsumes `imageprocessor` and the composite processors.
 fn diffusers_component_requires_weights(component: &str, class_name: &str) -> bool {
     let class = class_name.to_ascii_lowercase();
     !(component.contains("scheduler")
@@ -1205,6 +1195,15 @@ fn diffusers_component_requires_weights(component: &str, class_name: &str) -> bo
         || class.contains("tokenizer")
         || class.contains("featureextractor")
         || class.contains("processor"))
+}
+
+/// Whether a component directory exists and holds at least one file. Used as the
+/// completeness signal for weightless auxiliary components, whose config file
+/// names vary too much by class to enumerate reliably.
+fn diffusers_component_dir_nonempty(snapshot: &FsPath, component: &str) -> bool {
+    std::fs::read_dir(snapshot.join(component))
+        .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+        .unwrap_or(false)
 }
 
 fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bool {
