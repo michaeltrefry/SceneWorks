@@ -28,7 +28,8 @@ use super::media_jobs::{
     run_ffmpeg,
 };
 use super::model_jobs::{
-    check_downloaded_model_family, finalize_converted_dir, DownloadFamilyCheck,
+    check_downloaded_model_family, finalize_converted_dir, hf_cli_encoding_failure,
+    DownloadFamilyCheck, HF_CLI_UTF8_ENV,
 };
 use super::supervisor::{
     auto_worker_specs, child_environment, restart_exited_children_with_spawner,
@@ -71,6 +72,25 @@ fn wan_video_safetensors_keys() -> Vec<String> {
         }
     }
     keys
+}
+
+#[test]
+fn hf_cli_windows_encoding_failures_are_detected() {
+    let stderr = "Fetching 28 files: 100%|##########| 28/28 [00:00<00:00, 14016.05it/s]\n\
+                  Error: Invalid value. 'charmap' codec can't encode character '\\u2713' \
+                  in position 5: character maps to <undefined>";
+
+    assert!(hf_cli_encoding_failure(stderr));
+    assert!(!hf_cli_encoding_failure("Error: Repository not found."));
+}
+
+#[test]
+fn hf_cli_environment_forces_python_utf8_output() {
+    let env: HashMap<_, _> = HF_CLI_UTF8_ENV.into_iter().collect();
+
+    assert_eq!(env.get("PYTHONUTF8"), Some(&"1"));
+    assert_eq!(env.get("PYTHONIOENCODING"), Some(&"utf-8"));
+    assert_eq!(env.get("HF_HUB_DISABLE_PROGRESS_BARS"), Some(&"1"));
 }
 
 #[test]

@@ -549,6 +549,7 @@ pub(crate) async fn download_model_with_hf_cli(
         .arg(&cache_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    configure_hf_cli_environment(&mut command);
     if let Some(token) = &settings.huggingface_token {
         command.env("HF_TOKEN", token);
     }
@@ -588,8 +589,23 @@ pub(crate) async fn download_model_with_hf_cli(
         }
     };
     let stderr = stderr_task.await.unwrap_or_default();
+    let cache_path = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Unable to resolve Hugging Face cache path for {repo}."
+        ))
+    })?;
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr);
+        // Some Windows installs run the Python-based HF CLI with a legacy stdio
+        // codepage. The download can complete, then the process exits non-zero
+        // while printing a Unicode checkmark/progress footer. If the cache now has
+        // a snapshot, keep the completed transfer instead of failing the job.
+        if hf_cli_encoding_failure(&stderr)
+            && huggingface_snapshot_dir(&settings.data_dir, repo).is_some()
+        {
+            write_model_install_marker(marker_dir, &job.payload, repo, &job.id).await?;
+            return Ok(Some(cache_path));
+        }
         let detail = bounded_tail(&stderr, 10, 2000);
         let message = if detail.trim().is_empty() {
             "Hugging Face CLI download failed without stderr output.".to_owned()
@@ -599,13 +615,28 @@ pub(crate) async fn download_model_with_hf_cli(
         return Err(WorkerError::InvalidPayload(message));
     }
 
-    let cache_path = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "Unable to resolve Hugging Face cache path for {repo}."
-        ))
-    })?;
     write_model_install_marker(marker_dir, &job.payload, repo, &job.id).await?;
     Ok(Some(cache_path))
+}
+
+pub(crate) const HF_CLI_UTF8_ENV: [(&str, &str); 3] = [
+    ("PYTHONUTF8", "1"),
+    ("PYTHONIOENCODING", "utf-8"),
+    ("HF_HUB_DISABLE_PROGRESS_BARS", "1"),
+];
+
+pub(crate) fn configure_hf_cli_environment(command: &mut Command) {
+    for (key, value) in HF_CLI_UTF8_ENV {
+        command.env(key, value);
+    }
+}
+
+pub(crate) fn hf_cli_encoding_failure(stderr: &str) -> bool {
+    let normalized = stderr.to_ascii_lowercase();
+    normalized.contains("charmap")
+        && (normalized.contains("codec can't encode")
+            || normalized.contains("unicodeencodeerror")
+            || normalized.contains("character maps to <undefined>"))
 }
 
 pub(crate) async fn hf_cli_program() -> Option<&'static str> {
