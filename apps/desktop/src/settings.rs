@@ -407,7 +407,7 @@ pub fn set_credential(
     label: String,
     scheme: CredentialScheme,
     token: String,
-) -> Result<(), String> {
+) -> Result<Vec<CredentialStatus>, String> {
     let host = normalize_host(&host);
     if host.is_empty() {
         return Err("A host is required (e.g. huggingface.co).".to_owned());
@@ -437,12 +437,13 @@ pub fn set_credential(
             scheme,
         },
     );
-    save_settings(&settings)
+    save_settings(&settings)?;
+    Ok(list_credentials())
 }
 
 /// Remove a host's credential from the keychain and drop its metadata.
 #[tauri::command]
-pub fn delete_credential(host: String) -> Result<(), String> {
+pub fn delete_credential(host: String) -> Result<Vec<CredentialStatus>, String> {
     let host = normalize_host(&host);
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &cred_account(&host)) {
         match entry.delete_credential() {
@@ -459,7 +460,8 @@ pub fn delete_credential(host: String) -> Result<(), String> {
     }
     let mut settings = load_settings();
     remove_credential_meta(&mut settings, &host);
-    save_settings(&settings)
+    save_settings(&settings)?;
+    Ok(list_credentials())
 }
 
 #[tauri::command]

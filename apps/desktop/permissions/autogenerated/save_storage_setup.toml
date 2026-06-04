@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-storage-setup"
+description = "Enables the save_storage_setup command without any pre-configured scope."
+commands.allow = ["save_storage_setup"]
+
+[[permission]]
+identifier = "deny-save-storage-setup"
+description = "Denies the save_storage_setup command without any pre-configured scope."
+commands.deny = ["save_storage_setup"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-storage-setup"
+description = "Enables the get_storage_setup command without any pre-configured scope."
+commands.allow = ["get_storage_setup"]
+
+[[permission]]
+identifier = "deny-get-storage-setup"
+description = "Denies the get_storage_setup command without any pre-configured scope."
+commands.deny = ["get_storage_setup"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-setup"
+description = "Enables the reset_setup command without any pre-configured scope."
+commands.allow = ["reset_setup"]
+
+[[permission]]
+identifier = "deny-reset-setup"
+description = "Denies the reset_setup command without any pre-configured scope."
+commands.deny = ["reset_setup"]

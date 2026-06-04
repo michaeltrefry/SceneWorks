@@ -199,7 +199,7 @@ export function SettingsScreen() {
             aria-label="Credential token"
           />
           <button type="button" onClick={addCredential} disabled={!canSaveCredential}>
-            Save
+            Save token
           </button>
         </div>
       </section>

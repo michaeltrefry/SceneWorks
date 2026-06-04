@@ -30,13 +30,26 @@ describe("SettingsScreen service credentials", () => {
   beforeEach(async () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     credentials = [];
-    invoke = vi.fn(async (command) => {
+    invoke = vi.fn(async (command, args) => {
       switch (command) {
         case "get_app_settings":
           return {};
         case "get_gpu_info":
           return { platform: "windows", devices: [] };
         case "list_credentials":
+          return credentials;
+        case "set_credential":
+          credentials = [
+            {
+              host: args.host.replace(/^https?:\/\//i, "").split("/")[0].toLowerCase(),
+              label: args.label,
+              scheme: args.scheme,
+              present: true,
+            },
+          ];
+          return credentials;
+        case "delete_credential":
+          credentials = credentials.filter((credential) => credential.host !== args.host);
           return credentials;
         default:
           return null;
@@ -94,6 +107,9 @@ describe("SettingsScreen service credentials", () => {
       scheme: "query",
       token: "key123",
     });
+    expect(container.textContent).toContain("Civit.ai");
+    expect(container.textContent).toContain("civitai.com");
+    expect(container.textContent).not.toContain("key123");
   });
 
   it("removes a credential via delete_credential", async () => {

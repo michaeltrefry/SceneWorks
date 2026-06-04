@@ -32,8 +32,7 @@ export async function loadCredentials() {
 // Returns the updated, redacted credential list (both transports yield it).
 export async function saveCredential({ host, label, scheme, token }) {
   if (credentialsIsDesktop) {
-    await invoke("set_credential", { host, label, scheme, token });
-    return loadCredentials();
+    return (await invoke("set_credential", { host, label, scheme, token })) ?? loadCredentials();
   }
   return apiFetch("/api/v1/credentials", serverToken(), {
     method: "PUT",
@@ -43,8 +42,7 @@ export async function saveCredential({ host, label, scheme, token }) {
 
 export async function removeCredentialRequest(host) {
   if (credentialsIsDesktop) {
-    await invoke("delete_credential", { host });
-    return loadCredentials();
+    return (await invoke("delete_credential", { host })) ?? loadCredentials();
   }
   return apiFetch(`/api/v1/credentials/${encodeURIComponent(host)}`, serverToken(), {
     method: "DELETE",

@@ -198,7 +198,7 @@ const viewTitles = {
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
   Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
-  Settings: { title: "Settings", blurb: "Paths, Hugging Face token, and detected GPU." },
+  Settings: { title: "Settings", blurb: "Paths, service tokens, and detected GPU." },
 };
 
 function readStoredTheme() {
