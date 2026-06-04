@@ -1,6 +1,9 @@
 {
   "identifier": "default",
-  "description": "Default capability set for the SceneWorks desktop shell window.",
+  "description": "Default capability set for the SceneWorks desktop shell window. The `remote` grant is REQUIRED: after setup the shell navigates the main window from tauri:// to the API-served React UI at http://127.0.0.1:<port>, and every window.__TAURI__ invoke (set_credential, choose_data_dir, reveal_in_os, restart_worker, get_gpu_info, …) is rejected by the ACL at that remote origin without it. Loopback-only; the shell health-gates the API (health_is_sceneworks) before navigating. Do not remove.",
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
   "permissions": ["core:default"]
 }
