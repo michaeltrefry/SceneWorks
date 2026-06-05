@@ -1616,17 +1616,81 @@ fn flux2_klein_variants_route_to_mlx_worker() {
 }
 
 #[test]
+fn sdxl_and_realvisxl_route_to_mlx_worker() {
+    let store = store("mlx-routing-sdxl");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    for model in ["sdxl", "realvisxl"] {
+        let job = store
+            .create_job(image_job_with(
+                json!({ "model": model, "prompt": "a red fox" }),
+                "auto",
+            ))
+            .unwrap_or_else(|_| panic!("{model} job creates"));
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "{model} should defer off the torch worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .unwrap_or_else(|| panic!("mlx claims {model}"));
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("complete job");
+    }
+
+    // SDXL reference/IP-Adapter stays on the Python torch path.
+    let reference = store
+        .create_job(image_job_with(
+            json!({ "model": "sdxl", "prompt": "p", "referenceAssetId": "asset_1" }),
+            "auto",
+        ))
+        .expect("reference job creates");
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims sdxl reference job");
+    assert_eq!(claimed.id, reference.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
 fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     let store = store("mlx-routing-non-mlx-model");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // A model not yet ported to the Rust worker (e.g. sdxl, sc-3026) stays on the
-    // Python path: the torch worker claims it without deferral, and the mlx worker
-    // would refuse it.
+    // A torch-only image model with no mlx-gen engine (e.g. kolors — InstantID/Kolors/
+    // PuLID/SenseNova have no MLX crate) stays on the Python path: the torch worker
+    // claims it without deferral, and the mlx worker would refuse it.
     let job = store
         .create_job(image_job_with(
-            json!({ "model": "sdxl", "prompt": "p" }),
+            json!({ "model": "kolors", "prompt": "p" }),
             "auto",
         ))
         .expect("job creates");
