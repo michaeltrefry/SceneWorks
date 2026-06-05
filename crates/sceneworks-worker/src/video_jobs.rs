@@ -1298,11 +1298,36 @@ fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool {
     ltx_engine_id(&request.model).is_some() && resolve_ltx_model_dir(settings, request).is_ok()
 }
 
-/// Resolve the converted LTX MLX snapshot dir. Env override
-/// (`SCENEWORKS_MLX_LTX_DIR` / `…_EROS_DIR`) → `<data>/models/mlx/<candidate>`. For the
-/// base model the Q4 checkpoint is the default (`mlxQuantize: 8` prefers the Q8 one); the
-/// engine reads the actual bits from the checkpoint's `split_model.json`, so this only
-/// picks *which* converted dir to load.
+/// The converted A/V repo the engine's LTX path consumes (the one it replaces); the Q4
+/// base checkpoint with the full audio+I2V component set.
+#[cfg(target_os = "macos")]
+const LTX_TURNKEY_REPO: &str = "notapalindrome/ltx23-mlx-av-q4";
+
+/// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
+/// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
+/// engine `load()` reads. Older conversions (`spatial_/temporal_upscaler_*`, no vocoder)
+/// fail this, so a stale local dir is skipped in favour of the turnkey snapshot.
+#[cfg(target_os = "macos")]
+fn ltx_dir_is_complete(dir: &Path) -> bool {
+    [
+        "connector.safetensors",
+        "transformer.safetensors",
+        "upsampler.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+    ]
+    .iter()
+    .all(|file| dir.join(file).is_file())
+}
+
+/// Resolve the converted LTX MLX snapshot dir. Env override (`SCENEWORKS_MLX_LTX_DIR` /
+/// `…_EROS_DIR`) → `<data>/models/mlx/<candidate>` → (base only) the turnkey HF snapshot
+/// [`LTX_TURNKEY_REPO`]. Only a dir **complete for the current engine**
+/// ([`ltx_dir_is_complete`]) counts, so a stale local conversion is skipped. For the base
+/// model the Q4 checkpoint is the default (`mlxQuantize: 8` prefers the Q8 one); the engine
+/// reads the actual bits from `split_model.json`, so this only picks *which* dir to load.
 #[cfg(target_os = "macos")]
 fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerResult<PathBuf> {
     let eros = request.model == "ltx_2_3_eros";
@@ -1313,7 +1338,7 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
     };
     if let Ok(override_dir) = std::env::var(env) {
         let path = PathBuf::from(override_dir.trim());
-        if path.join("config.json").is_file() {
+        if ltx_dir_is_complete(&path) {
             return Ok(path);
         }
     }
@@ -1332,12 +1357,21 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
     };
     for id in candidates {
         let dir = settings.data_dir.join("models").join("mlx").join(id);
-        if dir.join("config.json").is_file() {
+        if ltx_dir_is_complete(&dir) {
             return Ok(dir);
         }
     }
+    // Turnkey converted A/V snapshot for the base model (the repo the engine replaces).
+    if !eros {
+        if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, LTX_TURNKEY_REPO) {
+            if ltx_dir_is_complete(&dir) {
+                return Ok(dir);
+            }
+        }
+    }
     Err(WorkerError::InvalidPayload(format!(
-        "{}: no converted LTX MLX weights found under {} (expected one of {candidates:?}; or set ${env})",
+        "{}: no complete converted LTX MLX weights found under {} (expected one of {candidates:?} \
+         with the audio vocoder + i2v vae_encoder; or the turnkey {LTX_TURNKEY_REPO}; or set ${env})",
         request.model,
         settings.data_dir.join("models").join("mlx").display(),
     )))
@@ -1766,9 +1800,10 @@ mod tests {
         assert!(none.is_empty());
     }
 
-    /// A locally-converted LTX-2.3 snapshot **complete for the current engine** (needs the
-    /// audio `vocoder` + `vae_encoder` the engine load reads), else `None` so the smoke
-    /// skips. The cached `ltx_2_3_base_*` dirs predate that layout, so this normally skips.
+    /// An LTX-2.3 snapshot **complete for the current engine** ([`ltx_dir_is_complete`]),
+    /// else `None` so the smoke skips. Checks `$SCENEWORKS_MLX_LTX_DIR`, the app-managed
+    /// `<data>/models/mlx/*` dirs (which predate the audio+i2v layout, so usually skip), and
+    /// the turnkey HF-cache snapshot ([`LTX_TURNKEY_REPO`], `notapalindrome/ltx23-mlx-av-q4`).
     #[cfg(target_os = "macos")]
     fn ltx_complete_dir() -> Option<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
@@ -1776,6 +1811,13 @@ mod tests {
             candidates.push(PathBuf::from(dir.trim()));
         }
         if let Ok(home) = std::env::var("HOME") {
+            let hub = PathBuf::from(&home).join(".cache/huggingface/hub");
+            let snapshots = hub
+                .join("models--notapalindrome--ltx23-mlx-av-q4")
+                .join("snapshots");
+            if let Ok(entries) = std::fs::read_dir(&snapshots) {
+                candidates.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+            }
             let base =
                 PathBuf::from(home).join("Library/Application Support/SceneWorks/data/models/mlx");
             for id in [
@@ -1787,10 +1829,7 @@ mod tests {
                 candidates.push(base.join(id));
             }
         }
-        candidates.into_iter().find(|dir| {
-            dir.join("vocoder.safetensors").is_file()
-                && dir.join("vae_encoder.safetensors").is_file()
-        })
+        candidates.into_iter().find(|dir| ltx_dir_is_complete(dir))
     }
 
     /// Real in-process LTX-2.3 T2V **with synchronized audio** through the engine. Loads a
