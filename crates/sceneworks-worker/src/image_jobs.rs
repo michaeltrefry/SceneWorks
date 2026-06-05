@@ -21,8 +21,8 @@ use sceneworks_core::image_request::ImageRequest;
 // See mlx-gen-z-image/tests/registry.rs ("the SceneWorks worker").
 #[cfg(target_os = "macos")]
 use mlx_gen::{
-    AdapterKind, AdapterSpec, CancelFlag, GenerationOutput, GenerationRequest, Generator, LoadSpec,
-    Progress, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, CancelFlag, Conditioning, ControlKind, GenerationOutput,
+    GenerationRequest, Generator, Image, LoadSpec, Progress, Quant, WeightsSource,
 };
 #[cfg(target_os = "macos")]
 use mlx_gen_flux as _;
@@ -244,7 +244,20 @@ pub(crate) async fn run_image_generate_job(
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
     // procedural stub (keeps non-macOS + not-yet-ported models working).
     #[cfg(target_os = "macos")]
-    let handled = if mlx_available(&request, settings) {
+    let handled = if zimage_control_available(&request, settings) {
+        // Z-Image strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
+        generate_zimage_control_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if mlx_available(&request, settings) {
         generate_mlx_stream(
             api,
             settings,
@@ -970,7 +983,7 @@ async fn generate_mlx_stream(
         .collect();
 
     let cancel = CancelFlag::new();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
 
     let blocking = {
         let prompt = request.prompt.clone();
@@ -1020,6 +1033,48 @@ async fn generate_mlx_stream(
         })
     };
 
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        adapter_label,
+        &raw_settings,
+        count,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+/// Consume the streamed generation events (step / decoding / image) from the blocking
+/// thread: write each finished image as an asset fact, stream progress, and poll cancel
+/// ~every 2s (draining the channel after a cancel so the blocking sender never blocks).
+/// Shared by the base txt2img path ([`generate_mlx_stream`]) and the Z-Image strict-pose
+/// control path ([`generate_zimage_control_stream`]). `total` is the number of images
+/// the job produces (the request count, or the pose count).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn consume_gen_events(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    adapter_label: &str,
+    raw_settings: &JsonObject,
+    total: usize,
+    mut rx: tokio::sync::mpsc::Receiver<GenEvent>,
+    cancel: CancelFlag,
+    blocking: tokio::task::JoinHandle<WorkerResult<()>>,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let total_u32 = total as u32;
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     while let Some(event) = rx.recv().await {
@@ -1030,7 +1085,7 @@ async fn generate_mlx_stream(
             GenEvent::Step {
                 index,
                 current,
-                total,
+                total: step_total,
             } => {
                 if last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
@@ -1049,12 +1104,8 @@ async fn generate_mlx_stream(
                     image_progress(
                         JobStatus::Running,
                         ProgressStage::Generating,
-                        step_fraction(index, current, total, request.count),
-                        &format!(
-                            "Image {}/{} — step {current}/{total}.",
-                            index + 1,
-                            request.count
-                        ),
+                        step_fraction(index, current, step_total, total_u32),
+                        &format!("Image {}/{total} — step {current}/{step_total}.", index + 1),
                         Some(streaming_result(plan, asset_writes)),
                         backend,
                     ),
@@ -1068,8 +1119,8 @@ async fn generate_mlx_stream(
                     image_progress(
                         JobStatus::Running,
                         ProgressStage::Generating,
-                        step_fraction(index, 1, 1, request.count),
-                        &format!("Image {}/{} — decoding.", index + 1, request.count),
+                        step_fraction(index, 1, 1, total_u32),
+                        &format!("Image {}/{total} — decoding.", index + 1),
                         Some(streaming_result(plan, asset_writes)),
                         backend,
                     ),
@@ -1101,8 +1152,8 @@ async fn generate_mlx_stream(
                     image_progress(
                         JobStatus::Running,
                         ProgressStage::Generating,
-                        0.1 + 0.85 * ((index + 1) as f64 / request.count as f64),
-                        &format!("Generated image {}/{}.", index + 1, request.count),
+                        0.1 + 0.85 * ((index + 1) as f64 / total as f64),
+                        &format!("Generated image {}/{total}.", index + 1),
                         Some(streaming_result(plan, asset_writes)),
                         backend,
                     ),
@@ -1115,7 +1166,7 @@ async fn generate_mlx_stream(
 
     let task_result = blocking
         .await
-        .map_err(|error| WorkerError::InvalidPayload(format!("Z-Image task join: {error}")))?;
+        .map_err(|error| WorkerError::InvalidPayload(format!("generation task join: {error}")))?;
     if canceled {
         // check_cancel already posted the Canceled update; treat the (likely) generate
         // error as the clean cancel.
@@ -1125,6 +1176,345 @@ async fn generate_mlx_stream(
     }
     task_result
 }
+
+// ---------------------------------------------------------------------------
+// Z-Image strict-pose ControlNet (macOS, sc-3028): the Fun-Controlnet-Union
+// `z_image_turbo_control` variant. One image per pose, each driven by a DWPose
+// skeleton rendered from the pose's keypoints (see `openpose_skeleton`).
+// ---------------------------------------------------------------------------
+
+/// The engine registry id for the Z-Image Fun-Controlnet-Union variant.
+#[cfg(target_os = "macos")]
+const ZIMAGE_CONTROL_ENGINE_ID: &str = "z_image_turbo_control";
+/// Default Fun-Controlnet-Union control-weights repo + file (sc-2257 parity).
+#[cfg(target_os = "macos")]
+const ZIMAGE_CONTROL_REPO: &str = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1";
+#[cfg(target_os = "macos")]
+const ZIMAGE_CONTROL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
+
+/// The object-shaped `advanced.poses` entries (the strict-pose tier; empty otherwise).
+#[cfg(target_os = "macos")]
+fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
+    request
+        .advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .map(|poses| poses.iter().filter(|pose| pose.is_object()).collect())
+        .unwrap_or_default()
+}
+
+/// True when this is a Z-Image strict-pose job (z-image + ≥1 pose) whose base weights
+/// resolve — routed to the Fun-Controlnet-Union control path rather than plain txt2img.
+/// Control-weights presence is checked in the stream so a missing checkpoint errors
+/// loudly instead of silently dropping the poses to the txt2img path.
+#[cfg(target_os = "macos")]
+fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    request.model == "z_image_turbo"
+        && !pose_entries(request).is_empty()
+        && resolve_weights_dir(request, settings).is_some()
+}
+
+/// Resolve the Fun-Controlnet-Union checkpoint (`advanced.controlWeights.{repo,filename}`
+/// else defaults) to a single `.safetensors` in the HF cache. `None` when absent (the
+/// model-download flow fetches it ahead of generation, like base weights).
+#[cfg(target_os = "macos")]
+fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+    let control = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object);
+    let str_field = |key: &str, default: &'static str| -> String {
+        control
+            .and_then(|control| control.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default)
+            .to_owned()
+    };
+    let repo = str_field("repo", ZIMAGE_CONTROL_REPO);
+    let filename = str_field("filename", ZIMAGE_CONTROL_FILE);
+    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo)?;
+    let path = snapshot.join(filename);
+    path.exists().then_some(path)
+}
+
+/// Pose ControlNet lock strength: `advanced.controlScale` (default 0.9, clamp [0,2]).
+#[cfg(target_os = "macos")]
+fn resolve_control_scale(request: &ImageRequest) -> f32 {
+    request
+        .advanced
+        .get("controlScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(0.9)
+        .clamp(0.0, 2.0)
+}
+
+/// A pose's parsed keypoints, ready for [`crate::openpose_skeleton::draw_wholebody`].
+#[cfg(target_os = "macos")]
+struct PoseInput {
+    keypoints: Vec<crate::openpose_skeleton::Keypoint>,
+    hands: Option<Vec<crate::openpose_skeleton::Hand>>,
+    face: Option<Vec<crate::openpose_skeleton::Keypoint>>,
+}
+
+#[cfg(target_os = "macos")]
+fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
+    use crate::openpose_skeleton::{normalize_face, normalize_hands, normalize_keypoints};
+    pose_entries(request)
+        .into_iter()
+        .map(|entry| PoseInput {
+            keypoints: entry
+                .get("keypoints")
+                .map(normalize_keypoints)
+                .unwrap_or_else(|| vec![None; 18]),
+            hands: entry.get("hands").and_then(normalize_hands),
+            face: entry.get("face").and_then(normalize_face),
+        })
+        .collect()
+}
+
+/// Load the Z-Image Fun-Controlnet-Union generator (base snapshot + control overlay).
+#[cfg(target_os = "macos")]
+fn zimage_control_load(
+    weights_dir: PathBuf,
+    control_weights: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
+        .with_control(WeightsSource::File(control_weights));
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
+    }
+    mlx_gen::load(ZIMAGE_CONTROL_ENGINE_ID, &spec).map_err(|error| {
+        WorkerError::InvalidPayload(format!("Z-Image control load failed: {error}"))
+    })
+}
+
+/// Generate one strict-pose image: the `control` skeleton drives the Fun-Controlnet-Union
+/// pose branch at `control_scale`. Z-Image-Turbo is guidance-distilled (no CFG / negative).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn zimage_control_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    control: Image,
+    control_scale: f32,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        conditioning: vec![Conditioning::Control {
+            image: control,
+            kind: ControlKind::Pose,
+            scale: control_scale,
+        }],
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator.generate(&request, on_progress).map_err(|error| {
+        WorkerError::InvalidPayload(format!("control generation failed: {error}"))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::InvalidPayload("control generator produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::InvalidPayload(
+            "control generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn zimage_control_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    control_scale: f32,
+    pose_count: usize,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    // Z-Image-Turbo is guidance-distilled — no CFG.
+    raw.insert("guidanceScale".to_owned(), Value::Null);
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw.insert("controlScale".to_owned(), json!(control_scale));
+    raw.insert("poseCount".to_owned(), json!(pose_count));
+    raw
+}
+
+/// Real Z-Image strict-pose generation: one image per pose, each conditioned on a DWPose
+/// skeleton rendered from the pose keypoints + locked by the Fun-Controlnet-Union branch.
+/// Mirrors [`generate_mlx_stream`]'s blocking-thread + streamed-events shape (the MLX
+/// generator is `!Send` + single-thread), reusing [`consume_gen_events`].
+#[cfg(target_os = "macos")]
+async fn generate_zimage_control_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    // Identity img2img-init (sc-2328) is an opt-in escape hatch (off by default, validated
+    // marginal on 8-step Turbo). The engine accepts a Reference, but resolving
+    // referenceAssetId → image needs asset-path plumbing not yet in the Rust worker — so an
+    // explicit referenceStrength errors loudly here rather than silently dropping it
+    // (tracked follow-up). Pose-only (no referenceStrength) is the default tier.
+    let identity_init = request
+        .advanced
+        .get("referenceStrength")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .is_some_and(|strength| strength > 0.0);
+    if identity_init {
+        return Err(WorkerError::InvalidPayload(
+            "Identity img2img-init (referenceStrength) is not yet supported on the Rust Z-Image \
+             strict-pose path; omit referenceStrength for pose-only generation."
+                .to_owned(),
+        ));
+    }
+
+    let weights_dir = resolve_weights_dir(request, settings)
+        .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
+    let control_weights = resolve_control_weights(request, settings).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Z-Image strict-pose control weights not found (download {ZIMAGE_CONTROL_REPO})."
+        ))
+    })?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let zimage = mlx_model("z_image_turbo")
+        .ok_or_else(|| WorkerError::InvalidPayload("z-image model row missing".to_owned()))?;
+    let steps = resolve_steps(request, zimage);
+    let control_scale = resolve_control_scale(request);
+    let adapters = resolve_adapters(request)?;
+    let repo = model_repo(request, zimage);
+    let poses = parse_poses(request);
+    let count = poses.len();
+    let raw_settings =
+        zimage_control_raw_settings(request, &repo, steps, quant_bits, control_scale, count);
+    // Strict pose shares one seed across the set so noise-derived attributes (hair,
+    // wardrobe, lighting) stay constant while only the pose changes (Python parity).
+    let seed = resolve_seed(request, 0);
+
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+
+    let blocking = {
+        let prompt = request.prompt.clone();
+        let (width, height) = (request.width, request.height);
+        let cancel = cancel.clone();
+        let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let generator = zimage_control_load(weights_dir, control_weights, quant, adapters)?;
+            for (index, pose) in poses.into_iter().enumerate() {
+                let skeleton = crate::openpose_skeleton::draw_wholebody(
+                    width,
+                    height,
+                    &pose.keypoints,
+                    pose.hands.as_deref(),
+                    pose.face.as_deref(),
+                    stickwidth,
+                );
+                let control = Image {
+                    width,
+                    height,
+                    pixels: skeleton.into_raw(),
+                };
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
+                let (width, height, pixels) = zimage_control_generate_one(
+                    generator.as_ref(),
+                    &prompt,
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    control,
+                    control_scale,
+                    &cancel,
+                    &mut on_progress,
+                )?;
+                if tx
+                    .blocking_send(GenEvent::Image {
+                        index,
+                        seed,
+                        width,
+                        height,
+                        pixels,
+                    })
+                    .is_err()
+                {
+                    break; // receiver gone — stop generating.
+                }
+            }
+            Ok(())
+        })
+    };
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        ZIMAGE_ADAPTER_LABEL,
+        &raw_settings,
+        count,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+/// The asset `adapter` id for Z-Image (strict-pose shares the base z-image label).
+#[cfg(target_os = "macos")]
+const ZIMAGE_ADAPTER_LABEL: &str = "mlx_z_image";
 
 #[cfg(test)]
 mod tests {
@@ -1643,6 +2033,152 @@ mod tests {
             Some(7.0),
             Some("blurry, low quality".to_owned()),
         );
+    }
+
+    // --- Z-Image strict-pose control path (sc-3028) ---
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_control_scale_defaults_and_clamps() {
+        assert_eq!(
+            resolve_control_scale(&request(json!({ "projectId": "p" }))),
+            0.9
+        );
+        assert_eq!(
+            resolve_control_scale(&request(
+                json!({ "projectId": "p", "advanced": { "controlScale": 0.65 } })
+            )),
+            0.65
+        );
+        // Clamp to [0, 2].
+        assert_eq!(
+            resolve_control_scale(&request(
+                json!({ "projectId": "p", "advanced": { "controlScale": 5.0 } })
+            )),
+            2.0
+        );
+        assert_eq!(
+            resolve_control_scale(&request(
+                json!({ "projectId": "p", "advanced": { "controlScale": -1.0 } })
+            )),
+            0.0
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pose_entries_filters_to_objects() {
+        let req = request(json!({
+            "projectId": "p",
+            "advanced": { "poses": [{ "id": "a" }, "not-an-object", { "id": "b" }] }
+        }));
+        assert_eq!(pose_entries(&req).len(), 2);
+        // No poses → empty (not a strict-pose job).
+        assert!(pose_entries(&request(json!({ "projectId": "p" }))).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_poses_extracts_keypoints_hands_face() {
+        let req = request(json!({
+            "projectId": "p",
+            "advanced": { "poses": [{
+                "id": "a",
+                "keypoints": [[0.5, 0.2], [0.5, 0.35]],
+                "hands": [[[0.1, 0.1]], [[0.2, 0.2]]],
+                "face": [[0.5, 0.18]]
+            }] }
+        }));
+        let poses = parse_poses(&req);
+        assert_eq!(poses.len(), 1);
+        assert_eq!(poses[0].keypoints.len(), 18); // padded
+        assert_eq!(poses[0].keypoints[0], Some((0.5, 0.2)));
+        assert!(poses[0].hands.is_some());
+        assert!(poses[0].face.is_some());
+    }
+
+    /// Real-weights smoke: Z-Image strict-pose ControlNet. Loads the base
+    /// `Tongyi-MAI/Z-Image-Turbo` snapshot + the cached Fun-Controlnet-Union checkpoint,
+    /// renders a DWPose skeleton, and generates one pose image. Needs both in the HF
+    /// cache + a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored zimage_control_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Z-Image + Fun-Controlnet-Union weights + Metal device"]
+    fn zimage_control_real_weights_generates_one_pose() {
+        let base = hf_snapshot("models--Tongyi-MAI--Z-Image-Turbo");
+        let control = std::fs::read_dir(dirs_home().join(
+            ".cache/huggingface/hub/models--alibaba-pai--Z-Image-Turbo-Fun-Controlnet-Union-2.1/snapshots",
+        ))
+        .expect("control snapshots dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .map(|dir| dir.join(super::ZIMAGE_CONTROL_FILE))
+        .filter(|path| path.exists())
+        .expect("control weights file");
+
+        let generator =
+            zimage_control_load(base, control, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
+
+        // A minimal standing skeleton at 512².
+        let kp = crate::openpose_skeleton::normalize_keypoints(&json!([
+            [0.5, 0.2],
+            [0.5, 0.35],
+            [0.42, 0.35],
+            [0.40, 0.5],
+            [0.40, 0.65],
+            [0.58, 0.35],
+            [0.60, 0.5],
+            [0.60, 0.65],
+            [0.45, 0.6],
+            [0.45, 0.8],
+            [0.45, 0.95],
+            [0.55, 0.6],
+            [0.55, 0.8],
+            [0.55, 0.95],
+            [0.48, 0.18],
+            [0.52, 0.18],
+            [0.46, 0.2],
+            [0.54, 0.2]
+        ]));
+        let skeleton = crate::openpose_skeleton::draw_wholebody(
+            512,
+            512,
+            &kp,
+            None,
+            None,
+            crate::openpose_skeleton::body_stickwidth(512, 512),
+        );
+        let control = mlx_gen::Image {
+            width: 512,
+            height: 512,
+            pixels: skeleton.into_raw(),
+        };
+
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = zimage_control_generate_one(
+            generator.as_ref(),
+            "a person standing in a meadow",
+            512,
+            512,
+            42,
+            8,
+            control,
+            0.9,
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
     }
 
     #[cfg(target_os = "macos")]

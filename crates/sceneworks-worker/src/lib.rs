@@ -44,6 +44,7 @@ use media_jobs::*;
 mod image_jobs;
 use image_jobs::*;
 mod downloads;
+mod openpose_skeleton;
 use downloads::*;
 
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
