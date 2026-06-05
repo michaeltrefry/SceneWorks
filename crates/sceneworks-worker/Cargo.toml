@@ -78,6 +78,10 @@ mlx-gen-sdxl = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed6
 # (dense T2V/TI2V), `wan2_2_t2v_14b` + `wan2_2_i2v_14b` (dual-expert MoE) via
 # inventory when linked + referenced (`use mlx_gen_wan as _;` in video_jobs.rs).
 mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
+# LTX-2.3 video provider (epic 3018, sc-3035). Self-registers `ltx_2_3` (T2V/I2V +
+# synchronized audio, 2-stage distilled). Linked + referenced (`use mlx_gen_ltx as _;`
+# in video_jobs.rs); the Gemma-3 text encoder is resolved by the engine (HF cache / env).
+mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
 
 [lints]
 workspace = true

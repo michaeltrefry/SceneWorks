@@ -36,9 +36,11 @@ use mlx_gen::{
     LoadSpec, MoeExpert, Precision, Progress, Quant, WeightsSource,
 };
 #[cfg(target_os = "macos")]
+use mlx_gen_ltx as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_wan as _;
 #[cfg(target_os = "macos")]
-use sceneworks_core::video_request::wan_frame_count;
+use sceneworks_core::video_request::{ltx_frame_count, wan_frame_count};
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
@@ -128,11 +130,13 @@ pub(crate) async fn run_video_generate_job(
         ),
     )
     .await?;
-    // Generate: real MLX Wan on macOS for Wan models with resolvable weights, else the
-    // procedural stub (LTX real path = sc-3035; non-macOS or missing weights = stub).
+    // Generate: real MLX on macOS for Wan (sc-3034) / LTX+audio (sc-3035) models with
+    // resolvable weights, else the procedural stub (non-macOS or missing weights = stub).
     #[cfg(target_os = "macos")]
-    let (decoded, adapter, raw_settings) = match wan_engine_id(&request.model) {
-        Some(engine_id) if wan_available(&request, settings) => (
+    let (decoded, adapter, raw_settings) = if let Some(engine_id) =
+        wan_engine_id(&request.model).filter(|_| wan_available(&request, settings))
+    {
+        (
             generate_wan(
                 api,
                 settings,
@@ -145,12 +149,30 @@ pub(crate) async fn run_video_generate_job(
             .await?,
             WAN_ADAPTER,
             wan_raw_settings(&request),
-        ),
-        _ => (
+        )
+    } else if let Some(engine_id) =
+        ltx_engine_id(&request.model).filter(|_| ltx_available(&request, settings))
+    {
+        (
+            generate_ltx(
+                api,
+                settings,
+                job,
+                &request,
+                &project_path,
+                engine_id,
+                backend,
+            )
+            .await?,
+            LTX_ADAPTER,
+            ltx_raw_settings(&request),
+        )
+    } else {
+        (
             generate_stub_video(&request, seed),
             STUB_ADAPTER,
             stub_raw_settings(&request),
-        ),
+        )
     };
     #[cfg(not(target_os = "macos"))]
     let (decoded, adapter, raw_settings) = (
@@ -1026,10 +1048,12 @@ fn wan_sampling(engine_id: &str) -> (Option<u32>, Option<f32>) {
     }
 }
 
-/// The resolved inputs for one Wan generation (engine load + request build), split out
-/// so the engine call is unit-testable on real weights without the API/job plumbing.
+/// The resolved inputs for one video generation (engine load + request build), shared by
+/// Wan (sc-3034) and LTX (sc-3035) — split out so the engine call is unit-testable on real
+/// weights without the API/job plumbing. The LTX-only knobs (`video_mode` no_audio,
+/// prompt-enhance) default off for Wan; the Wan-only `moe_expert` rides on `adapters`.
 #[cfg(target_os = "macos")]
-struct WanGenInput {
+struct VideoGenInput {
     engine_id: &'static str,
     model_dir: PathBuf,
     quant: Option<Quant>,
@@ -1044,17 +1068,51 @@ struct WanGenInput {
     steps: Option<u32>,
     guidance: Option<f32>,
     seed: u64,
+    // LTX-only knobs (sc-3035); left at defaults by Wan + the other models.
+    video_mode: Option<String>,
+    enhance_prompt: bool,
+    use_uncensored_enhancer: bool,
+    enhance_max_tokens: Option<u32>,
+    enhance_temperature: Option<f32>,
 }
 
-/// Load the Wan model and run one generation to RGB8 frames (+ fps), streaming denoise
-/// progress via `on_progress` and honoring `cancel`. Synchronous + blocking (the
-/// `Box<dyn Generator>` is `!Send`); the caller runs it on a blocking thread.
 #[cfg(target_os = "macos")]
-fn run_wan_generation(
-    input: WanGenInput,
+impl Default for VideoGenInput {
+    fn default() -> Self {
+        Self {
+            engine_id: "",
+            model_dir: PathBuf::new(),
+            quant: None,
+            adapters: Vec::new(),
+            conditioning: Vec::new(),
+            prompt: String::new(),
+            negative_prompt: None,
+            width: 0,
+            height: 0,
+            frames: 0,
+            fps: 0,
+            steps: None,
+            guidance: None,
+            seed: 0,
+            video_mode: None,
+            enhance_prompt: false,
+            use_uncensored_enhancer: false,
+            enhance_max_tokens: None,
+            enhance_temperature: None,
+        }
+    }
+}
+
+/// Load a video model and run one generation to a [`DecodedVideo`] (RGB8 frames + fps +
+/// optional audio), streaming denoise progress via `on_progress` and honoring `cancel`.
+/// Synchronous + blocking (the `Box<dyn Generator>` is `!Send`); the caller runs it on a
+/// blocking thread. The engine fills the audio track (LTX) or leaves it `None` (Wan).
+#[cfg(target_os = "macos")]
+fn run_video_generation(
+    input: VideoGenInput,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(Vec<RgbFrame>, u32)> {
+) -> WorkerResult<DecodedVideo> {
     let spec = LoadSpec {
         weights: WeightsSource::Dir(input.model_dir),
         quantize: input.quant,
@@ -1063,7 +1121,7 @@ fn run_wan_generation(
         adapters: input.adapters,
     };
     let generator = mlx_gen::load(input.engine_id, &spec)
-        .map_err(|error| WorkerError::InvalidPayload(format!("Wan load failed: {error}")))?;
+        .map_err(|error| WorkerError::InvalidPayload(format!("video load failed: {error}")))?;
     let req = GenerationRequest {
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
@@ -1075,15 +1133,20 @@ fn run_wan_generation(
         guidance: input.guidance,
         seed: Some(input.seed),
         conditioning: input.conditioning,
+        video_mode: input.video_mode,
+        enhance_prompt: input.enhance_prompt,
+        use_uncensored_enhancer: input.use_uncensored_enhancer,
+        enhance_max_tokens: input.enhance_max_tokens,
+        enhance_temperature: input.enhance_temperature,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&req, on_progress)
-        .map_err(|error| WorkerError::InvalidPayload(format!("Wan generation failed: {error}")))?;
+    let output = generator.generate(&req, on_progress).map_err(|error| {
+        WorkerError::InvalidPayload(format!("video generation failed: {error}"))
+    })?;
     match output {
-        GenerationOutput::Video { frames, fps, .. } => Ok((
-            frames
+        GenerationOutput::Video { frames, fps, audio } => Ok(DecodedVideo {
+            frames: frames
                 .into_iter()
                 .map(|image| RgbFrame {
                     width: image.width,
@@ -1092,72 +1155,41 @@ fn run_wan_generation(
                 })
                 .collect(),
             fps,
-        )),
+            audio: audio.map(|track| AudioTrack {
+                samples: track.samples,
+                sample_rate: track.sample_rate,
+                channels: track.channels,
+            }),
+        }),
         GenerationOutput::Images(_) => Err(WorkerError::InvalidPayload(
-            "Wan returned images, expected video frames".to_owned(),
+            "video model returned images, expected video frames".to_owned(),
         )),
     }
 }
 
-/// Run a real MLX Wan generation on the blocking thread (the `Box<dyn Generator>` is
-/// `!Send` and the MLX device is single-thread), streaming denoise progress back to the
-/// async worker (which forwards it + polls cancel ~every 2s). Returns the decoded video
-/// (RGB8 frames + fps, no audio) for the shared [`encode_media`] pipeline.
+/// Drive a `run_video_generation` on a blocking thread, forwarding its streamed denoise
+/// progress to the async worker (Generating stage ~0.25..0.58) + polling cancel ~every 2s.
+/// The shared blocking + mpsc + cancel plumbing for Wan and LTX.
 #[cfg(target_os = "macos")]
-#[allow(clippy::too_many_arguments)]
-async fn generate_wan(
+async fn generate_video(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    request: &VideoRequest,
-    project_path: &Path,
-    engine_id: &'static str,
     backend: &str,
+    input: VideoGenInput,
 ) -> WorkerResult<DecodedVideo> {
-    let model_dir = resolve_wan_model_dir(settings, &request.model, engine_id)?;
-    let adapters = resolve_wan_adapters(settings, request, engine_id)?;
-    let conditioning = resolve_wan_conditioning(settings, request, project_path, engine_id)?;
-    let quant = resolve_wan_quant(request);
-    let frames = wan_frame_count(request.raw_frame_count());
-    let seed = resolve_video_seed(request);
-    let (steps, guidance) = wan_sampling(engine_id);
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
-    let prompt = request.prompt.clone();
-    let (width, height, fps) = (request.width, request.height, request.fps);
-
-    let input = WanGenInput {
-        engine_id,
-        model_dir,
-        quant,
-        adapters,
-        conditioning,
-        prompt,
-        negative_prompt,
-        width,
-        height,
-        frames,
-        fps,
-        steps,
-        guidance,
-        seed: seed as u64,
-    };
-
     let cancel = CancelFlag::new();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Progress>(64);
     let blocking = {
         let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<(Vec<RgbFrame>, u32)> {
+        tokio::task::spawn_blocking(move || -> WorkerResult<DecodedVideo> {
             let mut on_progress = |progress: Progress| {
                 let _ = tx.blocking_send(progress);
             };
-            run_wan_generation(input, &cancel, &mut on_progress)
+            run_video_generation(input, &cancel, &mut on_progress)
         })
     };
 
-    // Forward denoise progress (Generating stage, ~0.25..0.58) + poll cancel ~every 2s.
     let mut canceled = false;
     let mut last_cancel = Instant::now();
     while let Some(progress) = rx.recv().await {
@@ -1197,16 +1229,237 @@ async fn generate_wan(
 
     let result = blocking
         .await
-        .map_err(|error| WorkerError::InvalidPayload(format!("Wan task join: {error}")))?;
+        .map_err(|error| WorkerError::InvalidPayload(format!("video task join: {error}")))?;
     if canceled {
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    let (frames, out_fps) = result?;
-    Ok(DecodedVideo {
-        frames,
-        fps: out_fps,
-        audio: None,
-    })
+    result
+}
+
+/// Resolve a Wan request into a [`VideoGenInput`] and run it (sc-3034).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn generate_wan(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<DecodedVideo> {
+    let (steps, guidance) = wan_sampling(engine_id);
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let input = VideoGenInput {
+        engine_id,
+        model_dir: resolve_wan_model_dir(settings, &request.model, engine_id)?,
+        quant: resolve_wan_quant(request),
+        adapters: resolve_wan_adapters(settings, request, engine_id)?,
+        conditioning: resolve_wan_conditioning(settings, request, project_path, engine_id)?,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        steps,
+        guidance,
+        seed: resolve_video_seed(request) as u64,
+        ..VideoGenInput::default()
+    };
+    generate_video(api, settings, job, backend, input).await
+}
+
+// ---------------------------------------------------------------------------
+// Real MLX LTX-2.3 generation (macOS, via mlx-gen-ltx, sc-3035): T2V/I2V with
+// SYNCHRONIZED AUDIO (the 2-stage distilled A/V pipeline; CFG forced 1.0). One
+// engine model `ltx_2_3` serves both `ltx_2_3` + `ltx_2_3_eros` (the checkpoint dir
+// selects quant via split_model.json). The Gemma-3 text encoder is resolved by the
+// engine ($LTX_GEMMA_DIR / the HF cache). Audio rides the sc-3033 WAV→AAC mux path.
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real MLX LTX asset.
+#[cfg(target_os = "macos")]
+const LTX_ADAPTER: &str = "mlx_ltx";
+
+/// SceneWorks LTX model id → mlx-gen registry id (one engine model serves both), or
+/// `None` if not an LTX family id.
+#[cfg(target_os = "macos")]
+fn ltx_engine_id(model: &str) -> Option<&'static str> {
+    matches!(model, "ltx_2_3" | "ltx_2_3_eros").then_some("ltx_2_3")
+}
+
+/// Whether the linked LTX engine can serve this request now (resolvable weights).
+#[cfg(target_os = "macos")]
+fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool {
+    ltx_engine_id(&request.model).is_some() && resolve_ltx_model_dir(settings, request).is_ok()
+}
+
+/// Resolve the converted LTX MLX snapshot dir. Env override
+/// (`SCENEWORKS_MLX_LTX_DIR` / `…_EROS_DIR`) → `<data>/models/mlx/<candidate>`. For the
+/// base model the Q4 checkpoint is the default (`mlxQuantize: 8` prefers the Q8 one); the
+/// engine reads the actual bits from the checkpoint's `split_model.json`, so this only
+/// picks *which* converted dir to load.
+#[cfg(target_os = "macos")]
+fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerResult<PathBuf> {
+    let eros = request.model == "ltx_2_3_eros";
+    let env = if eros {
+        "SCENEWORKS_MLX_LTX_EROS_DIR"
+    } else {
+        "SCENEWORKS_MLX_LTX_DIR"
+    };
+    if let Ok(override_dir) = std::env::var(env) {
+        let path = PathBuf::from(override_dir.trim());
+        if path.join("config.json").is_file() {
+            return Ok(path);
+        }
+    }
+    let wants_q8 = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .map(|bits| bits >= 8)
+        .unwrap_or(false);
+    let candidates: &[&str] = if eros {
+        &["ltx_2_3_eros"]
+    } else if wants_q8 {
+        &["ltx_2_3_base_q8", "ltx_2_3_base_q4", "ltx_2_3"]
+    } else {
+        &["ltx_2_3_base_q4", "ltx_2_3_base_q8", "ltx_2_3"]
+    };
+    for id in candidates {
+        let dir = settings.data_dir.join("models").join("mlx").join(id);
+        if dir.join("config.json").is_file() {
+            return Ok(dir);
+        }
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{}: no converted LTX MLX weights found under {} (expected one of {candidates:?}; or set ${env})",
+        request.model,
+        settings.data_dir.join("models").join("mlx").display(),
+    )))
+}
+
+/// User LoRAs for an LTX generation (sc-3035): each at a uniform per-pass strength
+/// (`pass_scales` left `None` → the engine applies `scale` on every distilled stage; a
+/// per-stage schedule is parity-plus). No distill/Lightning prepend — the 2-stage distill
+/// is baked into the checkpoint. peft LoKr allowed (engine residual), LyCORIS rejected.
+#[cfg(target_os = "macos")]
+fn resolve_ltx_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let mut specs = Vec::with_capacity(request.loras.len());
+    for lora in &request.loras {
+        let path = lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = resolve_lora_file(path)?;
+        let kind = classify_adapter(&file)?;
+        specs.push(AdapterSpec::new(file, lora_scale(lora), kind));
+    }
+    Ok(specs)
+}
+
+/// Optional I2V conditioning for LTX: a `source_asset_id` → a single `Reference` image
+/// (image→video); absent → pure text→video. (Audio is produced either way.)
+#[cfg(target_os = "macos")]
+fn resolve_ltx_conditioning(
+    settings: &Settings,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Conditioning>> {
+    match request.source_asset_id.as_deref() {
+        Some(asset_id) => {
+            let image = load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                asset_id,
+                project_path,
+            )?;
+            Ok(vec![Conditioning::Reference {
+                image,
+                strength: None,
+            }])
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Read an `advanced` boolean flag (JSON bool), default `false` (Python `bool(.get(k))`).
+#[cfg(target_os = "macos")]
+fn advanced_bool(request: &VideoRequest, key: &str) -> bool {
+    request
+        .advanced
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Raw-settings recorded on a real MLX LTX asset (`advanced` knobs + real-inference markers).
+#[cfg(target_os = "macos")]
+fn ltx_raw_settings(request: &VideoRequest) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
+    raw.insert("fps".to_owned(), json!(request.fps));
+    Value::Object(raw)
+}
+
+/// Resolve an LTX request into a [`VideoGenInput`] and run it (sc-3035). Distilled 2-stage
+/// → no negative prompt / guidance (CFG 1.0); quant is checkpoint-driven (`None`); frames
+/// snap to `8k+1`; `advanced.noAudio` → `video_mode = "no_audio"` (full A/V denoise, audio
+/// decode skipped); prompt-enhance + per-pass LoRA flow through.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn generate_ltx(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<DecodedVideo> {
+    let video_mode = advanced_bool(request, "noAudio").then(|| "no_audio".to_owned());
+    let enhance_max_tokens = request
+        .advanced
+        .get("enhanceMaxTokens")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    let enhance_temperature = request
+        .advanced
+        .get("enhanceTemperature")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let input = VideoGenInput {
+        engine_id,
+        model_dir: resolve_ltx_model_dir(settings, request)?,
+        quant: None,
+        adapters: resolve_ltx_adapters(request)?,
+        conditioning: resolve_ltx_conditioning(settings, request, project_path)?,
+        prompt: request.prompt.clone(),
+        negative_prompt: None,
+        width: request.width,
+        height: request.height,
+        frames: ltx_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        steps: None,
+        guidance: None,
+        seed: resolve_video_seed(request) as u64,
+        video_mode,
+        enhance_prompt: advanced_bool(request, "enhancePrompt"),
+        use_uncensored_enhancer: advanced_bool(request, "useUncensoredEnhancer"),
+        enhance_max_tokens,
+        enhance_temperature,
+    };
+    generate_video(api, settings, job, backend, input).await
 }
 
 #[cfg(test)]
@@ -1455,21 +1708,17 @@ mod tests {
             eprintln!("skipping wan_5b_real_weights: no converted TI2V-5B dir found");
             return;
         };
-        let input = WanGenInput {
+        let input = VideoGenInput {
             engine_id: "wan2_2_ti2v_5b",
             model_dir,
-            quant: None,
-            adapters: Vec::new(),
-            conditioning: Vec::new(),
             prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
-            negative_prompt: None,
             width: 256,
             height: 256,
             frames: 5,
             fps: 16,
             steps: Some(8),
-            guidance: None,
             seed: 7,
+            ..VideoGenInput::default()
         };
         let cancel = CancelFlag::new();
         let mut steps = 0u32;
@@ -1478,12 +1727,113 @@ mod tests {
                 steps += 1;
             }
         };
-        let (frames, fps) =
-            run_wan_generation(input, &cancel, &mut on_progress).expect("5B T2V generation");
-        assert_eq!(frames.len(), 5, "5 frames (1 + 4·1)");
-        assert!(fps >= 1);
+        let decoded =
+            run_video_generation(input, &cancel, &mut on_progress).expect("5B T2V generation");
+        assert_eq!(decoded.frames.len(), 5, "5 frames (1 + 4·1)");
+        assert!(decoded.fps >= 1);
+        assert!(decoded.audio.is_none(), "Wan emits no audio");
         assert!(steps > 0, "denoise progress streamed");
-        assert!(frames
+        assert!(decoded
+            .frames
+            .iter()
+            .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
+    }
+
+    /// LTX model-id → engine-id mapping (both base + eros load the one engine model).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_engine_id_maps_base_and_eros() {
+        assert_eq!(ltx_engine_id("ltx_2_3"), Some("ltx_2_3"));
+        assert_eq!(ltx_engine_id("ltx_2_3_eros"), Some("ltx_2_3"));
+        assert_eq!(ltx_engine_id("wan_2_2"), None);
+        assert_eq!(ltx_engine_id("z_image_turbo"), None);
+    }
+
+    /// `advanced.noAudio` maps to the engine's `video_mode = "no_audio"`; enhance flags
+    /// flow through. Asserts the LTX request build (the VideoGenInput, pre-load).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_advanced_flags_map_to_video_gen_input() {
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "advanced": { "noAudio": true, "enhancePrompt": true }
+        }));
+        assert!(advanced_bool(&req, "noAudio"));
+        assert!(advanced_bool(&req, "enhancePrompt"));
+        assert!(!advanced_bool(&req, "useUncensoredEnhancer"));
+        // LTX adapters: a plain user LoRA is uniform (no per-pass schedule, no moe tag).
+        let none = resolve_ltx_adapters(&req).unwrap();
+        assert!(none.is_empty());
+    }
+
+    /// A locally-converted LTX-2.3 snapshot **complete for the current engine** (needs the
+    /// audio `vocoder` + `vae_encoder` the engine load reads), else `None` so the smoke
+    /// skips. The cached `ltx_2_3_base_*` dirs predate that layout, so this normally skips.
+    #[cfg(target_os = "macos")]
+    fn ltx_complete_dir() -> Option<PathBuf> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(dir) = std::env::var("SCENEWORKS_MLX_LTX_DIR") {
+            candidates.push(PathBuf::from(dir.trim()));
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let base =
+                PathBuf::from(home).join("Library/Application Support/SceneWorks/data/models/mlx");
+            for id in [
+                "ltx_2_3_base_q4",
+                "ltx_2_3_base_q8",
+                "ltx_2_3_eros",
+                "ltx_2_3",
+            ] {
+                candidates.push(base.join(id));
+            }
+        }
+        candidates.into_iter().find(|dir| {
+            dir.join("vocoder.safetensors").is_file()
+                && dir.join("vae_encoder.safetensors").is_file()
+        })
+    }
+
+    /// Real in-process LTX-2.3 T2V **with synchronized audio** through the engine. Loads a
+    /// complete converted snapshot + the cached Gemma TE and denoises a tiny 9-frame clip,
+    /// asserting frames come back RGB8-sized **and an audio track is produced** with streamed
+    /// progress. `#[ignore]` + skips unless a complete snapshot is present (the cached
+    /// `ltx_2_3_base_*` dirs predate the engine's vocoder/vae_encoder layout).
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real LTX-2.3 weights + Gemma TE; needs a snapshot complete for the current engine"]
+    #[test]
+    fn ltx_real_weights_with_audio() {
+        let Some(model_dir) = ltx_complete_dir() else {
+            eprintln!("skipping ltx_real_weights_with_audio: no complete LTX snapshot found");
+            return;
+        };
+        let input = VideoGenInput {
+            engine_id: "ltx_2_3",
+            model_dir,
+            prompt: "a calm ocean wave at sunset, gentle surf".to_owned(),
+            width: 256,
+            height: 256,
+            frames: 9,
+            fps: 24,
+            seed: 7,
+            ..VideoGenInput::default()
+        };
+        let cancel = CancelFlag::new();
+        let mut steps = 0u32;
+        let mut on_progress = |progress: Progress| {
+            if let Progress::Step { .. } = progress {
+                steps += 1;
+            }
+        };
+        let decoded =
+            run_video_generation(input, &cancel, &mut on_progress).expect("LTX A/V generation");
+        assert_eq!(decoded.frames.len(), 9, "9 frames (1 + 8·1)");
+        let audio = decoded
+            .audio
+            .expect("LTX produces a synchronized audio track");
+        assert!(audio.sample_rate >= 1 && !audio.samples.is_empty());
+        assert!(steps > 0, "denoise progress streamed");
+        assert!(decoded
+            .frames
             .iter()
             .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
     }
