@@ -1691,13 +1691,56 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
             .expect("complete job");
     }
 
-    // SDXL reference/IP-Adapter stays on the Python torch path.
-    let reference = store
+    // sc-3060: SDXL reference/IP-Adapter + edit_image (inpaint/outpaint) now run on the Rust
+    // engine, so they route to the mlx worker (the torch worker defers).
+    for payload in [
+        json!({ "model": "sdxl", "prompt": "p", "referenceAssetId": "asset_1" }),
+        json!({ "model": "sdxl", "prompt": "p", "mode": "edit_image", "sourceAssetId": "src_1" }),
+        json!({ "model": "sdxl", "prompt": "p", "mode": "edit_image",
+                "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
+    ] {
+        let job = store
+            .create_job(image_job_with(payload, "auto"))
+            .expect("advanced job creates");
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "sdxl advanced should defer off the torch worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .expect("mlx claims sdxl advanced job");
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("complete job");
+    }
+
+    // A third-party LyCORIS LoRA still keeps SDXL on the Python torch path.
+    let lycoris = store
         .create_job(image_job_with(
-            json!({ "model": "sdxl", "prompt": "p", "referenceAssetId": "asset_1" }),
+            json!({ "model": "sdxl", "prompt": "p", "loras": [{ "networkType": "lycoris" }] }),
             "auto",
         ))
-        .expect("reference job creates");
+        .expect("lycoris job creates");
     assert!(store
         .claim_next_job("worker-mlx")
         .expect("mlx claim ok")
@@ -1705,8 +1748,91 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
     let claimed = store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
-        .expect("torch claims sdxl reference job");
-    assert_eq!(claimed.id, reference.id);
+        .expect("torch claims sdxl lycoris job");
+    assert_eq!(claimed.id, lycoris.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn image_detail_routes_to_mlx_worker() {
+    // sc-3060: the tile-ControlNet detail refine (`image_detail`) now runs on the Rust
+    // engine for SDXL-family backbones, so it routes to the `mlx` worker (the torch worker
+    // defers); a third-party LyCORIS LoRA keeps it on torch.
+    let store = store("mlx-routing-detail");
+    let caps = vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::ImageGenerate,
+        WorkerCapability::ImageDetail,
+    ];
+    register_gpu_worker(&store, "worker-torch", "mps", caps.clone());
+    register_gpu_worker(&store, "worker-mlx", "mlx", caps);
+
+    let detail_job = |payload: Value| CreateJob {
+        job_type: JobType::ImageDetail,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(payload),
+        requested_gpu: "auto".to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    };
+
+    for model in ["sdxl", "realvisxl"] {
+        let job = store
+            .create_job(detail_job(
+                json!({ "model": model, "sourceAssetId": "asset_src" }),
+            ))
+            .unwrap_or_else(|_| panic!("{model} detail job creates"));
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "{model} detail should defer off the torch worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .unwrap_or_else(|| panic!("mlx claims {model} detail"));
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        store
+            .update_job_progress(
+                &claimed.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("complete detail job");
+    }
+
+    // LyCORIS detail job stays on the Python torch path.
+    let lycoris = store
+        .create_job(detail_job(json!({
+            "model": "realvisxl",
+            "sourceAssetId": "asset_src",
+            "loras": [{ "networkType": "lycoris" }]
+        })))
+        .expect("lycoris detail job creates");
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims lycoris detail job");
+    assert_eq!(claimed.id, lycoris.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
 }
 

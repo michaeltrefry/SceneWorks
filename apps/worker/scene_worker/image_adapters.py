@@ -3962,311 +3962,6 @@ class MlxZImageAdapter:
         return {"error": "MLX Z-Image sidecar produced no parseable result."}
 
 
-class MlxSdxlAdapter:
-    """Stable Diffusion XL base 1.0 via Apple's mlx-examples (vendored), IN-PROCESS.
-
-    Distinct from the mflux sidecar family (MlxFluxAdapter / MlxQwenAdapter /
-    MlxZImageAdapter): mlx-examples ships with the same minimal-dep stack the
-    main worker venv already has (mlx, huggingface_hub, regex, numpy, tqdm,
-    Pillow) once `requirements-mlx.txt` is installed on macOS — no separate
-    venv, no subprocess, no transformers/huggingface_hub conflict like mflux.
-    The vendored copy lives at `scene_worker/_vendor/mlx_sd/` (sc-1975, path C).
-
-    Spike measurement (sc-1975, M5 Max 128 GB, SDXL base 1.0, 1024² 30 steps,
-    CFG 7, seed 42, bf16): 1.08 s/step (~33 s gen), ~50 GB peak — roughly 3×
-    per-step speed vs the torch `SdxlDiffusersAdapter` baseline.
-
-    LoRA support: SceneWorks-authored merge module at
-    `_vendor/mlx_sd/lora.py`. Handles **PEFT** (the format SceneWorks's own
-    SDXL LoRA training kernel emits — `_SdxlLoraBackend`, training_adapters.py)
-    and **kohya with diffusers-style block paths** (the format almost every HF
-    community SDXL LoRA ships in, incl. LCM-LoRA). NOT yet supported: original
-    SD `input_blocks_*` paths (older offset-LoRA-style LoRAs) and FF-net /
-    conv-only LoRAs (mlx-examples renames the GEGLU FF differently than
-    diffusers; documented gap, follow-up). The merge is destructive (writes
-    into ``unet.<...>.weight`` directly), so the adapter reloads the model
-    whenever the LoRA composition changes.
-
-    v1 scope: T2I only on `sdxl`. ``edit_image`` would need a parallel
-    img2img variant (mlx-examples ships `image2image.py` but we don't vendor
-    it — separate scope). ``reference_asset_id`` jobs (IP-Adapter, sc-2007)
-    aren't supported here at all — fall back to the torch path.
-    """
-
-    id = "mlx_sdxl"
-    _supported_models = {"sdxl"}
-
-    def __init__(self) -> None:
-        self._sd: Any | None = None
-        # Cache key: (model_repo, frozenset of (lora_path, weight) tuples) — a
-        # change in either forces a reload because LoRA merge is destructive.
-        self._loaded_key: tuple | None = None
-
-    def loaded_models(self) -> list[str]:
-        return [self._loaded_key[0]] if self._loaded_key else []
-
-    def unload(self) -> bool:
-        if self._sd is None:
-            return False
-        self._sd = None
-        self._loaded_key = None
-        try:
-            import mlx.core as mx  # noqa: F401  (lazy — keeps non-Mac hosts importable)
-            mx.clear_cache()
-        except Exception:
-            pass
-        return True
-
-    @staticmethod
-    def _mlx_sd_available() -> bool:
-        # The vendored package only imports cleanly when `mlx` is present in
-        # the venv (Apple Silicon + requirements-mlx.txt installed). On
-        # Windows / Linux / Docker the module-level `import mlx.core` raises
-        # at import time, so existence-check it before claiming we can run.
-        try:
-            import mlx.core  # noqa: F401
-        except Exception:
-            return False
-        try:
-            from . import _vendor  # noqa: F401  (package marker)
-            from ._vendor import mlx_sd  # noqa: F401
-            return True
-        except Exception:
-            return False
-
-    def generate(
-        self,
-        *,
-        settings: WorkerSettings,
-        job: dict[str, Any],
-        request: ImageRequest,
-        project_path: Path,
-        progress: ProgressCallback,
-        cancel_requested: CancelCallback,
-    ) -> dict[str, Any]:
-        model_target = MODEL_TARGETS.get(request.model, {})
-        if model_target.get("adapter") != SdxlDiffusersAdapter.id:
-            raise RuntimeError(f"{request.model} is not an SDXL target.")
-        if request.model not in self._supported_models:
-            raise RuntimeError(
-                f"MlxSdxlAdapter supports "
-                f"{', '.join(sorted(self._supported_models))}, not {request.model}."
-            )
-        if request.mode == "edit_image":
-            raise RuntimeError(
-                f"{request.model} MLX adapter is text-to-image only (v1). "
-                "Use SCENEWORKS_IMAGE_ADAPTER=sdxl_diffusers for the torch edit path."
-            )
-        if request.reference_asset_id:
-            raise RuntimeError(
-                f"{request.model} reference-image (IP-Adapter) generation is not "
-                "supported on the MLX backend. Use the torch path "
-                "(SCENEWORKS_IMAGE_ADAPTER=sdxl_diffusers)."
-            )
-        if not self._mlx_sd_available():
-            raise RuntimeError(
-                "MLX SDXL generation requires the macOS-only MLX install "
-                "(apps/worker/requirements-mlx.txt) — looked for `mlx.core` and "
-                "the vendored `_vendor/mlx_sd` package, one or both not "
-                "importable in this worker venv."
-            )
-
-        validate_lora_compatibility(
-            request.loras, model_family=model_target.get("family"), adapter_id=self.id, model_id=request.model
-        )
-        lora_specs = normalize_lora_specs(request.loras)
-        # The MLX backend doesn't YET apply LoKr (Kronecker merge unbuilt, not
-        # impossible — epic 2193: sc-2215); the SDXL family can produce LoKr
-        # adapters, so reject them clearly here for now.
-        reject_lokr_loras(lora_specs, self.id)
-
-        total = request.count
-        steps = self._num_inference_steps(request, model_target)
-        guidance = self._guidance_scale(request, model_target)
-        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
-        repo = self._repo_for_request(request, model_target)
-
-        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (MLX).")
-        sd = self._load_sd(repo, lora_specs, job_id=job["id"])
-
-        # mlx-examples treats `latent_size` as the post-VAE downscale (×8).
-        latent_h, latent_w = request.height // 8, request.width // 8
-
-        def image_at_index(index: int) -> Image.Image:
-            seed = seeds[index]
-            progress(
-                "running",
-                "generating",
-                image_batch_progress(index, total),
-                format_batch_running_message(model_target["label"], index, total),
-            )
-            emit_worker_event(
-                "image_inference_start",
-                jobId=job["id"],
-                adapter=self.id,
-                model=request.model,
-                imageIndex=index,
-                imageCount=total,
-                device="mps",
-            )
-            try:
-                pil = self._run_one(sd, request.prompt, request.negative_prompt or "", seed, steps, guidance, latent_h, latent_w)
-            except Exception as exc:
-                emit_worker_event(
-                    "image_inference_failed",
-                    jobId=job["id"],
-                    adapter=self.id,
-                    imageIndex=index,
-                    error=str(exc),
-                    errorType=exc.__class__.__name__,
-                )
-                raise
-            emit_worker_event(
-                "image_inference_complete",
-                jobId=job["id"],
-                adapter=self.id,
-                imageIndex=index,
-            )
-            return pil
-
-        return ImageAssetWriter().write_incremental_outputs(
-            request=request,
-            project_path=project_path,
-            image_count=total,
-            image_at_index=image_at_index,
-            adapter_id=self.id,
-            progress=progress,
-            cancel_requested=cancel_requested,
-            raw_settings={
-                **request.advanced,
-                "repo": repo,
-                "numInferenceSteps": steps,
-                "guidanceScale": guidance,
-                "mlxBackend": "mlx-examples/stable_diffusion (vendored)",
-                "realModelInference": True,
-            },
-            settings=settings,
-            job_id=job["id"],
-        )
-
-    def _load_sd(
-        self,
-        repo: str,
-        lora_specs: list[Any],
-        *,
-        job_id: str,
-    ) -> Any:
-        # Lazy imports — the module-level safety check is in _mlx_sd_available;
-        # by the time we reach here mlx + the vendored package must import.
-        from ._vendor.mlx_sd import StableDiffusionXL  # type: ignore[import-not-found]
-        from ._vendor.mlx_sd.lora import apply_loras_to_unet  # type: ignore[import-not-found]
-
-        lora_key = tuple(sorted((spec.path, float(spec.weight)) for spec in lora_specs))
-        cache_key = (repo, lora_key)
-        if self._sd is not None and self._loaded_key == cache_key:
-            return self._sd
-
-        emit_worker_event(
-            "mlx_sdxl_load_start",
-            jobId=job_id,
-            adapter=self.id,
-            repo=repo,
-            loraCount=len(lora_specs),
-        )
-        # Clear the previous resident UNet before loading a new one — saves
-        # peak memory on small Macs that just barely fit one SDXL UNet at a
-        # time. mlx_sd doesn't expose a `del unet` hook but Python's GC + the
-        # MLX cache clear handles it.
-        if self._sd is not None:
-            self._sd = None
-            try:
-                import mlx.core as mx
-                mx.clear_cache()
-            except Exception:
-                pass
-
-        sd = StableDiffusionXL(repo, float16=True)
-        if lora_specs:
-            specs_payload = [
-                {"path": spec.path, "weight": float(spec.weight)} for spec in lora_specs
-            ]
-            touched = apply_loras_to_unet(sd.unet, specs_payload)
-            if touched == 0:
-                # All LoRAs in unsupported formats / no matching modules — surface
-                # rather than silently shipping an unmodified model.
-                raise RuntimeError(
-                    "MLX SDXL LoRA merge found no matching modules for the supplied "
-                    "LoRAs. Supported formats: PEFT (lora_A/lora_B) and kohya with "
-                    "diffusers-style block paths (lora_unet_down_blocks_..., "
-                    "lora_unet_up_blocks_..., lora_unet_mid_block_...). Original-SD "
-                    "input_blocks paths and FF-net/conv-only LoRAs aren't merged in v1."
-                )
-            emit_worker_event(
-                "mlx_sdxl_lora_merged",
-                jobId=job_id,
-                adapter=self.id,
-                loraCount=len(lora_specs),
-                modulesTouched=touched,
-            )
-        sd.ensure_models_are_loaded()
-        self._sd = sd
-        self._loaded_key = cache_key
-        emit_worker_event(
-            "mlx_sdxl_load_complete",
-            jobId=job_id,
-            adapter=self.id,
-            repo=repo,
-        )
-        return sd
-
-    @staticmethod
-    def _run_one(
-        sd: Any,
-        prompt: str,
-        negative_prompt: str,
-        seed: int,
-        steps: int,
-        guidance: float,
-        latent_h: int,
-        latent_w: int,
-    ) -> Image.Image:
-        import mlx.core as mx
-        import numpy as np
-
-        latents = sd.generate_latents(
-            prompt,
-            n_images=1,
-            cfg_weight=guidance,
-            num_steps=steps,
-            seed=seed,
-            negative_text=negative_prompt,
-            latent_size=(latent_h, latent_w),
-        )
-        x_t = None
-        for x_t in latents:
-            mx.eval(x_t)
-        # Decode + scale [0, 1] → uint8 (mlx-examples txt2image.py recipe).
-        image = sd.decode(x_t)
-        mx.eval(image)
-        image = (image * 255).astype(mx.uint8)
-        # `image[0]` drops the batch dim; np.array works directly on the
-        # mx.array buffer (no tolist() — that collapses dtype).
-        return Image.fromarray(np.array(image[0])).convert("RGB")
-
-    def _repo_for_request(self, request: ImageRequest, model_target: dict[str, Any]) -> str:
-        return request.advanced.get("modelRepo") or model_target["repo"]
-
-    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
-        return safe_int(request.advanced.get("steps"), model_target.get("steps", 30), 1, 80)
-
-    def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
-        default = model_target.get("guidanceScale", 7.0)
-        try:
-            return float(request.advanced.get("guidanceScale", default))
-        except (TypeError, ValueError):
-            return float(default)
-
-
 class MlxFlux2Adapter:
     """FLUX.2-klein-9b (txt2img + edit) via mflux (Apple MLX), run OUT-OF-PROCESS.
 
@@ -7449,7 +7144,6 @@ def create_image_adapter(
     | MlxFlux2Adapter
     | KolorsDiffusersAdapter
     | SdxlDiffusersAdapter
-    | MlxSdxlAdapter
     | ChromaDiffusersAdapter
     | "InstantIDAdapter"
     | "PuLIDFluxAdapter"
@@ -7474,7 +7168,6 @@ def create_image_adapter(
         MlxFlux2Adapter.id,
         KolorsDiffusersAdapter.id,
         SdxlDiffusersAdapter.id,
-        MlxSdxlAdapter.id,
         ChromaDiffusersAdapter.id,
         "instantid_sdxl",
         "pulid_flux",
@@ -7502,8 +7195,6 @@ def create_image_adapter(
         return adapters.get("kolors_diffusers") if adapters else KolorsDiffusersAdapter()
     if requested == SdxlDiffusersAdapter.id:
         return adapters.get("sdxl_diffusers") if adapters else SdxlDiffusersAdapter()
-    if requested == MlxSdxlAdapter.id:
-        return adapters.get("mlx_sdxl") if adapters else MlxSdxlAdapter()
     if requested == ChromaDiffusersAdapter.id:
         return adapters.get("chroma_diffusers") if adapters else ChromaDiffusersAdapter()
     if requested == "instantid_sdxl":
@@ -7553,13 +7244,12 @@ def create_image_adapter(
         # than silently rendering the procedural placeholder. sc-2164.
         return adapters.get("mlx_flux2") if adapters else MlxFlux2Adapter()
     if model_target.get("adapter") == SdxlDiffusersAdapter.id:
-        # SDXL auto-dispatch: prefer MlxSdxlAdapter on macOS when the vendored
-        # mlx-examples is importable AND the model is supported AND the job
-        # is plain T2I with no reference asset. Otherwise fall back to the
-        # torch path. SCENEWORKS_DISABLE_MLX_SDXL forces torch even when MLX
-        # is available (escape hatch for parity testing). sc-1975.
-        if _should_route_sdxl_to_mlx(payload):
-            return adapters.get("mlx_sdxl") if adapters else MlxSdxlAdapter()
+        # SDXL runs on the Python torch path here. On Mac the MLX-eligible SDXL shapes
+        # (txt2img / edit / inpaint / outpaint / reference) are claimed by the Rust `mlx`
+        # GPU worker via the API routing layer (epic 3018 + 3041 sc-3060), so they never
+        # reach this Python adapter; it stays the Windows/Linux path and the Mac fallback
+        # when the mlx worker is down. The in-process vendored MLX SDXL adapter (sc-1975)
+        # was retired by sc-3060 — the Rust `mlx-gen-sdxl` engine supersedes it.
         return adapters.get("sdxl_diffusers") if adapters else SdxlDiffusersAdapter()
     if model_target.get("adapter") == ChromaDiffusersAdapter.id:
         return adapters.get("chroma_diffusers") if adapters else ChromaDiffusersAdapter()
@@ -7646,44 +7336,6 @@ def _request_has_lycoris_lora(payload: dict[str, Any]) -> bool:
             if resolved is not None and classify_adapter_network(resolved) == "lycoris":
                 return True
     return False
-
-
-def _should_route_sdxl_to_mlx(payload: dict[str, Any]) -> bool:
-    """Decide whether the SDXL auto-dispatch path should pick MlxSdxlAdapter
-    (vendored mlx-examples in-proc) over SdxlDiffusersAdapter (torch). All
-    checks must pass; any failure falls back to the torch path so we never
-    regress it. sc-1975.
-
-    NOTE: a *separate* env var (`SCENEWORKS_DISABLE_MLX_SDXL`) from the mflux
-    family's `SCENEWORKS_DISABLE_MLX_FLUX`, because the MLX SDXL stack is
-    structurally different (in-process vendored, not subprocess + sidecar
-    venv). Each backend gets its own escape hatch.
-
-    Gates:
-      1. SCENEWORKS_DISABLE_MLX_SDXL unset.
-      2. Platform == darwin (mlx + mlx-examples are Apple-only).
-      3. Model in MlxSdxlAdapter._supported_models (just `sdxl` in v1).
-      4. mode != "edit_image" (img2img isn't vendored).
-      5. No referenceAssetId (no IP-Adapter in the MLX path).
-      6. The vendored mlx_sd package + mlx itself must import (the
-         requirements-mlx.txt install gate).
-      7. No LoKr LoRA in the request — LoKr is torch-only (epic 2193); a LoKr
-         job falls back to the torch path the same way a reference image does.
-    """
-    if os.getenv("SCENEWORKS_DISABLE_MLX_SDXL", "").strip().lower() in {"1", "true", "yes"}:
-        return False
-    if _request_has_lokr_lora(payload):
-        return False
-    if sys.platform != "darwin":
-        return False
-    model = payload.get("model")
-    if model not in MlxSdxlAdapter._supported_models:
-        return False
-    if payload.get("mode") == "edit_image":
-        return False
-    if payload.get("referenceAssetId"):
-        return False
-    return MlxSdxlAdapter._mlx_sd_available()
 
 
 def _should_route_z_image_to_mlx(payload: dict[str, Any]) -> bool:

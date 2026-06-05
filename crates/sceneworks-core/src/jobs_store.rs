@@ -1406,7 +1406,7 @@ fn should_defer_image_to_mlx_worker(
 ) -> JobsStoreResult<bool> {
     if job.requested_gpu != "auto"
         || worker.gpu_id.eq_ignore_ascii_case("mlx")
-        || !image_job_is_mlx_eligible(job)
+        || !job_is_mlx_eligible(job)
     {
         return Ok(false);
     }
@@ -1502,23 +1502,39 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     }
 }
 
-/// SDXL (sc-3026) MLX-routing conditions, ported from `_should_route_sdxl_to_mlx`:
-/// text-to-image only — SDXL reference/IP-Adapter and `edit_image` stay on the Python
-/// torch path (`SdxlDiffusersAdapter`). A third-party LyCORIS LoRA falls back to torch,
-/// but — unlike the old Python MLX-SDXL gate, which sent *all* LoKr to torch — peft
-/// LoKr stays on MLX: the Rust `mlx-gen-sdxl` path supports LoKr natively (the vendored
-/// `_mlx_sd` path it replaces did not).
-fn sdxl_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+/// Does this `image_detail` job belong on the in-process Rust MLX worker? sc-3060 (epic 3041)
+/// ports the tile-ControlNet detail refine onto the engine. Detail is SDXL-family only
+/// (`sdxl` / `realvisxl`, the detail-capable backbones; the payload defaults to `realvisxl`),
+/// and a third-party LyCORIS LoRA falls back to torch like every other SDXL shape. On
+/// Windows/Linux no `mlx` worker exists, so detail stays on the Python torch path.
+fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::ImageDetail) {
         return false;
     }
-    let has_reference = payload
-        .get("referenceAssetId")
+    let model = job
+        .payload
+        .get("model")
         .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if has_reference {
-        return false;
-    }
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("realvisxl");
+    matches!(model, "sdxl" | "realvisxl") && !request_has_lycoris_lora(&job.payload)
+}
+
+/// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).
+fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    image_job_is_mlx_eligible(job) || image_detail_mlx_eligible(job)
+}
+
+/// SDXL MLX-routing conditions. sc-3026 brought txt2img + LoRA; sc-3060 (epic 3041) adds the
+/// advanced shapes the Rust `mlx-gen-sdxl` engine now handles — reference/IP-Adapter, img2img
+/// `edit_image`, masked inpaint, and outpaint — so they route to the in-process MLX worker on
+/// Mac instead of the Python torch `SdxlDiffusersAdapter`. The torch path stays authoritative
+/// on Windows/Linux (no `mlx` worker registered → nothing defers) and as the Mac fallback.
+/// A third-party LyCORIS LoRA still falls back to torch (the engine/worker apply LoRA + peft
+/// LoKr natively, but not arbitrary LyCORIS); unlike the old Python gate, peft LoKr stays on MLX.
+/// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
+fn sdxl_mlx_eligible(payload: &Map<String, Value>) -> bool {
     !request_has_lycoris_lora(payload)
 }
 
@@ -1633,16 +1649,15 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
     }
-    // Epic 3018: the in-process MLX worker (gpu_id "mlx") only generates a fixed
-    // set of model families and only txt2img-shaped requests. It must not claim
-    // an image_generate job that needs the torch path — edit_image, a reference
-    // without a pose, a family not yet ported, or a third-party LyCORIS LoRA —
-    // those stay on the Python worker. Non-mlx workers are unaffected here; the
-    // *preference* to route eligible jobs to an idle mlx worker is a soft
-    // deferral in the claim path (`should_defer_image_to_mlx_worker`).
+    // Epic 3018/3041: the in-process MLX worker (gpu_id "mlx") serves a fixed set of
+    // model families. It must not claim an image_generate / image_detail job that needs
+    // the torch path — a family not yet ported, or a third-party LyCORIS LoRA — those
+    // stay on the Python worker. Non-mlx workers are unaffected here; the *preference* to
+    // route eligible jobs to an idle mlx worker is a soft deferral in the claim path
+    // (`should_defer_image_to_mlx_worker`).
     if worker.gpu_id.eq_ignore_ascii_case("mlx")
-        && matches!(job.job_type, JobType::ImageGenerate)
-        && !image_job_is_mlx_eligible(job)
+        && matches!(job.job_type, JobType::ImageGenerate | JobType::ImageDetail)
+        && !job_is_mlx_eligible(job)
     {
         return false;
     }
@@ -2030,18 +2045,29 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn sdxl_txt2img_eligible_edit_reference_and_lycoris_are_not() {
+    fn sdxl_eligible_for_txt2img_edit_reference_lokr_but_not_lycoris() {
         assert!(sdxl_mlx_eligible(&object(json!({ "prompt": "a red fox" }))));
         // peft LoKr stays on MLX (the Rust SDXL path supports LoKr, unlike the old
         // vendored path) — only third-party LyCORIS falls back to torch.
         assert!(sdxl_mlx_eligible(&object(json!({
             "loras": [{ "networkType": "lokr" }]
         }))));
-        assert!(!sdxl_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
-        assert!(!sdxl_mlx_eligible(&object(
+        // sc-3060: the Rust engine now handles the advanced shapes, so edit_image
+        // (img2img / inpaint / outpaint) and reference/IP-Adapter route to MLX too.
+        assert!(sdxl_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(sdxl_mlx_eligible(&object(
             json!({ "referenceAssetId": "asset_1" })
         )));
+        assert!(sdxl_mlx_eligible(&object(json!({
+            "mode": "edit_image",
+            "maskAssetId": "mask_1"
+        }))));
+        // A third-party LyCORIS LoRA still falls back to torch, even on an edit job.
         assert!(!sdxl_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+        assert!(!sdxl_mlx_eligible(&object(json!({
+            "mode": "edit_image",
             "loras": [{ "networkType": "lycoris" }]
         }))));
     }

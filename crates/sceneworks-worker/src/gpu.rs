@@ -150,8 +150,9 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
     }
 }
 
-/// The Apple-Silicon native MLX GPU worker (epic 3018): advertises `image_generate`
-/// and `video_generate`, served in-process by the linked mlx-gen engine. `Gpu` (not
+/// The Apple-Silicon native MLX GPU worker (epic 3018): advertises `image_generate`,
+/// `image_detail` (tile-ControlNet refine, sc-3060), and `video_generate`, served
+/// in-process by the linked mlx-gen engine. `Gpu` (not
 /// `Cpu`) so the API's `worker_supports_job` lets GPU jobs route here; it deliberately
 /// does NOT carry the CPU utility capabilities, so downloads/imports/etc. still go to
 /// the CPU worker. `video_generate` is claimed from the video runtime onward (sc-3033);
@@ -165,6 +166,9 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
         capabilities: vec![
             WorkerCapability::Gpu,
             WorkerCapability::ImageGenerate,
+            // Tile-ControlNet detail refine (epic 3041, sc-3060) — the SDXL-family
+            // `image_detail` job runs in-process on the engine here too.
+            WorkerCapability::ImageDetail,
             WorkerCapability::VideoGenerate,
         ],
         utilization: None,

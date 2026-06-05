@@ -33,7 +33,6 @@ from scene_worker.image_adapters import (
     MlxFlux2Adapter,
     MlxFluxAdapter,
     MlxQwenAdapter,
-    MlxSdxlAdapter,
     MlxZImageAdapter,
     MODEL_TARGETS,
     QwenImageAdapter,
@@ -3229,20 +3228,6 @@ def test_request_has_lokr_lora_detection():
     assert _request_has_lokr_lora({}) is False
 
 
-def test_should_route_sdxl_to_mlx_falls_back_for_lokr(monkeypatch):
-    from scene_worker.image_adapters import _should_route_sdxl_to_mlx
-
-    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
-    monkeypatch.setattr("sys.platform", "darwin")
-    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", lambda: True)
-    model = next(iter(MlxSdxlAdapter._supported_models))
-
-    # A normal LoRA stays on MLX; a LoKr LoRA falls back to the torch path so it
-    # actually applies (MLX can't merge LoKr) instead of erroring.
-    assert _should_route_sdxl_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lora"}]}) is True
-    assert _should_route_sdxl_to_mlx({"model": model, "loras": [{"id": "a", "networkType": "lokr"}]}) is False
-
-
 def test_should_route_z_image_to_mlx_keeps_lokr_on_mlx(monkeypatch):
     from scene_worker.image_adapters import _should_route_z_image_to_mlx
 
@@ -4106,142 +4091,25 @@ def test_sdxl_manifest_has_mlx_block():
     )
 
 
-def test_image_adapter_env_override_selects_mlx_sdxl(monkeypatch):
-    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "mlx_sdxl")
-    adapter = create_image_adapter({"payload": {"model": "sdxl"}})
-    assert adapter.__class__.__name__ == "MlxSdxlAdapter"
-    assert adapter.id == "mlx_sdxl"
-
-
-def test_sdxl_auto_dispatch_routes_to_mlx_when_vendor_available(monkeypatch):
-    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
+def test_sdxl_auto_dispatch_uses_torch_adapter_on_python_worker(monkeypatch):
+    # sc-3060 retired the in-process vendored MLX SDXL adapter (sc-1975). On the Python
+    # worker, SDXL now always resolves to the torch SdxlDiffusersAdapter — on every host
+    # and for every shape (txt2img / edit / reference). MLX routing for SDXL lives in the
+    # Rust API claim layer (jobs_store::sdxl_mlx_eligible), which defers eligible jobs to
+    # the `mlx` GPU worker; those never reach this Python adapter.
     monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
-    monkeypatch.setattr("sys.platform", "darwin")
-    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", staticmethod(lambda: True))
-    adapter = create_image_adapter({"payload": {"model": "sdxl"}})
-    assert adapter.__class__.__name__ == "MlxSdxlAdapter"
-
-
-def test_sdxl_auto_dispatch_falls_back_when_vendor_missing(monkeypatch):
-    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
-    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
-    monkeypatch.setattr("sys.platform", "darwin")
-    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", staticmethod(lambda: False))
-    adapter = create_image_adapter({"payload": {"model": "sdxl"}})
-    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
-
-
-def test_sdxl_auto_dispatch_respects_disable_env(monkeypatch):
-    # SCENEWORKS_DISABLE_MLX_SDXL is a SEPARATE escape hatch from
-    # SCENEWORKS_DISABLE_MLX_FLUX — the MLX SDXL stack is structurally
-    # different (in-process vendor, not sidecar venv).
-    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_SDXL", "1")
-    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
-    monkeypatch.setattr("sys.platform", "darwin")
-    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", staticmethod(lambda: True))
-    adapter = create_image_adapter({"payload": {"model": "sdxl"}})
-    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
-
-
-def test_sdxl_auto_dispatch_skips_mlx_on_non_macos(monkeypatch):
-    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
-    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
-    monkeypatch.setattr("sys.platform", "linux")
-    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", staticmethod(lambda: True))
-    adapter = create_image_adapter({"payload": {"model": "sdxl"}})
-    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
-
-
-def test_sdxl_auto_dispatch_skips_mlx_for_edit_image(monkeypatch):
-    # mlx-examples ships image2image.py but we don't vendor it; edit_image
-    # jobs stay on the torch path until that scope expands.
-    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
-    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
-    monkeypatch.setattr("sys.platform", "darwin")
-    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", staticmethod(lambda: True))
-    adapter = create_image_adapter(
-        {"payload": {"model": "sdxl", "mode": "edit_image"}}
-    )
-    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
-
-
-def test_sdxl_auto_dispatch_skips_mlx_for_realvisxl_model(monkeypatch):
-    # realvisxl is family-sdxl but a different checkpoint — not in
-    # MlxSdxlAdapter._supported_models for v1.
-    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
-    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
-    monkeypatch.setattr("sys.platform", "darwin")
-    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", staticmethod(lambda: True))
-    adapter = create_image_adapter({"payload": {"model": "realvisxl"}})
-    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
-
-
-def test_sdxl_auto_dispatch_skips_mlx_when_reference_asset_present(monkeypatch):
-    monkeypatch.delenv("SCENEWORKS_DISABLE_MLX_SDXL", raising=False)
-    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
-    monkeypatch.setattr("sys.platform", "darwin")
-    monkeypatch.setattr(MlxSdxlAdapter, "_mlx_sd_available", staticmethod(lambda: True))
-    adapter = create_image_adapter(
-        {"payload": {"model": "sdxl", "referenceAssetId": "asset_ref"}}
-    )
-    assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
-
-
-def test_mlx_sdxl_rejects_unsupported_model():
-    job = {
-        "id": "job_mlx_sdxl_wrong_model",
-        "payload": {"projectId": "p", "mode": "text_to_image", "model": "flux_schnell", "prompt": "x"},
-    }
-    noop = lambda *args, **kwargs: None  # noqa: E731
-    try:
-        MlxSdxlAdapter().generate(
-            settings=None, job=job, request=image_request_from_job(job), project_path=None,
-            progress=noop, cancel_requested=lambda: False,
-        )
-    except RuntimeError as exc:
-        assert "SDXL target" in str(exc) or "MlxSdxlAdapter supports" in str(exc)
-    else:
-        raise AssertionError("MlxSdxlAdapter must reject non-SDXL models.")
-
-
-def test_mlx_sdxl_rejects_image_edit():
-    job = {
-        "id": "job_mlx_sdxl_edit",
-        "payload": {"projectId": "p", "mode": "edit_image", "model": "sdxl", "prompt": "x"},
-    }
-    noop = lambda *args, **kwargs: None  # noqa: E731
-    try:
-        MlxSdxlAdapter().generate(
-            settings=None, job=job, request=image_request_from_job(job), project_path=None,
-            progress=noop, cancel_requested=lambda: False,
-        )
-    except RuntimeError as exc:
-        assert "text-to-image only" in str(exc).lower()
-    else:
-        raise AssertionError("MlxSdxlAdapter is T2I-only and must reject edit_image.")
-
-
-def test_mlx_sdxl_rejects_reference_asset():
-    job = {
-        "id": "job_mlx_sdxl_ref",
-        "payload": {
-            "projectId": "p",
-            "mode": "text_to_image",
-            "model": "sdxl",
-            "prompt": "x",
-            "referenceAssetId": "asset_ref",
-        },
-    }
-    noop = lambda *args, **kwargs: None  # noqa: E731
-    try:
-        MlxSdxlAdapter().generate(
-            settings=None, job=job, request=image_request_from_job(job), project_path=None,
-            progress=noop, cancel_requested=lambda: False,
-        )
-    except RuntimeError as exc:
-        assert "ip-adapter" in str(exc).lower() or "reference-image" in str(exc).lower()
-    else:
-        raise AssertionError("MlxSdxlAdapter must reject reference-image jobs.")
+    for platform in ("darwin", "linux", "win32"):
+        monkeypatch.setattr("sys.platform", platform)
+        for payload in (
+            {"model": "sdxl"},
+            {"model": "sdxl", "mode": "edit_image"},
+            {"model": "sdxl", "referenceAssetId": "asset_ref"},
+            {"model": "realvisxl"},
+        ):
+            adapter = create_image_adapter({"payload": payload})
+            assert adapter.__class__.__name__ == "SdxlDiffusersAdapter", (
+                f"{payload} on {platform} must use the torch SDXL adapter"
+            )
 
 
 def test_flux_model_target_defaults():
@@ -5098,10 +4966,9 @@ def test_kolors_pose_path_accepts_lokr_via_injection(monkeypatch, tmp_path):
 
 
 def test_create_image_adapter_routes_sdxl(monkeypatch):
-    # Pin the auto-dispatch off the MLX path so this asserts the torch
-    # fallback on every host (a developer Mac with the mlx-examples vendor
-    # importable would otherwise route here to MlxSdxlAdapter — sc-1975).
-    monkeypatch.setenv("SCENEWORKS_DISABLE_MLX_SDXL", "1")
+    # SDXL resolves to the torch adapter on the Python worker (sc-3060 retired the
+    # vendored MLX SDXL path; Mac MLX routing now lives in the Rust API claim layer).
+    monkeypatch.delenv("SCENEWORKS_IMAGE_ADAPTER", raising=False)
     adapter = create_image_adapter({"payload": {"model": "sdxl"}})
     assert adapter.__class__.__name__ == "SdxlDiffusersAdapter"
     assert adapter.id == "sdxl_diffusers"

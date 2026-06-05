@@ -465,6 +465,12 @@ async fn run_utility_job(
         JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
             .await
             .map_err(|error| ("Image generation failed.", error)),
+        // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
+        // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
+        // never advertised, so this arm is unreachable there (image_detail runs on torch).
+        JobType::ImageDetail => run_image_detail_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Image detail enhancement failed.", error)),
         // Native MLX video generation, served in-process by the linked mlx-gen engine
         // on the macOS Apple-Silicon GPU worker (epic 3018). sc-3033 ships the runtime
         // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link

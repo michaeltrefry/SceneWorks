@@ -276,6 +276,21 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
         true
+    } else if sdxl_advanced_available(&request, settings) {
+        // SDXL reference (IP-Adapter) / img2img edit / inpaint / outpaint (epic 3041,
+        // sc-3060) → the engine's advanced conditioning paths. Plain SDXL txt2img + LoRA
+        // stays on the base `mlx_available` path below.
+        generate_sdxl_advanced_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
     } else if mlx_available(&request, settings) {
         generate_mlx_stream(
             api,
@@ -2182,6 +2197,1051 @@ async fn generate_flux2_edit_stream(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// SDXL advanced conditioning (macOS, epic 3041 / sc-3060): reference (IP-Adapter),
+// img2img edit, masked inpaint, and outpaint on the `sdxl` engine model. The plain
+// txt2img + LoRA path stays on `generate_mlx_stream`; this branch handles every SDXL
+// shape that used to fall through to the Python torch `SdxlDiffusersAdapter`. The
+// engine selects the path from the loaded weights (`ip_adapter`) + conditioning combo
+// (mlx-gen-sdxl PRs #137/#138); we just build the right `LoadSpec` + `Conditioning`.
+// ---------------------------------------------------------------------------
+
+/// Default h94 IP-Adapter snapshot repo (ViT-H encoder + plus/plus-face SDXL weights).
+#[cfg(target_os = "macos")]
+const SDXL_IP_ADAPTER_REPO: &str = "h94/IP-Adapter";
+/// img2img strength for a plain SDXL edit (torch `SdxlDiffusersAdapter` default 0.6).
+#[cfg(target_os = "macos")]
+const SDXL_EDIT_STRENGTH: f32 = 0.6;
+/// img2img strength for masked inpaint / outpaint (torch default 0.85).
+#[cfg(target_os = "macos")]
+const SDXL_INPAINT_STRENGTH: f32 = 0.85;
+/// IP-Adapter scale when the request omits it — matches the torch plus-face default 0.7
+/// (`SdxlDiffusersAdapter._ip_adapter_scale`); the engine's own fallback is 0.6.
+#[cfg(target_os = "macos")]
+const SDXL_IP_SCALE: f32 = 0.7;
+
+/// Which advanced SDXL path a request maps onto (or `None` for plain txt2img, which stays
+/// on [`generate_mlx_stream`]). Outpaint wins over a plain mask when `fit_mode == outpaint`
+/// (the torch path checks outpaint first, then unions any user mask into the border).
+#[cfg(target_os = "macos")]
+enum SdxlSubMode {
+    /// Reference image-prompt via IP-Adapter (txt2img + decoupled cross-attn).
+    Ip,
+    /// Plain img2img edit (Reference init only).
+    Edit,
+    /// Masked inpaint (Reference init + Mask).
+    Inpaint,
+    /// Outpaint = inpaint with a generated border mask (+ optional user-mask union).
+    Outpaint,
+}
+
+#[cfg(target_os = "macos")]
+fn non_empty(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|id| !id.trim().is_empty())
+}
+
+/// The engine-backed SDXL family row for a model id (`sdxl` / `realvisxl`), if any.
+#[cfg(target_os = "macos")]
+fn sdxl_engine_model(model: &str) -> Option<&'static MlxModel> {
+    mlx_model(model).filter(|entry| entry.engine_id == "sdxl")
+}
+
+/// Classify an SDXL job into an advanced sub-mode. `None` = plain txt2img (no reference,
+/// not an edit) → handled by the base MLX path.
+#[cfg(target_os = "macos")]
+fn sdxl_sub_mode(request: &ImageRequest) -> Option<SdxlSubMode> {
+    if request.mode == "edit_image" {
+        if !non_empty(&request.source_asset_id) {
+            return None;
+        }
+        if request.fit_mode == "outpaint" {
+            return Some(SdxlSubMode::Outpaint);
+        }
+        if non_empty(&request.mask_asset_id) {
+            return Some(SdxlSubMode::Inpaint);
+        }
+        return Some(SdxlSubMode::Edit);
+    }
+    if non_empty(&request.reference_asset_id) {
+        return Some(SdxlSubMode::Ip);
+    }
+    None
+}
+
+/// True when this is an SDXL advanced job (sdxl-family model + an advanced sub-mode) whose
+/// base weights resolve — routed here rather than to plain txt2img.
+#[cfg(target_os = "macos")]
+fn sdxl_advanced_available(request: &ImageRequest, settings: &Settings) -> bool {
+    sdxl_engine_model(&request.model).is_some()
+        && sdxl_sub_mode(request).is_some()
+        && resolve_weights_dir(request, settings).is_some()
+}
+
+/// Resolve the IP-Adapter snapshot directory (`advanced.ipAdapterRepo` override, else the
+/// h94 default). The engine loader finds the ViT-H encoder + plus/plus-face weights inside.
+#[cfg(target_os = "macos")]
+fn resolve_ip_adapter_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+    let repo = request
+        .advanced
+        .get("ipAdapterRepo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(SDXL_IP_ADAPTER_REPO);
+    huggingface_snapshot_dir(&settings.data_dir, repo)
+}
+
+/// Resolve a mask asset id to an RGB8 [`Image`] (the engine luma-converts + binarizes it).
+#[cfg(target_os = "macos")]
+fn load_mask_asset_image(
+    settings: &Settings,
+    project_id: &str,
+    mask_asset_id: &str,
+    project_path: &Path,
+) -> WorkerResult<Image> {
+    load_reference_image(&settings.data_dir, project_id, mask_asset_id, project_path)
+}
+
+/// Float field on `advanced` (number or numeric string), clamped to `[lo, hi]`.
+#[cfg(target_os = "macos")]
+fn advanced_f32(request: &ImageRequest, key: &str, default: f32, lo: f32, hi: f32) -> f32 {
+    request
+        .advanced
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(default)
+        .clamp(lo, hi)
+}
+
+/// Composite `source` contained (long edge fits) + centered on a black `width`×`height`
+/// canvas, using the **engine's** `contain_box` so the padded source lines up pixel-for-pixel
+/// with [`mlx_gen::image::outpaint_border_mask`] (both derive the same kept rect).
+#[cfg(target_os = "macos")]
+fn sdxl_outpaint_canvas(source: &image::RgbImage, width: u32, height: u32) -> Image {
+    use image::imageops::FilterType::Lanczos3;
+    let (new_w, new_h, left, top) =
+        mlx_gen::image::contain_box(source.width(), source.height(), width, height);
+    let resized = image::imageops::resize(source, new_w.max(1), new_h.max(1), Lanczos3);
+    let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+    image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
+    Image {
+        width,
+        height,
+        pixels: canvas.into_raw(),
+    }
+}
+
+/// An [`Image`] (RGB8) as an `image::RgbImage` for host-side compositing.
+#[cfg(target_os = "macos")]
+fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
+    image::RgbImage::from_raw(image.width, image.height, image.pixels)
+        .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))
+}
+
+/// Load the SDXL generator for an advanced job. `ip_adapter_dir` (Some only in IP mode) adds
+/// the decoupled cross-attn weights at load — the engine then treats a `Reference` as the
+/// image prompt rather than an img2img init. Loaded per job (no persistent cache).
+#[cfg(target_os = "macos")]
+fn sdxl_advanced_load(
+    weights_dir: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+    ip_adapter_dir: Option<PathBuf>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    if let Some(ip) = ip_adapter_dir {
+        spec = spec.with_ip_adapter(WeightsSource::Dir(ip));
+    }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
+    }
+    mlx_gen::load("sdxl", &spec)
+        .map_err(|error| WorkerError::InvalidPayload(format!("sdxl advanced load failed: {error}")))
+}
+
+/// Generate one SDXL image conditioned on `conditioning` (Reference[/Mask]). SDXL is true-CFG
+/// (negative prompt + guidance honoured). The img2img strength / IP scale ride the Reference
+/// `strength` field, so no separate `req.strength` is needed.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn sdxl_advanced_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    conditioning: Vec<Conditioning>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance,
+        conditioning,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator.generate(&request, on_progress).map_err(|error| {
+        WorkerError::InvalidPayload(format!("sdxl advanced generation failed: {error}"))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::InvalidPayload("sdxl advanced produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::InvalidPayload(
+            "sdxl advanced returned non-image output".to_owned(),
+        )),
+    }
+}
+
+/// Recipe facts recorded on the assets (the sub-mode + strengths/IP scale that drove it).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn sdxl_advanced_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: Option<f32>,
+    mode_tag: &str,
+    strength: f32,
+    ip_scale: Option<f32>,
+) -> JsonObject {
+    let mut raw = mlx_raw_settings(request, repo, steps, quant_bits, guidance);
+    raw.insert("sdxlMode".to_owned(), Value::String(mode_tag.to_owned()));
+    raw.insert("strength".to_owned(), json!(strength));
+    if let Some(scale) = ip_scale {
+        raw.insert("ipAdapterScale".to_owned(), json!(scale));
+    }
+    raw
+}
+
+/// Real SDXL advanced generation: resolve the conditioning images on the async side, then load
+/// once + generate `count` images on the blocking thread (the MLX generator is `!Send`). Reuses
+/// [`consume_gen_events`] for streaming + asset writes.
+#[cfg(target_os = "macos")]
+async fn generate_sdxl_advanced_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let model = sdxl_engine_model(&request.model)
+        .ok_or_else(|| WorkerError::InvalidPayload("not an SDXL engine model".to_owned()))?;
+    let sub_mode = sdxl_sub_mode(request)
+        .ok_or_else(|| WorkerError::InvalidPayload("not an SDXL advanced job".to_owned()))?;
+    let weights_dir = resolve_weights_dir(request, settings)
+        .ok_or_else(|| WorkerError::InvalidPayload("SDXL weights not found".to_owned()))?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let steps = resolve_steps(request, model);
+    let guidance = resolve_guidance(request, model);
+    let negative_prompt = resolve_negative_prompt(request, model);
+    let adapters = resolve_adapters(request)?;
+    let repo = model_repo(request, model);
+    let adapter_label = model.adapter_label;
+    let (width, height) = (request.width, request.height);
+
+    // Build the (seed-independent) conditioning + decide whether IP weights load. Images are
+    // decoded here on the async side and moved into the blocking task (each cloned per seed).
+    let (conditioning, ip_adapter_dir, mode_tag, strength, ip_scale): (
+        Vec<Conditioning>,
+        Option<PathBuf>,
+        &str,
+        f32,
+        Option<f32>,
+    ) = match sub_mode {
+        SdxlSubMode::Ip => {
+            let reference_id = request
+                .reference_asset_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("IP-Adapter requires a reference image".to_owned())
+                })?;
+            let reference = load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                reference_id,
+                project_path,
+            )?;
+            let ip_dir = resolve_ip_adapter_dir(request, settings).ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "SDXL IP-Adapter weights not found (download {SDXL_IP_ADAPTER_REPO})."
+                ))
+            })?;
+            let scale = advanced_f32(request, "ipAdapterScale", SDXL_IP_SCALE, 0.0, 1.0);
+            (
+                vec![Conditioning::Reference {
+                    image: reference,
+                    strength: Some(scale),
+                }],
+                Some(ip_dir),
+                "ip_adapter",
+                scale,
+                Some(scale),
+            )
+        }
+        SdxlSubMode::Edit | SdxlSubMode::Inpaint => {
+            let source_id = request
+                .source_asset_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("SDXL edit requires a source image".to_owned())
+                })?;
+            let source = load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                source_id,
+                project_path,
+            )?;
+            // Pre-fit the source to the output W×H (crop/pad) so an off-aspect edit doesn't
+            // stretch — torch parity with `load_source_image` + `fit_image`.
+            let source = fit_engine_image(source, width, height, &request.fit_mode)?;
+            let is_inpaint = matches!(sub_mode, SdxlSubMode::Inpaint);
+            let strength = advanced_f32(
+                request,
+                "strength",
+                if is_inpaint {
+                    SDXL_INPAINT_STRENGTH
+                } else {
+                    SDXL_EDIT_STRENGTH
+                },
+                0.0,
+                1.0,
+            );
+            let mut conditioning = vec![Conditioning::Reference {
+                image: source,
+                strength: Some(strength),
+            }];
+            if is_inpaint {
+                let mask_id = request
+                    .mask_asset_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload("inpaint requires a mask image".to_owned())
+                    })?;
+                let mask =
+                    load_mask_asset_image(settings, &request.project_id, mask_id, project_path)?;
+                // Align the mask to the source with the SAME fit geometry.
+                let mask = fit_engine_image(mask, width, height, &request.fit_mode)?;
+                conditioning.push(Conditioning::Mask { image: mask });
+            }
+            (
+                conditioning,
+                None,
+                if is_inpaint { "inpaint" } else { "edit" },
+                strength,
+                None,
+            )
+        }
+        SdxlSubMode::Outpaint => {
+            let source_id = request
+                .source_asset_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("outpaint requires a source image".to_owned())
+                })?;
+            let source = engine_image_to_rgb(load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                source_id,
+                project_path,
+            )?)?;
+            let (src_w, src_h) = (source.width(), source.height());
+            let canvas = sdxl_outpaint_canvas(&source, width, height);
+            // White = generate (the padded border), black = keep (the centered source).
+            let mut mask = mlx_gen::image::outpaint_border_mask(src_w, src_h, width, height);
+            if non_empty(&request.mask_asset_id) {
+                // Union the user edit region with the border (white wins) — pad-fit the user
+                // mask onto the same contained geometry first.
+                let mask_id = request.mask_asset_id.as_deref().unwrap().trim();
+                let user_mask =
+                    load_mask_asset_image(settings, &request.project_id, mask_id, project_path)?;
+                let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
+                mask = mlx_gen::image::union_masks(&mask, &user_mask).map_err(|error| {
+                    WorkerError::InvalidPayload(format!("outpaint mask union failed: {error}"))
+                })?;
+            }
+            let strength = advanced_f32(request, "strength", SDXL_INPAINT_STRENGTH, 0.0, 1.0);
+            (
+                vec![
+                    Conditioning::Reference {
+                        image: canvas,
+                        strength: Some(strength),
+                    },
+                    Conditioning::Mask { image: mask },
+                ],
+                None,
+                "outpaint",
+                strength,
+                None,
+            )
+        }
+    };
+
+    let raw_settings = sdxl_advanced_raw_settings(
+        request, &repo, steps, quant_bits, guidance, mode_tag, strength, ip_scale,
+    );
+    let count = request.count as usize;
+    let seeds: Vec<i64> = (0..count)
+        .map(|index| resolve_seed(request, index))
+        .collect();
+    let total = seeds.len();
+
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+
+    let blocking = {
+        let prompt = request.prompt.clone();
+        let negative_prompt = negative_prompt.clone();
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let generator = sdxl_advanced_load(weights_dir, quant, adapters, ip_adapter_dir)?;
+            for (index, seed) in seeds.into_iter().enumerate() {
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
+                let (out_w, out_h, pixels) = sdxl_advanced_generate_one(
+                    generator.as_ref(),
+                    &prompt,
+                    negative_prompt.clone(),
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
+                    conditioning.clone(),
+                    &cancel,
+                    &mut on_progress,
+                )?;
+                if tx
+                    .blocking_send(GenEvent::Image {
+                        index,
+                        seed,
+                        width: out_w,
+                        height: out_h,
+                        pixels,
+                    })
+                    .is_err()
+                {
+                    break; // receiver gone — stop generating.
+                }
+            }
+            Ok(())
+        })
+    };
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        adapter_label,
+        &raw_settings,
+        total,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Tile-ControlNet detail refine (macOS, epic 3041 / sc-3060): the standalone
+// `image_detail` job (Image Editor, epic 2427). Faithful port of the Python
+// `run_image_detail` + `_refine_tiled_detail` (image_adapters.py) onto the engine's
+// SDXL tile-ControlNet path: each tile is img2img-refined with itself as both the
+// init (Reference) and the ControlNet conditioning (Control, control=same), then
+// recomposed with a raised-cosine feather over the overlap. Unlike the diffusers
+// pipeline, the engine requires width/height ∈ [512, 2048] and multiples of 8, so a
+// tile is run at the nearest valid size and the result resized back before blending.
+// ---------------------------------------------------------------------------
+
+/// The xinsir tile ControlNet repo (parity with Python `TILE_CONTROLNET_REPO`).
+#[cfg(target_os = "macos")]
+const TILE_CONTROLNET_REPO: &str = "xinsir/controlnet-tile-sdxl-1.0";
+#[cfg(target_os = "macos")]
+const DETAIL_DEFAULT_PROMPT: &str = "ultra detailed, sharp focus, fine texture, high quality";
+#[cfg(target_os = "macos")]
+const DETAIL_DEFAULT_NEGATIVE: &str = "blurry, soft, lowres, smooth, plastic";
+
+/// The locked detail recipe (sc-2437 round-2 spike defaults), resolved from `advanced`.
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct DetailParams {
+    strength: f32,
+    cn_scale: f32,
+    steps: u32,
+    guidance: f32,
+    tile: u32,
+    overlap: u32,
+    prompt: String,
+    negative: String,
+    seed: i64,
+}
+
+/// Unsigned int field on `advanced` (number or numeric string), clamped to `[lo, hi]`.
+#[cfg(target_os = "macos")]
+fn advanced_u32(request: &ImageRequest, key: &str, default: u32, lo: u32, hi: u32) -> u32 {
+    request
+        .advanced
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as u32)
+        .unwrap_or(default)
+        .clamp(lo, hi)
+}
+
+#[cfg(target_os = "macos")]
+fn advanced_str(request: &ImageRequest, key: &str, default: &str) -> String {
+    request
+        .advanced
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
+        .to_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_detail_params(request: &ImageRequest) -> DetailParams {
+    DetailParams {
+        strength: advanced_f32(request, "strength", 0.55, 0.2, 1.0),
+        cn_scale: advanced_f32(request, "cnScale", 0.7, 0.1, 1.5),
+        steps: advanced_u32(request, "steps", 24, 1, 60),
+        guidance: advanced_f32(request, "guidanceScale", 5.0, 1.0, 15.0),
+        tile: advanced_u32(request, "tile", 1024, 512, 1536),
+        overlap: advanced_u32(request, "overlap", 128, 0, 512),
+        prompt: advanced_str(request, "prompt", DETAIL_DEFAULT_PROMPT),
+        negative: advanced_str(request, "negativePrompt", DETAIL_DEFAULT_NEGATIVE),
+        // Python defaults the detail seed to 7 when the payload omits one.
+        seed: request.seed.unwrap_or(7),
+    }
+}
+
+/// Round a tile dimension up to the nearest multiple of 8 and clamp to the engine's
+/// `[512, 2048]` SDXL bounds, so an arbitrary-sized crop can be run through the engine.
+#[cfg(target_os = "macos")]
+fn engine_dim(value: u32) -> u32 {
+    value.div_ceil(8).saturating_mul(8).clamp(512, 2048)
+}
+
+/// Raised-cosine alpha ramp over the `overlap` borders so tiles blend seamlessly
+/// (parity with Python `_detail_feather`). Row-major `tile_h`×`tile_w` weights.
+#[cfg(target_os = "macos")]
+fn detail_feather(tile_w: u32, tile_h: u32, overlap: u32) -> Vec<f32> {
+    fn ramp(n: u32, overlap: u32) -> Vec<f32> {
+        let mut weights = vec![1.0f32; n as usize];
+        if overlap > 0 && n > overlap {
+            for index in 0..overlap as usize {
+                let edge = 0.5
+                    - 0.5 * (std::f32::consts::PI * (index as f32 + 0.5) / overlap as f32).cos();
+                weights[index] = edge;
+                weights[n as usize - 1 - index] = edge;
+            }
+        }
+        weights
+    }
+    let wx = ramp(tile_w, overlap);
+    let wy = ramp(tile_h, overlap);
+    let mut out = Vec::with_capacity((tile_w * tile_h) as usize);
+    for &vy in &wy {
+        for &vx in &wx {
+            out.push(vy * vx);
+        }
+    }
+    out
+}
+
+/// Load the SDXL generator with the tile ControlNet overlay (per job, no cache).
+#[cfg(target_os = "macos")]
+fn detail_load(
+    weights_dir: PathBuf,
+    control_file: PathBuf,
+    quant: Option<Quant>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
+        .with_control(WeightsSource::File(control_file));
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    mlx_gen::load("sdxl", &spec)
+        .map_err(|error| WorkerError::InvalidPayload(format!("sdxl detail load failed: {error}")))
+}
+
+/// Refine one tile (already sized to engine-valid `eng_w`×`eng_h`): img2img on the tile
+/// with the tile as the ControlNet image (control=same). Returns the refined RGB8 buffer.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn detail_refine_tile(
+    generator: &dyn Generator,
+    tile: Image,
+    eng_w: u32,
+    eng_h: u32,
+    params: &DetailParams,
+    seed: i64,
+    cancel: &CancelFlag,
+) -> WorkerResult<Vec<u8>> {
+    let mut noop = |_progress: Progress| {};
+    let request = GenerationRequest {
+        prompt: params.prompt.clone(),
+        negative_prompt: Some(params.negative.clone()),
+        width: eng_w,
+        height: eng_h,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(params.steps),
+        guidance: Some(params.guidance),
+        conditioning: vec![
+            Conditioning::Reference {
+                image: tile.clone(),
+                strength: Some(params.strength),
+            },
+            Conditioning::Control {
+                image: tile,
+                kind: ControlKind::Other("tile".to_owned()),
+                scale: params.cn_scale,
+            },
+        ],
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator
+        .generate(&request, &mut noop)
+        .map_err(|error| WorkerError::InvalidPayload(format!("detail tile failed: {error}")))?;
+    match output {
+        GenerationOutput::Images(mut images) => Ok(images
+            .pop()
+            .ok_or_else(|| WorkerError::InvalidPayload("detail tile produced no image".to_owned()))?
+            .pixels),
+        _ => Err(WorkerError::InvalidPayload(
+            "detail tile returned non-image output".to_owned(),
+        )),
+    }
+}
+
+/// Tiled feathered detail refine (parity with Python `_refine_tiled_detail`). Returns the
+/// recomposed image + the tile count. Runs on the blocking thread (the generator is `!Send`).
+#[cfg(target_os = "macos")]
+fn refine_tiled_detail(
+    generator: &dyn Generator,
+    source: &image::RgbImage,
+    params: &DetailParams,
+    cancel: &CancelFlag,
+    on_tile: &mut dyn FnMut(usize, usize),
+) -> WorkerResult<(image::RgbImage, usize)> {
+    use image::imageops::FilterType::Lanczos3;
+    let (width, height) = (source.width(), source.height());
+    let step = params.tile.saturating_sub(params.overlap).max(1);
+    let xs: Vec<u32> = (0..width.saturating_sub(params.overlap).max(1))
+        .step_by(step as usize)
+        .collect();
+    let ys: Vec<u32> = (0..height.saturating_sub(params.overlap).max(1))
+        .step_by(step as usize)
+        .collect();
+    let total = xs.len() * ys.len();
+    let mut acc = vec![0.0f32; (width * height * 3) as usize];
+    let mut wsum = vec![0.0f32; (width * height) as usize];
+    let mut done = 0usize;
+    for &y in &ys {
+        for &x in &xs {
+            if cancel.is_cancelled() {
+                return Err(WorkerError::Canceled(
+                    "Detail enhancement canceled by user.".to_owned(),
+                ));
+            }
+            let x0 = x.min(width.saturating_sub(params.tile));
+            let y0 = y.min(height.saturating_sub(params.tile));
+            let tile_w = params.tile.min(width - x0);
+            let tile_h = params.tile.min(height - y0);
+            let crop = image::imageops::crop_imm(source, x0, y0, tile_w, tile_h).to_image();
+            // Run at an engine-valid size (mult-8, ≥512), then resize the refined tile back.
+            let (eng_w, eng_h) = (engine_dim(tile_w), engine_dim(tile_h));
+            let eng_crop = if (eng_w, eng_h) == (tile_w, tile_h) {
+                crop
+            } else {
+                image::imageops::resize(&crop, eng_w, eng_h, Lanczos3)
+            };
+            let tile_img = Image {
+                width: eng_w,
+                height: eng_h,
+                pixels: eng_crop.into_raw(),
+            };
+            let refined_px = detail_refine_tile(
+                generator,
+                tile_img,
+                eng_w,
+                eng_h,
+                params,
+                params.seed + done as i64,
+                cancel,
+            )?;
+            let refined = image::RgbImage::from_raw(eng_w, eng_h, refined_px).ok_or_else(|| {
+                WorkerError::InvalidPayload("detail refined tile size mismatch".to_owned())
+            })?;
+            let refined = if (eng_w, eng_h) == (tile_w, tile_h) {
+                refined
+            } else {
+                image::imageops::resize(&refined, tile_w, tile_h, Lanczos3)
+            };
+            let feather = detail_feather(tile_w, tile_h, params.overlap);
+            for ty in 0..tile_h {
+                for tx in 0..tile_w {
+                    let f = feather[(ty * tile_w + tx) as usize];
+                    let src = refined.get_pixel(tx, ty).0;
+                    let gx = x0 + tx;
+                    let gy = y0 + ty;
+                    let acc_base = ((gy * width + gx) * 3) as usize;
+                    acc[acc_base] += src[0] as f32 * f;
+                    acc[acc_base + 1] += src[1] as f32 * f;
+                    acc[acc_base + 2] += src[2] as f32 * f;
+                    wsum[(gy * width + gx) as usize] += f;
+                }
+            }
+            done += 1;
+            on_tile(done, total);
+        }
+    }
+    let mut out = image::RgbImage::new(width, height);
+    for gy in 0..height {
+        for gx in 0..width {
+            let w = wsum[(gy * width + gx) as usize].max(1.0);
+            let base = ((gy * width + gx) * 3) as usize;
+            out.put_pixel(
+                gx,
+                gy,
+                image::Rgb([
+                    (acc[base] / w).clamp(0.0, 255.0) as u8,
+                    (acc[base + 1] / w).clamp(0.0, 255.0) as u8,
+                    (acc[base + 2] / w).clamp(0.0, 255.0) as u8,
+                ]),
+            );
+        }
+    }
+    Ok((out, total))
+}
+
+/// Build the detail child-asset fact (lineage to the source) + generation set, matching the
+/// Python `run_image_detail` result shape so `persist_reported_assets` indexes it identically.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn detail_result(
+    request: &ImageRequest,
+    genset_id: &str,
+    created_at: &str,
+    asset_id: &str,
+    media_rel: &str,
+    model: &str,
+    params: &DetailParams,
+    tiles: usize,
+    width: u32,
+    height: u32,
+) -> JsonObject {
+    let source_asset_id = request.source_asset_id.clone().unwrap_or_default();
+    let detail_settings = json!({
+        "enabled": true,
+        "backbone": model,
+        "controlNet": TILE_CONTROLNET_REPO,
+        "strength": params.strength,
+        "cnScale": params.cn_scale,
+        "steps": params.steps,
+        "guidanceScale": params.guidance,
+        "tile": params.tile,
+        "overlap": params.overlap,
+        "tiles": tiles,
+        "width": width,
+        "height": height,
+    });
+    let fact = json!({
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "image/png",
+        "type": "image",
+        "width": width,
+        "height": height,
+        "normalizedWidth": width,
+        "normalizedHeight": height,
+        "count": 1,
+        "seed": params.seed,
+        "displayName": "Detail enhanced",
+        "createdAt": created_at,
+        "mode": "image_detail",
+        "model": model,
+        "adapter": "mlx_sdxl",
+        "prompt": params.prompt,
+        "negativePrompt": params.negative,
+        "loras": [],
+        "stylePreset": "",
+        "sourceAssetId": source_asset_id,
+        "rawAdapterSettings": { "detail": detail_settings, "realModelInference": true },
+        "parents": [source_asset_id],
+        "extra": {
+            "isDetailEnhanced": true,
+            "detailFromAssetId": source_asset_id,
+            "backbone": model,
+            "strength": params.strength,
+            "cnScale": params.cn_scale,
+        },
+    });
+    let generation_set = json!({
+        "id": genset_id,
+        "mode": "image_detail",
+        "model": model,
+        "prompt": params.prompt,
+        "negativePrompt": params.negative,
+        "count": 1,
+        "createdAt": created_at,
+    });
+    json!({
+        "generationSetId": genset_id,
+        "expectedCount": 1,
+        "adapter": "mlx_sdxl",
+        "model": model,
+        "generationSet": generation_set,
+        "assetWrites": [fact],
+    })
+    .as_object()
+    .cloned()
+    .expect("json! object literal")
+}
+
+/// Native MLX tile-ControlNet detail refine (`JobType::ImageDetail`) on the macOS engine.
+#[cfg(target_os = "macos")]
+pub(crate) async fn run_image_detail_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let request = ImageRequest::from_payload(&job.payload);
+    if request.project_id.trim().is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Missing payload.projectId".to_owned(),
+        ));
+    }
+    let model = if request.model.trim().is_empty() {
+        "realvisxl".to_owned()
+    } else {
+        request.model.clone()
+    };
+    let engine_model = sdxl_engine_model(&model).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("{model} does not support detail enhancement."))
+    })?;
+    let source_id = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Detail-enhance jobs require a source image asset.".to_owned(),
+            )
+        })?
+        .to_owned();
+
+    let project =
+        ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
+    let project_path = PathBuf::from(project.path);
+    let genset_id = format!("genset_{}", Uuid::new_v4().simple());
+    tokio::fs::create_dir_all(project_path.join("assets").join("images").join(&genset_id)).await?;
+    let backend = backend_label(&settings.gpu_id);
+
+    let params = resolve_detail_params(&request);
+    let (quant, _) = resolve_quant(&request);
+    // Reuse the model's manifest/modelPath/cache resolution; engine_model gives the default repo.
+    let weights_dir = resolve_weights_dir(&request, settings)
+        .or_else(|| huggingface_snapshot_dir(&settings.data_dir, engine_model.default_repo));
+    let weights_dir = weights_dir
+        .ok_or_else(|| WorkerError::InvalidPayload("SDXL detail weights not found".to_owned()))?;
+    let control_repo = advanced_str(&request, "tileControlNetRepo", TILE_CONTROLNET_REPO);
+    let control_dir =
+        huggingface_snapshot_dir(&settings.data_dir, &control_repo).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "tile ControlNet weights not found (download {control_repo})."
+            ))
+        })?;
+    let control_file = first_safetensors_path(&control_dir).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "no .safetensors under the tile ControlNet snapshot {}",
+            control_dir.display()
+        ))
+    })?;
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.1,
+            "Loading source image.",
+            None,
+            backend,
+        ),
+    )
+    .await?;
+
+    let source = engine_image_to_rgb(load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        &source_id,
+        &project_path,
+    )?)?;
+
+    let created_at = now_rfc3339();
+    let asset_id = fresh_asset_id();
+    let filename = format!("{}_detail_{}.png", &created_at[..10], &asset_id[6..14]);
+    let media_rel = format!("assets/images/{genset_id}/{filename}");
+
+    let cancel = CancelFlag::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(usize, usize)>(16);
+    let blocking = {
+        let params_ref = params.clone();
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<(image::RgbImage, usize)> {
+            let generator = detail_load(weights_dir, control_file, quant)?;
+            let mut on_tile = |done: usize, total: usize| {
+                let _ = tx.blocking_send((done, total));
+            };
+            refine_tiled_detail(
+                generator.as_ref(),
+                &source,
+                &params_ref,
+                &cancel,
+                &mut on_tile,
+            )
+        })
+    };
+
+    let mut last_cancel_check = Instant::now();
+    while let Some((done, total)) = rx.recv().await {
+        if last_cancel_check.elapsed() >= Duration::from_secs(2) {
+            last_cancel_check = Instant::now();
+            if check_cancel(api, &job.id, "Detail enhancement canceled by user.")
+                .await
+                .is_err()
+            {
+                cancel.cancel();
+            }
+        }
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::Running,
+                ProgressStage::Generating,
+                0.45 + 0.5 * (done as f64 / total.max(1) as f64),
+                &format!("Refining detail tile {done}/{total}."),
+                None,
+                backend,
+            ),
+        )
+        .await?;
+        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    }
+
+    let (refined, tiles) = blocking
+        .await
+        .map_err(|error| WorkerError::InvalidPayload(format!("detail task join: {error}")))??;
+    let (out_w, out_h) = (refined.width(), refined.height());
+    let media_path = project_path.join(&media_rel);
+    let temp_path = media_path.with_extension("tmp.png");
+    refined
+        .save_with_format(&temp_path, image::ImageFormat::Png)
+        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
+    std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })?;
+
+    let result = detail_result(
+        &request,
+        &genset_id,
+        &created_at,
+        &asset_id,
+        &media_rel,
+        &model,
+        &params,
+        tiles,
+        out_w,
+        out_h,
+    );
+    update_job(
+        api,
+        &job.id,
+        image_progress(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Detail enhancement complete.",
+            Some(result),
+            backend,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Off macOS the in-process engine is unavailable; `image_detail` is served by the Python
+/// torch worker (the `mlx` worker — the only one advertising this capability — is macOS-only).
+#[cfg(not(target_os = "macos"))]
+pub(crate) async fn run_image_detail_job(
+    _api: &ApiClient,
+    _settings: &Settings,
+    _job: &JobSnapshot,
+) -> WorkerResult<()> {
+    Err(WorkerError::InvalidPayload(
+        "image_detail runs on the macOS MLX worker or the Python torch worker, not this Rust worker"
+            .to_owned(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3181,5 +4241,76 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn dirs_home() -> std::path::PathBuf {
         std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sdxl_sub_mode_classifies_advanced_shapes() {
+        // Plain txt2img (no reference, not an edit) → not an advanced job.
+        assert!(sdxl_sub_mode(&request(json!({ "model": "sdxl", "prompt": "a fox" }))).is_none());
+        // Reference (not edit) → IP-Adapter.
+        assert!(matches!(
+            sdxl_sub_mode(&request(
+                json!({ "model": "sdxl", "referenceAssetId": "ref_1" })
+            )),
+            Some(SdxlSubMode::Ip)
+        ));
+        // edit_image + source → plain img2img edit.
+        assert!(matches!(
+            sdxl_sub_mode(&request(
+                json!({ "model": "sdxl", "mode": "edit_image", "sourceAssetId": "src_1" })
+            )),
+            Some(SdxlSubMode::Edit)
+        ));
+        // edit_image + source + mask → inpaint.
+        assert!(matches!(
+            sdxl_sub_mode(&request(json!({
+                "model": "sdxl", "mode": "edit_image",
+                "sourceAssetId": "src_1", "maskAssetId": "mask_1"
+            }))),
+            Some(SdxlSubMode::Inpaint)
+        ));
+        // fit_mode outpaint wins over a user mask (the torch path checks outpaint first,
+        // then unions the user mask into the generated border).
+        assert!(matches!(
+            sdxl_sub_mode(&request(json!({
+                "model": "sdxl", "mode": "edit_image", "sourceAssetId": "src_1",
+                "fitMode": "outpaint", "maskAssetId": "mask_1"
+            }))),
+            Some(SdxlSubMode::Outpaint)
+        ));
+        // edit_image without a source → nothing to do (falls through, not advanced).
+        assert!(
+            sdxl_sub_mode(&request(json!({ "model": "sdxl", "mode": "edit_image" }))).is_none()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_dim_rounds_up_to_mult8_and_clamps() {
+        assert_eq!(engine_dim(1024), 1024); // already valid
+        assert_eq!(engine_dim(1000), 1000); // already a multiple of 8
+        assert_eq!(engine_dim(1001), 1008); // rounds up to the next multiple of 8
+        assert_eq!(engine_dim(500), 512); // clamps to the engine minimum
+        assert_eq!(engine_dim(3000), 2048); // clamps to the engine maximum
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detail_feather_ramps_over_overlap() {
+        // No overlap → a flat field of ones (every pixel contributes fully).
+        let flat = detail_feather(8, 8, 0);
+        assert_eq!(flat.len(), 64);
+        assert!(flat.iter().all(|&w| (w - 1.0).abs() < 1e-6));
+
+        // With overlap, the borders ramp down (raised cosine) while the center stays 1.0.
+        let f = detail_feather(16, 16, 4);
+        assert_eq!(f.len(), 256);
+        let at = |x: usize, y: usize| f[y * 16 + x];
+        assert!((at(8, 8) - 1.0).abs() < 1e-6, "center is full weight");
+        assert!(at(0, 0) < at(8, 8), "corner is feathered below center");
+        // Symmetric across the tile.
+        assert!((at(0, 8) - at(15, 8)).abs() < 1e-6);
+        assert!((at(8, 0) - at(8, 15)).abs() < 1e-6);
     }
 }
