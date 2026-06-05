@@ -187,6 +187,7 @@ fn builtin_preset_registry_exposes_optimizer_sensitive_defaults() {
     assert_eq!(prodigy.config.steps, 1600);
     assert_eq!(prodigy.config.advanced["sampleEvery"], 200);
     assert_eq!(prodigy.config.advanced["sampleSteps"], 8);
+    assert_eq!(prodigy.config.advanced["sampleGuidanceScale"], 1.0);
     assert_eq!(prodigy.ui["experimental"], true);
 
     let balanced = registry
@@ -223,6 +224,10 @@ fn builtin_registry_exposes_z_image_turbo_target() {
     assert_eq!(target.defaults.rank, 16);
     assert_eq!(target.defaults.resolution, 1024);
     assert_eq!(target.defaults.trigger_word, None);
+    assert_eq!(
+        target.defaults.advanced.get("sampleGuidanceScale"),
+        Some(&serde_json::json!(1.0))
+    );
 }
 
 #[test]
@@ -241,7 +246,7 @@ fn builtin_registry_exposes_sdxl_target() {
     assert_eq!(target.kernel, "sdxl_lora");
     assert_eq!(target.defaults.rank, 16);
     assert_eq!(target.defaults.resolution, 1024);
-    // Real CFG previews (positive guidance), unlike the distilled Z-Image target.
+    // Real CFG previews (higher positive guidance), unlike the distilled Z-Image target.
     assert_eq!(
         target.defaults.advanced.get("sampleGuidanceScale"),
         Some(&serde_json::json!(7.0))

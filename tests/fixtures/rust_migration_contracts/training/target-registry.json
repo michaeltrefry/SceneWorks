@@ -33,7 +33,7 @@
           "qualityPreset": "balanced",
           "requestedGpu": "auto",
           "sampleEvery": 250,
-          "sampleGuidanceScale": 0.0,
+          "sampleGuidanceScale": 1.0,
           "sampleSteps": 8,
           "timestepBias": "high_noise",
           "timestepType": "sigmoid",

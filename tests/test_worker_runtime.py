@@ -901,6 +901,19 @@ def test_z_image_loaded_models_include_repo_and_model_id():
     assert set(adapter.loaded_models()) == {"Tongyi-MAI/Z-Image-Turbo", "z_image_turbo"}
 
 
+def test_z_image_turbo_model_target_defaults_and_guidance_helper():
+    target = MODEL_TARGETS["z_image_turbo"]
+    assert target["adapter"] == "z_image_diffusers"
+    assert target["family"] == "z-image"
+    assert target["steps"] == 8
+    assert target["guidanceScale"] == 1.0
+
+    adapter = ZImageDiffusersAdapter()
+    assert adapter._guidance_scale(SimpleNamespace(model="z_image_turbo", advanced={})) == 1.0
+    assert adapter._guidance_scale(SimpleNamespace(model="z_image_turbo", advanced={"guidanceScale": 0.0})) == 0.0
+    assert adapter._guidance_scale(SimpleNamespace(model="z_image_turbo", advanced={"guidanceScale": "bad"})) == 1.0
+
+
 def test_qwen_loaded_models_track_text_and_edit_repos_independently():
     adapter = QwenImageAdapter()
     adapter._text_repo = "Qwen/Qwen-Image"
@@ -7301,6 +7314,17 @@ def test_read_run_config_parses_sample_render_settings():
     assert config.sample_prompts == ["miraStyle portrait"]
 
 
+def test_read_run_config_defaults_z_image_samples_to_turbo_guidance():
+    config = read_run_config(
+        {
+            "target": {"kernel": "z_image_lora", "baseModel": "z_image_turbo"},
+            "config": {"advanced": {"samplePrompts": ["miraStyle portrait"]}},
+        }
+    )
+
+    assert config.sample_guidance_scale == 1.0
+
+
 def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
     calls = []
 
@@ -7381,10 +7405,10 @@ def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
                 "seed": 7,
                 "advanced": {
                     "sampleSteps": 11,
-                    "sampleGuidanceScale": 0.0,
                     "samplePrompts": ["miraStyle portrait"],
                 },
             },
+            "target": {"kernel": "z_image_lora", "baseModel": "z_image_turbo"},
             "output": {"triggerWords": ["miraStyle"]},
         }
     )
@@ -7399,11 +7423,11 @@ def test_z_image_lora_backend_generates_samples_with_turbo_guidance(tmp_path):
     )
 
     assert calls[0]["num_inference_steps"] == 11
-    assert calls[0]["guidance_scale"] == 0.0
+    assert calls[0]["guidance_scale"] == 1.0
     assert calls[0]["seed"] == 11
     assert samples[0]["sampleSource"] == "live_adapter"
     assert samples[0]["numInferenceSteps"] == 11
-    assert samples[0]["guidanceScale"] == 0.0
+    assert samples[0]["guidanceScale"] == 1.0
 
 
 def test_create_training_kernel_resolves_known_and_rejects_unknown():
@@ -7993,12 +8017,12 @@ def test_z_image_trainer_emits_training_samples_on_sample_cadence(tmp_path):
     assert result["samplePrompts"][0].startswith("miraStyle")
     assert result["sampleSettings"] == {
         "numInferenceSteps": 9,
-        "guidanceScale": 0.0,
+        "guidanceScale": 1.0,
         "sampleSource": "live_adapter",
     }
     sample_updates = [payload for payload in progress_results if payload]
     assert sample_updates[-1]["latestTrainingSamples"][0]["relativePath"].startswith("loras/lora_1/samples/")
-    assert sample_updates[-1]["sampleSettings"]["guidanceScale"] == 0.0
+    assert sample_updates[-1]["sampleSettings"]["guidanceScale"] == 1.0
 
 
 def test_z_image_trainer_cancels_and_skips_save(tmp_path):

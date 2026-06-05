@@ -42,6 +42,7 @@ from sceneworks_shared import utc_now
 
 from .adapter_utils import filter_call_kwargs
 from .image_adapters import (
+    MODEL_TARGETS,
     activate_torch_device,
     empty_torch_cache,
     emit_worker_event,
@@ -264,7 +265,10 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         lora_target_modules=target_modules,
         sample_every=_as_int(advanced.get("sampleEvery"), 0, minimum=0),
         sample_steps=_as_int(advanced.get("sampleSteps"), 9, minimum=1),
-        sample_guidance_scale=_as_float(advanced.get("sampleGuidanceScale"), 0.0),
+        sample_guidance_scale=_as_float(
+            advanced.get("sampleGuidanceScale"),
+            default_sample_guidance_scale(plan),
+        ),
         sample_prompts=[str(prompt).strip() for prompt in sample_prompts if str(prompt).strip()][:4],
         training_adapter_repo=_as_optional_str(advanced.get("trainingAdapterRepo")),
         training_adapter_version=_as_optional_str(advanced.get("trainingAdapterVersion")),
@@ -273,6 +277,13 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
         decompose_factor=_as_int(advanced.get("decomposeFactor"), -1, minimum=-1),
         advanced=advanced,
     )
+
+
+def default_sample_guidance_scale(plan: dict[str, Any]) -> float:
+    target = plan.get("target") if isinstance(plan.get("target"), dict) else {}
+    if target.get("kernel") == "z_image_lora" or target.get("baseModel") in {"z_image_turbo", "z_image_edit"}:
+        return float(MODEL_TARGETS["z_image_turbo"].get("guidanceScale", 1.0))
+    return 0.0
 
 
 def trigger_words(plan: dict[str, Any]) -> list[str]:

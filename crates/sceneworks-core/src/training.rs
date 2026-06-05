@@ -801,7 +801,7 @@ where
     config.advanced.insert("sampleSteps".to_owned(), json!(8));
     config
         .advanced
-        .insert("sampleGuidanceScale".to_owned(), json!(0.0));
+        .insert("sampleGuidanceScale".to_owned(), json!(1.0));
     config.advanced.insert(
         "trainingAdapterRepo".to_owned(),
         json!("ostris/zimage_turbo_training_adapter"),
@@ -973,7 +973,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
                 "lrScheduler": "constant",
                 "sampleEvery": 250,
                 "sampleSteps": 8,
-                "sampleGuidanceScale": 0.0,
+                "sampleGuidanceScale": 1.0,
                 "qualityPreset": "balanced",
                 "outputScope": "project",
                 "requestedGpu": "auto"

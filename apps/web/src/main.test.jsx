@@ -264,7 +264,7 @@ const zImageTrainingTarget = {
       weightDecay: 0.0001,
       sampleEvery: 250,
       sampleSteps: 8,
-      sampleGuidanceScale: 0.0,
+      sampleGuidanceScale: 1.0,
       qualityPreset: "balanced",
       outputScope: "project",
       requestedGpu: "auto",
@@ -1353,7 +1353,7 @@ describe("SceneWorks app shell", () => {
 
     expect(field(container, "Target").value).toBe("z_image_turbo_lora");
     expect(field(container, "Base model").value).toBe("z_image_turbo");
-    expect(field(container, "Guidance scale").value).toBe("0");
+    expect(field(container, "Guidance scale").value).toBe("1");
     expect(field(container, "Rank").value).toBe("16");
     expect(field(container, "Precision").value).toBe("bf16");
     expect([...field(container, "Optimizer").options].map((option) => option.value)).toEqual(["adamw8bit", "adamw", "adam", "prodigyopt", "rose"]);

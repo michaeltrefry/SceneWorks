@@ -238,6 +238,7 @@ MODEL_TARGETS = {
         "family": "z-image",
         "supportsEdit": False,
         "steps": 8,
+        "guidanceScale": 1.0,
         "repo": "Tongyi-MAI/Z-Image-Turbo",
         "adapter": "z_image_diffusers",
     },
@@ -246,6 +247,7 @@ MODEL_TARGETS = {
         "family": "z-image",
         "supportsEdit": True,
         "steps": 8,
+        "guidanceScale": 1.0,
         # Uses Turbo weights via ZImageImg2ImgPipeline until the dedicated Edit checkpoint is released.
         "repo": "Tongyi-MAI/Z-Image-Turbo",
         "adapter": "z_image_diffusers",
@@ -1555,10 +1557,12 @@ class ZImageDiffusersAdapter:
         return safe_int(request.advanced.get("steps"), model_target["steps"] + 1, 1, 80)
 
     def _guidance_scale(self, request: ImageRequest) -> float:
+        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
+        default = model_target.get("guidanceScale", 1.0)
         try:
-            return float(request.advanced.get("guidanceScale", 0.0))
+            return float(request.advanced.get("guidanceScale", default))
         except (TypeError, ValueError):
-            return 0.0
+            return default
 
 
 class QwenImageAdapter:
