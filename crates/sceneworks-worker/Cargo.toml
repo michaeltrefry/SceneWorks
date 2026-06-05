@@ -55,6 +55,10 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
 mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
+# FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
+# builds once; self-registers `flux1_schnell`/`flux1_dev` via inventory only when
+# linked + referenced (`use mlx_gen_flux as _;` in image_jobs.rs).
+mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
 
 [lints]
 workspace = true

@@ -7,22 +7,25 @@
 //! `build_image_sidecar_parts` and indexing project.db — so emitting the accumulating
 //! `assetWrites` per image is what streams results into the gallery as they land.
 //!
-//! On macOS, `z_image_turbo` runs **real** in-process inference via the linked mlx-gen
-//! engine (sc-3022); other models (and non-macOS) fall back to a procedural stub
-//! (sc-3020), so the pipeline stays cross-platform-testable and additional families
-//! (sc-3023+) just extend the real path.
+//! On macOS, engine-backed families (`z_image_turbo` — sc-3022; `flux_schnell` /
+//! `flux_dev` — sc-3023) run **real** in-process inference via the linked mlx-gen
+//! engine; other models (and non-macOS) fall back to a procedural stub (sc-3020), so
+//! the pipeline stays cross-platform-testable and each new family just adds a row to
+//! the [`MLX_MODELS`] table + links its provider crate.
 
 use super::*;
 use sceneworks_core::image_request::ImageRequest;
 
-// Force the Z-Image provider crate to link so its `inventory::submit!` registration
-// survives linker GC. Each per-family story adds its provider + a matching
-// `use … as _;`. See mlx-gen-z-image/tests/registry.rs ("the SceneWorks worker").
+// Force each provider crate to link so its `inventory::submit!` registration survives
+// linker GC. Each per-family story adds its provider dep + a matching `use … as _;`.
+// See mlx-gen-z-image/tests/registry.rs ("the SceneWorks worker").
 #[cfg(target_os = "macos")]
 use mlx_gen::{
     AdapterKind, AdapterSpec, CancelFlag, GenerationOutput, GenerationRequest, Generator, LoadSpec,
     Progress, Quant, WeightsSource,
 };
+#[cfg(target_os = "macos")]
+use mlx_gen_flux as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
 
@@ -30,15 +33,69 @@ use mlx_gen_z_image as _;
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
 const STUB_ADAPTER: &str = "procedural_preview";
 #[cfg(target_os = "macos")]
-const ZIMAGE_ADAPTER: &str = "mlx_z_image";
-#[cfg(target_os = "macos")]
-const ZIMAGE_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
-/// Parity with the Python `MODEL_TARGETS["z_image_turbo"]["steps"]` (mlx-gen's own
-/// turbo default is 4; SceneWorks runs 8).
-#[cfg(target_os = "macos")]
-const ZIMAGE_DEFAULT_STEPS: u32 = 8;
-#[cfg(target_os = "macos")]
 const MAX_JOB_LORAS: usize = 3;
+
+/// One engine-backed image family: how a SceneWorks model id maps onto the linked
+/// mlx-gen registry, and the per-variant defaults (all chosen for parity with the
+/// Python `MODEL_TARGETS` + the per-family MLX adapter). Adding a family = one row
+/// here + its provider crate dep + a `use mlx_gen_<x> as _;` above.
+#[cfg(target_os = "macos")]
+struct MlxModel {
+    /// SceneWorks model id (the job payload `model`).
+    sceneworks_id: &'static str,
+    /// mlx-gen registry id passed to `mlx_gen::load`.
+    engine_id: &'static str,
+    /// Default HuggingFace repo when the manifest entry omits `repo`.
+    default_repo: &'static str,
+    /// Default denoise steps (Python `MODEL_TARGETS[...]["steps"]`).
+    default_steps: u32,
+    /// Whether the variant accepts a guidance scale. Distilled variants
+    /// (z-image-turbo, flux schnell) do not — the engine rejects `guidance` on them.
+    supports_guidance: bool,
+    /// Default guidance when supported and the request omits it.
+    default_guidance: f32,
+    /// The `adapter` id recorded on generated assets (the Python MLX adapter id).
+    adapter_label: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+const MLX_MODELS: &[MlxModel] = &[
+    MlxModel {
+        sceneworks_id: "z_image_turbo",
+        engine_id: "z_image_turbo",
+        default_repo: "Tongyi-MAI/Z-Image-Turbo",
+        default_steps: 8,
+        supports_guidance: false,
+        default_guidance: 0.0,
+        adapter_label: "mlx_z_image",
+    },
+    MlxModel {
+        sceneworks_id: "flux_schnell",
+        engine_id: "flux1_schnell",
+        default_repo: "black-forest-labs/FLUX.1-schnell",
+        default_steps: 4,
+        supports_guidance: false,
+        default_guidance: 0.0,
+        adapter_label: "mlx_flux",
+    },
+    MlxModel {
+        sceneworks_id: "flux_dev",
+        engine_id: "flux1_dev",
+        default_repo: "black-forest-labs/FLUX.1-dev",
+        default_steps: 28,
+        supports_guidance: true,
+        default_guidance: 3.5,
+        adapter_label: "mlx_flux",
+    },
+];
+
+/// The engine-backed family for a SceneWorks model id, if any.
+#[cfg(target_os = "macos")]
+fn mlx_model(sceneworks_id: &str) -> Option<&'static MlxModel> {
+    MLX_MODELS
+        .iter()
+        .find(|model| model.sceneworks_id == sceneworks_id)
+}
 
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
 /// assets through the Rust GPU worker.
@@ -81,8 +138,8 @@ pub(crate) async fn run_image_generate_job(
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
     // procedural stub (keeps non-macOS + not-yet-ported models working).
     #[cfg(target_os = "macos")]
-    let handled = if zimage_available(&request, settings) {
-        generate_zimage_stream(
+    let handled = if mlx_available(&request, settings) {
+        generate_mlx_stream(
             api,
             settings,
             job,
@@ -304,11 +361,12 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     .expect("json! object literal")
 }
 
-/// The adapter id reported for the set (real engine on macOS for z-image, else stub).
+/// The adapter id reported for the set (real engine on macOS for a linked family,
+/// else the procedural stub).
 fn adapter_id(request: &ImageRequest) -> &'static str {
     #[cfg(target_os = "macos")]
-    if request.model == "z_image_turbo" {
-        return ZIMAGE_ADAPTER;
+    if let Some(model) = mlx_model(&request.model) {
+        return model.adapter_label;
     }
     let _ = request;
     STUB_ADAPTER
@@ -418,7 +476,8 @@ fn lerp(a: u8, t: f32) -> u8 {
 }
 
 // ---------------------------------------------------------------------------
-// Real Z-Image-Turbo inference (macOS, in-process via mlx-gen). sc-3022.
+// Real in-process MLX inference (macOS, via mlx-gen): Z-Image (sc-3022) +
+// FLUX.1 schnell/dev (sc-3023), driven by the MLX_MODELS table.
 // ---------------------------------------------------------------------------
 
 /// Events streamed from the blocking generation thread to the async worker.
@@ -441,27 +500,30 @@ enum GenEvent {
     },
 }
 
-/// True when this job can run real in-process inference: z-image is the linked,
+/// True when this job can run real in-process inference: the model is a linked,
 /// engine-backed family and its weights resolve locally.
 #[cfg(target_os = "macos")]
-fn zimage_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model == "z_image_turbo" && resolve_weights_dir(request, settings).is_some()
+fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
+    mlx_model(&request.model).is_some() && resolve_weights_dir(request, settings).is_some()
 }
 
+/// The HuggingFace repo for the model: the manifest entry's `repo` wins, else the
+/// family default.
 #[cfg(target_os = "macos")]
-fn zimage_repo(request: &ImageRequest) -> String {
+fn model_repo(request: &ImageRequest, model: &MlxModel) -> String {
     request
         .model_manifest_entry
         .get("repo")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(ZIMAGE_REPO)
+        .unwrap_or(model.default_repo)
         .to_owned()
 }
 
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
-/// HuggingFace cache snapshot for the model repo.
+/// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
+/// engine family or its snapshot is absent.
 #[cfg(target_os = "macos")]
 fn resolve_weights_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
     if let Some(path) = request
@@ -477,7 +539,8 @@ fn resolve_weights_dir(request: &ImageRequest, settings: &Settings) -> Option<Pa
             return Some(path);
         }
     }
-    huggingface_snapshot_dir(&settings.data_dir, &zimage_repo(request))
+    let model = mlx_model(&request.model)?;
+    huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, model))
 }
 
 #[cfg(target_os = "macos")]
@@ -514,9 +577,9 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     }
 }
 
-/// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the z-image default 8.
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
 #[cfg(target_os = "macos")]
-fn resolve_steps(request: &ImageRequest) -> u32 {
+fn resolve_steps(request: &ImageRequest, model: &MlxModel) -> u32 {
     request
         .advanced
         .get("steps")
@@ -526,7 +589,28 @@ fn resolve_steps(request: &ImageRequest) -> u32 {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .map(|steps| (steps as u32).clamp(1, 80))
-        .unwrap_or(ZIMAGE_DEFAULT_STEPS)
+        .unwrap_or(model.default_steps)
+}
+
+/// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
+/// no guidance — the engine rejects `Some(_)` on them — so this returns `None`. For a
+/// guided variant (flux dev) it is `advanced.guidanceScale` else the family default.
+#[cfg(target_os = "macos")]
+fn resolve_guidance(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
+    if !model.supports_guidance {
+        return None;
+    }
+    let scale = request
+        .advanced
+        .get("guidanceScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(model.default_guidance);
+    Some(scale)
 }
 
 /// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
@@ -580,7 +664,7 @@ fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
         .unwrap_or(false);
     if module.contains("lycoris") || lycoris_keys {
         return Err(WorkerError::InvalidPayload(
-            "Third-party LyCORIS LoRA (LoHa / kohya LoKr) is not supported on the MLX Z-Image path."
+            "Third-party LyCORIS LoRA (LoHa / kohya LoKr) is not supported on the MLX path."
                 .to_owned(),
         ));
     }
@@ -631,18 +715,22 @@ fn resolve_adapters(request: &ImageRequest) -> WorkerResult<Vec<AdapterSpec>> {
 }
 
 #[cfg(target_os = "macos")]
-fn zimage_raw_settings(
+fn mlx_raw_settings(
     request: &ImageRequest,
     repo: &str,
     steps: u32,
     quant_bits: Option<i64>,
+    guidance: Option<f32>,
 ) -> JsonObject {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    // Z-Image-Turbo is guidance-distilled — no CFG.
-    raw.insert("guidanceScale".to_owned(), Value::Null);
+    // Distilled variants run without CFG (guidance == None → null in the recipe).
+    raw.insert(
+        "guidanceScale".to_owned(),
+        guidance.map(|value| json!(value)).unwrap_or(Value::Null),
+    );
     raw.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
@@ -650,9 +738,10 @@ fn zimage_raw_settings(
     raw
 }
 
-/// Load the Z-Image generator (heavy; once per job).
+/// Load the generator for `engine_id` (heavy; once per job).
 #[cfg(target_os = "macos")]
-fn zimage_load(
+fn mlx_load(
+    engine_id: &str,
     weights_dir: PathBuf,
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
@@ -664,20 +753,22 @@ fn zimage_load(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
-    mlx_gen::load("z_image_turbo", &spec)
-        .map_err(|error| WorkerError::InvalidPayload(format!("Z-Image load failed: {error}")))
+    mlx_gen::load(engine_id, &spec)
+        .map_err(|error| WorkerError::InvalidPayload(format!("{engine_id} load failed: {error}")))
 }
 
 /// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
+/// `guidance` is `None` for distilled variants (the engine rejects it on them).
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-fn zimage_generate_one(
+fn mlx_generate_one(
     generator: &dyn Generator,
     prompt: &str,
     width: u32,
     height: u32,
     seed: i64,
     steps: u32,
+    guidance: Option<f32>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -688,21 +779,22 @@ fn zimage_generate_one(
         count: 1,
         seed: Some(seed as u64),
         steps: Some(steps),
+        guidance,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::InvalidPayload(format!("Z-Image generate failed: {error}"))
-    })?;
+    let output = generator
+        .generate(&request, on_progress)
+        .map_err(|error| WorkerError::InvalidPayload(format!("generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
-                WorkerError::InvalidPayload("Z-Image produced no image".to_owned())
+                WorkerError::InvalidPayload("generator produced no image".to_owned())
             })?;
             Ok((image.width, image.height, image.pixels))
         }
         _ => Err(WorkerError::InvalidPayload(
-            "Z-Image returned non-image output".to_owned(),
+            "generator returned non-image output".to_owned(),
         )),
     }
 }
@@ -719,13 +811,13 @@ fn step_fraction(index: usize, current: u32, total: u32, count: u32) -> f64 {
     (0.1 + per * (index as f64 + within)).min(0.95)
 }
 
-/// Real Z-Image generation: load once on a blocking thread, generate each image, and
+/// Real MLX generation: load once on a blocking thread, generate each image, and
 /// stream step/decode/image events back to the async worker (which saves PNGs, emits
 /// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the
 /// `Box<dyn Generator>` is `!Send` and the MLX device is single-thread).
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-async fn generate_zimage_stream(
+async fn generate_mlx_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -735,13 +827,18 @@ async fn generate_zimage_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let model = mlx_model(&request.model)
+        .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)
-        .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
+        .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
     let (quant, quant_bits) = resolve_quant(request);
-    let steps = resolve_steps(request);
+    let steps = resolve_steps(request, model);
+    let guidance = resolve_guidance(request, model);
     let adapters = resolve_adapters(request)?;
-    let repo = zimage_repo(request);
-    let raw_settings = zimage_raw_settings(request, &repo, steps, quant_bits);
+    let repo = model_repo(request, model);
+    let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance);
+    let engine_id = model.engine_id;
+    let adapter_label = model.adapter_label;
     let count = request.count as usize;
     let seeds: Vec<i64> = (0..count)
         .map(|index| resolve_seed(request, index))
@@ -756,7 +853,7 @@ async fn generate_zimage_stream(
         let seeds = seeds.clone();
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            let generator = zimage_load(weights_dir, quant, adapters)?;
+            let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
             for (index, seed) in seeds.into_iter().enumerate() {
                 let mut on_progress = |progress: Progress| {
                     let event = match progress {
@@ -769,13 +866,14 @@ async fn generate_zimage_stream(
                     };
                     let _ = tx.blocking_send(event);
                 };
-                let (width, height, pixels) = zimage_generate_one(
+                let (width, height, pixels) = mlx_generate_one(
                     generator.as_ref(),
                     &prompt,
                     width,
                     height,
                     seed,
                     steps,
+                    guidance,
                     &cancel,
                     &mut on_progress,
                 )?;
@@ -866,7 +964,7 @@ async fn generate_zimage_stream(
                     width,
                     height,
                     pixels,
-                    ZIMAGE_ADAPTER,
+                    adapter_label,
                     raw_settings.clone(),
                     project_path,
                 )?;
@@ -1044,55 +1142,151 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn steps_default_is_eight_and_clamps() {
-        assert_eq!(resolve_steps(&request(json!({ "projectId": "p" }))), 8);
+    fn steps_default_is_family_default_and_clamps() {
+        let zimage = mlx_model("z_image_turbo").unwrap();
+        let schnell = mlx_model("flux_schnell").unwrap();
+        let dev = mlx_model("flux_dev").unwrap();
+        // Family defaults (Python MODEL_TARGETS parity): z-image 8, schnell 4, dev 28.
         assert_eq!(
-            resolve_steps(&request(
-                json!({ "projectId": "p", "advanced": { "steps": 200 } })
-            )),
+            resolve_steps(&request(json!({ "projectId": "p" })), zimage),
+            8
+        );
+        assert_eq!(
+            resolve_steps(&request(json!({ "projectId": "p" })), schnell),
+            4
+        );
+        assert_eq!(
+            resolve_steps(&request(json!({ "projectId": "p" })), dev),
+            28
+        );
+        // advanced.steps overrides, clamped to 1..=80.
+        assert_eq!(
+            resolve_steps(
+                &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
+                dev
+            ),
             80
         );
         assert_eq!(
-            resolve_steps(&request(
-                json!({ "projectId": "p", "advanced": { "steps": 12 } })
-            )),
+            resolve_steps(
+                &request(json!({ "projectId": "p", "advanced": { "steps": 12 } })),
+                schnell
+            ),
             12
         );
     }
 
-    /// The Z-Image provider linked into the worker self-registered via inventory.
     #[cfg(target_os = "macos")]
     #[test]
-    fn mlx_engine_registry_links_z_image() {
-        assert!(mlx_gen::registry::generators().any(|reg| (reg.descriptor)().id == "z_image_turbo"));
+    fn mlx_model_table_maps_known_families() {
+        assert_eq!(
+            mlx_model("z_image_turbo").unwrap().engine_id,
+            "z_image_turbo"
+        );
+        assert_eq!(
+            mlx_model("flux_schnell").unwrap().engine_id,
+            "flux1_schnell"
+        );
+        assert_eq!(mlx_model("flux_dev").unwrap().engine_id, "flux1_dev");
+        assert_eq!(mlx_model("flux_dev").unwrap().adapter_label, "mlx_flux");
+        assert!(mlx_model("sdxl").is_none());
     }
 
-    /// Real-weights smoke: load + generate one small Z-Image image. Needs the HF cache
-    /// (`Tongyi-MAI/Z-Image-Turbo`) + a Metal device; run on demand:
-    /// `cargo test -p sceneworks-worker --lib -- --ignored zimage_real_weights`.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "needs real Z-Image weights + Metal device"]
-    fn zimage_real_weights_generates_one_image() {
-        let snapshot = std::fs::read_dir(
-            dirs_home().join(".cache/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots"),
-        )
-        .expect("HF cache snapshots dir")
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.is_dir())
-        .expect("a snapshot dir");
+    fn resolve_guidance_none_for_distilled_set_for_dev() {
+        let schnell = mlx_model("flux_schnell").unwrap();
+        let dev = mlx_model("flux_dev").unwrap();
+        let zimage = mlx_model("z_image_turbo").unwrap();
+        // Distilled variants take no guidance (the engine rejects Some on them).
+        assert_eq!(
+            resolve_guidance(&request(json!({ "projectId": "p" })), schnell),
+            None
+        );
+        assert_eq!(
+            resolve_guidance(&request(json!({ "projectId": "p" })), zimage),
+            None
+        );
+        // flux dev defaults to 3.5, overridable via advanced.guidanceScale.
+        assert_eq!(
+            resolve_guidance(&request(json!({ "projectId": "p" })), dev),
+            Some(3.5)
+        );
+        assert_eq!(
+            resolve_guidance(
+                &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 2.0 } })),
+                dev
+            ),
+            Some(2.0)
+        );
+    }
 
-        let generator = zimage_load(snapshot, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn adapter_id_reports_per_family_mlx_label() {
+        assert_eq!(
+            adapter_id(&request(json!({ "model": "z_image_turbo" }))),
+            "mlx_z_image"
+        );
+        assert_eq!(
+            adapter_id(&request(json!({ "model": "flux_schnell" }))),
+            "mlx_flux"
+        );
+        assert_eq!(
+            adapter_id(&request(json!({ "model": "flux_dev" }))),
+            "mlx_flux"
+        );
+        assert_eq!(
+            adapter_id(&request(json!({ "model": "sdxl" }))),
+            "procedural_preview"
+        );
+    }
+
+    /// The Z-Image + FLUX.1 providers linked into the worker self-registered via inventory.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_engine_registry_links_image_families() {
+        let ids: Vec<&str> = mlx_gen::registry::generators()
+            .map(|reg| (reg.descriptor)().id)
+            .collect();
+        for id in ["z_image_turbo", "flux1_schnell", "flux1_dev"] {
+            assert!(ids.contains(&id), "registry missing {id}");
+        }
+    }
+
+    /// Resolve a HuggingFace cache snapshot dir for `models--<dir>` (test helper).
+    #[cfg(target_os = "macos")]
+    fn hf_snapshot(model_dir: &str) -> std::path::PathBuf {
+        std::fs::read_dir(dirs_home().join(format!(".cache/huggingface/hub/{model_dir}/snapshots")))
+            .expect("HF cache snapshots dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("a snapshot dir")
+    }
+
+    /// Load + generate one small image through the public mlx-gen path (test helper).
+    #[cfg(target_os = "macos")]
+    fn smoke_generate_one(engine_id: &str, snapshot: std::path::PathBuf, guidance: Option<f32>) {
+        let generator =
+            mlx_load(engine_id, snapshot, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
         let cancel = mlx_gen::CancelFlag::new();
         let mut steps_seen = 0u32;
-        let (w, h, pixels) = zimage_generate_one(
+        let steps = mlx_model(match engine_id {
+            "flux1_schnell" => "flux_schnell",
+            "flux1_dev" => "flux_dev",
+            _ => "z_image_turbo",
+        })
+        .unwrap()
+        .default_steps;
+        let (w, h, pixels) = mlx_generate_one(
             generator.as_ref(),
             "a serene mountain lake at dawn",
             512,
             512,
             42,
-            8,
+            steps,
+            guidance,
             &cancel,
             &mut |p| {
                 if let mlx_gen::Progress::Step { current, .. } = p {
@@ -1106,6 +1300,49 @@ mod tests {
         assert!(steps_seen >= 1, "expected denoise step progress");
         // Not a flat image.
         assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+    }
+
+    /// Real-weights smoke: load + generate one small Z-Image image. Needs the HF cache
+    /// (`Tongyi-MAI/Z-Image-Turbo`) + a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored zimage_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Z-Image weights + Metal device"]
+    fn zimage_real_weights_generates_one_image() {
+        smoke_generate_one(
+            "z_image_turbo",
+            hf_snapshot("models--Tongyi-MAI--Z-Image-Turbo"),
+            None,
+        );
+    }
+
+    /// Real-weights smoke: load + generate one small FLUX.1-schnell image (4-step,
+    /// guidance-distilled). Needs the HF cache (`black-forest-labs/FLUX.1-schnell`) +
+    /// a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored flux_schnell_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real FLUX.1-schnell weights + Metal device"]
+    fn flux_schnell_real_weights_generates_one_image() {
+        smoke_generate_one(
+            "flux1_schnell",
+            hf_snapshot("models--black-forest-labs--FLUX.1-schnell"),
+            None,
+        );
+    }
+
+    /// Real-weights smoke: load + generate one small FLUX.1-dev image (guided, 28-step).
+    /// Needs the HF cache (`black-forest-labs/FLUX.1-dev`) + a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored flux_dev_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real FLUX.1-dev weights + Metal device"]
+    fn flux_dev_real_weights_generates_one_image() {
+        smoke_generate_one(
+            "flux1_dev",
+            hf_snapshot("models--black-forest-labs--FLUX.1-dev"),
+            Some(3.5),
+        );
     }
 
     #[cfg(target_os = "macos")]

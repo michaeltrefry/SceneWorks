@@ -1452,10 +1452,10 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
 
 /// Models the in-process Rust MLX worker generates today, by id. This set grows
 /// one family story at a time as each lands real generation in
-/// `sceneworks-worker::image_jobs` — sc-3022 Z-Image (live), then sc-3023 FLUX.1,
+/// `sceneworks-worker::image_jobs` — sc-3022 Z-Image, sc-3023 FLUX.1 (live), then
 /// sc-3024 Qwen, sc-3025 FLUX.2, sc-3026 SDXL. A model id absent here is never
 /// routed to the mlx worker, so the Python torch path stays authoritative for it.
-const MLX_ROUTED_MODELS: &[&str] = &["z_image_turbo"];
+const MLX_ROUTED_MODELS: &[&str] = &["z_image_turbo", "flux_schnell", "flux_dev"];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
 /// worker (vs the Python torch worker)? This lifts the per-family Python
@@ -1481,11 +1481,31 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     }
     match model {
         "z_image_turbo" => z_image_mlx_eligible(&job.payload),
+        "flux_schnell" | "flux_dev" => flux_mlx_eligible(&job.payload),
         // Each family story adds its arm alongside real generation:
-        // sc-3023 flux_schnell/flux_dev, sc-3024 qwen_image, sc-3025 flux2_klein_*,
-        // sc-3026 sdxl. Until then a model in MLX_ROUTED_MODELS must have an arm.
+        // sc-3024 qwen_image, sc-3025 flux2_klein_*, sc-3026 sdxl.
+        // Until then a model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
+}
+
+/// FLUX.1 (sc-3023) MLX-routing conditions, ported from `_should_route_flux_to_mlx`:
+/// text-to-image only — FLUX.1 reference/IP-Adapter and `edit_image` stay on the
+/// Python torch path (`FluxDiffusersAdapter`). A third-party LyCORIS LoRA also falls
+/// back to torch: the engine + the worker's `classify_adapter` apply LoRA and peft
+/// LoKr natively, but not arbitrary LyCORIS (which the worker would reject).
+fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_reference {
+        return false;
+    }
+    !request_has_lycoris_lora(payload)
 }
 
 /// Z-Image (sc-3022) MLX-routing conditions, ported from
@@ -1805,7 +1825,7 @@ fn sort_json_value(value: &mut Value) {
 
 #[cfg(test)]
 mod mlx_routing_tests {
-    use super::{request_has_lycoris_lora, z_image_mlx_eligible};
+    use super::{flux_mlx_eligible, request_has_lycoris_lora, z_image_mlx_eligible};
     use serde_json::{json, Map, Value};
 
     fn object(value: Value) -> Map<String, Value> {
@@ -1863,6 +1883,34 @@ mod mlx_routing_tests {
         // Third-party LyCORIS has no native MLX loader → torch.
         assert!(!z_image_mlx_eligible(&object(json!({
             "loras": [{ "path": "b.safetensors", "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn flux_plain_txt2img_is_eligible() {
+        assert!(flux_mlx_eligible(&object(json!({ "prompt": "a red fox" }))));
+        assert!(flux_mlx_eligible(&Map::new()));
+        // A LoRA is fine on the MLX flux path (engine applies LoRA + peft LoKr).
+        assert!(flux_mlx_eligible(&object(json!({
+            "loras": [{ "path": "a.safetensors", "networkType": "lora" }]
+        }))));
+    }
+
+    #[test]
+    fn flux_edit_reference_and_lycoris_fall_back_to_torch() {
+        // edit_image, reference (IP-Adapter), and third-party LyCORIS all stay on Python.
+        assert!(!flux_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(!flux_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        assert!(!flux_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+        // Unlike Z-Image, a pose set does NOT rescue a reference: FLUX.1 has no MLX
+        // reference path here, so reference always falls back.
+        assert!(!flux_mlx_eligible(&object(json!({
+            "referenceAssetId": "asset_1",
+            "advanced": { "poses": [{ "id": "p1" }] }
         }))));
     }
 

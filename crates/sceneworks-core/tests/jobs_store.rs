@@ -1464,17 +1464,68 @@ fn explicit_gpu_image_job_is_not_deferred_to_mlx_worker() {
 }
 
 #[test]
+fn flux_schnell_txt2img_routes_to_mlx_worker() {
+    let store = store("mlx-routing-flux");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // FLUX.1 txt2img (sc-3023) is MLX-eligible → defers to the idle mlx worker.
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "flux_schnell", "prompt": "a red fox" }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims flux txt2img");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn flux_reference_job_stays_on_torch() {
+    let store = store("mlx-routing-flux-reference");
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // FLUX.1 reference/IP-Adapter stays on the Python torch path → mlx refuses it.
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "flux_dev", "prompt": "p", "referenceAssetId": "asset_1" }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims flux reference job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
 fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     let store = store("mlx-routing-non-mlx-model");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // A model not yet ported to the Rust worker (e.g. flux_schnell, sc-3023) stays
-    // on the Python path: the torch worker claims it without deferral, and the mlx
-    // worker would refuse it.
+    // A model not yet ported to the Rust worker (e.g. sdxl, sc-3026) stays on the
+    // Python path: the torch worker claims it without deferral, and the mlx worker
+    // would refuse it.
     let job = store
         .create_job(image_job_with(
-            json!({ "model": "flux_schnell", "prompt": "p" }),
+            json!({ "model": "sdxl", "prompt": "p" }),
             "auto",
         ))
         .expect("job creates");
