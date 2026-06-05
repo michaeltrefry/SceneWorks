@@ -4,6 +4,14 @@ pub(crate) async fn discover_gpu(requested_gpu_id: &str) -> DiscoveredGpu {
     if requested_gpu_id == "cpu" {
         return cpu_gpu();
     }
+    // Apple-Silicon native MLX GPU worker (epic 3018): an explicit `mlx` gpu id
+    // selects the in-process mlx-gen engine. Kept off the `auto`/nvidia paths so
+    // the existing macOS CPU utility worker is unaffected; the desktop launch +
+    // routing wiring that selects `mlx` lands in sc-3021/sc-3032.
+    #[cfg(target_os = "macos")]
+    if requested_gpu_id == "mlx" {
+        return mlx_gpu();
+    }
     let gpus = discover_gpus().await;
     if requested_gpu_id.is_empty() || requested_gpu_id == "auto" {
         return gpus.into_iter().next().unwrap_or_else(cpu_gpu);
@@ -138,6 +146,22 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
         id: "cpu".to_owned(),
         name: "Rust CPU utility worker".to_owned(),
         capabilities: vec![WorkerCapability::Placeholder, WorkerCapability::Cpu],
+        utilization: None,
+    }
+}
+
+/// The Apple-Silicon native MLX GPU worker (epic 3018): advertises `image_generate`,
+/// served in-process by the linked mlx-gen engine. `Gpu` (not `Cpu`) so the API's
+/// `worker_supports_job` lets GPU jobs route here; it deliberately does NOT carry the
+/// CPU utility capabilities, so downloads/imports/etc. still go to the CPU worker.
+/// Video + the remaining image capabilities are added as their stories land
+/// (sc-3022.. image, sc-3034.. video).
+#[cfg(target_os = "macos")]
+pub(crate) fn mlx_gpu() -> DiscoveredGpu {
+    DiscoveredGpu {
+        id: "mlx".to_owned(),
+        name: "Apple Silicon (MLX)".to_owned(),
+        capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
         utilization: None,
     }
 }

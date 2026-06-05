@@ -19,6 +19,8 @@ use super::downloads::{
     download_snapshot_into_cache, DownloadContext, DownloadProgress, HuggingFaceSnapshot,
     SnapshotFile,
 };
+#[cfg(target_os = "macos")]
+use super::gpu::mlx_gpu;
 use super::gpu::{
     cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id, parse_nvidia_smi_gpus, visible_gpu_ids,
     worker_capabilities_with_utility,
@@ -419,6 +421,39 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
     assert!(!gpu_capabilities
         .iter()
         .any(|capability| capability.as_str() == "image_generate"));
+}
+
+/// The Apple-Silicon MLX GPU worker (epic 3018) advertises `image_generate` so the
+/// API routes generation to it, but it must NOT pick up CPU utility jobs (those stay
+/// on the CPU worker) — the inverse of the CPU-worker contract above.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_gpu_advertises_image_generate_only() {
+    let mlx = mlx_gpu();
+    assert_eq!(mlx.id, "mlx");
+    let capabilities = worker_capabilities_with_utility(&mlx, true);
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "image_generate"));
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "gpu"));
+    // No CPU utility capabilities, even with utility jobs enabled — only the CPU
+    // worker (which carries `Cpu`) gets those extended onto it.
+    for utility in [
+        "model_download",
+        "model_import",
+        "timeline_export",
+        "cpu",
+        "placeholder",
+    ] {
+        assert!(
+            !capabilities
+                .iter()
+                .any(|capability| capability.as_str() == utility),
+            "MLX GPU worker should not advertise utility capability {utility}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -22,5 +22,35 @@ uuid = { version = "1.11", features = ["v4"] }
 axum = "0.7"
 tower = { version = "0.5", features = ["util"] }
 
+# macOS NAX-presence guard (tests/nax_guard.rs): exercises a 16-bit fused SDPA op
+# directly against mlx-rs to prove the workspace .cargo/config.toml deployment-target
+# pin is in effect. Pinned to the SAME rev mlx-gen uses so Cargo builds MLX once
+# (a different rev would compile pmetal-mlx-sys twice). mlx-gen itself is already a
+# (macOS) dependency above and is usable from integration tests as-is.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "e59ffd88014340e6a49b26de95446b8b76a57932" }
+
+# Native MLX image+video inference engine (epic 2337), linked in-process so the
+# Rust GPU worker dispatches generation with no Python adapter/sidecar (epic 3018).
+# macOS-only: mlx-gen builds Apple MLX from source and is meaningless off Apple
+# Silicon. Git-pinned by SHA (the repo + its pmetal-mlx-rs fork are public, so this
+# resolves on Linux/Windows CI without creds and only *compiles* on macOS via the
+# target gate). The deployment-target build seam lives in /.cargo/config.toml.
+#
+# Local mlx-gen co-dev: point this at a sibling checkout via a workspace-root
+# [patch] (NOT committed — a path that is absent on CI breaks resolution):
+#   [patch."https://github.com/michaeltrefry/mlx-gen"]
+#   mlx-gen = { path = "../mlx-gen" }
+# `mlx-gen` is the core engine (load/registry/request types). Each model family
+# lives in its own provider crate that self-registers into the engine's link-time
+# `inventory` registry — the core does NOT depend on the providers, so a consumer
+# links the provider crates it serves and references each with `use … as _;`
+# (image_jobs.rs) to keep the linker from dropping the registration. Per-family
+# stories (sc-3022..3035) add their provider here; this scaffold links Z-Image
+# (sc-3022, next) to prove the cross-crate registry path end to end.
+[target.'cfg(target_os = "macos")'.dependencies]
+mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
+mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0e3ed60a550f7a948c06b97f95c9dd9fc6d59246" }
+
 [lints]
 workspace = true

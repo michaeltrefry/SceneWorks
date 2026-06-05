@@ -1,0 +1,44 @@
+# SceneWorks workspace Cargo config.
+#
+# This file is the build seam for the native MLX inference path (epic 3018). The
+# Rust GPU worker links the `mlx-gen` engine (epic 2337) as a macOS-only Cargo
+# dependency, which builds Apple MLX from source. Two things have to be set HERE,
+# in the consuming workspace, because Cargo does NOT read a *dependency's*
+# `.cargo/config.toml` — only the config of the workspace that invokes the build.
+
+[env]
+# Build MLX at the macOS 26.2 deployment target so the Apple matrix-unit ("NAX")
+# Metal kernels both compile in AND codegen correctly. mlx-sys's build.rs floors
+# the target at macOS 14 (Metal 310), which trips MLX's kernel gate and defines
+# -DMLX_METAL_NO_NAX, omitting the fast steel_gemm_*_nax / steel_attention_nax
+# kernels -> ~2.5x slower DiT. The NAX kernels use Apple's Metal Performance
+# Primitives matrix-unit intrinsic (mpp::tensor_ops::matmul2d), which is only
+# valid for macOS >= 26.2 — at 26.0 the kernels still compile but metalfe
+# MISCOMPILES the 16-bit (bf16/f16) tensor-op to garbage. 26.2 makes them correct
+# AND fast. This MUST live in the SceneWorks workspace: if it is only in mlx-gen's
+# own config it does not travel to this consumer, NAX silently compiles out, and
+# the Mac path regresses ~2.5x. Mirrors mlx-gen/.cargo/config.toml; see sc-2772.
+#
+# NOT forced: Cargo only applies an [env] value when the variable is unset, so a
+# local/shipping build defaults to 26.2 (correct NAX), while a hosted-macOS CI job
+# can override to 15.0 by exporting MACOSX_DEPLOYMENT_TARGET=15.0 — GitHub's hosted
+# macOS runners cap at macos-15 / SDK 15 and cannot provide SDK >= 26.2. CI then
+# builds for correctness only; it cannot exercise the NAX fast path (is_nax_
+# available() is false there), so the lower target is harmless. NB: mlx-sys's
+# build.rs has no rerun-if-env-changed, so a clean rebuild of pmetal-mlx-sys is
+# required for a change here to take effect.
+MACOSX_DEPLOYMENT_TARGET = "26.2"
+
+# Heavy-recompile mitigation (the "compile MLX once" concern, epic 3018 build seam).
+# Building MLX from source is the slow part of a clean build, and a fresh git
+# worktree gets its own `target/` so it recompiles MLX from scratch. To share
+# compiled artifacts across worktrees/clean builds WITHOUT hard-requiring a tool
+# that may be absent (sccache is not installed by default, and a committed
+# `rustc-wrapper`/`target-dir` would break every machine and CI lane that lacks
+# it), this is left as an opt-in via environment rather than pinned here:
+#
+#   brew install sccache
+#   export RUSTC_WRAPPER=sccache          # caches compiled crates across target dirs
+#   export CARGO_TARGET_DIR=~/.cache/sceneworks-target   # one shared target dir
+#
+# See docs/rust-mlx-build.md.

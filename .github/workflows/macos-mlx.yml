@@ -1,0 +1,63 @@
+name: macOS MLX worker
+
+# Compiles the Rust GPU worker with the native MLX engine (mlx-gen, epic 2337)
+# linked in — the macOS-only build that the Linux `parity` job (check.yml) and the
+# Windows desktop job cannot exercise, because mlx-gen is gated to
+# `cfg(target_os = "macos")` and builds Apple MLX from source.
+#
+# CORRECTNESS-ONLY. GitHub's hosted macOS runners cap at macos-15 / SDK 15 and
+# cannot provide SDK >= 26.2, so this overrides the workspace 26.2 deployment-target
+# pin (/.cargo/config.toml) to 15.0. At 15.0 the NAX matrix-unit kernels compile out
+# (is_nax_available() is false), so this job verifies the link + logic but CANNOT
+# exercise or guard the NAX fast path — the `nax_guard` integration test is therefore
+# NOT run here; it requires a self-hosted macOS >= 26.2 runner to be meaningful (it
+# would only test fallback kernels at 15.0). See sc-3019 / sc-2772.
+#
+# Scoped to the isolated epic integration branch (rust-mlx-integration) + its story
+# PRs, because building MLX from source is heavy; promote to per-PR on main at cutover
+# (sc-3032) if desired. mlx-gen + its pmetal-mlx-rs fork are public, so no token is
+# needed to fetch them.
+
+on:
+  push:
+    branches:
+      - rust-mlx-integration
+    paths: &mlx_paths
+      - "crates/**"
+      - "apps/rust-worker/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/config.toml"
+      - ".github/workflows/macos-mlx.yml"
+  pull_request:
+    branches:
+      - rust-mlx-integration
+    paths: *mlx_paths
+  workflow_dispatch:
+
+concurrency:
+  group: macos-mlx-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-worker:
+    runs-on: macos-15
+    env:
+      # Hosted runners cannot provide SDK >= 26.2; build for correctness at 15.0.
+      # The workspace [env] pin is non-forced, so this env value wins.
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # MLX-from-source dominates the build; cache the shared target + git deps.
+          key: macos-mlx-worker
+      - name: Build the MLX GPU worker (mlx-gen linked)
+        run: cargo build -p sceneworks-worker
+      - name: Worker logic tests (non-MLX)
+        run: cargo test -p sceneworks-worker --lib
+      - name: Clippy (MLX worker)
+        run: cargo clippy -p sceneworks-worker --all-targets -- -D warnings

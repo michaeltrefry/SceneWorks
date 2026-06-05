@@ -41,6 +41,8 @@ mod model_jobs;
 use model_jobs::*;
 mod media_jobs;
 use media_jobs::*;
+mod image_jobs;
+use image_jobs::*;
 mod downloads;
 use downloads::*;
 
@@ -450,6 +452,12 @@ async fn run_utility_job(
         JobType::Placeholder => run_placeholder_job(api, settings, &job)
             .await
             .map_err(|error| ("Placeholder job failed.", error)),
+        // Native MLX image generation, served in-process by the linked mlx-gen
+        // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
+        // capability is never advertised, so this arm is unreachable there.
+        JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Image generation failed.", error)),
         JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model download failed.", error)),
