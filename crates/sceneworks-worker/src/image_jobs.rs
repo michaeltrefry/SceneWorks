@@ -784,7 +784,7 @@ fn resolve_negative_prompt(request: &ImageRequest, model: &MlxModel) -> Option<S
 
 /// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
 #[cfg(target_os = "macos")]
-fn lora_path(lora: &Value) -> Option<PathBuf> {
+pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
     for key in ["installedPath", "sourcePath", "path"] {
         if let Some(value) = lora
             .get(key)
@@ -807,7 +807,7 @@ fn lora_path(lora: &Value) -> Option<PathBuf> {
 /// `networkType: lokr`) → `Lokr`; third-party LyCORIS (LoHa / kohya LoKr) is not
 /// reconstructable here → rejected; everything else → `Lora`.
 #[cfg(target_os = "macos")]
-fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
+pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     let header = read_safetensors_header(file)
         .map_err(|error| WorkerError::InvalidPayload(format!("LoRA header: {error}")))?;
     let metadata = header.get("__metadata__");
@@ -1853,7 +1853,7 @@ fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
 /// Resolve a reference/source asset id to an in-memory RGB8 image (the engine VAE-
 /// encodes + resizes it). Uses the indexed `ProjectStore::get_asset` → `file.path`.
 #[cfg(target_os = "macos")]
-fn load_reference_image(
+pub(crate) fn load_reference_image(
     data_dir: &Path,
     project_id: &str,
     asset_id: &str,

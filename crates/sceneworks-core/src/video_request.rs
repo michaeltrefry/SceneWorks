@@ -138,16 +138,12 @@ pub fn ltx_frame_count(raw_frames: u32) -> u32 {
 }
 
 /// Wan2.2 temporal stride: the VAE math `t_lat = (frames − 1) / 4 + 1` requires
-/// `frames ≡ 1 (mod 4)`, so frames snap to the nearest `4n + 1`, minimum 1.
+/// `frames ≡ 1 (mod 4)`. Frames floor to the largest `4k + 1` at or below `raw`,
+/// with a 5-frame minimum — the Python worker's `_run_wan_mlx`
+/// `max(5, raw - ((raw - 1) % 4))`.
 pub fn wan_frame_count(raw_frames: u32) -> u32 {
     let raw = raw_frames.max(1);
-    let lower = raw - ((raw - 1) % 4);
-    let upper = lower + 4;
-    if raw - lower <= upper - raw {
-        lower
-    } else {
-        upper
-    }
+    (raw - ((raw - 1) % 4)).max(5)
 }
 
 /// Whether `model` is an LTX-2.3 family id (`ltx_2_3`, `ltx_2_3_eros`, …).
@@ -354,13 +350,17 @@ mod tests {
     }
 
     #[test]
-    fn wan_frame_count_snaps_to_4n_plus_1() {
-        assert_eq!(wan_frame_count(1), 1);
+    fn wan_frame_count_floors_to_4n_plus_1_min_5() {
+        // Exact 1+4k values >= 5 are unchanged.
         assert_eq!(wan_frame_count(5), 5);
         assert_eq!(wan_frame_count(81), 81);
-        assert_eq!(wan_frame_count(2), 1); // |2-1|=1 <= |5-2|=3 -> lower
-        assert_eq!(wan_frame_count(4), 5); // |4-1|=3 > |5-4|=1 -> upper
-        assert_eq!(wan_frame_count(83), 81); // |83-81|=2 <= |85-83|=2 -> lower
+        // Floors to the 1+4k at or below raw (Python `raw - ((raw-1)%4)`).
+        assert_eq!(wan_frame_count(48), 45); // 48-(47%4=3)
+        assert_eq!(wan_frame_count(83), 81); // 83-(82%4=2)
+        assert_eq!(wan_frame_count(8), 5); // 8-(7%4=3)
+                                           // 5-frame floor for tiny counts.
+        assert_eq!(wan_frame_count(1), 5);
+        assert_eq!(wan_frame_count(4), 5);
     }
 
     #[test]
