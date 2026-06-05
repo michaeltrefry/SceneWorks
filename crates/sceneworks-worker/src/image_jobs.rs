@@ -1351,6 +1351,11 @@ fn zimage_control_load(
 
 /// Generate one strict-pose image: the `control` skeleton drives the Fun-Controlnet-Union
 /// pose branch at `control_scale`. Z-Image-Turbo is guidance-distilled (no CFG / negative).
+///
+/// `reference` is the optional identity img2img-init shared across the pose set (sc-3146):
+/// `(image, strength)` adds a `Reference` conditioning next to the required `Control`, seeding
+/// the denoise from the reference latents. `strength` is the engine's img2img strength (mflux
+/// `image_strength` convention: higher = more init kept). `None` → the pose-only tier.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn zimage_control_generate_one(
@@ -1362,9 +1367,21 @@ fn zimage_control_generate_one(
     steps: u32,
     control: Image,
     control_scale: f32,
+    reference: Option<&(Image, f32)>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let mut conditioning = vec![Conditioning::Control {
+        image: control,
+        kind: ControlKind::Pose,
+        scale: control_scale,
+    }];
+    if let Some((image, strength)) = reference {
+        conditioning.push(Conditioning::Reference {
+            image: image.clone(),
+            strength: Some(*strength),
+        });
+    }
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
@@ -1372,11 +1389,7 @@ fn zimage_control_generate_one(
         count: 1,
         seed: Some(seed as u64),
         steps: Some(steps),
-        conditioning: vec![Conditioning::Control {
-            image: control,
-            kind: ControlKind::Pose,
-            scale: control_scale,
-        }],
+        conditioning,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -1435,27 +1448,14 @@ async fn generate_zimage_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    // Identity img2img-init (sc-2328) is an opt-in escape hatch (off by default, validated
-    // marginal on 8-step Turbo). The engine accepts a Reference, but resolving
-    // referenceAssetId → image needs asset-path plumbing not yet in the Rust worker — so an
-    // explicit referenceStrength errors loudly here rather than silently dropping it
-    // (tracked follow-up). Pose-only (no referenceStrength) is the default tier.
-    let identity_init = request
-        .advanced
-        .get("referenceStrength")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .is_some_and(|strength| strength > 0.0);
-    if identity_init {
-        return Err(WorkerError::InvalidPayload(
-            "Identity img2img-init (referenceStrength) is not yet supported on the Rust Z-Image \
-             strict-pose path; omit referenceStrength for pose-only generation."
-                .to_owned(),
-        ));
-    }
+    // Identity img2img-init (sc-2328 / sc-3146) — OPT-IN escape hatch, off by default. The
+    // Fun-Controlnet-Union pose head denoises the pose FROM NOISE, so seeding from a reference
+    // init fights the pose lock on few-step Turbo (validated marginal on 8-step Turbo; no single
+    // strength holds BOTH identity and pose). It engages only when advanced.referenceStrength > 0
+    // AND a referenceAssetId is present — parity with `MlxZImageAdapter._identity_init_requested`.
+    // The reference is shared across the whole pose set (identity is constant; only the per-pose
+    // skeleton changes). None → the pose-only tier (the validated sc-2257 default).
+    let identity_init = resolve_zimage_identity_init(request, settings, project_path)?;
 
     let weights_dir = resolve_weights_dir(request, settings)
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
@@ -1489,6 +1489,7 @@ async fn generate_zimage_control_stream(
         let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
             let generator = zimage_control_load(weights_dir, control_weights, quant, adapters)?;
+            let identity_init = identity_init.as_ref();
             for (index, pose) in poses.into_iter().enumerate() {
                 let skeleton = crate::openpose_skeleton::draw_wholebody(
                     width,
@@ -1523,6 +1524,7 @@ async fn generate_zimage_control_stream(
                     steps,
                     control,
                     control_scale,
+                    identity_init,
                     &cancel,
                     &mut on_progress,
                 )?;
@@ -1559,6 +1561,65 @@ async fn generate_zimage_control_stream(
         asset_writes,
     )
     .await
+}
+
+/// The clamped identity img2img-init strength for the Z-Image strict-pose set, or `None` for the
+/// pose-only tier (sc-3146). `Some(strength)` iff `advanced.referenceStrength > 0` AND a non-empty
+/// `referenceAssetId` is present — parity with `MlxZImageAdapter._identity_init_requested`. The
+/// strict-pose stream always carries poses (`zimage_control_available`), so the
+/// bare-reference-without-poses rejection is handled upstream; here a `referenceStrength` set
+/// without an asset simply falls back to pose-only, matching the Python gate rather than erroring.
+///
+/// `strength` is the user value clamped to `[0.05, 1.0]` and carries the mflux `image_strength`
+/// convention **verbatim** (no numeric inversion): the mlx-gen Z-Image control engine and mflux
+/// agree — higher strength → later denoise start (`init_time_step`) → output stays closer to the
+/// init. Mirrors `MlxZImageAdapter._reference_strength` + the sidecar's verbatim forward. Pure
+/// (request only) so the parity-sensitive gate + clamp are unit-testable without asset I/O.
+#[cfg(target_os = "macos")]
+fn zimage_identity_strength(request: &ImageRequest) -> Option<f32> {
+    let strength = request
+        .advanced
+        .get("referenceStrength")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .filter(|strength| *strength > 0.0)?;
+    let has_asset = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|id| !id.is_empty());
+    has_asset.then(|| (strength as f32).clamp(0.05, 1.0))
+}
+
+/// Resolve the optional identity img2img-init for the Z-Image strict-pose set (sc-3146):
+/// `Some((image, strength))` when [`zimage_identity_strength`] engages, decoding `referenceAssetId`
+/// via [`load_reference_image`]; `None` for the default pose-only tier. The reference is shared
+/// across the whole pose set (identity is constant; only the per-pose skeleton changes).
+#[cfg(target_os = "macos")]
+fn resolve_zimage_identity_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    let Some(strength) = zimage_identity_strength(request) else {
+        return Ok(None);
+    };
+    let asset_id = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .expect("zimage_identity_strength guarantees a non-empty referenceAssetId");
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    Ok(Some((image, strength)))
 }
 
 /// The asset `adapter` id for Z-Image (strict-pose shares the base z-image label).
@@ -3823,6 +3884,61 @@ mod tests {
         assert!(poses[0].face.is_some());
     }
 
+    /// Identity img2img-init gate + clamp (sc-3146): the parity-sensitive decision the
+    /// strict-pose stream makes before loading the reference image. Mirrors the Python
+    /// `MlxZImageAdapter._identity_init_requested` + `_reference_strength` semantics.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zimage_identity_strength_gate_and_clamp() {
+        let with = |adv: Value, asset: Value| {
+            let mut payload = json!({
+                "projectId": "p", "model": "z_image_turbo", "prompt": "a knight"
+            });
+            let obj = payload.as_object_mut().unwrap();
+            obj.insert("advanced".to_owned(), adv);
+            if !asset.is_null() {
+                obj.insert("referenceAssetId".to_owned(), asset);
+            }
+            zimage_identity_strength(&request(payload))
+        };
+        let approx = |got: Option<f32>, want: f32| match got {
+            Some(value) => assert!((value - want).abs() < 1e-6, "got {value}, want {want}"),
+            None => panic!("expected Some({want}), got None"),
+        };
+
+        // Pose-only tiers → None: no referenceStrength; referenceStrength == 0 (parity:
+        // the Python gate requires > 0); referenceStrength > 0 but no/blank asset (a bare
+        // reference has no MLX home, so it falls back to pose-only rather than erroring).
+        assert_eq!(with(json!({}), json!("ref_1")), None);
+        assert_eq!(
+            with(json!({ "referenceStrength": 0.0 }), json!("ref_1")),
+            None
+        );
+        assert_eq!(with(json!({ "referenceStrength": 0.6 }), Value::Null), None);
+        assert_eq!(
+            with(json!({ "referenceStrength": 0.6 }), json!("   ")),
+            None
+        );
+
+        // Engaged: strength forwarded verbatim (no inversion) and clamped to [0.05, 1.0].
+        approx(
+            with(json!({ "referenceStrength": 0.6 }), json!("ref_1")),
+            0.6,
+        );
+        approx(
+            with(json!({ "referenceStrength": "0.45" }), json!("ref_1")),
+            0.45,
+        );
+        assert_eq!(
+            with(json!({ "referenceStrength": 1.8 }), json!("ref_1")),
+            Some(1.0)
+        );
+        assert_eq!(
+            with(json!({ "referenceStrength": 0.01 }), json!("ref_1")),
+            Some(0.05)
+        );
+    }
+
     /// Real-weights smoke: Z-Image strict-pose ControlNet. Loads the base
     /// `Tongyi-MAI/Z-Image-Turbo` snapshot + the cached Fun-Controlnet-Union checkpoint,
     /// renders a DWPose skeleton, and generates one pose image. Needs both in the HF
@@ -3893,6 +4009,7 @@ mod tests {
             8,
             control,
             0.9,
+            None,
             &cancel,
             &mut |p| {
                 if let mlx_gen::Progress::Step { current, .. } = p {
