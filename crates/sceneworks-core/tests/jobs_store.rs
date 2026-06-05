@@ -1463,6 +1463,182 @@ fn explicit_gpu_image_job_is_not_deferred_to_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
 }
 
+// --- Video routing (epic 3018, sc-3036) ---
+
+fn video_caps() -> Vec<WorkerCapability> {
+    vec![WorkerCapability::Gpu, WorkerCapability::VideoGenerate]
+}
+
+fn video_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::VideoGenerate,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(payload),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    }
+}
+
+#[test]
+fn mlx_eligible_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
+    let store = store("mlx-video-routing-defer");
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": "a misty fjord" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The torch worker defers the MLX-eligible video job to the idle mlx worker.
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn mlx_worker_excluded_from_advanced_mode_video_job() {
+    let store = store("mlx-video-routing-exclude");
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    // first_last_frame is an advanced mode — torch-only even on a Wan model (MLX
+    // covers only text_to_video / image_to_video).
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "wan_2_2", "mode": "first_last_frame" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn mlx_eligible_video_job_falls_back_to_torch_when_no_mlx_worker() {
+    let store = store("mlx-video-routing-fallback");
+    register_gpu_worker(&store, "worker-torch", "cuda:0", video_caps());
+
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
+}
+
+#[test]
+fn explicit_gpu_video_job_is_not_deferred_to_mlx_worker() {
+    let store = store("mlx-video-routing-explicit-gpu");
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": "p" }),
+            "mps",
+        ))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the explicit-gpu job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn lokr_on_wan_video_stays_on_torch() {
+    let store = store("mlx-video-lokr-wan");
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    // LoKr-on-Wan → torch: the diffusers-Wan path applies LoKr via PEFT; the
+    // mlx-video path can't (mirrors create_video_adapter).
+    let job = store
+        .create_job(video_job_with(
+            json!({
+                "model": "wan_2_2_t2v_14b",
+                "mode": "text_to_video",
+                "loras": [{ "path": "a.safetensors", "networkType": "lokr" }]
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the LoKr-on-Wan job");
+    assert_eq!(claimed.id, job.id);
+}
+
+#[test]
+fn lokr_on_ltx_video_routes_to_mlx_worker() {
+    let store = store("mlx-video-lokr-ltx");
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    // LoKr-on-LTX stays MLX: the torch LTX path has no LoKr loader; the Rust engine
+    // applies it natively.
+    let job = store
+        .create_job(video_job_with(
+            json!({
+                "model": "ltx_2_3",
+                "mode": "text_to_video",
+                "loras": [{ "path": "a.safetensors", "networkType": "lokr" }]
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the LoKr-on-LTX job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
 #[test]
 fn flux_schnell_txt2img_routes_to_mlx_worker() {
     let store = store("mlx-routing-flux");

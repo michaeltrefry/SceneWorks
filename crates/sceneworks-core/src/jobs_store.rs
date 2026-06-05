@@ -709,7 +709,9 @@ impl JobsStore {
         if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
             return Ok(None);
         }
-        if should_defer_image_to_mlx_worker(&transaction, &queued, &worker)? {
+        if should_defer_image_to_mlx_worker(&transaction, &queued, &worker)?
+            || should_defer_video_to_mlx_worker(&transaction, &queued, &worker)?
+        {
             return Ok(None);
         }
 
@@ -1410,6 +1412,34 @@ fn should_defer_image_to_mlx_worker(
     {
         return Ok(false);
     }
+    idle_mlx_worker_can_claim(connection, job, worker)
+}
+
+/// Video sibling of [`should_defer_image_to_mlx_worker`] (sc-3036): a non-mlx GPU
+/// worker defers an `auto` MLX-eligible `video_generate` job when an idle `mlx`
+/// worker can run it. Same fallback guarantees — no mlx worker / explicit GPU →
+/// never deferred.
+fn should_defer_video_to_mlx_worker(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    if job.requested_gpu != "auto"
+        || worker.gpu_id.eq_ignore_ascii_case("mlx")
+        || !video_job_is_mlx_eligible(job)
+    {
+        return Ok(false);
+    }
+    idle_mlx_worker_can_claim(connection, job, worker)
+}
+
+/// Whether an idle `mlx` worker (other than `worker`) exists that supports `job`
+/// and has no active GPU job — the shared tail of the image/video MLX deferral.
+fn idle_mlx_worker_can_claim(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
     let mut statement = connection.prepare(
         "
         select * from workers
@@ -1629,6 +1659,89 @@ fn request_has_lycoris_lora(payload: &Map<String, Value>) -> bool {
     })
 }
 
+/// Whether any request LoRA records `networkType == "lokr"` (SceneWorks peft LoKr).
+/// Sibling of [`request_has_lycoris_lora`]; used by the video routing to keep a
+/// LoKr-on-Wan job on the torch path (see [`video_job_is_mlx_eligible`]).
+fn request_has_lokr_lora(payload: &Map<String, Value>) -> bool {
+    let Some(loras) = payload.get("loras").and_then(Value::as_array) else {
+        return false;
+    };
+    loras.iter().any(|lora| {
+        lora.as_object()
+            .and_then(|lora| {
+                lora.get("networkType").and_then(Value::as_str).or_else(|| {
+                    lora.get("compatibility")
+                        .and_then(Value::as_object)
+                        .and_then(|compat| compat.get("networkType"))
+                        .and_then(Value::as_str)
+                })
+            })
+            .is_some_and(|recorded| recorded.trim().eq_ignore_ascii_case("lokr"))
+    })
+}
+
+/// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
+/// sc-3035 LTX-2.3 + audio). Mirrors `MlxVideoAdapter._supported_models`. A model
+/// id absent here is never routed to the mlx worker — the Python torch path stays
+/// authoritative for it (and for SVD, which has no MLX crate).
+const VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
+    "ltx_2_3",
+    "ltx_2_3_eros",
+    "wan_2_2",
+    "wan_2_2_t2v_14b",
+    "wan_2_2_i2v_14b",
+];
+
+/// Whether `model` is a Wan2.2 video family id (vs LTX).
+fn is_wan_video_model(model: &str) -> bool {
+    model.starts_with("wan")
+}
+
+/// Epic 3018 routing (sc-3036, the video sibling of [`image_job_is_mlx_eligible`]):
+/// does this video job belong on the in-process Rust MLX worker? Encodes today's
+/// Python `create_video_adapter` MLX-eligibility (video_adapters.py) at the claim
+/// layer, minus the worker-local gates (MPS presence / sidecar) — those are now
+/// expressed by whether an `mlx` worker is registered and idle (see
+/// [`should_defer_video_to_mlx_worker`]).
+///
+/// MLX covers **`text_to_video` + `image_to_video` on Wan/LTX only**. Everything
+/// else stays on the Python torch path: the advanced job types
+/// (`video_extend`/`video_bridge`/`person_replace`) and the advanced
+/// `video_generate` modes (`first_last_frame`/`replace_person`), SVD (no crate), a
+/// non-MLX model, a third-party LyCORIS LoRA (the mlx worker's `classify_adapter`
+/// rejects it), and **LoKr-on-Wan** (the diffusers-Wan path applies LoKr via PEFT;
+/// the mlx-video path can't — mirrors `create_video_adapter`). LoKr-on-LTX stays
+/// MLX (the torch LTX path has no LoKr loader; the Rust engine applies it natively).
+fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    // Only the base video_generate job type is MLX-eligible; the advanced job types
+    // (extend/bridge/person-replace) are torch-only.
+    if !matches!(job.job_type, JobType::VideoGenerate) {
+        return false;
+    }
+    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+        return false;
+    };
+    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
+        return false;
+    }
+    // Mode defaults to `image_to_video`, mirroring `video_request_from_job`.
+    let mode = job
+        .payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("image_to_video");
+    if !matches!(mode, "text_to_video" | "image_to_video") {
+        return false;
+    }
+    if request_has_lycoris_lora(&job.payload) {
+        return false;
+    }
+    if is_wan_video_model(model) && request_has_lokr_lora(&job.payload) {
+        return false;
+    }
+    true
+}
+
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
@@ -1640,11 +1753,24 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // those stay on the Python worker. Non-mlx workers are unaffected here; the
     // *preference* to route eligible jobs to an idle mlx worker is a soft
     // deferral in the claim path (`should_defer_image_to_mlx_worker`).
-    if worker.gpu_id.eq_ignore_ascii_case("mlx")
-        && matches!(job.job_type, JobType::ImageGenerate)
-        && !image_job_is_mlx_eligible(job)
-    {
-        return false;
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") {
+        if matches!(job.job_type, JobType::ImageGenerate) && !image_job_is_mlx_eligible(job) {
+            return false;
+        }
+        // Video (sc-3036): the mlx worker claims only MLX-eligible `video_generate`
+        // jobs (Wan/LTX text_to_video / image_to_video). The advanced video job types
+        // (extend / bridge / person-replace) and torch-only `video_generate` cases
+        // (advanced modes, SVD, non-MLX model, LoKr-on-Wan) stay on the Python worker.
+        if matches!(
+            job.job_type,
+            JobType::VideoGenerate
+                | JobType::VideoExtend
+                | JobType::VideoBridge
+                | JobType::PersonReplace
+        ) && !video_job_is_mlx_eligible(job)
+        {
+            return false;
+        }
     }
     let advertises = |capability: &str| {
         worker
