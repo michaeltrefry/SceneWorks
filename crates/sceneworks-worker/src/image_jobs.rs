@@ -207,7 +207,13 @@ pub(crate) async fn run_image_generate_job(
     let project_path = PathBuf::from(project.path);
     tokio::fs::create_dir_all(project_path.join("assets").join("images")).await?;
 
-    let plan = ImagePlan::new(&request);
+    // A FLUX.2 angle set produces 11 images and a pose set one per pose, regardless of
+    // the requested `count` (sc-3030) — bake the real total into the plan so the
+    // generation set + streamed `expectedCount` match what lands in the gallery.
+    #[cfg(target_os = "macos")]
+    let plan = ImagePlan::with_count(&request, flux2_image_count(&request, settings));
+    #[cfg(not(target_os = "macos"))]
+    let plan = ImagePlan::with_count(&request, request.count);
 
     // Pre-flight LoRA family-compat guardrail (sc-3027): reject an incompatible LoRA
     // (e.g. a Flux LoRA on an SDXL model, or a Wan 5B LoRA on the 14B base) before any
@@ -232,14 +238,14 @@ pub(crate) async fn run_image_generate_job(
             JobStatus::Preparing,
             ProgressStage::Preparing,
             0.05,
-            &format!("Preparing {} image(s).", request.count),
+            &format!("Preparing {} image(s).", plan.image_count),
             None,
             backend,
         ),
     )
     .await?;
 
-    let mut asset_writes: Vec<Value> = Vec::with_capacity(request.count as usize);
+    let mut asset_writes: Vec<Value> = Vec::with_capacity(plan.image_count as usize);
 
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
     // procedural stub (keeps non-macOS + not-yet-ported models working).
@@ -308,7 +314,7 @@ pub(crate) async fn run_image_generate_job(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            &format!("Generated {} image(s).", request.count),
+            &format!("Generated {} image(s).", plan.image_count),
             Some(streaming_result(&plan, &asset_writes)),
             backend,
         ),
@@ -371,10 +377,24 @@ struct ImagePlan {
     family: String,
     slug: String,
     generation_set: Value,
+    /// Number of images this job produces. Usually `request.count`, but a FLUX.2 angle
+    /// set is 11 and a pose set is the pose count (sc-3030) — the generation set's
+    /// `count`/`expectedCount` reflect this so the gallery streams against the real
+    /// total, not the requested `count`.
+    image_count: u32,
 }
 
 impl ImagePlan {
+    /// Test-only convenience: a plan whose image count is the request count. Production
+    /// always goes through [`ImagePlan::with_count`] (the FLUX.2 angle/pose sets need an
+    /// effective count that differs from `request.count`).
+    #[cfg(test)]
     fn new(request: &ImageRequest) -> Self {
+        Self::with_count(request, request.count)
+    }
+
+    /// Build a plan whose generation set reports `image_count` images (see the field).
+    fn with_count(request: &ImageRequest, image_count: u32) -> Self {
         let genset_id = format!("genset_{}", Uuid::new_v4().simple());
         let created_at = now_rfc3339();
         let family = resolve_family(request);
@@ -385,7 +405,7 @@ impl ImagePlan {
             "model": request.model,
             "prompt": request.prompt,
             "negativePrompt": request.negative_prompt,
-            "count": request.count,
+            "count": image_count,
             "createdAt": created_at,
         });
         Self {
@@ -395,6 +415,7 @@ impl ImagePlan {
             family,
             slug,
             generation_set,
+            image_count,
         }
     }
 }
@@ -456,7 +477,7 @@ fn write_image_asset(
         "height": height,
         "normalizedWidth": request.width,
         "normalizedHeight": request.height,
-        "count": request.count,
+        "count": plan.image_count,
         "family": plan.family,
         "seed": seed,
         "index": index,
@@ -482,7 +503,7 @@ fn write_image_asset(
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     json!({
         "generationSetId": plan.genset_id,
-        "expectedCount": plan.request.count,
+        "expectedCount": plan.image_count,
         "adapter": adapter_id(&plan.request),
         "model": plan.request.model,
         "generationSet": plan.generation_set,
@@ -1530,6 +1551,251 @@ async fn generate_zimage_control_stream(
 const ZIMAGE_ADAPTER_LABEL: &str = "mlx_z_image";
 
 // ---------------------------------------------------------------------------
+// Character-Studio angle set + best-effort pose tier + fit_image (macOS, sc-3030):
+// the per-iteration batch orchestration on top of FLUX.2-klein edit. An angle set
+// loops the 11 canonical head angles (shared seed, per-angle prompt augment); the
+// best-effort pose tier pairs each pose's body skeleton with the reference as a
+// `[skeleton, reference]` multi-image set; fit_image pre-fits an Image-Edit source
+// to the output W×H (crop/pad/outpaint) so off-aspect edits don't stretch. Faithful
+// ports of `character_studio_angles.py` + the `MlxFlux2Adapter` / `fit_image` paths.
+// ---------------------------------------------------------------------------
+
+/// The 11 canonical Character-Studio angles, in order (parity with
+/// `character_studio_angles.CHARACTER_ANGLE_SET_ORDER`).
+#[cfg(target_os = "macos")]
+const CHARACTER_ANGLE_SET_ORDER: [&str; 11] = [
+    "front",
+    "three_quarter_left",
+    "three_quarter_right",
+    "left_profile",
+    "right_profile",
+    "up",
+    "down",
+    "up_left",
+    "up_right",
+    "down_left",
+    "down_right",
+];
+
+/// The per-angle continuation clause appended to the user's prompt (parity with
+/// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
+#[cfg(target_os = "macos")]
+fn angle_prompt_augment(angle: &str) -> &'static str {
+    match angle {
+        "front" => {
+            "frontal portrait, looking directly at the camera, head and shoulders, neutral expression"
+        }
+        "three_quarter_left" => {
+            "three-quarter left profile, head turned slightly to the left, three-quarter view"
+        }
+        "three_quarter_right" => {
+            "three-quarter right profile, head turned slightly to the right, three-quarter view"
+        }
+        "left_profile" => {
+            "full left profile, head turned 90 degrees to the left, side view of the head"
+        }
+        "right_profile" => {
+            "full right profile, head turned 90 degrees to the right, side view of the head"
+        }
+        "up" => "looking up, head tilted slightly upward toward the sky",
+        "down" => "looking down, head tilted slightly downward toward the floor",
+        "up_left" => {
+            "looking up and to the left, head tilted slightly upward and turned slightly to the left"
+        }
+        "up_right" => {
+            "looking up and to the right, head tilted slightly upward and turned slightly to the right"
+        }
+        "down_left" => {
+            "looking down and to the left, head tilted slightly downward and turned slightly to the left"
+        }
+        "down_right" => {
+            "looking down and to the right, head tilted slightly downward and turned slightly to the right"
+        }
+        _ => "",
+    }
+}
+
+/// Strip the user's base prompt for augmentation: trim whitespace, then trailing
+/// `,`/`.`/`;` — exactly Python's `(base or "").strip().rstrip(",.;")` (which can
+/// leave a trailing space, e.g. `"a . "` → `"a "`).
+#[cfg(target_os = "macos")]
+fn strip_base_prompt(base: &str) -> &str {
+    base.trim().trim_end_matches([',', '.', ';'])
+}
+
+/// Append the per-angle clause to the user's base prompt (parity with
+/// `augment_prompt_for_angle`). Empty base + unknown angle → empty string.
+#[cfg(target_os = "macos")]
+fn augment_prompt_for_angle(base: &str, angle: &str) -> String {
+    let augment = angle_prompt_augment(angle);
+    let base = strip_base_prompt(base);
+    if !base.is_empty() && !augment.is_empty() {
+        format!("{base}, {augment}")
+    } else if !augment.is_empty() {
+        augment.to_owned()
+    } else {
+        base.to_owned()
+    }
+}
+
+/// The pose-skeleton instruction appended to the prompt for the best-effort pose tier
+/// (parity with `character_studio_angles.POSE_SKELETON_PROMPT`).
+#[cfg(target_os = "macos")]
+const POSE_SKELETON_PROMPT: &str =
+    "matching the exact body pose shown in the OpenPose skeleton reference image";
+
+/// Append the pose-skeleton cue to the user's base prompt (parity with
+/// `augment_prompt_for_pose`).
+#[cfg(target_os = "macos")]
+fn augment_prompt_for_pose(base: &str) -> String {
+    let base = strip_base_prompt(base);
+    if base.is_empty() {
+        POSE_SKELETON_PROMPT.to_owned()
+    } else {
+        format!("{base}, {POSE_SKELETON_PROMPT}")
+    }
+}
+
+/// Python's `bool(advanced.get(key))` for the JSON types the UI sends: bool as-is,
+/// non-zero number, non-empty string/array → true; absent/null/false → false.
+#[cfg(target_os = "macos")]
+fn advanced_flag(request: &ImageRequest, key: &str) -> bool {
+    match request.advanced.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(number)) => number.as_f64().map(|value| value != 0.0).unwrap_or(false),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(Value::Array(value)) => !value.is_empty(),
+        _ => false,
+    }
+}
+
+/// How a FLUX.2 edit job batches its iterations.
+#[cfg(target_os = "macos")]
+enum Flux2Grouping {
+    /// `count` independent images (per-image seeds), the plain reference/edit path.
+    Plain,
+    /// The 11-angle Character-Studio set: shared seed, per-angle prompt augment.
+    Angles,
+    /// The best-effort pose tier: `n` poses, shared seed, `[skeleton, reference]` sets.
+    Poses(usize),
+}
+
+/// Decide the grouping for a FLUX.2 edit job (parity with the `MlxFlux2Adapter`
+/// decision: pose set > angle set > plain, all gated to `character_image` mode — an
+/// `edit_image` job is never grouped). The caller only reaches this with a reference
+/// present, so `is_character_image` reduces to the mode check.
+#[cfg(target_os = "macos")]
+fn flux2_grouping(request: &ImageRequest) -> Flux2Grouping {
+    if request.mode != "character_image" {
+        return Flux2Grouping::Plain;
+    }
+    let poses = pose_entries(request).len();
+    if poses > 0 {
+        return Flux2Grouping::Poses(poses);
+    }
+    if advanced_flag(request, "angleSet") {
+        return Flux2Grouping::Angles;
+    }
+    Flux2Grouping::Plain
+}
+
+/// The number of images a FLUX.2 edit job produces: 11 for an angle set, `n` for a
+/// pose set, else the request count. `request.count` for any non-FLUX.2-edit job.
+/// Threaded into [`ImagePlan`] so the generation set's `count`/`expectedCount` match
+/// what is actually generated (the UI streams against it).
+#[cfg(target_os = "macos")]
+fn flux2_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
+    if flux2_edit_available(request, settings) {
+        match flux2_grouping(request) {
+            Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+            Flux2Grouping::Poses(count) => count as u32,
+            Flux2Grouping::Plain => request.count,
+        }
+    } else {
+        request.count
+    }
+}
+
+/// True when the FLUX.2 Image-Edit source should be pre-fitted to W×H (parity with the
+/// `MlxFlux2Adapter` fit gate): `edit_image` mode, a source asset, no character
+/// `referenceAssetId`, and a non-`stretch` fit mode. The Character-Studio reference
+/// path stays at native resolution.
+#[cfg(target_os = "macos")]
+fn should_fit_edit_source(request: &ImageRequest) -> bool {
+    let has_source = request
+        .source_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
+    // No character referenceAssetId (absent or empty).
+    let no_reference = !request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
+    request.mode == "edit_image" && has_source && no_reference && request.fit_mode != "stretch"
+}
+
+/// Where a `src_w`×`src_h` image lands when contained (long edge fits) and centered in
+/// a `width`×`height` box: `(new_w, new_h, left, top)`. Parity with Python `_contain_box`
+/// (shared by the pad fit so the kept region lines up). Integer-divides the offsets.
+#[cfg(target_os = "macos")]
+fn contain_box(src_w: u32, src_h: u32, width: u32, height: u32) -> (u32, u32, u32, u32) {
+    let ratio = (width as f32 / src_w as f32).min(height as f32 / src_h as f32);
+    let new_w = ((src_w as f32 * ratio).round() as u32).max(1);
+    let new_h = ((src_h as f32 * ratio).round() as u32).max(1);
+    (new_w, new_h, (width - new_w) / 2, (height - new_h) / 2)
+}
+
+/// Resize an RGB image to exactly `width`×`height` honoring `mode` without distorting it
+/// (parity with Python `fit_image`, RGB path only — no inpaint mask exists on the MLX
+/// FLUX.2 edit path, so `outpaint` degrades to `pad` geometry):
+///   - `crop`:    scale to COVER (short edge fits), center-crop the overflow.
+///   - `pad`/`outpaint`: scale to CONTAIN (long edge fits), center on a black canvas.
+///   - `stretch`: legacy non-aspect-preserving resize.
+#[cfg(target_os = "macos")]
+fn fit_rgb(source: &image::RgbImage, width: u32, height: u32, mode: &str) -> image::RgbImage {
+    use image::imageops::FilterType::Lanczos3;
+    let width = width.max(1);
+    let height = height.max(1);
+    let (src_w, src_h) = (source.width(), source.height());
+    match mode {
+        "stretch" => image::imageops::resize(source, width, height, Lanczos3),
+        "crop" => {
+            let ratio = (width as f32 / src_w as f32).max(height as f32 / src_h as f32);
+            // Ceil so the scaled image always fully covers the target before cropping.
+            let new_w = width.max((src_w as f32 * ratio).ceil() as u32);
+            let new_h = height.max((src_h as f32 * ratio).ceil() as u32);
+            let resized = image::imageops::resize(source, new_w, new_h, Lanczos3);
+            let left = (new_w - width) / 2;
+            let top = (new_h - height) / 2;
+            image::imageops::crop_imm(&resized, left, top, width, height).to_image()
+        }
+        // "pad" / "outpaint": contain + center on a black canvas (letterbox).
+        _ => {
+            let (new_w, new_h, left, top) = contain_box(src_w, src_h, width, height);
+            let resized = image::imageops::resize(source, new_w, new_h, Lanczos3);
+            let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+            image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
+            canvas
+        }
+    }
+}
+
+/// Fit an engine [`Image`] (RGB8) to `width`×`height` by `mode` via [`fit_rgb`].
+#[cfg(target_os = "macos")]
+fn fit_engine_image(source: Image, width: u32, height: u32, mode: &str) -> WorkerResult<Image> {
+    let rgb =
+        image::RgbImage::from_raw(source.width, source.height, source.pixels).ok_or_else(|| {
+            WorkerError::InvalidPayload("edit source buffer size mismatch".to_owned())
+        })?;
+    let fitted = fit_rgb(&rgb, width, height, mode);
+    Ok(Image {
+        width: fitted.width(),
+        height: fitted.height(),
+        pixels: fitted.into_raw(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // FLUX.2-klein edit / reference (macOS, sc-3029): the `flux2_klein_9b_edit` and
 // `flux2_klein_9b_kv_edit` variants. FLUX.2-klein is MLX-only (no torch), so this
 // is where its edit/reference jobs run. One output per requested count, each
@@ -1749,7 +2015,61 @@ async fn generate_flux2_edit_stream(
             "FLUX.2 edit requires a reference image".to_owned(),
         ));
     }
-    let raw_settings = flux2_edit_raw_settings(
+    // sc-3030 fit_image: pre-fit the Image-Edit source to the output W×H (crop / pad /
+    // outpaint→pad) so an off-aspect edit doesn't stretch. Character-Studio references
+    // stay native (the `should_fit_edit_source` gate excludes them).
+    if should_fit_edit_source(request) {
+        references = references
+            .into_iter()
+            .map(|reference| {
+                fit_engine_image(reference, request.width, request.height, &request.fit_mode)
+            })
+            .collect::<WorkerResult<Vec<_>>>()?;
+    }
+
+    // sc-3030 per-iteration grouping: a Character-Studio angle set (11 shared-seed,
+    // per-angle prompt) / best-effort pose tier (one per pose, shared seed, each a
+    // `[skeleton, reference]` set) / else the plain per-image reference path.
+    let grouping = flux2_grouping(request);
+    let set_seed = resolve_seed(request, 0);
+    let (seeds, prompts, pose_keypoints): (
+        Vec<i64>,
+        Vec<String>,
+        Option<Vec<Vec<crate::openpose_skeleton::Keypoint>>>,
+    ) = match &grouping {
+        Flux2Grouping::Poses(count) => {
+            // Shared seed so only the pose changes across the set (Python parity).
+            let keypoints = parse_poses(request)
+                .into_iter()
+                .map(|pose| pose.keypoints)
+                .collect();
+            let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
+            (vec![set_seed; *count], prompts, Some(keypoints))
+        }
+        Flux2Grouping::Angles => {
+            // Shared seed so noise-derived attributes (hair, lighting) stay constant
+            // across angles — only the head pose changes (sc-2050 InstantID strategy).
+            let prompts = CHARACTER_ANGLE_SET_ORDER
+                .iter()
+                .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
+                .collect();
+            (
+                vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()],
+                prompts,
+                None,
+            )
+        }
+        Flux2Grouping::Plain => {
+            let count = request.count as usize;
+            let seeds = (0..count)
+                .map(|index| resolve_seed(request, index))
+                .collect();
+            (seeds, vec![request.prompt.clone(); count], None)
+        }
+    };
+    let total = seeds.len();
+
+    let mut raw_settings = flux2_edit_raw_settings(
         request,
         &repo,
         engine_id,
@@ -1758,23 +2078,52 @@ async fn generate_flux2_edit_stream(
         guidance,
         references.len(),
     );
-    let count = request.count as usize;
-    let seeds: Vec<i64> = (0..count)
-        .map(|index| resolve_seed(request, index))
-        .collect();
+    match grouping {
+        Flux2Grouping::Angles => {
+            raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
+        }
+        Flux2Grouping::Poses(_) => {
+            raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
+        }
+        Flux2Grouping::Plain => {}
+    }
 
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
 
     let blocking = {
-        let prompt = request.prompt.clone();
         let (width, height) = (request.width, request.height);
-        let seeds = seeds.clone();
+        let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
             let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
-            for (index, seed) in seeds.into_iter().enumerate() {
-                let conditioning = build_edit_conditioning(&references);
+            for (index, (seed, prompt)) in seeds.into_iter().zip(prompts).enumerate() {
+                // Pose tier: pair this pose's body-only skeleton (DWPose body, no
+                // hands/face — Python `draw_bodypose`) with the reference as a
+                // `[skeleton, reference]` multi-image set; else the plain reference set.
+                let conditioning = match &pose_keypoints {
+                    Some(keypoints) => {
+                        let skeleton = crate::openpose_skeleton::draw_wholebody(
+                            width,
+                            height,
+                            &keypoints[index],
+                            None,
+                            None,
+                            stickwidth,
+                        );
+                        vec![Conditioning::MultiReference {
+                            images: vec![
+                                Image {
+                                    width,
+                                    height,
+                                    pixels: skeleton.into_raw(),
+                                },
+                                references[0].clone(),
+                            ],
+                        }]
+                    }
+                    None => build_edit_conditioning(&references),
+                };
                 let mut on_progress = |progress: Progress| {
                     let event = match progress {
                         Progress::Step { current, total } => GenEvent::Step {
@@ -1786,7 +2135,7 @@ async fn generate_flux2_edit_stream(
                     };
                     let _ = tx.blocking_send(event);
                 };
-                let (width, height, pixels) = flux2_edit_generate_one(
+                let (out_w, out_h, pixels) = flux2_edit_generate_one(
                     generator.as_ref(),
                     &prompt,
                     width,
@@ -1802,8 +2151,8 @@ async fn generate_flux2_edit_stream(
                     .blocking_send(GenEvent::Image {
                         index,
                         seed,
-                        width,
-                        height,
+                        width: out_w,
+                        height: out_h,
                         pixels,
                     })
                     .is_err()
@@ -1824,7 +2173,7 @@ async fn generate_flux2_edit_stream(
         backend,
         adapter_label,
         &raw_settings,
-        count,
+        total,
         rx,
         cancel,
         blocking,
@@ -2594,6 +2943,227 @@ mod tests {
             4,
             Some(1.0),
             build_edit_conditioning(std::slice::from_ref(&reference)),
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+    }
+
+    // --- Angle set / pose tier / fit_image (sc-3030) ---
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn character_angle_set_is_eleven_ordered_angles() {
+        assert_eq!(CHARACTER_ANGLE_SET_ORDER.len(), 11);
+        assert_eq!(CHARACTER_ANGLE_SET_ORDER[0], "front");
+        // Every angle has a non-empty augment clause.
+        for angle in CHARACTER_ANGLE_SET_ORDER {
+            assert!(
+                !angle_prompt_augment(angle).is_empty(),
+                "no augment for {angle}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn augment_prompt_for_angle_appends_clause_and_strips_punctuation() {
+        assert_eq!(
+            augment_prompt_for_angle("a knight", "front"),
+            "a knight, frontal portrait, looking directly at the camera, head and shoulders, neutral expression"
+        );
+        // Trailing punctuation on the base is stripped before the comma join.
+        assert_eq!(
+            augment_prompt_for_angle("a knight.", "left_profile"),
+            "a knight, full left profile, head turned 90 degrees to the left, side view of the head"
+        );
+        // Empty base → the augment clause alone.
+        assert_eq!(
+            augment_prompt_for_angle("", "down"),
+            "looking down, head tilted slightly downward toward the floor"
+        );
+        // Unknown angle (no clause) → the base prompt unchanged.
+        assert_eq!(augment_prompt_for_angle("a knight", "sideways"), "a knight");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn augment_prompt_for_pose_appends_cue() {
+        assert_eq!(
+            augment_prompt_for_pose("a hero"),
+            "a hero, matching the exact body pose shown in the OpenPose skeleton reference image"
+        );
+        assert_eq!(augment_prompt_for_pose("  "), POSE_SKELETON_PROMPT);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn flux2_grouping_poses_over_angles_over_plain() {
+        // Pose set wins even when angleSet is also set.
+        let poses = request(json!({
+            "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
+            "advanced": { "angleSet": true, "poses": [{ "id": "a" }, { "id": "b" }] }
+        }));
+        assert!(matches!(flux2_grouping(&poses), Flux2Grouping::Poses(2)));
+        // angleSet without poses → the 11-angle set.
+        let angles = request(json!({
+            "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
+            "advanced": { "angleSet": true }
+        }));
+        assert!(matches!(flux2_grouping(&angles), Flux2Grouping::Angles));
+        // character_image with neither → plain.
+        let plain = request(json!({
+            "projectId": "p", "mode": "character_image", "referenceAssetId": "ref"
+        }));
+        assert!(matches!(flux2_grouping(&plain), Flux2Grouping::Plain));
+        // edit_image never groups, even with angleSet (mode gate).
+        let edit = request(json!({
+            "projectId": "p", "mode": "edit_image", "sourceAssetId": "src",
+            "advanced": { "angleSet": true }
+        }));
+        assert!(matches!(flux2_grouping(&edit), Flux2Grouping::Plain));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn should_fit_edit_source_only_for_off_aspect_edit_image() {
+        // edit_image + source + no reference + non-stretch → fit.
+        assert!(should_fit_edit_source(&request(json!({
+            "projectId": "p", "mode": "edit_image", "sourceAssetId": "src", "fitMode": "crop"
+        }))));
+        // A character reference present → the reference path stays native.
+        assert!(!should_fit_edit_source(&request(json!({
+            "projectId": "p", "mode": "edit_image", "sourceAssetId": "src",
+            "referenceAssetId": "ref", "fitMode": "crop"
+        }))));
+        // stretch keeps the legacy naive resize.
+        assert!(!should_fit_edit_source(&request(json!({
+            "projectId": "p", "mode": "edit_image", "sourceAssetId": "src", "fitMode": "stretch"
+        }))));
+        // character_image is never the edit-source fit path.
+        assert!(!should_fit_edit_source(&request(json!({
+            "projectId": "p", "mode": "character_image", "referenceAssetId": "ref"
+        }))));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn contain_box_centers_the_contained_rect() {
+        // Wide source contained in a square: full width, centered vertically.
+        assert_eq!(contain_box(100, 50, 50, 50), (50, 25, 0, 12));
+        // Tall source: full height, centered horizontally.
+        assert_eq!(contain_box(50, 100, 50, 50), (25, 50, 12, 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fit_rgb_crop_pad_stretch_produce_exact_dims_and_geometry() {
+        // 100×50 solid white source.
+        let source = image::RgbImage::from_pixel(100, 50, image::Rgb([255, 255, 255]));
+
+        // crop → cover + center-crop, exact target dims, no black bars (all white).
+        let cropped = fit_rgb(&source, 50, 50, "crop");
+        assert_eq!((cropped.width(), cropped.height()), (50, 50));
+        assert_eq!(cropped.get_pixel(0, 0), &image::Rgb([255, 255, 255]));
+        assert_eq!(cropped.get_pixel(25, 25), &image::Rgb([255, 255, 255]));
+
+        // pad → contain + letterbox: black top/bottom bars, white band in the middle.
+        let padded = fit_rgb(&source, 50, 50, "pad");
+        assert_eq!((padded.width(), padded.height()), (50, 50));
+        assert_eq!(padded.get_pixel(0, 0), &image::Rgb([0, 0, 0])); // top bar
+        assert_eq!(padded.get_pixel(25, 24), &image::Rgb([255, 255, 255])); // content band
+
+        // outpaint degrades to pad geometry (same letterbox).
+        assert_eq!(
+            fit_rgb(&source, 50, 50, "outpaint").into_raw(),
+            padded.into_raw()
+        );
+
+        // stretch → exact target dims (aspect not preserved).
+        let stretched = fit_rgb(&source, 40, 30, "stretch");
+        assert_eq!((stretched.width(), stretched.height()), (40, 30));
+    }
+
+    /// Real-weights smoke: the best-effort pose tier — a `[skeleton, reference]`
+    /// `MultiReference` edit through `flux2_klein_9b_edit`. Verifies the engine accepts
+    /// the multi-image pose conditioning on real weights (the single-reference smoke
+    /// above does not). Needs the HF cache (`black-forest-labs/FLUX.2-klein-9B`) + a
+    /// Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored flux2_pose_tier_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real FLUX.2-klein-9b weights + Metal device"]
+    fn flux2_pose_tier_real_weights_generates_one_image() {
+        let snapshot = hf_snapshot("models--black-forest-labs--FLUX.2-klein-9b");
+        let generator = mlx_load(
+            "flux2_klein_9b_edit",
+            snapshot,
+            Some(mlx_gen::Quant::Q8),
+            Vec::new(),
+        )
+        .unwrap();
+        // A minimal standing skeleton (body only — the best-effort tier uses no
+        // hands/face) + a synthetic reference, paired as the pose multi-image set.
+        let kp = crate::openpose_skeleton::normalize_keypoints(&json!([
+            [0.5, 0.2],
+            [0.5, 0.35],
+            [0.42, 0.35],
+            [0.40, 0.5],
+            [0.40, 0.65],
+            [0.58, 0.35],
+            [0.60, 0.5],
+            [0.60, 0.65],
+            [0.45, 0.6],
+            [0.45, 0.8],
+            [0.45, 0.95],
+            [0.55, 0.6],
+            [0.55, 0.8],
+            [0.55, 0.95],
+            [0.48, 0.18],
+            [0.52, 0.18],
+            [0.46, 0.2],
+            [0.54, 0.2]
+        ]));
+        let skeleton = crate::openpose_skeleton::draw_wholebody(
+            512,
+            512,
+            &kp,
+            None,
+            None,
+            crate::openpose_skeleton::body_stickwidth(512, 512),
+        );
+        let skeleton_img = mlx_gen::Image {
+            width: 512,
+            height: 512,
+            pixels: skeleton.into_raw(),
+        };
+        let reference = mlx_gen::Image {
+            width: 512,
+            height: 512,
+            pixels: stub_rgb8(512, 512, 7),
+        };
+        let conditioning = vec![mlx_gen::Conditioning::MultiReference {
+            images: vec![skeleton_img, reference],
+        }];
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = flux2_edit_generate_one(
+            generator.as_ref(),
+            &augment_prompt_for_pose("a knight standing in a courtyard"),
+            512,
+            512,
+            42,
+            4,
+            Some(1.0),
+            conditioning,
             &cancel,
             &mut |p| {
                 if let mlx_gen::Progress::Step { current, .. } = p {
