@@ -31,6 +31,8 @@ use mlx_gen_flux2 as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_qwen_image as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_sdxl as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
@@ -151,6 +153,31 @@ const MLX_MODELS: &[MlxModel] = &[
         default_guidance: 1.0,
         supports_negative_prompt: false,
         adapter_label: "mlx_flux2",
+    },
+    // SDXL (sc-3026) — U-Net, real CFG (negative prompt + guidance 7.0), 30 steps.
+    // `sdxl` and the `realvisxl` finetune share the engine's single `sdxl` model
+    // (identical arch), differing only in weights. Replaces the in-process
+    // _vendor/mlx_sd path. The engine supports Q4/Q8 (the Python vendored path had
+    // none); Q8 is the default here (engine-validated; saves ~half the U-Net memory).
+    MlxModel {
+        sceneworks_id: "sdxl",
+        engine_id: "sdxl",
+        default_repo: "stabilityai/stable-diffusion-xl-base-1.0",
+        default_steps: 30,
+        supports_guidance: true,
+        default_guidance: 7.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_sdxl",
+    },
+    MlxModel {
+        sceneworks_id: "realvisxl",
+        engine_id: "sdxl",
+        default_repo: "SG161222/RealVisXL_V5.0",
+        default_steps: 30,
+        supports_guidance: true,
+        default_guidance: 7.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_sdxl",
     },
 ];
 
@@ -1297,7 +1324,15 @@ mod tests {
             mlx_model("flux2_klein_9b_true_v2").unwrap().default_steps,
             24
         );
-        assert!(mlx_model("sdxl").is_none());
+        // SDXL + the realvisxl finetune share the single `sdxl` engine model (real CFG).
+        for id in ["sdxl", "realvisxl"] {
+            let m = mlx_model(id).unwrap();
+            assert_eq!(m.engine_id, "sdxl");
+            assert_eq!(m.adapter_label, "mlx_sdxl");
+            assert_eq!(m.default_steps, 30);
+            assert!(m.supports_guidance && m.supports_negative_prompt);
+        }
+        assert!(mlx_model("instantid_sdxl").is_none());
     }
 
     #[cfg(target_os = "macos")]
@@ -1374,8 +1409,10 @@ mod tests {
             adapter_id(&request(json!({ "model": "flux_dev" }))),
             "mlx_flux"
         );
+        assert_eq!(adapter_id(&request(json!({ "model": "sdxl" }))), "mlx_sdxl");
+        // A torch-only model with no mlx-gen engine records the procedural stub adapter.
         assert_eq!(
-            adapter_id(&request(json!({ "model": "sdxl" }))),
+            adapter_id(&request(json!({ "model": "kolors" }))),
             "procedural_preview"
         );
     }
@@ -1394,6 +1431,7 @@ mod tests {
             "flux1_dev",
             "qwen_image",
             "flux2_klein_9b",
+            "sdxl",
         ] {
             assert!(ids.contains(&id), "registry missing {id}");
         }
@@ -1559,6 +1597,38 @@ mod tests {
         let dir = dirs_home()
             .join("Library/Application Support/SceneWorks/data/models/mlx/flux2_klein_9b_true_v2");
         smoke_generate_one("flux2_klein_9b_true_v2", dir, Some(1.0), None);
+    }
+
+    /// Real-weights smoke: SDXL base (real CFG, guidance 7.0 + a negative prompt,
+    /// 30-step, Q8). Verifies the engine's SDXL quant default works (the Python
+    /// vendored path had no quant). Needs the HF cache
+    /// (`stabilityai/stable-diffusion-xl-base-1.0`) + a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored sdxl_real_weights`.
+    /// SDXL native is 1024²; min is 512 — this smoke uses 512² for speed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real SDXL weights + Metal device"]
+    fn sdxl_real_weights_generates_one_image() {
+        smoke_generate_one(
+            "sdxl",
+            hf_snapshot("models--stabilityai--stable-diffusion-xl-base-1.0"),
+            Some(7.0),
+            Some("blurry, low quality".to_owned()),
+        );
+    }
+
+    /// Real-weights smoke: the RealVisXL finetune through the same `sdxl` engine model.
+    /// Needs the HF cache (`SG161222/RealVisXL_V5.0`) + a Metal device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real RealVisXL weights + Metal device"]
+    fn realvisxl_real_weights_generates_one_image() {
+        smoke_generate_one(
+            "realvisxl",
+            hf_snapshot("models--SG161222--RealVisXL_V5.0"),
+            Some(7.0),
+            Some("blurry, low quality".to_owned()),
+        );
     }
 
     #[cfg(target_os = "macos")]

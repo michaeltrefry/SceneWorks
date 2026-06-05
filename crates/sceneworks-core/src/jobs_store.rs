@@ -1453,8 +1453,8 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
 /// Models the in-process Rust MLX worker generates today, by id. This set grows
 /// one family story at a time as each lands real generation in
 /// `sceneworks-worker::image_jobs` — sc-3022 Z-Image, sc-3023 FLUX.1, sc-3024 Qwen,
-/// sc-3025 FLUX.2 (live), then sc-3026 SDXL. A model id absent here is never routed to
-/// the mlx worker, so the Python torch path stays authoritative for it.
+/// sc-3025 FLUX.2, sc-3026 SDXL (live). A model id absent here is never routed to the
+/// mlx worker, so the Python torch path stays authoritative for it.
 const MLX_ROUTED_MODELS: &[&str] = &[
     "z_image_turbo",
     "flux_schnell",
@@ -1463,6 +1463,8 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux2_klein_9b",
     "flux2_klein_9b_kv",
     "flux2_klein_9b_true_v2",
+    "sdxl",
+    "realvisxl",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -1494,10 +1496,30 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" => {
             flux2_mlx_eligible(&job.payload)
         }
-        // Each family story adds its arm alongside real generation: sc-3026 sdxl.
-        // Until then a model in MLX_ROUTED_MODELS must have an arm.
+        "sdxl" | "realvisxl" => sdxl_mlx_eligible(&job.payload),
+        // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
+}
+
+/// SDXL (sc-3026) MLX-routing conditions, ported from `_should_route_sdxl_to_mlx`:
+/// text-to-image only — SDXL reference/IP-Adapter and `edit_image` stay on the Python
+/// torch path (`SdxlDiffusersAdapter`). A third-party LyCORIS LoRA falls back to torch,
+/// but — unlike the old Python MLX-SDXL gate, which sent *all* LoKr to torch — peft
+/// LoKr stays on MLX: the Rust `mlx-gen-sdxl` path supports LoKr natively (the vendored
+/// `_mlx_sd` path it replaces did not).
+fn sdxl_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_reference {
+        return false;
+    }
+    !request_has_lycoris_lora(payload)
 }
 
 /// FLUX.2-klein (sc-3025) MLX-routing conditions. FLUX.2-klein is an **MLX-only**
@@ -1886,7 +1908,7 @@ fn sort_json_value(value: &mut Value) {
 mod mlx_routing_tests {
     use super::{
         flux2_mlx_eligible, flux_mlx_eligible, qwen_mlx_eligible, request_has_lycoris_lora,
-        z_image_mlx_eligible,
+        sdxl_mlx_eligible, z_image_mlx_eligible,
     };
     use serde_json::{json, Map, Value};
 
@@ -2015,6 +2037,23 @@ mod mlx_routing_tests {
             json!({ "referenceAssetId": "asset_1" })
         )));
         assert!(!flux2_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn sdxl_txt2img_eligible_edit_reference_and_lycoris_are_not() {
+        assert!(sdxl_mlx_eligible(&object(json!({ "prompt": "a red fox" }))));
+        // peft LoKr stays on MLX (the Rust SDXL path supports LoKr, unlike the old
+        // vendored path) — only third-party LyCORIS falls back to torch.
+        assert!(sdxl_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lokr" }]
+        }))));
+        assert!(!sdxl_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
+        assert!(!sdxl_mlx_eligible(&object(
+            json!({ "referenceAssetId": "asset_1" })
+        )));
+        assert!(!sdxl_mlx_eligible(&object(json!({
             "loras": [{ "networkType": "lycoris" }]
         }))));
     }
