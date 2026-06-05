@@ -773,6 +773,162 @@ fn collect_tensor_keys(header: &Value) -> Vec<String> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// LoRA family-compatibility validation (epic 3018, sc-3027).
+//
+// Ported from the Python worker's `lora_adapters.py`
+// (validate_lora_compatibility / accepted_lora_families / lora_families /
+// lora_base_model) so the Rust GPU worker rejects an incompatible LoRA *before*
+// a job runs, with the same message, instead of failing deep in the engine's
+// strict adapter loader. Pure (no I/O): it reads the LoRA spec's *declared*
+// families, exactly like the Python pre-flight.
+// ---------------------------------------------------------------------------
+
+/// Maximum LoRAs per job (matches the worker's `MAX_JOB_LORAS` / Python
+/// `normalize_lora_specs`).
+pub const MAX_JOB_LORAS: usize = 3;
+
+/// Architecture families a model can load LoRAs from *in addition to* its own
+/// (Python `EXTRA_COMPATIBLE_LORA_FAMILIES`). Chroma is FLUX.1-derived and shares
+/// Flux's block layout, so Flux LoRAs load on Chroma (one-directional). FLUX.2
+/// [klein]'s model family is `flux2-klein` but klein LoRAs are detected/declared
+/// as `flux2`, so a klein model must accept `flux2` LoRAs.
+fn extra_compatible_lora_families(normalized_family: &str) -> &'static [&'static str] {
+    match normalized_family {
+        "chroma" => &["flux"],
+        "flux2-klein" => &["flux2"],
+        _ => &[],
+    }
+}
+
+/// The set of LoRA families a model of `model_family` can load (normalized; the
+/// model's own family plus its extra-compatible families). Empty when the family
+/// is unknown — callers treat that as "skip validation".
+pub fn accepted_lora_families(model_family: &str) -> Vec<String> {
+    let normalized = normalize_model_family(model_family);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let mut families = vec![normalized.clone()];
+    families.extend(
+        extra_compatible_lora_families(&normalized)
+            .iter()
+            .map(|family| (*family).to_owned()),
+    );
+    families
+}
+
+/// The LoRA's declared compatible families (normalized, de-duplicated, sorted),
+/// from the first present of `families` / `compatibleFamilies` / `modelFamilies`
+/// / `compatibility.families` / `[family]`. Empty when the spec declares none
+/// (an unstamped LoRA the user vouches for — never rejected on family grounds).
+pub fn lora_declared_families(lora: &Value) -> Vec<String> {
+    let compatibility = lora.get("compatibility").and_then(Value::as_object);
+    let raw = ["families", "compatibleFamilies", "modelFamilies"]
+        .into_iter()
+        .find_map(|key| lora.get(key).and_then(Value::as_array).cloned())
+        .or_else(|| {
+            compatibility
+                .and_then(|compat| compat.get("families").and_then(Value::as_array).cloned())
+        })
+        .or_else(|| {
+            lora.get("family")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| vec![Value::String(value.to_owned())])
+        })
+        .unwrap_or_default();
+    let mut families: Vec<String> = raw
+        .iter()
+        .filter_map(Value::as_str)
+        .map(normalize_model_family)
+        .filter(|family| !family.is_empty())
+        .collect();
+    families.sort();
+    families.dedup();
+    families
+}
+
+/// The specific base model a LoRA records (e.g. `wan_2_2`, `wan_2_2_t2v_14b`), or
+/// `None`. Used by the base-model gate for families where a matching family alone
+/// is not enough (Python `lora_base_model`).
+pub fn lora_base_model(lora: &Value) -> Option<String> {
+    lora.get("baseModel")
+        .or_else(|| lora.get("base_model"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Families that share an architecture family but NOT a LoRA-compatible
+/// architecture, so the trained base model must also match (Python
+/// `_BASE_MODEL_GATED_FAMILIES`). Wan: `wan_2_2` (5B) and `wan_2_2_*_14b` (A14B)
+/// are both `wan-video` but cross-applying a LoRA garbles output.
+fn is_base_model_gated_family(family: &str) -> bool {
+    family == "wan-video"
+}
+
+/// A LoRA id for error messages: `id` / `loraId` / `lora_<n>`.
+fn lora_display_id(lora: &Value, index: usize) -> String {
+    lora.get("id")
+        .or_else(|| lora.get("loraId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("lora_{}", index + 1))
+}
+
+/// Validate every LoRA in `loras` against `model_family` before a job runs
+/// (Python `validate_lora_compatibility`). Errors on a declared family the model
+/// cannot load, or — for a base-model-gated family (Wan) — a recorded base model
+/// that differs from `model_id`. A LoRA that declares no family is skipped (the
+/// user vouches for it). Returns the user-facing message as `Err`.
+pub fn validate_lora_compatibility(
+    loras: &[Value],
+    model_family: Option<&str>,
+    adapter_id: &str,
+    model_id: Option<&str>,
+) -> Result<(), String> {
+    let normalized_model_family = model_family.map(normalize_model_family).unwrap_or_default();
+    let accepted = model_family.map(accepted_lora_families).unwrap_or_default();
+    if loras.is_empty() || accepted.is_empty() {
+        return Ok(());
+    }
+    for (index, lora) in loras.iter().enumerate() {
+        let families = lora_declared_families(lora);
+        if families.is_empty() {
+            continue;
+        }
+        let lora_id = lora_display_id(lora, index);
+        // Accept when any declared family is one the model can load.
+        if !families.iter().any(|family| accepted.contains(family)) {
+            return Err(format!(
+                "LoRA {lora_id} is not compatible with model family {normalized_model_family} for {adapter_id}."
+            ));
+        }
+        // Base-model gating (Wan 5B vs 14B): a LoRA that records its trained base
+        // model only applies to that exact model; one without falls back to family.
+        if let Some(model_id) = model_id {
+            if families
+                .iter()
+                .any(|family| is_base_model_gated_family(family))
+            {
+                if let Some(base) = lora_base_model(lora) {
+                    if base != model_id {
+                        return Err(format!(
+                            "LoRA {lora_id} was trained for base model {base}, not {model_id}; \
+                             Wan 5B and 14B LoRAs are not interchangeable."
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1503,5 +1659,117 @@ mod tests {
         let caps = model_capabilities_for_type_and_family("image", "sensenova-u1");
         assert!(caps.contains(&"text_to_image"));
         assert!(caps.contains(&"edit_image"));
+    }
+
+    // --- LoRA family-compat validation (sc-3027) ---
+
+    #[test]
+    fn accepted_lora_families_includes_extra_compatible() {
+        assert_eq!(accepted_lora_families("flux"), vec!["flux".to_owned()]);
+        // chroma additionally accepts flux; flux2-klein accepts flux2.
+        assert_eq!(
+            accepted_lora_families("chroma"),
+            vec!["chroma".to_owned(), "flux".to_owned()]
+        );
+        assert_eq!(
+            accepted_lora_families("flux2_klein"),
+            vec!["flux2-klein".to_owned(), "flux2".to_owned()]
+        );
+        assert!(accepted_lora_families("").is_empty());
+    }
+
+    #[test]
+    fn lora_declared_families_reads_first_present_source() {
+        assert_eq!(
+            lora_declared_families(&json!({ "family": "FLUX" })),
+            vec!["flux".to_owned()]
+        );
+        assert_eq!(
+            lora_declared_families(&json!({ "compatibility": { "families": ["sdxl"] } })),
+            vec!["sdxl".to_owned()]
+        );
+        // `families` wins over `family`; normalized + de-duplicated + sorted.
+        assert_eq!(
+            lora_declared_families(&json!({ "families": ["flux2", "Flux2"], "family": "sdxl" })),
+            vec!["flux2".to_owned()]
+        );
+        assert!(lora_declared_families(&json!({ "id": "x" })).is_empty());
+    }
+
+    #[test]
+    fn validate_lora_compatibility_accepts_matching_and_extra_compatible() {
+        // exact family
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "a", "family": "flux" })],
+            Some("flux"),
+            "mlx_flux",
+            Some("flux_dev"),
+        )
+        .is_ok());
+        // flux2-klein model accepts a flux2 LoRA
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "a", "family": "flux2" })],
+            Some("flux2-klein"),
+            "mlx_flux2",
+            Some("flux2_klein_9b"),
+        )
+        .is_ok());
+        // unstamped LoRA (no declared family) is skipped, not rejected
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "a" })],
+            Some("sdxl"),
+            "mlx_sdxl",
+            Some("sdxl"),
+        )
+        .is_ok());
+        // unknown model family → skip (no accepted set)
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "a", "family": "flux" })],
+            None,
+            "mlx_x",
+            None,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_lora_compatibility_rejects_incompatible_family() {
+        let err = validate_lora_compatibility(
+            &[json!({ "id": "fluxlora", "family": "flux" })],
+            Some("sdxl"),
+            "mlx_sdxl",
+            Some("sdxl"),
+        )
+        .unwrap_err();
+        assert!(err.contains("fluxlora"), "got: {err}");
+        assert!(err.contains("sdxl"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_lora_compatibility_gates_wan_base_model() {
+        // Same family (wan-video) but a LoRA trained for a different base model is rejected.
+        let err = validate_lora_compatibility(
+            &[json!({ "id": "w", "family": "wan-video", "baseModel": "wan_2_2_t2v_14b" })],
+            Some("wan-video"),
+            "mlx_wan",
+            Some("wan_2_2"),
+        )
+        .unwrap_err();
+        assert!(err.contains("not interchangeable"), "got: {err}");
+        // A matching base model passes; a LoRA without a base model falls back to family.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "w", "family": "wan-video", "baseModel": "wan_2_2" })],
+            Some("wan-video"),
+            "mlx_wan",
+            Some("wan_2_2"),
+        )
+        .is_ok());
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "w", "family": "wan-video" })],
+            Some("wan-video"),
+            "mlx_wan",
+            Some("wan_2_2"),
+        )
+        .is_ok());
     }
 }

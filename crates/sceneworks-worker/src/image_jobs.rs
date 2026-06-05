@@ -208,6 +208,20 @@ pub(crate) async fn run_image_generate_job(
     tokio::fs::create_dir_all(project_path.join("assets").join("images")).await?;
 
     let plan = ImagePlan::new(&request);
+
+    // Pre-flight LoRA family-compat guardrail (sc-3027): reject an incompatible LoRA
+    // (e.g. a Flux LoRA on an SDXL model, or a Wan 5B LoRA on the 14B base) before any
+    // heavy load, with the same message the Python worker raised — instead of failing
+    // deep in the engine's strict adapter loader. Network-type rules (peft LoKr stays
+    // on MLX, third-party LyCORIS → torch) are handled by routing + `classify_adapter`.
+    sceneworks_core::lora_family::validate_lora_compatibility(
+        &request.loras,
+        Some(plan.family.as_str()),
+        adapter_id(&request),
+        Some(request.model.as_str()),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+
     let backend = backend_label(&settings.gpu_id);
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
