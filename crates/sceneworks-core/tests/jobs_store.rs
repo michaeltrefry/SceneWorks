@@ -688,6 +688,58 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
 }
 
 #[test]
+fn training_progress_merges_latest_sample_batches_into_history() {
+    let store = store("training-sample-history");
+    let job = store
+        .create_job(lora_train_job("auto", false))
+        .expect("training job creates");
+
+    for (step, path) in [
+        (250, "training/job-1/samples/step-000250/front.png"),
+        (500, "training/job-1/samples/step-000500/front.png"),
+    ] {
+        store
+            .update_job_progress(
+                &job.id,
+                ProgressUpdate {
+                    status: JobStatus::Running,
+                    stage: ProgressStage::Rendering,
+                    progress: 0.5,
+                    message: format!("Rendered samples at step {step}."),
+                    error: None,
+                    result: Some(object(json!({
+                        "latestTrainingSamples": [{
+                            "step": step,
+                            "prompt": "front",
+                            "relativePath": path,
+                        }]
+                    }))),
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                },
+            )
+            .expect("sample progress updates");
+    }
+
+    let updated = store.get_job(&job.id).expect("job loads");
+    let samples = updated
+        .result
+        .get("trainingSamples")
+        .and_then(Value::as_array)
+        .expect("training sample history is present");
+
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0]["step"], json!(250));
+    assert_eq!(samples[1]["step"], json!(500));
+    assert_eq!(
+        updated.result["latestTrainingSamples"][0]["relativePath"],
+        json!("training/job-1/samples/step-000500/front.png")
+    );
+}
+
+#[test]
 fn gpu_generation_jobs_reject_cpu_requested_gpu() {
     let store = store("gpu-jobs-reject-cpu");
 

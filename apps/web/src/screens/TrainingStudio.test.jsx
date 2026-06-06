@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { configDraftFromTarget, trainingConfigSnapshot } from "./TrainingStudio.jsx";
+import { configDraftFromTarget, trainingConfigSnapshot, trainingSampleGroups } from "./TrainingStudio.jsx";
 
 // Minimal target mirroring a LoKr-capable builtin (sc-2195 gating): networkType
 // lives in defaults.advanced, the choice is gated by limits.networkTypes.
@@ -68,5 +68,49 @@ describe("TrainingStudio network type", () => {
     const snap = snapshot({ ...draft, networkType: "lokr", decomposeFactor: "" });
     expect(snap.config.advanced.networkType).toBe("lokr");
     expect(snap.config.advanced).not.toHaveProperty("decomposeFactor");
+  });
+});
+
+describe("TrainingStudio training samples", () => {
+  it("groups every sampling cycle newest first", () => {
+    const groups = trainingSampleGroups(
+      {
+        id: "job-1",
+        payload: { plan: { config: { triggerWord: "Mira" } } },
+        result: {
+          samplePrompts: ["front", "side"],
+          trainingSamples: [
+            { step: 250, prompt: "front", relativePath: "training/job-1/samples/step-000250/front.png" },
+            { step: 250, prompt: "side", relativePath: "training/job-1/samples/step-000250/side.png" },
+            { step: 500, prompt: "front", relativePath: "training/job-1/samples/step-000500/front.png" },
+            { step: 500, prompt: "side", relativePath: "training/job-1/samples/step-000500/side.png" },
+          ],
+        },
+      },
+      "project-1",
+    );
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0].label).toBe("Sample #2 - Step 500");
+    expect(groups[0].assets).toHaveLength(2);
+    expect(groups[0].assets[0].file.path).toBe("training/job-1/samples/step-000500/front.png");
+    expect(groups[1].label).toBe("Sample #1 - Step 250");
+  });
+
+  it("deduplicates latest samples already present in the cumulative list", () => {
+    const groups = trainingSampleGroups(
+      {
+        id: "job-1",
+        payload: {},
+        result: {
+          trainingSamples: [{ step: 250, prompt: "front", relativePath: "training/job-1/samples/step-000250/front.png" }],
+          latestTrainingSamples: [{ step: 250, prompt: "front", relativePath: "training/job-1/samples/step-000250/front.png" }],
+        },
+      },
+      "project-1",
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].assets).toHaveLength(1);
   });
 });

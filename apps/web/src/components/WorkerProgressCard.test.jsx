@@ -417,6 +417,26 @@ describe("WorkerProgressCard thumbnails", () => {
     expect(skeletons).toHaveLength(3);
   });
 
+  it("renders grouped thumbnail cycles with section labels", () => {
+    api = render(
+      <WorkerProgressCard
+        job={runningJob}
+        thumbnailsVariant="image-grid"
+        thumbnailGroups={[
+          { id: "step-500", label: "Sample #2 - Step 500", assets: [imageAssets[0]] },
+          { id: "step-250", label: "Sample #1 - Step 250", assets: [imageAssets[1]] },
+        ]}
+        expectedThumbnailCount={4}
+      />,
+      makeContext([]),
+    );
+    const groups = api.container.querySelectorAll(".worker-progress-card__thumbnail-group");
+    expect(groups).toHaveLength(2);
+    expect(groups[0].textContent).toContain("Sample #2 - Step 500");
+    expect(groups[1].textContent).toContain("Sample #1 - Step 250");
+    expect(api.container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton")).toHaveLength(0);
+  });
+
   it("does not render skeletons after the job completes", () => {
     api = render(
       <WorkerProgressCard

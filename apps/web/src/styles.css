@@ -7460,6 +7460,35 @@ label {
   position: relative;
 }
 
+.worker-progress-card__thumbnail-groups {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.worker-progress-card__thumbnail-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.worker-progress-card__thumbnail-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.worker-progress-card__thumbnail-group-label::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+}
+
 .worker-progress-card__thumb-cell {
   display: block;
   padding: 0;

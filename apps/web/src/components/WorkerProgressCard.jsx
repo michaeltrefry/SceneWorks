@@ -279,6 +279,34 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
   );
 }
 
+function ThumbnailGroups({ groups, variant, onThumbnailClick }) {
+  const sections = Array.isArray(groups) ? groups.filter((group) => Array.isArray(group?.assets) && group.assets.length) : [];
+  if (!sections.length) {
+    return null;
+  }
+  return (
+    <div className="worker-progress-card__thumbnail-groups" role="group" aria-label="Job output samples">
+      {sections.map((group, index) => (
+        <section
+          className="worker-progress-card__thumbnail-group"
+          key={group.id ?? `${group.label ?? "sample"}-${index}`}
+        >
+          {group.label ? (
+            <div className="worker-progress-card__thumbnail-group-label">{group.label}</div>
+          ) : null}
+          <ThumbnailGrid
+            assets={group.assets}
+            variant={variant}
+            onThumbnailClick={onThumbnailClick}
+            isRunning={false}
+            expectedCount={0}
+          />
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function VideoThumbnail({ assets, onThumbnailClick }) {
   const asset = Array.isArray(assets) ? assets[0] : null;
   if (!asset) {
@@ -323,11 +351,14 @@ function VideoThumbnail({ assets, onThumbnailClick }) {
   );
 }
 
-function ThumbnailsRegion({ variant, finalAssets, interimAssets, onThumbnailClick, isRunning, expectedCount }) {
+function ThumbnailsRegion({ variant, finalAssets, interimAssets, thumbnailGroups, onThumbnailClick, isRunning, expectedCount }) {
   if (variant === "hidden") return null;
   if (!THUMBNAIL_VARIANTS.has(variant)) return null;
   if (variant === "video-player") {
     return <VideoThumbnail assets={finalAssets} onThumbnailClick={onThumbnailClick} />;
+  }
+  if (Array.isArray(thumbnailGroups) && thumbnailGroups.some((group) => Array.isArray(group?.assets) && group.assets.length)) {
+    return <ThumbnailGroups groups={thumbnailGroups} variant={variant} onThumbnailClick={onThumbnailClick} />;
   }
   const merged = mergeThumbnails(finalAssets, interimAssets);
   return (
@@ -352,6 +383,7 @@ export function WorkerProgressCard({
   className,
   thumbnailsVariant = "hidden",
   thumbnailAssets,
+  thumbnailGroups,
   interimThumbnailAssets,
   expectedThumbnailCount,
   onThumbnailClick,
@@ -490,6 +522,7 @@ export function WorkerProgressCard({
       <ThumbnailsRegion
         variant={thumbnailsVariant}
         finalAssets={thumbnailAssets}
+        thumbnailGroups={thumbnailGroups}
         interimAssets={interimThumbnailAssets}
         onThumbnailClick={onThumbnailClick}
         isRunning={!isTerminal}

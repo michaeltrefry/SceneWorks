@@ -784,6 +784,10 @@ impl JobsStore {
         let peak_load = update
             .peak_gpu_load_pct
             .map(|value| value.clamp(0.0, 100.0));
+        let mut result = update.result;
+        if let Some(result) = result.as_mut() {
+            merge_training_sample_history(&transaction, job_id, result)?;
+        }
         transaction.execute(
             "
             update jobs
@@ -814,7 +818,7 @@ impl JobsStore {
                 progress,
                 update.message,
                 update.error,
-                optional_dumps(update.result.as_ref())?,
+                optional_dumps(result.as_ref())?,
                 update.eta_seconds,
                 completed_at,
                 canceled_at,
@@ -1224,6 +1228,85 @@ fn loads_object(value: Option<&str>) -> Map<String, Value> {
     value
         .and_then(|text| serde_json::from_str::<Map<String, Value>>(text).ok())
         .unwrap_or_default()
+}
+
+fn merge_training_sample_history(
+    connection: &Connection,
+    job_id: &str,
+    incoming: &mut Map<String, Value>,
+) -> JobsStoreResult<()> {
+    let has_training_samples = incoming
+        .get("trainingSamples")
+        .and_then(Value::as_array)
+        .is_some();
+    let has_latest_training_samples = incoming
+        .get("latestTrainingSamples")
+        .and_then(Value::as_array)
+        .is_some();
+    if !has_training_samples && !has_latest_training_samples {
+        return Ok(());
+    }
+
+    let existing_json: Option<String> = connection
+        .query_row(
+            "select result_json from jobs where id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let existing = loads_object(existing_json.as_deref());
+    let mut samples = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    append_training_samples(&mut samples, &mut seen, existing.get("trainingSamples"));
+    append_training_samples(&mut samples, &mut seen, incoming.get("trainingSamples"));
+    append_training_samples(
+        &mut samples,
+        &mut seen,
+        incoming.get("latestTrainingSamples"),
+    );
+
+    if !samples.is_empty() {
+        incoming.insert("trainingSamples".to_owned(), Value::Array(samples));
+    }
+    Ok(())
+}
+
+fn append_training_samples(
+    samples: &mut Vec<Value>,
+    seen: &mut std::collections::HashSet<String>,
+    value: Option<&Value>,
+) {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for sample in array {
+        let key = training_sample_key(sample, samples.len());
+        if seen.insert(key) {
+            samples.push(sample.clone());
+        }
+    }
+}
+
+fn training_sample_key(sample: &Value, fallback_index: usize) -> String {
+    let Some(object) = sample.as_object() else {
+        return format!("sample:{fallback_index}");
+    };
+    for key in ["relativePath", "path", "url"] {
+        if let Some(value) = object.get(key).and_then(Value::as_str) {
+            if !value.is_empty() {
+                return format!("{key}:{value}");
+            }
+        }
+    }
+    let step = object
+        .get("step")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "unknown".to_owned());
+    let prompt = object
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!("step:{step}:prompt:{prompt}:index:{fallback_index}")
 }
 
 fn loads_vec<T>(value: Option<&str>) -> Vec<T>

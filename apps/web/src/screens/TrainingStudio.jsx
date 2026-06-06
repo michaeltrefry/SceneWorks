@@ -723,15 +723,6 @@ function DatasetHealth({ health, action }) {
   );
 }
 
-function latestTrainingSamples(job) {
-  const latest = Array.isArray(job.result?.latestTrainingSamples) ? job.result.latestTrainingSamples : [];
-  if (latest.length) {
-    return latest.slice(-4);
-  }
-  const samples = Array.isArray(job.result?.trainingSamples) ? job.result.trainingSamples : [];
-  return samples.slice(-4);
-}
-
 // Convert a training-sample record into an asset-shaped object that AssetThumbnail
 // (via assetUrl) can render. Worker emits {url, relativePath, step, prompt}; we
 // translate to either { url } (when relative) or { file: { path } } (when path-
@@ -756,20 +747,78 @@ function trainingSampleToAsset(sample, projectId, label, key) {
   return null;
 }
 
-// Resolve the training-sample assets for a job. Pads with placeholder labels
-// (the sample-prompt list) so the image-grid skeleton cells communicate
-// "this slot is coming" just like image batches.
-function trainingSampleAssets(job, projectId) {
-  const samples = latestTrainingSamples(job);
+function trainingSampleIdentity(sample, index) {
+  return sample?.relativePath ?? sample?.path ?? sample?.url ?? `${sample?.step ?? "sample"}-${sample?.prompt ?? ""}-${index}`;
+}
+
+function allTrainingSamples(job) {
+  const samples = Array.isArray(job.result?.trainingSamples) ? job.result.trainingSamples : [];
+  const latest = Array.isArray(job.result?.latestTrainingSamples) ? job.result.latestTrainingSamples : [];
+  const seen = new Set();
+  return [...samples, ...latest].filter((sample, index) => {
+    const key = trainingSampleIdentity(sample, index);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function sampleStepKey(sample, index) {
+  const numeric = Number(sample?.step);
+  return Number.isFinite(numeric) && numeric > 0 ? `step-${numeric}` : `sample-${index}`;
+}
+
+function sampleStepValue(samples, fallbackIndex) {
+  const numeric = Number(samples[0]?.step);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallbackIndex;
+}
+
+// Resolve all training-sample cycles for a job. Each sampling step gets its own
+// worker-card section so newer cycles stack above older cycles instead of
+// replacing them.
+export function trainingSampleGroups(job, projectId) {
+  const samples = allTrainingSamples(job);
   const samplePrompts = Array.isArray(job.result?.samplePrompts)
     ? job.result.samplePrompts
     : samplePromptsFromTrigger(job.payload?.plan?.config?.triggerWord);
-  return samplePrompts.slice(0, 4).map((prompt, index) => {
-    const sample = samples[index];
-    if (!sample) return null;
-    const label = sample?.step ? `Step ${sample.step}` : prompt;
-    return trainingSampleToAsset(sample, projectId, label, `${job.id}-sample-${index}`);
-  }).filter(Boolean);
+  const grouped = [];
+  const groupsByStep = new Map();
+  samples.forEach((sample, index) => {
+    const key = sampleStepKey(sample, index);
+    if (!groupsByStep.has(key)) {
+      const group = { key, firstIndex: index, samples: [] };
+      groupsByStep.set(key, group);
+      grouped.push(group);
+    }
+    groupsByStep.get(key).samples.push(sample);
+  });
+
+  return grouped
+    .map((group, index) => {
+      const step = sampleStepValue(group.samples, group.firstIndex);
+      return { ...group, chronologicalSampleNumber: index + 1, step };
+    })
+    .sort((a, b) => b.step - a.step)
+    .map((group) => {
+      const stepLabel = Number.isFinite(Number(group.samples[0]?.step)) ? ` - Step ${group.samples[0].step}` : "";
+      const assets = group.samples.map((sample, index) => {
+        const prompt = sample?.prompt ?? samplePrompts[index] ?? `Sample ${index + 1}`;
+        return trainingSampleToAsset(
+          sample,
+          projectId,
+          prompt,
+          `${job.id}-sample-${group.key}-${trainingSampleIdentity(sample, index)}`,
+        );
+      }).filter(Boolean);
+      return {
+        id: `${job.id}-sample-group-${group.key}`,
+        label: `Sample #${group.chronologicalSampleNumber}${stepLabel}`,
+        assets,
+      };
+    })
+    .filter((group) => group.assets.length);
 }
 
 function TrainingLiveProgress({ jobs, projectId }) {
@@ -791,7 +840,7 @@ function TrainingLiveProgress({ jobs, projectId }) {
             key={job.id}
             job={job}
             thumbnailsVariant="image-grid"
-            thumbnailAssets={trainingSampleAssets(job, projectId)}
+            thumbnailGroups={trainingSampleGroups(job, projectId)}
             expectedThumbnailCount={4}
           />
         ))}
