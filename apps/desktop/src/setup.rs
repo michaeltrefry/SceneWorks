@@ -34,6 +34,10 @@ const LENS_TORCHVISION_SPEC: &str = "torchvision>=0.26,<0.27";
 pub struct Managed {
     pub api: Mutex<Option<CommandChild>>,
     pub worker: Mutex<Option<CommandChild>>,
+    /// The Apple-Silicon MLX GPU worker (sc-3289): the same `sceneworks-api`
+    /// binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
+    /// `SCENEWORKS_GPU_ID=mlx`). Only populated on macOS.
+    pub mlx_worker: Mutex<Option<CommandChild>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
     /// PIDs of the spawned sidecars, persisted to disk so an unclean exit
@@ -44,11 +48,15 @@ pub struct Managed {
     pub shutting_down: AtomicBool,
 }
 
-/// PIDs of the API + Python worker sidecars owned by this launch.
+/// PIDs of the API + Python worker + MLX worker sidecars owned by this launch.
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct SidecarPids {
     api: Option<u32>,
     worker: Option<u32>,
+    /// The MLX GPU worker (sc-3289). `#[serde(default)]` so a pidfile written by
+    /// an older build (no such field) still deserializes for reaping.
+    #[serde(default)]
+    mlx_worker: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -870,6 +878,15 @@ fn gate_window(app: AppHandle) {
                             let _ = window.navigate(url);
                         }
                     }
+                    #[cfg(target_os = "macos")]
+                    {
+                        supervise_worker(app.clone(), port);
+                        // Apple-Silicon MLX GPU worker (sc-3289): MLX-eligible
+                        // image/video jobs run here on the in-process Rust
+                        // mlx-gen engine instead of the Python torch/MPS path.
+                        supervise_mlx_worker(app, port);
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     supervise_worker(app, port);
                     return;
                 }
@@ -1034,6 +1051,146 @@ fn supervise_worker(app: AppHandle, api_port: u16) {
     });
 }
 
+/// Spawn and supervise the Apple-Silicon MLX GPU worker (sc-3289): the same
+/// `sceneworks-api` sidecar binary re-launched in worker mode
+/// (`SCENEWORKS_WORKER_ONLY=1`) with `SCENEWORKS_GPU_ID=mlx`, so MLX-eligible
+/// image/video jobs run on the in-process Rust mlx-gen engine instead of the
+/// Python torch/MPS path. A crash-isolated sibling of the API process; restarted
+/// with exponential backoff while the app is open. Output goes to mlx-worker.log.
+///
+/// Without this worker registered, `jobs_store::should_defer_image_to_mlx_worker`
+/// has nowhere to defer and the Python `mps` worker is the fallback — which is
+/// why image/video jobs reported MPS before this landed.
+#[cfg(target_os = "macos")]
+fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
+    std::thread::spawn(move || {
+        let log_path = logs_dir().join("mlx-worker.log");
+        let api_url = format!("http://127.0.0.1:{api_port}");
+        // Match the API sidecar's HF cache root so the engine reads the same
+        // downloaded weights the catalog tracks.
+        let hf_home = huggingface_home().to_string_lossy().to_string();
+        // Unique per launch (distinct prefix from the Python `worker-local-*` and
+        // the in-process `rust-utility-worker`) so the three workers never collide
+        // in the shared jobs.db.
+        let worker_id = format!(
+            "mlx-worker-local-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or_default()
+        );
+        let mut backoff = 1u64;
+        loop {
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            let sidecar = match app.shell().sidecar("sceneworks-api") {
+                Ok(command) => command,
+                Err(error) => {
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] mlx worker: locate sidecar failed: {error}\n"),
+                    );
+                    return;
+                }
+            };
+            let mut command = sidecar
+                // Dispatches `main` to `run_worker()` (HTTP API never starts).
+                .env("SCENEWORKS_WORKER_ONLY", "1")
+                .env("SCENEWORKS_GPU_ID", "mlx")
+                .env("SCENEWORKS_WORKER_ID", &worker_id)
+                .env("SCENEWORKS_API_URL", &api_url)
+                .env("HF_HOME", &hf_home)
+                // Parent-death watchdog (run_worker() honours this): a force-quit
+                // self-terminates the worker so its multi-GB MLX model isn't
+                // orphaned to launchd.
+                .env("SCENEWORKS_PARENT_PID", std::process::id().to_string())
+                .env(
+                    "SCENEWORKS_DATA_DIR",
+                    resolved_data_dir().to_string_lossy().to_string(),
+                )
+                .env(
+                    "SCENEWORKS_CONFIG_DIR",
+                    config_dir().to_string_lossy().to_string(),
+                );
+            // The worker muxes generated video with ffmpeg; the desktop ships no
+            // system ffmpeg, so point it at the bundled binary (as spawn_api does).
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg() {
+                command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
+            }
+            if let Some(token) = crate::settings::read_hf_token() {
+                command = command.env("HF_TOKEN", token);
+            }
+            if let Some(credentials) = crate::settings::credentials_env_json() {
+                command = command.env("SCENEWORKS_CREDENTIALS", credentials);
+            }
+            let spawned = command.spawn();
+            let (mut events, child) = match spawned {
+                Ok(pair) => pair,
+                Err(error) => {
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] mlx worker spawn failed: {error}\n"),
+                    );
+                    std::thread::sleep(Duration::from_secs(backoff));
+                    backoff = (backoff * 2).min(30);
+                    continue;
+                }
+            };
+            record_mlx_worker_pid(&app, Some(child.pid()));
+            app.state::<Managed>()
+                .mlx_worker
+                .lock()
+                .expect("mlx worker lock")
+                .replace(child);
+            let started = Instant::now();
+            loop {
+                match tauri::async_runtime::block_on(events.recv()) {
+                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
+                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
+                    }
+                    Some(CommandEvent::Terminated(payload)) => {
+                        append_log(
+                            &log_path,
+                            &format!(
+                                "[desktop] mlx worker terminated: code={:?} signal={:?}\n",
+                                payload.code, payload.signal
+                            ),
+                        );
+                        break;
+                    }
+                    Some(CommandEvent::Error(error)) => {
+                        append_log(&log_path, &format!("[desktop] mlx worker error: {error}\n"));
+                        break;
+                    }
+                    None => break,
+                    _ => {}
+                }
+            }
+            let _ = app
+                .state::<Managed>()
+                .mlx_worker
+                .lock()
+                .expect("mlx worker lock")
+                .take();
+            record_mlx_worker_pid(&app, None);
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                backoff = 1;
+            }
+            append_log(
+                &log_path,
+                &format!("[desktop] restarting mlx worker in {backoff}s\n"),
+            );
+            std::thread::sleep(Duration::from_secs(backoff));
+            backoff = (backoff * 2).min(30);
+        }
+    });
+}
+
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
@@ -1071,6 +1228,14 @@ fn record_worker_pid(app: &AppHandle, pid: Option<u32>) {
     let state = app.state::<Managed>();
     let mut pids = state.pids.lock().expect("pids lock");
     pids.worker = pid;
+    write_sidecar_pidfile(&pids);
+}
+
+#[cfg(target_os = "macos")]
+fn record_mlx_worker_pid(app: &AppHandle, pid: Option<u32>) {
+    let state = app.state::<Managed>();
+    let mut pids = state.pids.lock().expect("pids lock");
+    pids.mlx_worker = pid;
     write_sidecar_pidfile(&pids);
 }
 
@@ -1137,7 +1302,10 @@ pub fn reap_stale_sidecars() {
         return;
     };
     let pids: SidecarPids = serde_json::from_slice(&bytes).unwrap_or_default();
-    for pid in [pids.api, pids.worker].into_iter().flatten() {
+    for pid in [pids.api, pids.worker, pids.mlx_worker]
+        .into_iter()
+        .flatten()
+    {
         if is_our_sidecar(pid) {
             kill_pid(pid);
         }
@@ -1145,17 +1313,18 @@ pub fn reap_stale_sidecars() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Begin graceful shutdown: stop the Python worker then the API sidecar. On Unix
-/// this sends SIGTERM and waits up to the grace period before force-killing; on
-/// Windows it force-kills (CTRL_BREAK handling is a Windows-session refinement).
-/// Returns true if shutdown was initiated (caller should prevent the immediate
-/// exit), false if it was already in progress.
+/// Begin graceful shutdown: stop the Python + MLX workers then the API sidecar.
+/// On Unix this sends SIGTERM and waits up to the grace period before
+/// force-killing; on Windows it force-kills (CTRL_BREAK handling is a
+/// Windows-session refinement). Returns true if shutdown was initiated (caller
+/// should prevent the immediate exit), false if it was already in progress.
 pub fn begin_shutdown(app: &AppHandle) -> bool {
     let managed = app.state::<Managed>();
     if managed.shutting_down.swap(true, Ordering::SeqCst) {
         return false;
     }
     let worker = managed.worker.lock().expect("worker lock").take();
+    let mlx_worker = managed.mlx_worker.lock().expect("mlx worker lock").take();
     let api_child = managed.api.lock().expect("api lock").take();
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -1167,9 +1336,10 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
                 .unwrap_or(10)
                 .clamp(1, 30);
             let worker_pid = worker.as_ref().map(CommandChild::pid);
+            let mlx_worker_pid = mlx_worker.as_ref().map(CommandChild::pid);
             let api_pid = api_child.as_ref().map(CommandChild::pid);
-            // SIGTERM the worker first, then the API.
-            for pid in [worker_pid, api_pid].into_iter().flatten() {
+            // SIGTERM the workers first, then the API.
+            for pid in [worker_pid, mlx_worker_pid, api_pid].into_iter().flatten() {
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGTERM,
@@ -1177,7 +1347,11 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
             }
             let deadline = Instant::now() + Duration::from_secs(grace);
             while Instant::now() < deadline {
-                if ![worker_pid, api_pid].into_iter().flatten().any(pid_alive) {
+                if ![worker_pid, mlx_worker_pid, api_pid]
+                    .into_iter()
+                    .flatten()
+                    .any(pid_alive)
+                {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -1185,6 +1359,9 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         }
         // Force-kill anything still alive.
         if let Some(child) = worker {
+            let _ = child.kill();
+        }
+        if let Some(child) = mlx_worker {
             let _ = child.kill();
         }
         if let Some(child) = api_child {

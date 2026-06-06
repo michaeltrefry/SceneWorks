@@ -278,6 +278,42 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Run this binary as a standalone worker process instead of the HTTP API.
+/// Dispatched from `main` when `SCENEWORKS_WORKER_ONLY=1`; the desktop app uses
+/// it to launch the Apple-Silicon MLX GPU worker (`SCENEWORKS_GPU_ID=mlx`,
+/// sc-3289) as a crash-isolated sibling of the API process — reusing this binary
+/// because it already links the mlx-gen engine.
+///
+/// Delegates to [`sceneworks_worker::run`] (which reads `SCENEWORKS_GPU_ID` +
+/// `SCENEWORKS_API_URL` and, for a non-`auto`/non-`cpu` id, runs a single worker
+/// loop), raced against the same parent-death watchdog the API uses: the desktop
+/// sets `SCENEWORKS_PARENT_PID` to its own PID, and a force-quit/crash skips the
+/// shell's graceful teardown — so without this a worker would orphan to launchd
+/// with its multi-GB MLX model resident.
+pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(home) = sceneworks_core::hf_home::ensure_default_huggingface_home() {
+        println!(
+            "SceneWorks Rust worker defaulting HF_HOME to {}",
+            home.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        tokio::select! {
+            result = sceneworks_worker::run() => result?,
+            _ = parent_death(parent_pid_to_watch()) => {
+                eprintln!("SceneWorks Rust worker: watched parent process gone, exiting");
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        sceneworks_worker::run().await?;
+        Ok(())
+    }
+}
+
 /// Spawns the utility worker loop ([`sceneworks_worker::run_worker_loop`]) as a
 /// tokio task in this process, pointed at the local API over loopback. The loop
 /// observes the same Ctrl+C/SIGTERM as the HTTP server (via the worker's own
