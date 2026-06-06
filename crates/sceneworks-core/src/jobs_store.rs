@@ -711,6 +711,7 @@ impl JobsStore {
         }
         if should_defer_image_to_mlx_worker(&transaction, &queued, &worker)?
             || should_defer_video_to_mlx_worker(&transaction, &queued, &worker)?
+            || should_defer_training_to_mlx_worker(&transaction, &queued, &worker)?
         {
             return Ok(None);
         }
@@ -1433,6 +1434,27 @@ fn should_defer_video_to_mlx_worker(
     idle_mlx_worker_can_claim(connection, job, worker)
 }
 
+/// Training sibling of [`should_defer_image_to_mlx_worker`] (epic 3039): a non-mlx
+/// GPU worker defers an `auto` MLX-eligible `lora_train` job when an idle `mlx`
+/// worker can run it, so the native Rust trainer (`mlx_gen::load_trainer`) claims
+/// it. Same fallback guarantees — no mlx worker registered (Windows/Linux, or the
+/// mlx worker is down) → nothing defers and the Python torch trainer runs it; an
+/// explicit (non-`auto`) GPU choice is always honoured. The torch trainers stay
+/// the cross-platform path + the Mac fallback (sc-3049), so a job is never stuck.
+fn should_defer_training_to_mlx_worker(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    if job.requested_gpu != "auto"
+        || worker.gpu_id.eq_ignore_ascii_case("mlx")
+        || !training_job_is_mlx_eligible(job)
+    {
+        return Ok(false);
+    }
+    idle_mlx_worker_can_claim(connection, job, worker)
+}
+
 /// Whether an idle `mlx` worker (other than `worker`) exists that supports `job`
 /// and has no active GPU job — the shared tail of the image/video MLX deferral.
 fn idle_mlx_worker_can_claim(
@@ -1758,6 +1780,67 @@ fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     true
 }
 
+/// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
+/// the engine registers `z_image_turbo`/`sdxl`/`ltx_2_3`/`wan2_2_*` trainers, which
+/// the worker reaches via these SceneWorks kernel ids (the mlx worker maps kernel +
+/// base model → engine trainer id). `kolors_lora` (SDXL + ChatGLM3) and `lens_lora`
+/// (sidecar) have no mlx-gen crate, so they stay on the Python torch worker. A
+/// kernel absent here is never routed to the mlx worker.
+const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "z_image_lora",
+    "sdxl_lora",
+    "wan_lora",
+    "wan_moe_lora",
+    "ltx_mlx_lora",
+];
+
+/// Epic 3039 routing — does this `lora_train` job belong on the in-process Rust MLX
+/// worker (vs the Python torch worker)? The training sibling of
+/// [`image_job_is_mlx_eligible`]/[`video_job_is_mlx_eligible`]: the engine has a
+/// native trainer for the family. Both dry-run and real runs are eligible (the
+/// dry-run validates the same resolved plan). LoKr-on-Wan stays torch — the mlx Wan
+/// inference path can't load a Kronecker adapter, mirroring [`video_job_is_mlx_eligible`];
+/// LoKr on Z-Image/SDXL/LTX is fine (the Rust engine applies it natively).
+///
+/// The resolved plan is stamped into the job payload at submit (apps/rust-api
+/// training.rs) for both dry-run and real runs, so the kernel + network type are
+/// readable here without touching the dataset or weights.
+fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return false;
+    }
+    let Some(plan) = job.payload.get("plan").and_then(Value::as_object) else {
+        return false;
+    };
+    let kernel = plan
+        .get("target")
+        .and_then(Value::as_object)
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+        return false;
+    }
+    // LoKr-on-Wan stays on the torch path (no Kronecker merge in the mlx Wan path).
+    if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
+        return false;
+    }
+    true
+}
+
+/// Whether a resolved training plan requests a LoKr (Kronecker) adapter. The network
+/// type lives in the plan's `config.advanced.networkType` (SceneWorks training
+/// contract), distinct from a generation request's per-LoRA `networkType`.
+fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
+    plan.get("config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("advanced"))
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("networkType"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("lokr"))
+}
+
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
@@ -1786,6 +1869,13 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
                 | JobType::PersonReplace
         ) && !video_job_is_mlx_eligible(job)
         {
+            return false;
+        }
+        // Training (epic 3039): the mlx worker trains only the MLX-native families
+        // (z_image / sdxl / wan / ltx) via `mlx_gen::load_trainer`. `kolors_lora` +
+        // `lens_lora` (no mlx-gen crate) and LoKr-on-Wan stay on the Python torch
+        // worker. Applies to both dry-run and real runs.
+        if matches!(job.job_type, JobType::LoraTrain) && !training_job_is_mlx_eligible(job) {
             return false;
         }
     }

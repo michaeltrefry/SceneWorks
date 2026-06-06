@@ -1,0 +1,883 @@
+//! Native MLX LoRA/LoKr training jobs (epic 3039) — the training analog of
+//! [`image_jobs`](crate::image_jobs)/[`video_jobs`](crate::video_jobs).
+//!
+//! Parses a `lora_train` job into the Rust-resolved [`TrainingPlan`], then either
+//! validates it (dry run) or maps it onto an [`mlx_gen::TrainingRequest`] and drives
+//! `mlx_gen::load_trainer(id, &LoadSpec).train(req, on_progress)` — exactly as the
+//! image path maps `ImageRequest` → `GenerationRequest` and calls `Generator::generate`.
+//! The engine writes the adapter to the plan's `output.outputDir`; the API registers
+//! it from the staged `manifestEntry` + the files on disk (apps/rust-api jobs.rs
+//! `register_trained_lora`), so the streamed `result` here is informational/UI only.
+//!
+//! Routing (sc-3049): the API only sends MLX-native families
+//! (`z_image_lora`/`sdxl_lora`/`wan_lora`/`wan_moe_lora`/`ltx_mlx_lora`) here
+//! (`jobs_store::training_job_is_mlx_eligible`). `kolors`/`lens` and LoKr-on-Wan stay
+//! on the Python torch worker, which also remains the Windows/Linux path + the Mac
+//! fallback. The dry-run validator is cross-platform; the real run is macOS-only
+//! (mlx-gen builds Apple MLX) and unreachable elsewhere (the capability is never
+//! advertised off macOS).
+
+use super::*;
+use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
+
+// Force each trainer-provider crate to link so its `inventory::submit!` trainer
+// registration survives linker GC and `load_trainer` can find it. The same crates
+// are referenced by image_jobs/video_jobs for generation; re-stating the training
+// dependency here keeps it explicit and independent of those modules.
+#[cfg(target_os = "macos")]
+use mlx_gen::{
+    CancelFlag, LoadSpec, LrSchedule, NetworkType, TrainingConfig, TrainingItem, TrainingOutput,
+    TrainingProgress, TrainingRequest, WeightsSource,
+};
+#[cfg(target_os = "macos")]
+use mlx_gen_ltx as _;
+#[cfg(target_os = "macos")]
+use mlx_gen_sdxl as _;
+#[cfg(target_os = "macos")]
+use mlx_gen_wan as _;
+#[cfg(target_os = "macos")]
+use mlx_gen_z_image as _;
+
+/// Run a `lora_train` job: parse the resolved plan, then either validate it
+/// (dry run, the default) or execute real training. Mirrors the Python
+/// `run_lora_train_job` split (apps/worker/scene_worker/runtime.py).
+pub(crate) async fn run_lora_train_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let plan = parse_plan(&job.payload)?;
+    let dry_run = job
+        .payload
+        .get("dryRun")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if dry_run {
+        run_training_dry_run(api, settings, job, &plan).await
+    } else {
+        run_training_execution(api, settings, job, &plan).await
+    }
+}
+
+/// Deserialize the Rust-resolved plan stamped into the job payload at submit time
+/// (apps/rust-api training.rs). The plan round-trips through `TrainingPlan`, so a
+/// payload missing/garbling it is a hard error (never a silent no-op).
+fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
+    let plan = payload.get("plan").ok_or_else(|| {
+        WorkerError::InvalidPayload("Training job payload is missing a resolved plan.".to_owned())
+    })?;
+    serde_json::from_value(plan.clone())
+        .map_err(|error| WorkerError::InvalidPayload(format!("Invalid training plan: {error}")))
+}
+
+/// Validate a resolved plan the way the Python `validate_training_plan` does:
+/// reject an unknown plan version, an empty dataset, or missing dataset images.
+/// Shared by the dry-run validator and the real run so both reject the same inputs.
+fn validate_training_plan(plan: &TrainingPlan) -> WorkerResult<()> {
+    if plan.plan_version != TRAINING_PLAN_VERSION {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Unsupported training plan version {}; this worker understands version {}.",
+            plan.plan_version, TRAINING_PLAN_VERSION
+        )));
+    }
+    if plan.dataset.items.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Training plan dataset has no items to train on.".to_owned(),
+        ));
+    }
+    let missing: Vec<&str> = plan
+        .dataset
+        .items
+        .iter()
+        .filter(|item| !Path::new(&item.image_path).exists())
+        .map(|item| item.image_path.as_str())
+        .collect();
+    if !missing.is_empty() {
+        let preview = missing
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} dataset image(s) are missing on the worker, e.g. {preview}.",
+            missing.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Dry-run: validate the plan and report what a real run would produce, with no
+/// model load or training (so a GPU worker without the engine still validates).
+/// Cross-platform — the validator and summary touch only the plan + the dataset
+/// images on disk. Mirrors the Python `_run_lora_train_dry_run`.
+async fn run_training_dry_run(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+) -> WorkerResult<()> {
+    let backend = backend_label(&settings.gpu_id);
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        training_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.1,
+            "Validating training plan.",
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    validate_training_plan(plan)?;
+    let item_count = plan.dataset.items.len();
+    update_job(
+        api,
+        &job.id,
+        training_progress(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.5,
+            &format!("Checked {item_count} dataset item(s)."),
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    update_job(
+        api,
+        &job.id,
+        training_progress(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            &format!("Dry run validated {item_count} dataset item(s); training plan is ready."),
+            Some(dry_run_summary(plan)),
+            backend,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The dry-run completion summary (keys mirror the Python `dry_run_training_summary`
+/// so the Training Studio reads an identical shape regardless of which worker runs it).
+fn dry_run_summary(plan: &TrainingPlan) -> JsonObject {
+    let base_model_installed = Path::new(&plan.target.base_model_path).exists();
+    let mut summary = JsonObject::new();
+    summary.insert("mode".to_owned(), json!("dry_run"));
+    summary.insert("validated".to_owned(), json!(true));
+    summary.insert("dryRun".to_owned(), json!(true));
+    summary.insert(
+        "datasetItemCount".to_owned(),
+        json!(plan.dataset.items.len()),
+    );
+    summary.insert("datasetId".to_owned(), json!(plan.dataset.dataset_id));
+    summary.insert(
+        "datasetVersion".to_owned(),
+        json!(plan.dataset.dataset_version),
+    );
+    summary.insert("targetId".to_owned(), json!(plan.target.target_id));
+    summary.insert("kernel".to_owned(), json!(plan.target.kernel));
+    summary.insert("loraId".to_owned(), json!(plan.output.lora_id));
+    summary.insert("outputDir".to_owned(), json!(plan.output.output_dir));
+    summary.insert("fileName".to_owned(), json!(plan.output.file_name));
+    summary.insert("baseModel".to_owned(), json!(plan.target.base_model));
+    summary.insert(
+        "baseModelRepo".to_owned(),
+        json!(plan.target.base_model_repo),
+    );
+    summary.insert(
+        "baseModelPath".to_owned(),
+        json!(plan.target.base_model_path),
+    );
+    summary.insert("baseModelInstalled".to_owned(), json!(base_model_installed));
+    summary.insert("planVersion".to_owned(), json!(plan.plan_version));
+    summary
+}
+
+/// A `lora_train` progress update with the worker's backend label (mirrors
+/// `image_jobs::image_progress`). LoRA training keeps `status: running` across the
+/// caching/training/checkpointing/saving stages; only the final update is `completed`.
+fn training_progress(
+    status: JobStatus,
+    stage: ProgressStage,
+    progress: f64,
+    message: &str,
+    result: Option<JsonObject>,
+    backend: &str,
+) -> ProgressRequest {
+    ProgressRequest {
+        status,
+        stage,
+        progress: number_from_f64(progress),
+        message: message.to_owned(),
+        error: None,
+        result,
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: Some(backend.to_owned()),
+        extra: BTreeMap::new(),
+    }
+}
+
+// --------------------------------------------------------------------------- #
+// Real training — macOS / Apple-Silicon only (mlx-gen builds Apple MLX). The
+// capability is never advertised off macOS, so the non-macOS arm is unreachable.
+// --------------------------------------------------------------------------- #
+
+/// Map a resolved plan's `(kernel, baseModel)` onto the mlx-gen trainer registry id
+/// (the trainer id matches the generator id of the same base model). Wan splits by
+/// the base model variant: the dense TI2V-5B (`wan_lora`) vs the two A14B MoE
+/// variants (`wan_moe_lora` + the T2V/I2V base model). `None` for a family with no
+/// mlx-gen trainer — those never route here, but the mapping fails loudly if one does.
+#[cfg(target_os = "macos")]
+fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
+    match plan.target.kernel.as_str() {
+        "z_image_lora" => Some("z_image_turbo"),
+        "sdxl_lora" => Some("sdxl"),
+        "ltx_mlx_lora" => Some("ltx_2_3"),
+        // Dense Wan2.2-TI2V-5B.
+        "wan_lora" => Some("wan2_2_ti2v_5b"),
+        // A14B dual-expert MoE; the T2V/I2V base model picks the trainer.
+        "wan_moe_lora" => match plan.target.base_model.as_str() {
+            "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
+            "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Read an `advanced` field as a string, trimmed and non-empty, else `default`.
+#[cfg(target_os = "macos")]
+fn advanced_str(advanced: &JsonObject, key: &str, default: &str) -> String {
+    advanced
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
+        .to_owned()
+}
+
+/// Read an `advanced` field as an f32, else `default`.
+#[cfg(target_os = "macos")]
+fn advanced_f32(advanced: &JsonObject, key: &str, default: f32) -> f32 {
+    advanced
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(default)
+}
+
+/// Read an `advanced` field as a u32, else `default`.
+#[cfg(target_os = "macos")]
+fn advanced_u32(advanced: &JsonObject, key: &str, default: u32) -> u32 {
+    advanced
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as u32)
+        .unwrap_or(default)
+}
+
+/// Map the SceneWorks `TrainingConfig` (plan `config` + its free-form `advanced`
+/// bag) onto the engine's typed [`mlx_gen::TrainingConfig`]. The optimizer string is
+/// passed verbatim — the engine normalizes aliases (`adamw8bit`→`adamw`,
+/// `prodigyopt`→`prodigy`). An empty `loraTargetModules` lets the family trainer use
+/// its default target set.
+#[cfg(target_os = "macos")]
+fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> TrainingConfig {
+    let advanced = &config.advanced;
+    let lora_target_modules = advanced
+        .get("loraTargetModules")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    TrainingConfig {
+        rank: config.rank,
+        alpha: config.alpha as f32,
+        learning_rate: config.learning_rate.as_f64().unwrap_or(1e-4) as f32,
+        steps: config.steps,
+        batch_size: config.batch_size,
+        gradient_accumulation: config.gradient_accumulation,
+        resolution: config.resolution,
+        save_every: config.save_every,
+        seed: config.seed.max(0) as u64,
+        optimizer: config.optimizer.clone(),
+        weight_decay: advanced_f32(advanced, "weightDecay", 0.0),
+        lr_scheduler: LrSchedule::parse(&advanced_str(advanced, "lrScheduler", "constant")),
+        lr_warmup_steps: advanced_u32(advanced, "lrWarmupSteps", 0),
+        network_type: NetworkType::parse(&advanced_str(advanced, "networkType", "lora")),
+        decompose_factor: advanced
+            .get("decomposeFactor")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32)
+            .unwrap_or(-1),
+        lora_target_modules,
+        timestep_type: advanced_str(advanced, "timestepType", "sigmoid"),
+        timestep_bias: advanced_str(advanced, "timestepBias", "balanced"),
+        loss_type: advanced_str(advanced, "lossType", "mse"),
+        trigger_word: config.trigger_word.clone(),
+    }
+}
+
+/// One progress event streamed from the blocking training thread to the async side.
+#[cfg(target_os = "macos")]
+enum TrainEvent {
+    Progress(TrainingProgress),
+    Done(TrainingOutput),
+}
+
+/// Execute a real training run on the in-process mlx-gen engine. Loads the (frozen)
+/// base model via a [`LoadSpec`] (exactly as inference's `mlx_load`), runs the
+/// family trainer on a blocking thread, streams staged progress, honors cancellation
+/// via the engine's [`CancelFlag`], and reports the produced adapter. The adapter is
+/// written by the engine into the plan's `output.outputDir`; the API registers it
+/// from the staged manifest entry.
+#[cfg(target_os = "macos")]
+async fn run_training_execution(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+) -> WorkerResult<()> {
+    let backend = backend_label(&settings.gpu_id);
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        training_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.05,
+            "Preparing LoRA training.",
+            None,
+            backend,
+        ),
+    )
+    .await?;
+
+    validate_training_plan(plan)?;
+
+    let engine_id = engine_trainer_id(plan).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "No MLX trainer for kernel '{}' (base model '{}').",
+            plan.target.kernel, plan.target.base_model
+        ))
+    })?;
+
+    let weights_dir = PathBuf::from(&plan.target.base_model_path);
+    if !weights_dir.is_dir() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Base model weights are not installed at {}.",
+            weights_dir.display()
+        )));
+    }
+
+    let output_dir = PathBuf::from(&plan.output.output_dir);
+    tokio::fs::create_dir_all(&output_dir).await?;
+
+    let items: Vec<TrainingItem> = plan
+        .dataset
+        .items
+        .iter()
+        .map(|item| TrainingItem {
+            image_path: PathBuf::from(&item.image_path),
+            caption: item.caption.clone(),
+        })
+        .collect();
+    let config = map_training_config(&plan.config);
+    let total_steps = config.steps;
+    let file_name = plan.output.file_name.clone();
+    let trigger_words = plan.output.trigger_words.clone();
+
+    check_cancel(api, &job.id, "LoRA training canceled before it started.").await?;
+
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<TrainEvent>(64);
+
+    let blocking = {
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let mut trainer =
+                mlx_gen::load_trainer(engine_id, &LoadSpec::new(WeightsSource::Dir(weights_dir)))
+                    .map_err(|error| {
+                    WorkerError::InvalidPayload(format!("{engine_id} trainer load failed: {error}"))
+                })?;
+            let request = TrainingRequest {
+                items,
+                config,
+                output_dir,
+                file_name,
+                trigger_words,
+                cancel,
+            };
+            trainer.validate(&request).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "{engine_id} trainer rejected the plan: {error}"
+                ))
+            })?;
+            let mut on_progress = |progress: TrainingProgress| {
+                let _ = tx.blocking_send(TrainEvent::Progress(progress));
+            };
+            let output = trainer.train(&request, &mut on_progress).map_err(|error| {
+                WorkerError::InvalidPayload(format!("training failed: {error}"))
+            })?;
+            let _ = tx.blocking_send(TrainEvent::Done(output));
+            Ok(())
+        })
+    };
+
+    consume_training_events(
+        api,
+        settings,
+        job,
+        plan,
+        backend,
+        total_steps,
+        rx,
+        cancel,
+        blocking,
+    )
+    .await
+}
+
+/// Consume training events from the blocking thread: stream staged progress, poll
+/// cancel ~every 2s (draining after a cancel so the blocking sender never blocks),
+/// and on the final `Done` event report completion with the result the UI shows.
+/// Mirrors `image_jobs::consume_gen_events`.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn consume_training_events(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    backend: &str,
+    total_steps: u32,
+    mut rx: tokio::sync::mpsc::Receiver<TrainEvent>,
+    cancel: CancelFlag,
+    blocking: tokio::task::JoinHandle<WorkerResult<()>>,
+) -> WorkerResult<()> {
+    let mut canceled = false;
+    let mut last_cancel_check = Instant::now();
+    let mut checkpoints: Vec<Value> = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if canceled {
+            continue; // drain remaining events so the blocking sender never blocks.
+        }
+        match event {
+            TrainEvent::Progress(progress) => {
+                // Poll cancel on the long training band only (cheap stages fly by).
+                if matches!(progress, TrainingProgress::Training { .. })
+                    && last_cancel_check.elapsed() >= Duration::from_secs(2)
+                {
+                    last_cancel_check = Instant::now();
+                    if check_cancel(api, &job.id, "LoRA training canceled by user.")
+                        .await
+                        .is_err()
+                    {
+                        cancel.cancel();
+                        canceled = true;
+                        continue;
+                    }
+                }
+                if let TrainingProgress::Checkpoint { step } = progress {
+                    checkpoints.push(json!({ "step": step }));
+                }
+                let (status, stage, fraction, message) =
+                    map_training_progress(progress, total_steps);
+                update_job(
+                    api,
+                    &job.id,
+                    training_progress(status, stage, fraction, &message, None, backend),
+                )
+                .await?;
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+            }
+            TrainEvent::Done(output) => {
+                let result = training_result(plan, &output, &checkpoints);
+                update_job(
+                    api,
+                    &job.id,
+                    training_progress(
+                        JobStatus::Completed,
+                        ProgressStage::Completed,
+                        1.0,
+                        &format!("Trained LoRA saved as {}.", plan.output.file_name),
+                        Some(result),
+                        backend,
+                    ),
+                )
+                .await?;
+            }
+        }
+    }
+
+    let task_result = blocking
+        .await
+        .map_err(|error| WorkerError::InvalidPayload(format!("training task join: {error}")))?;
+    if canceled {
+        // check_cancel already posted the Canceled update; treat the engine's
+        // early return as the clean cancel.
+        return Err(WorkerError::Canceled(
+            "LoRA training canceled by user.".to_owned(),
+        ));
+    }
+    task_result
+}
+
+/// Map an engine [`TrainingProgress`] event onto a job `(status, stage, fraction,
+/// message)`. The fractions follow the kernel's bands (prepare 0–.08, load .08–.18,
+/// cache .18–.32, train/checkpoint .32–.92, save .92–1.0) so the UI's existing
+/// `caching_latents`/`training`/`checkpointing`/`saving` stages light up unchanged.
+#[cfg(target_os = "macos")]
+fn map_training_progress(
+    progress: TrainingProgress,
+    total_steps: u32,
+) -> (JobStatus, ProgressStage, f64, String) {
+    match progress {
+        TrainingProgress::Preparing => (
+            JobStatus::Running,
+            ProgressStage::Preparing,
+            0.06,
+            "Preparing dataset.".to_owned(),
+        ),
+        TrainingProgress::LoadingModel => (
+            JobStatus::Running,
+            ProgressStage::LoadingModel,
+            0.12,
+            "Loading base model.".to_owned(),
+        ),
+        TrainingProgress::Caching { current, total } => {
+            let span = if total == 0 {
+                0.0
+            } else {
+                0.14 * (current as f64 / total as f64)
+            };
+            (
+                JobStatus::Running,
+                ProgressStage::CachingLatents,
+                0.18 + span,
+                format!("Caching dataset latents ({current}/{total})."),
+            )
+        }
+        TrainingProgress::Training { step, total, loss } => (
+            JobStatus::Running,
+            ProgressStage::Training,
+            train_fraction(step, total),
+            format!("Training step {step} of {total} (loss {loss:.4})."),
+        ),
+        TrainingProgress::Checkpoint { step } => (
+            JobStatus::Running,
+            ProgressStage::Checkpointing,
+            train_fraction(step, total_steps.max(step)),
+            format!("Saved checkpoint at step {step}."),
+        ),
+        TrainingProgress::Saving => (
+            JobStatus::Running,
+            ProgressStage::Saving,
+            0.94,
+            "Saving adapter.".to_owned(),
+        ),
+    }
+}
+
+/// Scale a training micro-step into the 0.32–0.92 training band.
+#[cfg(target_os = "macos")]
+fn train_fraction(step: u32, total: u32) -> f64 {
+    if total == 0 {
+        return 0.32;
+    }
+    0.32 + 0.60 * (step as f64 / total as f64).clamp(0.0, 1.0)
+}
+
+/// Build the completion `result` the Training Studio reads (keys mirror the Python
+/// trainer's `_result`). LoRA registration is driven by the staged `manifestEntry` +
+/// the on-disk adapter (apps/rust-api `register_trained_lora`), not this result, so
+/// this is informational/UI metadata.
+#[cfg(target_os = "macos")]
+fn training_result(
+    plan: &TrainingPlan,
+    output: &TrainingOutput,
+    checkpoints: &[Value],
+) -> JsonObject {
+    let mut result = JsonObject::new();
+    result.insert("mode".to_owned(), json!("train"));
+    result.insert("kernel".to_owned(), json!(plan.target.kernel));
+    result.insert("loraId".to_owned(), json!(plan.output.lora_id));
+    result.insert("outputDir".to_owned(), json!(plan.output.output_dir));
+    result.insert("fileName".to_owned(), json!(plan.output.file_name));
+    result.insert(
+        "outputPath".to_owned(),
+        json!(output.adapter_path.display().to_string()),
+    );
+    result.insert("format".to_owned(), json!(plan.output.format));
+    result.insert("datasetId".to_owned(), json!(plan.dataset.dataset_id));
+    result.insert(
+        "datasetVersion".to_owned(),
+        json!(plan.dataset.dataset_version),
+    );
+    result.insert(
+        "datasetItemCount".to_owned(),
+        json!(plan.dataset.items.len()),
+    );
+    result.insert("targetId".to_owned(), json!(plan.target.target_id));
+    result.insert("baseModel".to_owned(), json!(plan.target.base_model));
+    result.insert("steps".to_owned(), json!(plan.config.steps));
+    result.insert("stepsCompleted".to_owned(), json!(output.steps));
+    result.insert("finalLoss".to_owned(), json!(output.final_loss));
+    result.insert("checkpoints".to_owned(), json!(checkpoints));
+    result.insert("rank".to_owned(), json!(plan.config.rank));
+    result.insert("alpha".to_owned(), json!(plan.config.alpha));
+    result.insert("resolution".to_owned(), json!(plan.config.resolution));
+    result.insert("triggerWords".to_owned(), json!(plan.output.trigger_words));
+    result.insert("planVersion".to_owned(), json!(plan.plan_version));
+    result.insert("backend".to_owned(), json!("mlx"));
+    result
+}
+
+/// Off macOS the mlx-gen engine is not linked; the `lora_train_execute` capability is
+/// never advertised, so a real run can never be claimed here. Fail loudly if one is.
+#[cfg(not(target_os = "macos"))]
+async fn run_training_execution(
+    _api: &ApiClient,
+    _settings: &Settings,
+    _job: &JobSnapshot,
+    _plan: &TrainingPlan,
+) -> WorkerResult<()> {
+    Err(WorkerError::InvalidPayload(
+        "Native MLX LoRA training requires macOS (mlx-gen); this worker cannot execute it."
+            .to_owned(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A complete resolved plan as the API serializes it, parameterized by the
+    /// fields the worker glue reads. `baseModelPath` is a path that does not exist,
+    /// so `baseModelInstalled` is false unless a test overrides it.
+    fn plan_json(
+        kernel: &str,
+        base_model: &str,
+        network_type: &str,
+        image_paths: &[&str],
+    ) -> Value {
+        let items: Vec<Value> = image_paths
+            .iter()
+            .map(|path| json!({ "imagePath": path, "caption": "a photo of mychar" }))
+            .collect();
+        json!({
+            "schemaVersion": 1,
+            "planVersion": 1,
+            "jobId": "job-1",
+            "target": {
+                "targetId": format!("{kernel}_target"),
+                "kernel": kernel,
+                "family": "test",
+                "modality": "image",
+                "outputKind": "lora",
+                "baseModel": base_model,
+                "baseModelPath": "/tmp/sceneworks-test-base-does-not-exist"
+            },
+            "dataset": {
+                "datasetId": "ds-1",
+                "datasetVersion": 1,
+                "rootPath": "/tmp/ds",
+                "items": items
+            },
+            "config": {
+                "rank": 16,
+                "alpha": 32,
+                "learningRate": 0.0001,
+                "steps": 1000,
+                "batchSize": 1,
+                "gradientAccumulation": 2,
+                "resolution": 1024,
+                "saveEvery": 250,
+                "seed": 42,
+                "optimizer": "adamw8bit",
+                "advanced": {
+                    "networkType": network_type,
+                    "lrScheduler": "cosine",
+                    "lrWarmupSteps": 50,
+                    "weightDecay": 0.01,
+                    "decomposeFactor": 8,
+                    "loraTargetModules": ["to_q", "to_k"],
+                    "timestepType": "sigmoid",
+                    "timestepBias": "high_noise",
+                    "lossType": "mse"
+                }
+            },
+            "output": {
+                "loraId": "lora-1",
+                "outputDir": "/tmp/out",
+                "fileName": "lora.safetensors",
+                "format": "safetensors",
+                "triggerWords": ["mychar"]
+            },
+            "provenance": {
+                "datasetId": "ds-1",
+                "datasetVersion": 1,
+                "targetId": format!("{kernel}_target"),
+                "baseModel": base_model,
+                "configSnapshot": {},
+                "outputLoraId": "lora-1",
+                "sourceJobId": "job-1",
+                "createdAt": "2026-06-06T00:00:00Z"
+            }
+        })
+    }
+
+    fn parse(value: Value) -> TrainingPlan {
+        serde_json::from_value(value).expect("plan deserializes")
+    }
+
+    #[test]
+    fn validate_rejects_unknown_plan_version() {
+        let mut value = plan_json("z_image_lora", "z_image_turbo", "lora", &["/tmp/x.png"]);
+        value["planVersion"] = json!(999);
+        let error = validate_training_plan(&parse(value)).expect_err("version mismatch rejected");
+        assert!(error
+            .to_string()
+            .contains("Unsupported training plan version"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_dataset() {
+        let plan = parse(plan_json("z_image_lora", "z_image_turbo", "lora", &[]));
+        let error = validate_training_plan(&plan).expect_err("empty dataset rejected");
+        assert!(error.to_string().contains("no items"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_image() {
+        let plan = parse(plan_json(
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &["/tmp/sceneworks-missing-7f3a9c.png"],
+        ));
+        let error = validate_training_plan(&plan).expect_err("missing image rejected");
+        assert!(error.to_string().contains("missing on the worker"));
+    }
+
+    #[test]
+    fn validate_accepts_present_images() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let path = file.path().to_string_lossy().into_owned();
+        let plan = parse(plan_json("z_image_lora", "z_image_turbo", "lora", &[&path]));
+        assert!(validate_training_plan(&plan).is_ok());
+    }
+
+    #[test]
+    fn dry_run_summary_carries_plan_facts() {
+        let plan = parse(plan_json(
+            "sdxl_lora",
+            "sdxl",
+            "lora",
+            &["/tmp/a.png", "/tmp/b.png"],
+        ));
+        let summary = dry_run_summary(&plan);
+        assert_eq!(summary.get("mode").unwrap(), "dry_run");
+        assert_eq!(summary.get("kernel").unwrap(), "sdxl_lora");
+        assert_eq!(summary.get("datasetItemCount").unwrap(), 2);
+        assert_eq!(summary.get("loraId").unwrap(), "lora-1");
+        assert_eq!(summary.get("fileName").unwrap(), "lora.safetensors");
+        // The placeholder base path does not exist.
+        assert_eq!(summary.get("baseModelInstalled").unwrap(), false);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_trainer_id_maps_mlx_native_families_and_rejects_the_rest() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            ("z_image_lora", "z_image_turbo", Some("z_image_turbo")),
+            ("sdxl_lora", "sdxl", Some("sdxl")),
+            ("ltx_mlx_lora", "ltx_2_3", Some("ltx_2_3")),
+            ("wan_lora", "wan_2_2", Some("wan2_2_ti2v_5b")),
+            ("wan_moe_lora", "wan_2_2_t2v_14b", Some("wan2_2_t2v_14b")),
+            ("wan_moe_lora", "wan_2_2_i2v_14b", Some("wan2_2_i2v_14b")),
+            // No mlx-gen trainer crate — these never route here, but map to None.
+            ("kolors_lora", "kolors", None),
+            ("lens_lora", "lens", None),
+            // Unknown A14B base model variant.
+            ("wan_moe_lora", "wan_2_2_mystery", None),
+        ];
+        for (kernel, base_model, expected) in cases {
+            let plan = parse(plan_json(kernel, base_model, "lora", &["/tmp/x.png"]));
+            assert_eq!(
+                engine_trainer_id(&plan),
+                *expected,
+                "kernel={kernel} base_model={base_model}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn map_training_config_reads_advanced_and_passes_optimizer_verbatim() {
+        let plan = parse(plan_json(
+            "z_image_lora",
+            "z_image_turbo",
+            "lokr",
+            &["/tmp/x.png"],
+        ));
+        let cfg = map_training_config(&plan.config);
+        assert_eq!(cfg.rank, 16);
+        assert_eq!(cfg.alpha as u32, 32);
+        assert_eq!(cfg.steps, 1000);
+        assert_eq!(cfg.gradient_accumulation, 2);
+        assert_eq!(cfg.seed, 42);
+        // The optimizer alias is passed verbatim; the engine normalizes it.
+        assert_eq!(cfg.optimizer, "adamw8bit");
+        assert!((cfg.weight_decay - 0.01).abs() < 1e-6);
+        assert!((cfg.learning_rate - 0.0001).abs() < 1e-6);
+        assert_eq!(cfg.lr_warmup_steps, 50);
+        assert_eq!(cfg.decompose_factor, 8);
+        assert!(matches!(cfg.network_type, NetworkType::Lokr));
+        assert!(matches!(cfg.lr_scheduler, LrSchedule::Cosine));
+        assert_eq!(
+            cfg.lora_target_modules,
+            vec!["to_q".to_owned(), "to_k".to_owned()]
+        );
+        assert_eq!(cfg.timestep_bias, "high_noise");
+        assert_eq!(cfg.trigger_word, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn map_training_config_defaults_when_advanced_is_empty() {
+        let mut value = plan_json("sdxl_lora", "sdxl", "lora", &["/tmp/x.png"]);
+        value["config"]["advanced"] = json!({});
+        let plan = parse(value);
+        let cfg = map_training_config(&plan.config);
+        assert!(matches!(cfg.network_type, NetworkType::Lora));
+        assert!(matches!(cfg.lr_scheduler, LrSchedule::Constant));
+        assert_eq!(cfg.lr_warmup_steps, 0);
+        assert_eq!(cfg.decompose_factor, -1);
+        assert!(cfg.lora_target_modules.is_empty());
+        assert_eq!(cfg.timestep_type, "sigmoid");
+        assert_eq!(cfg.loss_type, "mse");
+    }
+}

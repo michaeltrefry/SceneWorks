@@ -1463,6 +1463,180 @@ fn explicit_gpu_image_job_is_not_deferred_to_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
 }
 
+// --- Training routing (epic 3039, sc-3043/3049) ---
+
+fn training_caps() -> Vec<WorkerCapability> {
+    vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::LoraTrain,
+        WorkerCapability::LoraTrainExecute,
+    ]
+}
+
+fn mlx_training_job(
+    kernel: &str,
+    base_model: &str,
+    network_type: &str,
+    dry_run: bool,
+    requested_gpu: &str,
+) -> CreateJob {
+    CreateJob {
+        job_type: JobType::LoraTrain,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(json!({
+            "dryRun": dry_run,
+            "plan": {
+                "planVersion": 1,
+                "target": { "kernel": kernel, "baseModel": base_model },
+                "config": { "advanced": { "networkType": network_type } }
+            }
+        })),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+    }
+}
+
+#[test]
+fn mlx_eligible_training_job_defers_from_torch_worker_to_idle_mlx_worker() {
+    let store = store("mlx-training-defer");
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    let job = store
+        .create_job(mlx_training_job(
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The torch worker defers the MLX-native training job to the idle mlx worker.
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    // The mlx worker claims it and trains in-process via mlx-gen.
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the training job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn mlx_worker_excluded_from_kolors_training_job() {
+    let store = store("mlx-training-kolors");
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    // Kolors has no mlx-gen trainer crate → torch path only.
+    let job = store
+        .create_job(mlx_training_job(
+            "kolors_lora",
+            "kolors",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The mlx worker must not claim a torch-only training job.
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    // A torch worker is the home for it.
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the kolors job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn mlx_worker_excluded_from_lokr_wan_training_job() {
+    let store = store("mlx-training-lokr-wan");
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    // LoKr-on-Wan has no Kronecker merge in the mlx Wan path → torch only.
+    let job = store
+        .create_job(mlx_training_job(
+            "wan_moe_lora",
+            "wan_2_2_t2v_14b",
+            "lokr",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the LoKr-on-Wan job");
+    assert_eq!(claimed.id, job.id);
+}
+
+#[test]
+fn lokr_z_image_training_stays_mlx_eligible() {
+    let store = store("mlx-training-lokr-zimage");
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+
+    // LoKr on Z-Image/SDXL/LTX is fine — the Rust engine applies it natively.
+    let job = store
+        .create_job(mlx_training_job(
+            "z_image_lora",
+            "z_image_turbo",
+            "lokr",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the LoKr Z-Image job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn mlx_eligible_training_falls_back_to_torch_when_no_mlx_worker() {
+    let store = store("mlx-training-fallback");
+    // No mlx worker (Windows/Linux, or it's down) — torch is the only path.
+    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+
+    let job = store
+        .create_job(mlx_training_job("sdxl_lora", "sdxl", "lora", false, "auto"))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the training job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
+}
+
 // --- Video routing (epic 3018, sc-3036) ---
 
 fn video_caps() -> Vec<WorkerCapability> {

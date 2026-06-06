@@ -45,6 +45,8 @@ mod image_jobs;
 use image_jobs::*;
 mod video_jobs;
 use video_jobs::*;
+mod training_jobs;
+use training_jobs::*;
 mod downloads;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on other platforms it still builds + unit-tests (cross-platform
@@ -479,6 +481,14 @@ async fn run_utility_job(
         JobType::VideoGenerate => run_video_generate_job(api, settings, &job)
             .await
             .map_err(|error| ("Video generation failed.", error)),
+        // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
+        // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
+        // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);
+        // kolors/lens + LoKr-on-Wan stay on the Python torch worker, which is also the
+        // Windows/Linux path. Off macOS the execute capability is never advertised.
+        JobType::LoraTrain => run_lora_train_job(api, settings, &job)
+            .await
+            .map_err(|error| ("LoRA training failed.", error)),
         JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model download failed.", error)),

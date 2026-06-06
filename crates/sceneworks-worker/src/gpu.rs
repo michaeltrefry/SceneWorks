@@ -151,13 +151,21 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
 }
 
 /// The Apple-Silicon native MLX GPU worker (epic 3018): advertises `image_generate`,
-/// `image_detail` (tile-ControlNet refine, sc-3060), and `video_generate`, served
-/// in-process by the linked mlx-gen engine. `Gpu` (not
+/// `image_detail` (tile-ControlNet refine, sc-3060), `video_generate`, and LoRA/LoKr
+/// `lora_train` + `lora_train_execute` (epic 3039), served in-process by the linked
+/// mlx-gen engine. `Gpu` (not
 /// `Cpu`) so the API's `worker_supports_job` lets GPU jobs route here; it deliberately
 /// does NOT carry the CPU utility capabilities, so downloads/imports/etc. still go to
 /// the CPU worker. `video_generate` is claimed from the video runtime onward (sc-3033);
 /// the procedural stub backs models whose real MLX path is not yet linked (Wan sc-3034,
 /// LTX+audio sc-3035), and the API-side MLX-vs-Python routing is sc-3036.
+///
+/// Training (epic 3039, sc-3043/3049): the engine is always linked on macOS, so this
+/// worker can both validate plans (`lora_train`) and run real training
+/// (`lora_train_execute`) — unlike the Python worker, which advertises execute only
+/// when its torch backend is present. The API gates which `lora_train` jobs reach
+/// here to the MLX-native families (`jobs_store::training_job_is_mlx_eligible`);
+/// `kolors`/`lens` and LoKr-on-Wan stay on the Python torch worker.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_gpu() -> DiscoveredGpu {
     DiscoveredGpu {
@@ -170,6 +178,10 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // `image_detail` job runs in-process on the engine here too.
             WorkerCapability::ImageDetail,
             WorkerCapability::VideoGenerate,
+            // Native Rust LoRA/LoKr training (epic 3039): plan validation +
+            // real execution, both served in-process by `mlx_gen::load_trainer`.
+            WorkerCapability::LoraTrain,
+            WorkerCapability::LoraTrainExecute,
         ],
         utilization: None,
     }
