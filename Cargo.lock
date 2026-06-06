@@ -2437,7 +2437,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=269c8a29cb81b43735722d7931d66e35ebb846de#269c8a29cb81b43735722d7931d66e35ebb846de"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=01bf62591eb0c0e34b028c94c98a6ef7af96faa3#01bf62591eb0c0e34b028c94c98a6ef7af96faa3"
 dependencies = [
  "inventory",
  "pmetal-mlx-rs",
@@ -2448,7 +2448,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=269c8a29cb81b43735722d7931d66e35ebb846de#269c8a29cb81b43735722d7931d66e35ebb846de"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=01bf62591eb0c0e34b028c94c98a6ef7af96faa3#01bf62591eb0c0e34b028c94c98a6ef7af96faa3"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2459,7 +2459,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=269c8a29cb81b43735722d7931d66e35ebb846de#269c8a29cb81b43735722d7931d66e35ebb846de"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=01bf62591eb0c0e34b028c94c98a6ef7af96faa3#01bf62591eb0c0e34b028c94c98a6ef7af96faa3"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2470,7 +2470,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=269c8a29cb81b43735722d7931d66e35ebb846de#269c8a29cb81b43735722d7931d66e35ebb846de"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=01bf62591eb0c0e34b028c94c98a6ef7af96faa3#01bf62591eb0c0e34b028c94c98a6ef7af96faa3"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2481,7 +2481,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=269c8a29cb81b43735722d7931d66e35ebb846de#269c8a29cb81b43735722d7931d66e35ebb846de"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=01bf62591eb0c0e34b028c94c98a6ef7af96faa3#01bf62591eb0c0e34b028c94c98a6ef7af96faa3"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2491,7 +2491,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=269c8a29cb81b43735722d7931d66e35ebb846de#269c8a29cb81b43735722d7931d66e35ebb846de"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=01bf62591eb0c0e34b028c94c98a6ef7af96faa3#01bf62591eb0c0e34b028c94c98a6ef7af96faa3"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2503,19 +2503,20 @@ dependencies = [
 [[package]]
 name = "mlx-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=269c8a29cb81b43735722d7931d66e35ebb846de#269c8a29cb81b43735722d7931d66e35ebb846de"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=01bf62591eb0c0e34b028c94c98a6ef7af96faa3#01bf62591eb0c0e34b028c94c98a6ef7af96faa3"
 dependencies = [
  "inventory",
  "mlx-gen",
  "pmetal-mlx-rs",
  "serde_json",
  "unicode-normalization",
+ "zip",
 ]
 
 [[package]]
 name = "mlx-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=269c8a29cb81b43735722d7931d66e35ebb846de#269c8a29cb81b43735722d7931d66e35ebb846de"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=01bf62591eb0c0e34b028c94c98a6ef7af96faa3#01bf62591eb0c0e34b028c94c98a6ef7af96faa3"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2778,7 +2779,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.2",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5357,6 +5358,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6650,6 +6657,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "indexmap 2.14.0",
+ "memchr",
+ "typed-path",
 ]
 
 [[package]]

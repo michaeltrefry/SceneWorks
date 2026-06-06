@@ -1830,12 +1830,18 @@
         "types": ["style", "motion", "character", "enhance"]
       },
       "mlx": {
-        // No published MLX repo; the bf16 checkpoint is converted locally
-        // (python -m mlx_video.convert --quantize --q-bits 4) into
-        // <data>/models/mlx/ltx_2_3_eros. minMemoryGb mirrors the LTX-2.3 Q4 tier.
+        // No published MLX repo; the bf16 single-file checkpoint is converted locally
+        // in-process by the Rust mlx-gen-ltx converter (sc-3240, converter "ltx_video";
+        // Q4 — the reference `--quantize --q-bits 4`) into <data>/models/mlx/ltx_2_3_eros.
+        // The loader requires the latent upsampler, which eros does not bundle, so the
+        // converter merges it from the base LTX-2.3 repo (convertBaseRepo); the convert job
+        // fetches just that ~1 GB file on demand. minMemoryGb mirrors the LTX-2.3 Q4 tier.
         "minMemoryGb": 31,
         "requiresConversion": true,
+        "converter": "ltx_video",
         "convertSourceRepo": "TenStrip/LTX2.3-10Eros",
+        "convertSourceFile": "10Eros_v1_bf16.safetensors",
+        "convertBaseRepo": "Lightricks/LTX-2.3",
         "textEncoderRepo": "mlx-community/gemma-3-12b-it-bf16",
         // 10Eros's base is not pre-distilled, so the MLX adapter auto-injects the
         // cond_safe distill LoRA (resources.distilledLora) at runtime with per-pass
@@ -1929,16 +1935,27 @@
       "type": "video",
       "adapter": "wan_video",
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+      // Per-platform source (sc-3240): macOS converts the native checkpoint to MLX in-process
+      // (mlx-gen-wan ingests native Wan format only); Windows/Linux load the diffusers layout via
+      // the torch wan_video adapter. The API serves only the entry matching the running OS.
       "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.2-TI2V-5B",
+          "files": [],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 34196904505
+        },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
           "files": [],
+          "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 34203021834
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+        "model": "${HF_CACHE}/Wan-AI/Wan2.2-TI2V-5B"
       },
       "defaults": {
         "duration": 5,
@@ -1984,11 +2001,13 @@
         }
       },
       "mlx": {
-        // TI2V-5B has no published MLX repo; the native diffusers checkpoint is
-        // converted locally (tracked model_convert job) into <data>/models/mlx/wan_2_2.
+        // TI2V-5B has no published MLX repo; the native checkpoint is converted locally
+        // in-process by the Rust mlx-gen-wan converter (sc-3240, converter "wan_ti2v_5b")
+        // into <data>/models/mlx/wan_2_2. Dense bf16 (no quantization).
         "minMemoryGb": 45,
         "requiresConversion": true,
-        "convertSourceRepo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "converter": "wan_ti2v_5b",
+        "convertSourceRepo": "Wan-AI/Wan2.2-TI2V-5B",
         // MLX path is sealed (own ODE solver, no diffusers scheduler) — override
         // the top-level sampler/scheduler menu to default-only (epic 1753 §14).
         "limits": {
@@ -2113,16 +2132,28 @@
       "type": "video",
       "adapter": "wan_video",
       "capabilities": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+      // Per-platform source (sc-3240): macOS converts the native dual-expert checkpoint to MLX
+      // in-process (mlx-gen-wan); Windows/Linux load the diffusers/GGUF layout via the torch
+      // wan_video adapter. Native is larger than the diffusers layout (~126 GB vs ~72 GB). The
+      // API serves only the entry matching the running OS.
       "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.2-I2V-A14B",
+          "files": [],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 126202610088
+        },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
           "files": [],
+          "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 72000000000
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+        "model": "${HF_CACHE}/Wan-AI/Wan2.2-I2V-A14B"
       },
       "defaults": {
         "duration": 5,
@@ -2170,12 +2201,14 @@
         }
       },
       "mlx": {
-        // I2V-A14B has no published MLX repo; the native diffusers checkpoint is
-        // converted locally (tracked model_convert job) into
-        // <data>/models/mlx/wan_2_2_i2v_14b. Its distill LoRA is applied at run time.
+        // I2V-A14B has no published MLX repo; the native checkpoint is converted locally
+        // in-process by the Rust mlx-gen-wan converter (sc-3240, converter "wan_i2v_14b")
+        // into <data>/models/mlx/wan_2_2_i2v_14b (in_dim 36 image-concat, z16 VAE; dense
+        // bf16 by default). Its distill LoRA is applied at run time.
         "minMemoryGb": 133,
         "requiresConversion": true,
-        "convertSourceRepo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        "converter": "wan_i2v_14b",
+        "convertSourceRepo": "Wan-AI/Wan2.2-I2V-A14B",
         "limits": {
           "samplers": ["default"],
           "schedulers": ["default"]

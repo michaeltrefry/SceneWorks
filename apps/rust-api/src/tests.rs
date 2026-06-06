@@ -5739,6 +5739,56 @@ fn model_download_size_helpers_match_contract_shapes() {
 }
 
 #[test]
+fn platform_tagged_downloads_resolve_per_os() {
+    // A video model that ships a native MLX-convert checkpoint (macOS) and a diffusers/torch
+    // checkpoint (Windows/Linux) for the same model id (sc-3240).
+    let model = json!({
+        "downloads": [
+            { "provider": "huggingface", "repo": "Wan-AI/Wan2.2-TI2V-5B", "platforms": ["macos"] },
+            { "provider": "huggingface", "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers", "platforms": ["windows", "linux"] }
+        ]
+    });
+    let resolved_repo = |model: &Value| {
+        super::model_download(model).and_then(|download| {
+            download
+                .get("repo")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+    };
+
+    // macOS keeps the native MLX-convert source...
+    let mut mac = model.clone();
+    super::retain_downloads_for_os(&mut mac, "macos");
+    assert_eq!(
+        resolved_repo(&mac),
+        Some("Wan-AI/Wan2.2-TI2V-5B".to_owned())
+    );
+
+    // ...Windows/Linux keep the diffusers/torch repo.
+    for os in ["windows", "linux"] {
+        let mut other = model.clone();
+        super::retain_downloads_for_os(&mut other, os);
+        assert_eq!(
+            resolved_repo(&other),
+            Some("Wan-AI/Wan2.2-TI2V-5B-Diffusers".to_owned()),
+            "os={os}"
+        );
+    }
+
+    // Untagged single-repo models are untouched on every OS.
+    let mut agnostic = json!({
+        "downloads": [{ "provider": "huggingface", "repo": "owner/model" }]
+    });
+    super::retain_downloads_for_os(&mut agnostic, "macos");
+    assert_eq!(
+        agnostic["downloads"].as_array().map(Vec::len),
+        Some(1),
+        "agnostic downloads must not be filtered"
+    );
+}
+
+#[test]
 fn lora_family_filter_shapes_match_contract_fallbacks() {
     let shapes = [
         json!({ "families": ["z-image"] }),

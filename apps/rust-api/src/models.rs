@@ -157,9 +157,9 @@ pub(crate) async fn create_model_download_job(
 
 /// Convert a model's native checkpoint into the local MLX format (macOS/Apple
 /// Silicon). Only valid for models whose manifest declares `mlx.requiresConversion`
-/// (Wan TI2V-5B, Wan I2V-A14B); turnkey MLX models need no conversion. The native
-/// source checkpoint must already be downloaded; the Rust utility worker shells out
-/// to the Python/MLX `mlx_video.convert_wan` tool.
+/// (Wan TI2V-5B/I2V-A14B, LTX-2.3 eros, FLUX.2-klein); turnkey MLX models need no conversion. The
+/// native source checkpoint must already be downloaded; the worker converts it in-process via the
+/// linked `mlx-gen-*` converters, selected by the `mlx.converter` discriminator (sc-3240).
 pub(crate) async fn create_model_convert_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -182,10 +182,10 @@ pub(crate) async fn create_model_convert_job(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let quantize = payload.quantize_bits.is_some();
-    // Two sources: models that require conversion read the native diffusers
-    // checkpoint (convertSourceRepo); turnkey MLX models (a pre-converted bf16
-    // `repo`) have nothing to convert, but can still be quantized in place from
-    // that repo (`--quantize-only`), so a quant request on a turnkey model is valid.
+    // Two sources: models that require conversion read the native checkpoint (convertSourceRepo);
+    // turnkey MLX models (a pre-converted bf16 `repo`) carried a legacy in-place quantize path. The
+    // native Rust converters don't re-quantize an already-converted dir, so the worker now rejects
+    // `quantize_only` with a clear message (sc-3240) — quantize during native conversion instead.
     let (source_repo, quantize_only) = if requires_conversion {
         let repo = mlx
             .get("convertSourceRepo")
@@ -711,6 +711,13 @@ pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiErr
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
     let mut models = merge_entries_by_id(builtin, user);
+    // Resolve per-platform download sources before computing install state/size: some video models
+    // carry both a native MLX-convert checkpoint (macOS) and a diffusers/torch checkpoint
+    // (Windows/Linux). Keep only the entries applicable to this OS so the download job, status,
+    // size, and the frontend all agree on the right repo (sc-3240).
+    for model in &mut models {
+        retain_downloads_for_os(model, std::env::consts::OS);
+    }
     let download_contexts = models
         .iter()
         .map(model_download_context)
@@ -980,6 +987,31 @@ pub(crate) fn merge_model_manifest_entry(builtin: Option<Value>, user: Option<Va
             merged
         }
     }
+}
+
+/// Restrict a model's `downloads` to the entries applicable to `os` (`std::env::consts::OS`).
+/// A download entry with a `platforms` array applies only to the listed OSes; an entry without one
+/// is platform-agnostic and always kept. Some video models ship two source repos for the same model
+/// — the native MLX-convert checkpoint on macOS vs the diffusers/torch checkpoint on Windows/Linux
+/// (sc-3240, Wan2.2) — so filtering here makes the download job, install status, size, and the
+/// frontend's `downloads[0]` all resolve to the right per-platform repo from one seam. No-op unless
+/// at least one entry is platform-tagged, so single-repo models are untouched.
+pub(crate) fn retain_downloads_for_os(model: &mut Value, os: &str) {
+    let Some(downloads) = model.get_mut("downloads").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if !downloads
+        .iter()
+        .any(|entry| entry.get("platforms").is_some())
+    {
+        return;
+    }
+    downloads.retain(
+        |entry| match entry.get("platforms").and_then(Value::as_array) {
+            Some(platforms) => platforms.iter().any(|p| p.as_str() == Some(os)),
+            None => true,
+        },
+    );
 }
 
 pub(crate) fn model_download(model: &Value) -> Option<Value> {
