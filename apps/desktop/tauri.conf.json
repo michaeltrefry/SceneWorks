@@ -37,7 +37,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "26.2"
     },
     "windows": {
       "webviewInstallMode": {

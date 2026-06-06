@@ -23,10 +23,6 @@ from .image_adapters import (
     FluxDiffusersAdapter,
     KolorsDiffusersAdapter,
     LensTurboAdapter,
-    MlxFlux2Adapter,
-    MlxFluxAdapter,
-    MlxQwenAdapter,
-    MlxZImageAdapter,
     ProceduralImageAdapter,
     QwenImageAdapter,
     SdxlDiffusersAdapter,
@@ -1656,21 +1652,17 @@ def run_prompt_refine_job(api: ApiClient, settings: WorkerSettings, job: dict) -
 def run_worker_loop(settings: WorkerSettings) -> None:
     gpu = discover_gpu(settings.gpu_id)
     api = ApiClient(settings)
+    # Epic 3018 cutover (sc-3032): the Python MLX image adapters (mlx_flux / mlx_qwen /
+    # mlx_z_image / mlx_flux2) were deleted — MLX image generation runs on the in-process
+    # Rust GPU worker (gpu_id "mlx"). The torch adapters below stay as the Windows/Linux
+    # path and the Mac fallback when the mlx worker is not claiming jobs.
     image_adapters: dict[str, object] = {
         "procedural_preview": ProceduralImageAdapter(),
         "qwen_image": QwenImageAdapter(),
-        "mlx_qwen": MlxQwenAdapter(),
         "z_image_diffusers": ZImageDiffusersAdapter(),
-        "mlx_z_image": MlxZImageAdapter(),
         "lens_turbo": LensTurboAdapter(),
         "sensenova_u1": SenseNovaU1Adapter(),
         "flux_diffusers": FluxDiffusersAdapter(),
-        "mlx_flux": MlxFluxAdapter(),
-        # FLUX.2-klein family (sc-2164). Registered here so create_image_adapter's
-        # `adapters.get("mlx_flux2")` dispatch resolves in the real runtime; the
-        # earlier omission made every FLUX.2 job crash with "'NoneType' object
-        # has no attribute 'generate'" (sc-2203).
-        "mlx_flux2": MlxFlux2Adapter(),
         "kolors_diffusers": KolorsDiffusersAdapter(),
         "sdxl_diffusers": SdxlDiffusersAdapter(),
         "chroma_diffusers": ChromaDiffusersAdapter(),
