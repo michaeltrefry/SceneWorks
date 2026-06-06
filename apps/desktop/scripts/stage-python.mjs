@@ -22,7 +22,6 @@ mkdirSync(outDir, { recursive: true });
 for (const file of [
   "requirements.txt",
   "requirements-ltx.txt",
-  "requirements-mlx.txt",
   "requirements-lens.txt",
   // InstantID face-identity extras (insightface/onnxruntime/onnx/peft/einops);
   // installed into the main venv by setup.rs so the instantid_sdxl adapter runs.

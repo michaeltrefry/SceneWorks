@@ -271,24 +271,6 @@ fn requirements_lens_path(app: &AppHandle) -> PathBuf {
         .join("requirements-lens.txt")
 }
 
-/// requirements-mlx.txt location (Apple Silicon MLX video inference deps): the
-/// bundled resource in a packaged app, or the repo copy during development.
-/// Optional and macOS-only — installed by `provision_venv` only on darwin so the
-/// Windows/Linux PyTorch worker is unaffected.
-#[cfg(target_os = "macos")]
-fn requirements_mlx_path(app: &AppHandle) -> PathBuf {
-    if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("python-src").join("requirements-mlx.txt");
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("worker")
-        .join("requirements-mlx.txt")
-}
-
 /// Platform default workspace data directory, used when the user hasn't picked a
 /// custom location in the first-run splash / Settings.
 pub fn default_data_dir() -> PathBuf {
@@ -565,17 +547,9 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     // stay blocked. Epic 2282 / sc-2285.
     let requirements_pose = requirements_pose_path(app);
     let requirements_pose_body = std::fs::read_to_string(&requirements_pose).unwrap_or_default();
-    // Apple Silicon MLX video inference deps — macOS-only; empty body elsewhere so
-    // the marker stays stable and the Windows/Linux PyTorch worker is untouched.
-    #[cfg(target_os = "macos")]
-    let requirements_mlx = requirements_mlx_path(app);
-    #[cfg(target_os = "macos")]
-    let requirements_mlx_body = std::fs::read_to_string(&requirements_mlx).unwrap_or_default();
-    #[cfg(not(target_os = "macos"))]
-    let requirements_mlx_body = String::new();
     let marker = marker_path();
     let expected = format!(
-        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# mlx\n{requirements_mlx_body}\n# instantid\n{requirements_instantid_body}\n# pulid_flux\n{requirements_pulid_flux_body}\n# pose\n{requirements_pose_body}"
+        "v{SETUP_VERSION}\n{requirements_body}\n# ltx\n{requirements_ltx_body}\n# instantid\n{requirements_instantid_body}\n# pulid_flux\n{requirements_pulid_flux_body}\n# pose\n{requirements_pose_body}"
     );
 
     if python.exists() {
@@ -625,12 +599,6 @@ async fn provision_venv(app: &AppHandle) -> Result<(), String> {
     let mut requirement_files = vec![requirements.clone()];
     if requirements_ltx.exists() {
         requirement_files.push(requirements_ltx.clone());
-    }
-    // MLX deps (Apple Silicon only): the native-MLX LTX/Wan video path. Resolved
-    // in the same uv pass so transformers/numpy stay on one ABI-compatible set.
-    #[cfg(target_os = "macos")]
-    if requirements_mlx.exists() {
-        requirement_files.push(requirements_mlx.clone());
     }
     // InstantID extras resolve cleanly alongside the pinned torch/diffusers stack
     // (validated on the torch 2.8 / diffusers 0.39 worker venv) — add them to the
