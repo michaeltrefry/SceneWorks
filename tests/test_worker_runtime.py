@@ -113,7 +113,6 @@ from scene_worker.training_adapters import (
     SUPPORTED_LR_SCHEDULERS,
     SUPPORTED_TRAINING_PLAN_VERSION,
     LensLoraTrainer,
-    LtxMlxLoraTrainer,
     SdxlLoraTrainer,
     KolorsLoraTrainer,
     TrainingKernelError,
@@ -125,8 +124,6 @@ from scene_worker.training_adapters import (
     _WanLoraBackend,
     _WanMoeLoraBackend,
     _ZImageLoraBackend,
-    _build_mlx_lr_schedule,
-    _build_mlx_optimizer,
     apply_weight_noise,
     build_lr_scheduler,
     build_optimizer,
@@ -139,7 +136,6 @@ from scene_worker.training_adapters import (
     lr_schedule_updates,
     normalize_lr_scheduler,
     read_run_config,
-    require_mlx_runtime,
     resolve_pretrained_source,
     resolve_training_adapter_source,
     sample_training_timestep,
@@ -5372,66 +5368,6 @@ def test_apply_weight_noise_skips_frozen_params():
     assert not torch.equal(trainable.detach(), torch.zeros(8))
 
 
-def test_build_mlx_lr_schedule_constant_no_warmup_is_plain_float():
-    # Plain constant (no warmup) collapses to a plain float — byte-identical to the
-    # pre-scheduler MLX path, with no schedule callable and no MLX dependency.
-    assert _build_mlx_lr_schedule("constant", 0.1, total_updates=10, warmup_updates=0) == pytest.approx(0.1)
-
-
-def test_build_mlx_lr_schedule_callable_returns_mx_array_matching_multiplier():
-    mx = pytest.importorskip("mlx.core")
-
-    # Non-constant / warmup returns a callable that mirrors the SAME shared
-    # multiplier the torch LambdaLR uses, so both backends decay identically. The
-    # value MUST be an mx.array, not a Python float: MLX stores the schedule's
-    # return straight into optimizer state and calls ``.astype()`` on it, so a
-    # float would crash on the first optimizer update.
-    base = 0.1
-    for name, total, warmup in [("cosine", 10, 4), ("linear", 8, 0), ("constant", 12, 3)]:
-        schedule = _build_mlx_lr_schedule(name, base, total_updates=total, warmup_updates=warmup)
-        assert callable(schedule)
-        for step in range(total + 1):
-            value = schedule(step)
-            assert isinstance(value, mx.array)
-            assert float(value) == pytest.approx(base * lr_decay_multiplier(name, step, total, warmup))
-
-    # The warmup first step is nonzero (1/(warmup+1) of base), not a wasted 0-LR
-    # update — the divergence the torch path deliberately avoids.
-    warmup_schedule = _build_mlx_lr_schedule("cosine", base, total_updates=10, warmup_updates=4)
-    assert float(warmup_schedule(0)) > 0.0
-    assert float(warmup_schedule(0)) == pytest.approx(base * (1 / 5))
-
-
-def test_build_mlx_lr_schedule_drives_real_optimizer_lr_per_update():
-    # Integration guard: feed the schedule to a real mlx.optimizers optimizer
-    # (exactly as the LTX MLX backend does) and confirm the effective LR follows
-    # lr_decay_multiplier, advancing once per optimizer.update() from the
-    # optimizer's own 0-indexed step counter — the same curve the torch LambdaLR
-    # path produces. This exercises the float-vs-mx.array contract that the
-    # in-isolation callable test cannot.
-    mx = pytest.importorskip("mlx.core")
-    nn = pytest.importorskip("mlx.nn")
-
-    base = 0.05
-    total, warmup = 10, 0
-    schedule = _build_mlx_lr_schedule("cosine", base, total_updates=total, warmup_updates=warmup)
-    optimizer = _build_mlx_optimizer("adamw", schedule, 0.0)
-    model = nn.Linear(2, 2)
-
-    observed = []
-    for _ in range(total):
-        _loss, grads = nn.value_and_grad(model, lambda m: mx.sum(m(mx.ones((1, 2))) ** 2))(model)
-        optimizer.update(model, grads)
-        mx.eval(model.parameters(), optimizer.state)
-        observed.append(float(optimizer.learning_rate))
-
-    expected = [base * lr_decay_multiplier("cosine", step, total, warmup) for step in range(total)]
-    assert observed == pytest.approx(expected, abs=1e-6)
-    # And it actually decays — regression guard for the float-return crash that
-    # silently left every non-constant MLX schedule non-functional.
-    assert observed[0] > observed[total // 2] > observed[-1]
-
-
 def test_z_image_lora_backend_activates_default_adapter():
     class FakeTransformer:
         def __init__(self):
@@ -6372,78 +6308,13 @@ def test_z_image_trainer_cancels_and_skips_save(tmp_path):
     assert backend.cleaned is True
 
 
-def test_require_mlx_runtime_rejects_non_apple_silicon(monkeypatch):
-    import scene_worker.training_adapters as ta
-
-    monkeypatch.setattr(ta.sys, "platform", "linux")
-    monkeypatch.setattr(ta.platform, "machine", lambda: "x86_64")
-    with pytest.raises(TrainingKernelError, match="Apple Silicon"):
-        require_mlx_runtime()
-
-
-def test_require_mlx_runtime_rejects_apple_silicon_without_mlx(monkeypatch):
-    import scene_worker.training_adapters as ta
-
-    monkeypatch.setattr(ta.sys, "platform", "darwin")
-    monkeypatch.setattr(ta.platform, "machine", lambda: "arm64")
-
-    def _missing(name):
-        raise ImportError(f"No module named {name!r}")
-
-    monkeypatch.setattr(ta.importlib, "import_module", _missing)
-    with pytest.raises(TrainingKernelError, match="optional MLX worker dependencies"):
-        require_mlx_runtime()
-
-
-def test_require_mlx_runtime_passes_on_apple_silicon_with_mlx(monkeypatch):
-    import scene_worker.training_adapters as ta
-
-    monkeypatch.setattr(ta.sys, "platform", "darwin")
-    monkeypatch.setattr(ta.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(ta.importlib, "import_module", lambda name: ModuleType(name))
-    # Apple Silicon + MLX available: no error.
-    require_mlx_runtime()
-
-
-def test_create_training_kernel_resolves_ltx_mlx():
-    kernel = create_training_kernel("ltx_mlx_lora")
-    assert isinstance(kernel, LtxMlxLoraTrainer)
-    # The LTX trainer reuses the Z-Image backend-agnostic staged orchestration.
-    assert isinstance(kernel, ZImageLoraTrainer)
-
-
-def test_ltx_mlx_trainer_runs_stages_with_fake_backend(tmp_path):
-    plan = _real_train_plan(tmp_path, steps=4, save_every=2)
-    plan["target"] = {
-        "targetId": "ltx_video_lora",
-        "kernel": "ltx_mlx_lora",
-        "family": "ltx-video",
-        "baseModel": "ltx_2_3",
-        "baseModelRepo": "notapalindrome/ltx23-mlx-av-q4",
-        "baseModelPath": str(tmp_path / "model"),
-    }
-    backend = FakeTrainingBackend()
-    trainer = LtxMlxLoraTrainer(backend=backend)
-    events_log = []
-
-    result = trainer.train(
-        settings=SimpleNamespace(worker_id="worker-1", gpu_id="0"),
-        plan=plan,
-        progress=lambda status, stage, value, message, *extra: events_log.append((status, stage)),
-        cancel_requested=lambda: False,
-    )
-
-    stages = {stage for _status, stage in events_log}
-    statuses = {status for status, _stage in events_log}
-    assert backend.events[0] == "load"
-    assert ("step", 4) in backend.events
-    assert result["kernel"] == "ltx_mlx_lora"
-    assert result["mode"] == "train"
-    assert result["stepsCompleted"] == 4
-    assert {"loading_model", "caching_latents", "training", "saving"}.issubset(stages)
-    assert statuses <= _VALID_JOB_STATUSES
-    assert result["outputPath"] == backend.saved
-    assert result["triggerWords"] == ["miraStyle"]
+def test_ltx_mlx_lora_kernel_is_retired_from_python():
+    # Epic 3039 (sc-3049): native MLX LTX LoRA training moved to the Rust mlx-gen
+    # engine. The Python kernel was removed, so resolving it now raises — the Rust
+    # mlx worker is the sole LTX-training path (routing keeps `ltx_mlx_lora` off
+    # non-mlx workers; see jobs_store::training_kernel_is_mlx_only).
+    with pytest.raises(TrainingKernelError):
+        create_training_kernel("ltx_mlx_lora")
 
 
 def test_run_lora_train_job_executes_real_run(monkeypatch, tmp_path):

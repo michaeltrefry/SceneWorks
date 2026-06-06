@@ -110,42 +110,16 @@ SceneWorks storage, config defaults, or the target registry directly.
   reports preparing, loading, caching, training, checkpointing (every `saveEvery`
   steps), and saving stages, and honors cancellation between steps. A real run
   requires the inference backend; the kernel reports clearly when it is missing.
-- **Native MLX video LoRA** (`ltx_mlx_lora`, :class:`LtxMlxLoraTrainer`, Apple
-  Silicon only — gated by `target.requiresAppleSilicon`) trains an LTX-2.3 video
-  LoRA from a still-image dataset entirely in MLX. It loads the quantized
-  AudioVideo transformer (`notapalindrome/ltx23-mlx-av-q4`) plus the LTX VAE
-  encoder and gemma text encoder, freezes the base, injects rank-r LoRA into the
-  `attn1`/`attn2` projections, caches each still as a single-frame latent
-  (`encode_image`, already per-channel normalized) and a caption context embed,
-  then runs a rectified-flow loop. The raw transformer output is regressed to
-  `noise - clean` at timestep `sigma` (no sign flip — unlike the diffusers
-  Z-Image path above, the LTX `to_denoised` consumes the output directly). The
-  adapter is saved keyed by the real module paths (`{module}.lora_A.weight` /
-  `.lora_B.weight` + scalar `.alpha`) so `mlx_video.lora` round-trips at
-  inference with no key remap. The AdamW optimizer honors
-  `config.advanced.weightDecay` (passed through to MLX `AdamW`; plain `Adam` has
-  no decoupled decay) and the same `lrScheduler` set (`constant`/`linear`/`cosine`
-  + `lrWarmupSteps`) via a schedule callable that shares the torch decay/warmup
-  math (`lr_decay_multiplier`), which MLX advances from the optimizer's own step
-  counter. Validated end-to-end: a rank-32 / 1500-step run on
-  ~76 stills (res 512, weight decay 0.01, trigger-focused captions) produces a clearly attributable
-  identity effect through the real `MlxVideoAdapter` generation path. Practical
-  footprint: ~1.35 s/step. The gemma text encoder (~28 GB) is released after
-  caption caching, so the **training loop peaks ~27 GB**; the whole-run ceiling
-  is now the dataset-caching phase at **~42 GB (text encoder still resident)** —
-  a **48 GB Mac suffices** (64 GB+ comfortable). Generation peaks ~34 GB.
-  Mid-training previews are supported: with `config.advanced.sampleEvery > 0` the
-  kernel renders a short clip per `samplePrompts` entry from the in-progress
-  adapter at each interval (written under `<output>/samples/step-NNNNNN/`,
-  streamed through job progress) — the only honest convergence signal, since the
-  flow-matching loss is uninformative. A preview saves the live adapter and drives
-  the real `generate_video_with_audio` path with it applied (so previews match
-  final inference), which reloads the full inference stack — a fixed seed keeps
-  renders comparable across checkpoints, but the peak rises to **~46 GB** (a
-  64 GB+ Mac is recommended with previews on; otherwise keep them off and generate
-  from saved checkpoints). The distilled sampler is fixed (8+3 stage steps,
-  baked-in guidance), so `sampleSteps`/`sampleGuidanceScale` do not affect preview
-  output.
+- **Native MLX video LoRA** (`ltx_mlx_lora`, Apple Silicon only) is no longer a
+  Python kernel: epic 3039 (sc-3049) retired the Python `LtxMlxLoraTrainer` and
+  routes LTX-2.3 video-LoRA training to the in-process Rust **mlx-gen** engine on
+  the macOS GPU worker (`crates/sceneworks-worker/src/training_jobs.rs` →
+  `mlx_gen::load_trainer("ltx_2_3")`), exactly like the other MLX-native families.
+  It still trains a still-image dataset into an `ltx-video` LoRA via a
+  rectified-flow loop on the quantized LTX transformer + Gemma text encoder; the
+  produced adapter reloads through the real LTX inference path. The Rust trainer
+  has no torch fallback (LTX training was always Apple-Silicon MLX), so the API
+  routes `ltx_mlx_lora` exclusively to the mlx worker.
 
 The kernel produces the weights file and a result summary. Registering the
 produced adapter as a usable SceneWorks LoRA (with provenance and Image Studio

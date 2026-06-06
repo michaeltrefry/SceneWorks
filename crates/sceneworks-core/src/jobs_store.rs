@@ -1828,6 +1828,31 @@ fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     true
 }
 
+/// Training kernels with NO non-Rust fallback — only the in-process Rust mlx worker
+/// can run them. `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049)
+/// retired that Python trainer, leaving the native Rust LTX trainer as the sole path,
+/// so a non-mlx worker must refuse the job (leaving it queued for the mlx worker)
+/// rather than claim it and fail with "no training kernel". The torch families
+/// (z-image/sdxl/wan) keep their Python trainer as the Windows path + Mac fallback, so
+/// they are deliberately NOT listed here.
+const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora"];
+
+/// Whether this `lora_train` job targets a kernel with no non-Rust fallback (see
+/// [`MLX_ONLY_TRAINING_KERNELS`]). Such a job can only run on the mlx worker.
+fn training_kernel_is_mlx_only(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return false;
+    }
+    job.payload
+        .get("plan")
+        .and_then(Value::as_object)
+        .and_then(|plan| plan.get("target"))
+        .and_then(Value::as_object)
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)
+        .is_some_and(|kernel| MLX_ONLY_TRAINING_KERNELS.contains(&kernel))
+}
+
 /// Whether a resolved training plan requests a LoKr (Kronecker) adapter. The network
 /// type lives in the plan's `config.advanced.networkType` (SceneWorks training
 /// contract), distinct from a generation request's per-LoRA `networkType`.
@@ -1843,6 +1868,12 @@ fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
 
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
+        return false;
+    }
+    // Epic 3039 (sc-3049): a training kernel with no torch fallback (the retired Python
+    // MLX LTX trainer) runs only on the mlx worker — a non-mlx worker must refuse it
+    // (leaving it queued for the mlx worker) instead of claiming it and failing.
+    if !worker.gpu_id.eq_ignore_ascii_case("mlx") && training_kernel_is_mlx_only(job) {
         return false;
     }
     // Epic 3018/3041 + sc-3036: the in-process MLX worker (gpu_id "mlx") serves a fixed

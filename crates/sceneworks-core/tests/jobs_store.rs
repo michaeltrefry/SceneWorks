@@ -1637,6 +1637,37 @@ fn mlx_eligible_training_falls_back_to_torch_when_no_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
 }
 
+#[test]
+fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
+    let store = store("mlx-training-ltx-only");
+    // sc-3049 retired the Python MLX LTX trainer, so `ltx_mlx_lora` has no torch
+    // fallback: a torch worker must NOT claim it — it stays queued for the mlx worker.
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    let job = store
+        .create_job(mlx_training_job(
+            "ltx_mlx_lora",
+            "ltx_2_3",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+
+    // The mlx worker is the only home for it.
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the LTX training job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
 // --- Video routing (epic 3018, sc-3036) ---
 
 fn video_caps() -> Vec<WorkerCapability> {
