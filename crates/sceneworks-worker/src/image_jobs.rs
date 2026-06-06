@@ -3941,9 +3941,9 @@ mod tests {
     }
 
     /// sc-3031 A/B dump (pose): generate ONE strict-pose image through the **real new-adapter
-    /// path** — the production `resolve_control_weights` / `resolve_control_scale` / `parse_poses`
-    /// + `draw_wholebody` skeleton render + `zimage_control_load` / `zimage_control_generate_one`
-    /// core that `generate_zimage_control_stream` drives — and write it to `$SC3031_OUT` for
+    /// path** — the production `resolve_control_weights` / `resolve_control_scale` / `parse_poses`,
+    /// the `draw_wholebody` skeleton render, and `zimage_control_load` / `zimage_control_generate_one`
+    /// (the core that `generate_zimage_control_stream` drives) — and write it to `$SC3031_OUT` for
     /// head-to-head comparison against the Python `MlxZImageAdapter` strict-pose tier (drive the
     /// Python side with the SAME `advanced.poses` payload). Env: `SC3031_PAYLOAD` (must carry
     /// `advanced.poses`), `SC3031_OUT`; set `SCENEWORKS_DATA_DIR` + `HF_HOME`.
