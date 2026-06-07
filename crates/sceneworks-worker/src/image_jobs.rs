@@ -119,8 +119,9 @@ const MLX_MODELS: &[MlxModel] = &[
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
     // 40 steps (engine's own default is 4 — passed explicitly, like the txt2img row). The
     // edit path resolves guidance from `trueCfgScale` (4.0), NOT `guidanceScale`; see
-    // `resolve_qwen_edit_guidance`. The `_2511_lightning` distill (sampler + lightx2v LoRA)
-    // is a separate story (sc-3398) and is intentionally absent here.
+    // `resolve_qwen_edit_guidance`. The `_2511_lightning` distill (4-step, CFG-off) shares
+    // these weights but adds the `lightning` sampler + the lightx2v distill LoRA — see the
+    // row below and [`qwen_edit_lightning`] (sc-3398).
     MlxModel {
         sceneworks_id: "qwen_image_edit",
         engine_id: "qwen_image_edit",
@@ -149,6 +150,23 @@ const MLX_MODELS: &[MlxModel] = &[
         supports_guidance: true,
         default_guidance: 4.0,
         supports_negative_prompt: true,
+        adapter_label: "mlx_qwen",
+    },
+    // Lightning 4-step distill (sc-3398): same `qwen_image_edit` engine model + base
+    // Qwen-Image-Edit-2511 weights as the rows above, but the generate path passes the
+    // `lightning` sampler (static-shift schedule + CFG-off single forward) and stacks the
+    // lightx2v distill LoRA ahead of any user LoRAs (see [`qwen_edit_lightning`] +
+    // [`generate_qwen_edit_stream`]). Python parity (MODEL_TARGETS): 4 steps, guidance 1.0,
+    // CFG off — so no negative prompt. The distill LoRA is a CFG-distilled adapter, so the
+    // engine runs a single forward/step regardless of `default_guidance`.
+    MlxModel {
+        sceneworks_id: "qwen_image_edit_2511_lightning",
+        engine_id: "qwen_image_edit",
+        default_repo: "Qwen/Qwen-Image-Edit-2511",
+        default_steps: 4,
+        supports_guidance: true,
+        default_guidance: 1.0,
+        supports_negative_prompt: false,
         adapter_label: "mlx_qwen",
     },
     // FLUX.2-klein (sc-3025) — MLX-only family (no torch fallback). All three SceneWorks
@@ -2323,16 +2341,124 @@ async fn generate_flux2_edit_stream(
 // ---------------------------------------------------------------------------
 
 /// The engine edit-model id for a Qwen SceneWorks model, or `None` if it has no edit
-/// variant. `qwen_image_edit` / `_2509` / `_2511` all map to the single `qwen_image_edit`
-/// engine model (`_2511_lightning` is sc-3398, deliberately excluded).
+/// variant. `qwen_image_edit` / `_2509` / `_2511` / `_2511_lightning` all map to the single
+/// `qwen_image_edit` engine model; the lightning id differs only in its sampler + distill
+/// LoRA (see [`qwen_edit_lightning`]), not in the engine model.
 #[cfg(target_os = "macos")]
 fn qwen_edit_engine_id(model: &str) -> Option<&'static str> {
     match model {
-        "qwen_image_edit" | "qwen_image_edit_2509" | "qwen_image_edit_2511" => {
-            Some("qwen_image_edit")
-        }
+        "qwen_image_edit"
+        | "qwen_image_edit_2509"
+        | "qwen_image_edit_2511"
+        | "qwen_image_edit_2511_lightning" => Some("qwen_image_edit"),
         _ => None,
     }
+}
+
+/// The Lightning few-step distill for a Qwen edit variant, or `None` for the production
+/// (multi-step true-CFG) path. The engine's `lightning` sampler (static-shift schedule +
+/// CFG-off single forward, mlx-gen-qwen-image `model_edit.rs`, sc-2909) only produces a
+/// clean image when the matching lightx2v distill LoRA is stacked at load time — so a
+/// lightning variant carries both. Worker-local: the distill LoRA is fetched lazily into
+/// the HF cache on first use (`ensure_distill_lora_cached`), mirroring the Python path's
+/// `load_lora_weights` → `fuse_lora` (it is not a manifest install artifact). sc-3398.
+#[cfg(target_os = "macos")]
+struct LightningDistill {
+    /// The engine sampler id passed via `GenerationRequest.sampler`.
+    sampler: &'static str,
+    /// HuggingFace repo holding the distill LoRA.
+    repo: &'static str,
+    /// The distill LoRA filename within the repo (the 4-step bf16 variant matches the
+    /// 4-step `default_steps` of the lightning model row).
+    file: &'static str,
+}
+
+/// The Lightning distill config for a SceneWorks model id, or `None` for every
+/// production variant. Only `qwen_image_edit_2511_lightning` is a distilled variant today.
+#[cfg(target_os = "macos")]
+fn qwen_edit_lightning(model: &str) -> Option<LightningDistill> {
+    match model {
+        "qwen_image_edit_2511_lightning" => Some(LightningDistill {
+            sampler: "lightning",
+            repo: "lightx2v/Qwen-Image-Edit-2511-Lightning",
+            file: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+        }),
+        _ => None,
+    }
+}
+
+/// Ensure a single distill-LoRA `file` from HuggingFace `repo` is materialized in the
+/// shared HF hub cache, returning its absolute path. Fast-paths when the file is already
+/// cached; otherwise fetches just that file into the standard `models--<org>--<name>`
+/// layout (deduping with the Python loader and other tools, sc-1904) — the Rust generate
+/// path assumes weights are cached, so the lightning path fetches its distill LoRA lazily
+/// here, mirroring the Python `load_lora_weights` HF download (sc-3398, decision (b):
+/// worker-local, not a cross-cutting model-install artifact).
+#[cfg(target_os = "macos")]
+async fn ensure_distill_lora_cached(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    repo: &str,
+    file: &str,
+) -> WorkerResult<PathBuf> {
+    // Fast path: already materialized in the hub cache (the common case after first use).
+    if let Some(snapshot_dir) =
+        crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, repo)
+    {
+        let candidate = snapshot_dir.join(file);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    let repo_dir = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Unable to resolve Hugging Face cache path for {repo}."
+        ))
+    })?;
+    let revision = "main";
+    let client = reqwest::Client::new();
+    let snapshot =
+        HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &[file.to_owned()]).await?;
+    if snapshot.files.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Distill LoRA {file} not found in Hugging Face repo {repo}."
+        )));
+    }
+    let mut progress = DownloadProgress::new(
+        repo,
+        directory_size(&repo_dir.join("blobs")).await,
+        snapshot.total_bytes(),
+        progress_report_interval(settings),
+    );
+    download_snapshot_into_cache(
+        &DownloadContext {
+            api,
+            client: &client,
+            settings,
+            job_id: &job.id,
+            cancel_message: "Generation canceled while fetching the Lightning distill LoRA.",
+            fresh_download: false,
+        },
+        &repo_dir,
+        revision,
+        &snapshot,
+        &mut progress,
+    )
+    .await?;
+    let snapshot_dir = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, repo)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Hugging Face snapshot for {repo} missing after download."
+            ))
+        })?;
+    let path = snapshot_dir.join(file);
+    if !path.is_file() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Distill LoRA {file} missing from the {repo} snapshot after download."
+        )));
+    }
+    Ok(path)
 }
 
 /// Reference asset ids for a Qwen edit: the character-flow `referenceAssetId`, else the
@@ -2443,6 +2569,8 @@ fn qwen_edit_raw_settings(
 
 /// Generate one Qwen edit image conditioned on `conditioning` (the reference set). True
 /// CFG: passes the negative prompt + `guidance`. Mirrors [`flux2_edit_generate_one`].
+/// `sampler` selects the engine recipe — `Some("lightning")` runs the few-step distilled
+/// path (CFG-off single forward), `None` the production multi-step true-CFG path (sc-3398).
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn qwen_edit_generate_one(
@@ -2454,6 +2582,7 @@ fn qwen_edit_generate_one(
     seed: i64,
     steps: u32,
     guidance: f32,
+    sampler: Option<&str>,
     conditioning: Vec<Conditioning>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -2467,6 +2596,7 @@ fn qwen_edit_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance: Some(guidance),
+        sampler: sampler.map(str::to_owned),
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -2515,7 +2645,20 @@ async fn generate_qwen_edit_stream(
     let steps = resolve_steps(request, model);
     let guidance = resolve_qwen_edit_guidance(request, model);
     let negative_prompt = resolve_negative_prompt(request, model);
-    let adapters = resolve_adapters(request)?;
+    // Lightning few-step distill (sc-3398): the `lightning` sampler engages the engine's
+    // CFG-off static-shift recipe, and the matching lightx2v distill LoRA is stacked AHEAD
+    // of any user LoRAs (the user's own `loras` still occupy their slots — mirrors the
+    // Python fuse-distill-then-stack path). The distill LoRA is fetched lazily into the HF
+    // cache on first use. `None`/`Vec::new()` for the production multi-step variants.
+    let lightning = qwen_edit_lightning(&request.model);
+    let sampler = lightning.as_ref().map(|distill| distill.sampler);
+    let mut adapters: Vec<AdapterSpec> = Vec::new();
+    if let Some(distill) = &lightning {
+        let path =
+            ensure_distill_lora_cached(api, settings, job, distill.repo, distill.file).await?;
+        adapters.push(AdapterSpec::new(path, 1.0, AdapterKind::Lora));
+    }
+    adapters.extend(resolve_adapters(request)?);
     let repo = model_repo(request, model);
     let adapter_label = model.adapter_label;
 
@@ -2606,6 +2749,18 @@ async fn generate_qwen_edit_stream(
         }
         Flux2Grouping::Plain => {}
     }
+    // Record the Lightning recipe for telemetry/A-B parity (matches the Python `distillLora`
+    // key format `repo/file`); absent on the production multi-step variants.
+    if let Some(distill) = &lightning {
+        raw_settings.insert(
+            "sampler".to_owned(),
+            Value::String(distill.sampler.to_owned()),
+        );
+        raw_settings.insert(
+            "distillLora".to_owned(),
+            Value::String(format!("{}/{}", distill.repo, distill.file)),
+        );
+    }
 
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
@@ -2664,6 +2819,7 @@ async fn generate_qwen_edit_stream(
                     seed,
                     steps,
                     guidance,
+                    sampler,
                     conditioning,
                     &cancel,
                     &mut on_progress,
@@ -4897,8 +5053,32 @@ mod tests {
             assert_eq!(m.adapter_label, "mlx_qwen");
             assert!(m.supports_guidance && m.supports_negative_prompt);
         }
-        // The Lightning distill is intentionally not wired here yet (sc-3398).
-        assert!(mlx_model("qwen_image_edit_2511_lightning").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn qwen_edit_lightning_model_row_is_cfg_off_4step_distill() {
+        // sc-3398: shares the engine model + base weights with the production edit rows
+        // but runs the 4-step CFG-off recipe (no negative prompt) + the lightx2v distill.
+        let m = mlx_model("qwen_image_edit_2511_lightning").unwrap();
+        assert_eq!(m.engine_id, "qwen_image_edit");
+        assert_eq!(m.default_repo, "Qwen/Qwen-Image-Edit-2511");
+        assert_eq!(m.default_steps, 4);
+        assert_eq!(m.default_guidance, 1.0);
+        assert_eq!(m.adapter_label, "mlx_qwen");
+        assert!(!m.supports_negative_prompt, "lightning runs CFG-off");
+
+        // The lightning lookup carries the engine sampler + the lightx2v 4-step distill LoRA;
+        // the production edit ids carry none.
+        let distill = qwen_edit_lightning("qwen_image_edit_2511_lightning").unwrap();
+        assert_eq!(distill.sampler, "lightning");
+        assert_eq!(distill.repo, "lightx2v/Qwen-Image-Edit-2511-Lightning");
+        assert_eq!(
+            distill.file,
+            "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+        );
+        assert!(qwen_edit_lightning("qwen_image_edit_2511").is_none());
+        assert!(qwen_edit_lightning("qwen_image_edit").is_none());
     }
 
     #[cfg(target_os = "macos")]
@@ -4908,12 +5088,14 @@ mod tests {
             "qwen_image_edit",
             "qwen_image_edit_2509",
             "qwen_image_edit_2511",
+            // The Lightning distill maps to the same engine model (sc-3398); only its
+            // sampler + distill LoRA differ.
+            "qwen_image_edit_2511_lightning",
         ] {
             assert_eq!(qwen_edit_engine_id(id), Some("qwen_image_edit"));
         }
-        // Base txt2img Qwen, the Lightning distill, and other families have no edit variant.
+        // Base txt2img Qwen and other families have no edit variant.
         assert_eq!(qwen_edit_engine_id("qwen_image"), None);
-        assert_eq!(qwen_edit_engine_id("qwen_image_edit_2511_lightning"), None);
         assert_eq!(qwen_edit_engine_id("flux2_klein_9b"), None);
     }
 
@@ -5045,6 +5227,73 @@ mod tests {
             42,
             4,
             4.0,
+            None,
+            build_edit_conditioning(std::slice::from_ref(&reference)),
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+    }
+
+    /// Real-weights smoke: Qwen-Image-Edit **Lightning** (sc-3398). Loads `qwen_image_edit`
+    /// (Qwen-Image-Edit-2511 snapshot) with the lightx2v 4-step distill LoRA stacked on, then
+    /// generates one image via the `lightning` sampler (CFG-off single forward, no negative
+    /// prompt) at 4 steps. Needs the HF cache for BOTH `Qwen/Qwen-Image-Edit-2511` and the
+    /// distill LoRA `lightx2v/Qwen-Image-Edit-2511-Lightning` + a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored qwen_edit_lightning_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Qwen-Image-Edit-2511 + lightx2v distill LoRA weights + Metal device"]
+    fn qwen_edit_lightning_real_weights_generates_one_image() {
+        let distill = qwen_edit_lightning("qwen_image_edit_2511_lightning").unwrap();
+        // The distill LoRA lives in the HF cache (download it once via the lightning
+        // generate path, or `huggingface-cli download <repo>`); resolve its snapshot file.
+        let snapshot_dir = crate::model_jobs::huggingface_snapshot_dir(
+            &Settings::from_env().data_dir,
+            distill.repo,
+        )
+        .expect("lightx2v distill LoRA must be cached for this smoke");
+        let lora_path = snapshot_dir.join(distill.file);
+        assert!(
+            lora_path.is_file(),
+            "distill LoRA missing in cache: {}",
+            lora_path.display()
+        );
+
+        let snapshot = hf_snapshot("models--Qwen--Qwen-Image-Edit-2511");
+        let generator = mlx_load(
+            "qwen_image_edit",
+            snapshot,
+            Some(mlx_gen::Quant::Q8),
+            vec![AdapterSpec::new(lora_path, 1.0, AdapterKind::Lora)],
+        )
+        .unwrap();
+        let reference = mlx_gen::Image {
+            width: 512,
+            height: 512,
+            pixels: stub_rgb8(512, 512, 7),
+        };
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = qwen_edit_generate_one(
+            generator.as_ref(),
+            "make it a watercolor painting",
+            // Lightning runs CFG-off: no negative prompt, guidance 1.0 (engine ignores it).
+            None,
+            512,
+            512,
+            42,
+            4,
+            1.0,
+            Some("lightning"),
             build_edit_conditioning(std::slice::from_ref(&reference)),
             &cancel,
             &mut |p| {

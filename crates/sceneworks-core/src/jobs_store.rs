@@ -1609,6 +1609,7 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "qwen_image_edit",
     "qwen_image_edit_2509",
     "qwen_image_edit_2511",
+    "qwen_image_edit_2511_lightning",
     "flux2_klein_9b",
     "flux2_klein_9b_kv",
     "flux2_klein_9b_true_v2",
@@ -1642,9 +1643,10 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         "z_image_turbo" => z_image_mlx_eligible(&job.payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(&job.payload),
         "qwen_image" => qwen_mlx_eligible(&job.payload),
-        "qwen_image_edit" | "qwen_image_edit_2509" | "qwen_image_edit_2511" => {
-            qwen_edit_mlx_eligible(&job.payload)
-        }
+        "qwen_image_edit"
+        | "qwen_image_edit_2509"
+        | "qwen_image_edit_2511"
+        | "qwen_image_edit_2511_lightning" => qwen_edit_mlx_eligible(&job.payload),
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" => {
             flux2_mlx_eligible(&job.payload)
         }
@@ -1727,15 +1729,15 @@ fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
     !request_has_lycoris_lora(payload)
 }
 
-/// Qwen-Image-Edit (sc-3397) MLX-routing conditions. The `qwen_image_edit` / `_2509` /
-/// `_2511` ids run the engine's `qwen_image_edit` model on the Rust worker (the edit
-/// sibling of `qwen_mlx_eligible`). Eligible when the job carries the reference the edit
-/// model requires: `edit_image` with a `sourceAssetId` (or a `referenceAssetId`), or
-/// `character_image` with a `referenceAssetId` (the subject-variation / best-effort-pose
-/// / angle-set flows — all reference-conditioned). A third-party LyCORIS LoRA falls back
-/// to torch (engine + worker apply LoRA + peft LoKr, but not arbitrary LyCORIS). The
-/// `_2511_lightning` distill is not routed here yet (needs the sampler + distill-LoRA
-/// wiring of sc-3398), and base-Qwen strict pose stays on torch until epic 3401 lands.
+/// Qwen-Image-Edit (sc-3397/sc-3398) MLX-routing conditions. The `qwen_image_edit` /
+/// `_2509` / `_2511` / `_2511_lightning` ids run the engine's `qwen_image_edit` model on
+/// the Rust worker (the edit sibling of `qwen_mlx_eligible`). Eligible when the job carries
+/// the reference the edit model requires: `edit_image` with a `sourceAssetId` (or a
+/// `referenceAssetId`), or `character_image` with a `referenceAssetId` (the subject-variation
+/// / best-effort-pose / angle-set flows — all reference-conditioned). The lightning distill
+/// (sc-3398) shares the same gate (its sampler + distill-LoRA are worker-local). A
+/// third-party LyCORIS LoRA falls back to torch (engine + worker apply LoRA + peft LoKr, but
+/// not arbitrary LyCORIS); base-Qwen strict pose stays on torch until epic 3401 lands.
 fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if request_has_lycoris_lora(payload) {
         return false;
