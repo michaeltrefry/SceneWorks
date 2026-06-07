@@ -60,33 +60,32 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 # stories (sc-3022..3035) add their provider here; this scaffold links Z-Image
 # (sc-3022, next) to prove the cross-crate registry path end to end.
 [target.'cfg(target_os = "macos")'.dependencies]
-# Rev 4ea5d86 (mlx-gen main): the LoRA/LoKr trainer surface (epic 3039, PRs #142–147)
-# layered on top of the sc-3224 Wan/LTX converters (PR #140, rev 01bf6259) the base
-# branch pinned — 4ea5d86 is a strict superset, so it carries BOTH the converters and
-# the trainers in a single rev (and MLX still builds once with the unchanged mlx-rs pin).
-mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
-mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+# Rev d233f23 (mlx-gen main): carries the LoRA/LoKr trainer surface (epic 3039),
+# Wan/LTX converter stack, and the Qwen modulation-LoRA routing fix (PR #160) in one
+# shared rev so MLX builds once with the unchanged mlx-rs pin.
+mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d233f231bc1c992e6bdd52ec9d4c880a1c8b352e" }
+mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d233f231bc1c992e6bdd52ec9d4c880a1c8b352e" }
 # FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
 # builds once; self-registers `flux1_schnell`/`flux1_dev` via inventory only when
 # linked + referenced (`use mlx_gen_flux as _;` in image_jobs.rs).
-mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d233f231bc1c992e6bdd52ec9d4c880a1c8b352e" }
 # Qwen-Image provider (epic 3018, sc-3024). Self-registers `qwen_image`.
-mlx-gen-qwen-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+mlx-gen-qwen-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d233f231bc1c992e6bdd52ec9d4c880a1c8b352e" }
 # FLUX.2-klein provider (epic 3018, sc-3025). Self-registers `flux2_klein_9b`
 # (txt2img) + `flux2_klein_9b_edit` + `flux2_klein_9b_kv_edit` (edit = sc-3029).
-mlx-gen-flux2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+mlx-gen-flux2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d233f231bc1c992e6bdd52ec9d4c880a1c8b352e" }
 # SDXL provider (epic 3018, sc-3026). Self-registers `sdxl` (also serves the
 # `realvisxl` finetune — same arch). Replaces the in-process _vendor/mlx_sd path.
-mlx-gen-sdxl = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+mlx-gen-sdxl = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d233f231bc1c992e6bdd52ec9d4c880a1c8b352e" }
 # Wan2.2 video provider (epic 3018, sc-3034). Self-registers `wan2_2_ti2v_5b`
 # (dense T2V/TI2V), `wan2_2_t2v_14b` + `wan2_2_i2v_14b` (dual-expert MoE) via
 # inventory when linked + referenced (`use mlx_gen_wan as _;` in video_jobs.rs).
-mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d233f231bc1c992e6bdd52ec9d4c880a1c8b352e" }
 # LTX-2.3 video provider (epic 3018, sc-3035). Self-registers `ltx_2_3` (T2V/I2V +
 # synchronized audio, 2-stage distilled). Linked + referenced (`use mlx_gen_ltx as _;`
 # in video_jobs.rs); the Gemma-3 text encoder is resolved by the engine (HF cache / env).
 # Same rev as the other mlx-gen crates (sc-3060 bump) so MLX + the shared core build once.
-mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4ea5d8653b9cdc84997bc97dfdb0e5a0fa62fda4" }
+mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d233f231bc1c992e6bdd52ec9d4c880a1c8b352e" }
 
 [lints]
 workspace = true
