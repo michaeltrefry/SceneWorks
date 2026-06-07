@@ -1606,6 +1606,9 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux_schnell",
     "flux_dev",
     "qwen_image",
+    "qwen_image_edit",
+    "qwen_image_edit_2509",
+    "qwen_image_edit_2511",
     "flux2_klein_9b",
     "flux2_klein_9b_kv",
     "flux2_klein_9b_true_v2",
@@ -1639,6 +1642,9 @@ fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         "z_image_turbo" => z_image_mlx_eligible(&job.payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(&job.payload),
         "qwen_image" => qwen_mlx_eligible(&job.payload),
+        "qwen_image_edit" | "qwen_image_edit_2509" | "qwen_image_edit_2511" => {
+            qwen_edit_mlx_eligible(&job.payload)
+        }
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" => {
             flux2_mlx_eligible(&job.payload)
         }
@@ -1719,6 +1725,34 @@ fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
         return false;
     }
     !request_has_lycoris_lora(payload)
+}
+
+/// Qwen-Image-Edit (sc-3397) MLX-routing conditions. The `qwen_image_edit` / `_2509` /
+/// `_2511` ids run the engine's `qwen_image_edit` model on the Rust worker (the edit
+/// sibling of `qwen_mlx_eligible`). Eligible when the job carries the reference the edit
+/// model requires: `edit_image` with a `sourceAssetId` (or a `referenceAssetId`), or
+/// `character_image` with a `referenceAssetId` (the subject-variation / best-effort-pose
+/// / angle-set flows — all reference-conditioned). A third-party LyCORIS LoRA falls back
+/// to torch (engine + worker apply LoRA + peft LoKr, but not arbitrary LyCORIS). The
+/// `_2511_lightning` distill is not routed here yet (needs the sampler + distill-LoRA
+/// wiring of sc-3398), and base-Qwen strict pose stays on torch until epic 3401 lands.
+fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if request_has_lycoris_lora(payload) {
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_source = payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    match payload.get("mode").and_then(Value::as_str) {
+        Some("edit_image") => has_source || has_reference,
+        Some("character_image") => has_reference,
+        _ => false,
+    }
 }
 
 /// FLUX.1 (sc-3023) MLX-routing conditions, ported from `_should_route_flux_to_mlx`:
@@ -2260,8 +2294,8 @@ fn sort_json_value(value: &mut Value) {
 #[cfg(test)]
 mod mlx_routing_tests {
     use super::{
-        flux2_mlx_eligible, flux_mlx_eligible, qwen_mlx_eligible, request_has_lycoris_lora,
-        sdxl_mlx_eligible, z_image_mlx_eligible,
+        flux2_mlx_eligible, flux_mlx_eligible, qwen_edit_mlx_eligible, qwen_mlx_eligible,
+        request_has_lycoris_lora, sdxl_mlx_eligible, z_image_mlx_eligible,
     };
     use serde_json::{json, Map, Value};
 
@@ -2373,6 +2407,61 @@ mod mlx_routing_tests {
             "advanced": { "poses": [{ "id": "p1" }] }
         }))));
         assert!(!qwen_mlx_eligible(&object(json!({
+            "loras": [{ "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn qwen_edit_routes_edit_and_reference_flows_to_mlx() {
+        // sc-3397: the qwen_image_edit ids run the engine's `qwen_image_edit` model.
+        // edit_image with a source → eligible.
+        assert!(qwen_edit_mlx_eligible(&object(json!({
+            "mode": "edit_image", "sourceAssetId": "src_1"
+        }))));
+        // character_image with a reference (subject variation) → eligible.
+        assert!(qwen_edit_mlx_eligible(&object(json!({
+            "mode": "character_image", "referenceAssetId": "ref_1"
+        }))));
+        // character_image + reference + best-effort poses → still eligible. Unlike the base
+        // Qwen strict-pose ControlNet (torch until epic 3401), the edit best-effort pose tier
+        // is native multi-image ([reference, skeleton]) → MLX.
+        assert!(qwen_edit_mlx_eligible(&object(json!({
+            "mode": "character_image", "referenceAssetId": "ref_1",
+            "advanced": { "poses": [{ "id": "p1" }] }
+        }))));
+        // character_image + reference + angle set → eligible.
+        assert!(qwen_edit_mlx_eligible(&object(json!({
+            "mode": "character_image", "referenceAssetId": "ref_1",
+            "advanced": { "angleSet": true }
+        }))));
+        // A peft LoKr is fine on the MLX edit path.
+        assert!(qwen_edit_mlx_eligible(&object(json!({
+            "mode": "edit_image", "sourceAssetId": "src_1",
+            "loras": [{ "networkType": "lokr" }]
+        }))));
+    }
+
+    #[test]
+    fn qwen_edit_without_reference_or_with_lycoris_falls_back_to_torch() {
+        // edit_image with nothing to edit (no source, no reference) → torch.
+        assert!(!qwen_edit_mlx_eligible(&object(
+            json!({ "mode": "edit_image" })
+        )));
+        // character_image without a reference → torch (the edit model needs a reference).
+        assert!(!qwen_edit_mlx_eligible(&object(
+            json!({ "mode": "character_image" })
+        )));
+        // A plain txt2img mode is not an edit job (that's the base qwen_image MLX path).
+        assert!(!qwen_edit_mlx_eligible(&object(json!({
+            "mode": "text_to_image", "sourceAssetId": "src_1"
+        }))));
+        // Whitespace-only ids are treated as absent.
+        assert!(!qwen_edit_mlx_eligible(&object(json!({
+            "mode": "edit_image", "sourceAssetId": "   "
+        }))));
+        // Third-party LyCORIS has no native MLX loader → torch.
+        assert!(!qwen_edit_mlx_eligible(&object(json!({
+            "mode": "edit_image", "sourceAssetId": "src_1",
             "loras": [{ "networkType": "lycoris" }]
         }))));
     }

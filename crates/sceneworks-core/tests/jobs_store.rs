@@ -1439,6 +1439,38 @@ fn mlx_eligible_image_job_defers_from_torch_worker_to_idle_mlx_worker() {
 }
 
 #[test]
+fn qwen_edit_image_job_defers_to_mlx_worker() {
+    let store = store("mlx-routing-qwen-edit");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // Qwen-Image-Edit (sc-3397): an edit_image job with a source routes to the mlx worker.
+    let job = store
+        .create_job(image_job_with(
+            json!({
+                "model": "qwen_image_edit_2511",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "prompt": "make it a watercolor painting"
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    // The torch worker defers it to the idle mlx worker, which claims it.
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
 fn mlx_worker_excluded_from_torch_only_image_job() {
     let store = store("mlx-routing-exclude");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());

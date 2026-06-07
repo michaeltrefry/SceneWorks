@@ -102,11 +102,50 @@ const MLX_MODELS: &[MlxModel] = &[
     MlxModel {
         // Non-distilled true-CFG base: 20 steps + guidance 4.0 + negative prompt
         // (Python MODEL_TARGETS / MlxQwenAdapter). mlx-gen's own default is 4 steps,
-        // so steps are passed explicitly. Edit + strict-pose ControlNet stay on torch.
+        // so steps are passed explicitly. Edit moves to MLX (sc-3397, the `qwen_image_edit`
+        // engine model below); base-Qwen strict-pose ControlNet stays on torch until the
+        // engine port lands (epic 3401).
         sceneworks_id: "qwen_image",
         engine_id: "qwen_image",
         default_repo: "Qwen/Qwen-Image",
         default_steps: 20,
+        supports_guidance: true,
+        default_guidance: 4.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_qwen",
+    },
+    // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
+    // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
+    // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
+    // 40 steps (engine's own default is 4 — passed explicitly, like the txt2img row). The
+    // edit path resolves guidance from `trueCfgScale` (4.0), NOT `guidanceScale`; see
+    // `resolve_qwen_edit_guidance`. The `_2511_lightning` distill (sampler + lightx2v LoRA)
+    // is a separate story (sc-3398) and is intentionally absent here.
+    MlxModel {
+        sceneworks_id: "qwen_image_edit",
+        engine_id: "qwen_image_edit",
+        default_repo: "Qwen/Qwen-Image-Edit-2511",
+        default_steps: 40,
+        supports_guidance: true,
+        default_guidance: 4.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_qwen",
+    },
+    MlxModel {
+        sceneworks_id: "qwen_image_edit_2509",
+        engine_id: "qwen_image_edit",
+        default_repo: "Qwen/Qwen-Image-Edit-2511",
+        default_steps: 40,
+        supports_guidance: true,
+        default_guidance: 4.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_qwen",
+    },
+    MlxModel {
+        sceneworks_id: "qwen_image_edit_2511",
+        engine_id: "qwen_image_edit",
+        default_repo: "Qwen/Qwen-Image-Edit-2511",
+        default_steps: 40,
         supports_guidance: true,
         default_guidance: 4.0,
         supports_negative_prompt: true,
@@ -211,7 +250,7 @@ pub(crate) async fn run_image_generate_job(
     // the requested `count` (sc-3030) — bake the real total into the plan so the
     // generation set + streamed `expectedCount` match what lands in the gallery.
     #[cfg(target_os = "macos")]
-    let plan = ImagePlan::with_count(&request, flux2_image_count(&request, settings));
+    let plan = ImagePlan::with_count(&request, grouped_image_count(&request, settings));
     #[cfg(not(target_os = "macos"))]
     let plan = ImagePlan::with_count(&request, request.count);
 
@@ -266,6 +305,20 @@ pub(crate) async fn run_image_generate_job(
     } else if flux2_edit_available(&request, settings) {
         // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
         generate_flux2_edit_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if qwen_edit_available(&request, settings) {
+        // Qwen-Image-Edit (mode edit_image / Character-Studio reference / best-effort
+        // pose / angle set) → the engine's `qwen_image_edit` model (sc-3397).
+        generate_qwen_edit_stream(
             api,
             settings,
             job,
@@ -2259,6 +2312,398 @@ async fn generate_flux2_edit_stream(
 }
 
 // ---------------------------------------------------------------------------
+// Qwen-Image-Edit (macOS, sc-3397): the `qwen_image_edit` / `_2509` / `_2511` ids, all
+// served by the engine's single `qwen_image_edit` model (Reference/MultiReference
+// dual-latent). This is where Qwen edit/reference jobs run — `edit_image`, the
+// Character-Studio reference flow (subject variation), the 11-angle set, and the
+// best-effort pose tier (`[reference, skeleton]` multi-image). True CFG (negative prompt
+// + guidance from `trueCfgScale`), LoRA/LoKr, Q4/Q8, fit_image. Base-Qwen strict-pose
+// ControlNet stays on torch until the engine port lands (epic 3401); the `_2511_lightning`
+// distill (sampler + lightx2v LoRA) is sc-3398.
+// ---------------------------------------------------------------------------
+
+/// The engine edit-model id for a Qwen SceneWorks model, or `None` if it has no edit
+/// variant. `qwen_image_edit` / `_2509` / `_2511` all map to the single `qwen_image_edit`
+/// engine model (`_2511_lightning` is sc-3398, deliberately excluded).
+#[cfg(target_os = "macos")]
+fn qwen_edit_engine_id(model: &str) -> Option<&'static str> {
+    match model {
+        "qwen_image_edit" | "qwen_image_edit_2509" | "qwen_image_edit_2511" => {
+            Some("qwen_image_edit")
+        }
+        _ => None,
+    }
+}
+
+/// Reference asset ids for a Qwen edit: the character-flow `referenceAssetId`, else the
+/// Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
+/// `ref = referenceAssetId or (sourceAssetId if edit_image)` and the FLUX.2 edit path.
+#[cfg(target_os = "macos")]
+fn qwen_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
+    }
+    if request.mode == "edit_image" {
+        if let Some(id) = request
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return vec![id.to_owned()];
+        }
+    }
+    Vec::new()
+}
+
+/// True when this is a Qwen edit job (a qwen edit-capable model + ≥1 reference) whose
+/// weights resolve — routed to the `qwen_image_edit` engine model rather than txt2img.
+#[cfg(target_os = "macos")]
+fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
+    qwen_edit_engine_id(&request.model).is_some()
+        && !qwen_edit_reference_ids(request).is_empty()
+        && resolve_weights_dir(request, settings).is_some()
+}
+
+/// The number of images this image_generate job produces, accounting for grouped edit
+/// sets (Character-Studio angle set = 11, best-effort pose set = n) on either edit
+/// family; otherwise `request.count`. Threaded into [`ImagePlan`] so the generation
+/// set's `count`/`expectedCount` match what actually lands in the gallery (the UI
+/// streams against it). Qwen edit reuses the shared [`flux2_grouping`] decision.
+#[cfg(target_os = "macos")]
+fn grouped_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
+    if qwen_edit_available(request, settings) {
+        match flux2_grouping(request) {
+            Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+            Flux2Grouping::Poses(count) => count as u32,
+            Flux2Grouping::Plain => request.count,
+        }
+    } else {
+        flux2_image_count(request, settings)
+    }
+}
+
+/// Resolve the Qwen edit true-CFG guidance. The engine's `guidance` IS the true CFG
+/// (diffusers `true_cfg_scale`), so this reads `advanced.trueCfgScale` (NOT
+/// `guidanceScale`, the inert embedded-guidance knob that the Python edit path pins at
+/// 1.0) else the family default (4.0). The Character-Studio reference path clamps to
+/// [1, 10] (Python `_reference_true_cfg_scale`); `edit_image` floors at 1.0 (the engine
+/// needs CFG > 1 to engage).
+#[cfg(target_os = "macos")]
+fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &MlxModel) -> f32 {
+    let raw = request
+        .advanced
+        .get("trueCfgScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(model.default_guidance);
+    if request.mode == "character_image" {
+        raw.clamp(1.0, 10.0)
+    } else {
+        raw.max(1.0)
+    }
+}
+
+/// Flat telemetry for a Qwen edit generation (parity with `flux2_edit_raw_settings`).
+#[cfg(target_os = "macos")]
+fn qwen_edit_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: f32,
+    reference_count: usize,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    // The engine guidance is the true CFG — record it under the key the Python path uses.
+    raw.insert("trueCfgScale".to_owned(), json!(guidance));
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw.insert(
+        "editEngine".to_owned(),
+        Value::String("qwen_image_edit".to_owned()),
+    );
+    raw.insert("referenceCount".to_owned(), json!(reference_count));
+    raw
+}
+
+/// Generate one Qwen edit image conditioned on `conditioning` (the reference set). True
+/// CFG: passes the negative prompt + `guidance`. Mirrors [`flux2_edit_generate_one`].
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn qwen_edit_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: f32,
+    conditioning: Vec<Conditioning>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance: Some(guidance),
+        conditioning,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator
+        .generate(&request, on_progress)
+        .map_err(|error| WorkerError::InvalidPayload(format!("edit generation failed: {error}")))?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::InvalidPayload("edit generator produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::InvalidPayload(
+            "edit generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
+/// Real Qwen-Image-Edit generation: load the `qwen_image_edit` engine model once, then
+/// one output per grouped iteration each conditioned on the shared reference set. Mirrors
+/// [`generate_flux2_edit_stream`]'s blocking-thread + streamed-events shape and reuses the
+/// shared grouping ([`flux2_grouping`]) and [`consume_gen_events`]; differs in true-CFG
+/// guidance (`trueCfgScale`) + the negative prompt, the `[reference, skeleton]` pose order
+/// (reference first drives the VL identity prompt), and the body-only pose skeleton.
+#[cfg(target_os = "macos")]
+async fn generate_qwen_edit_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let model = mlx_model(&request.model)
+        .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
+    let engine_id = qwen_edit_engine_id(&request.model)
+        .ok_or_else(|| WorkerError::InvalidPayload("not a Qwen edit model".to_owned()))?;
+    let weights_dir = resolve_weights_dir(request, settings).ok_or_else(|| {
+        WorkerError::InvalidPayload("Qwen-Image-Edit weights not found".to_owned())
+    })?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let steps = resolve_steps(request, model);
+    let guidance = resolve_qwen_edit_guidance(request, model);
+    let negative_prompt = resolve_negative_prompt(request, model);
+    let adapters = resolve_adapters(request)?;
+    let repo = model_repo(request, model);
+    let adapter_label = model.adapter_label;
+
+    // Resolve the reference image(s) on the async side (decode → Send Image moved in).
+    let reference_ids = qwen_edit_reference_ids(request);
+    let mut references = Vec::with_capacity(reference_ids.len());
+    for id in &reference_ids {
+        references.push(load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            id,
+            project_path,
+        )?);
+    }
+    if references.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Qwen-Image-Edit requires a reference image".to_owned(),
+        ));
+    }
+    // sc-3030 fit_image: pre-fit the Image-Edit source to the output W×H (crop / pad /
+    // outpaint→pad) so an off-aspect edit doesn't stretch. Character-Studio references
+    // stay native (the `should_fit_edit_source` gate excludes them).
+    if should_fit_edit_source(request) {
+        references = references
+            .into_iter()
+            .map(|reference| {
+                fit_engine_image(reference, request.width, request.height, &request.fit_mode)
+            })
+            .collect::<WorkerResult<Vec<_>>>()?;
+    }
+
+    // Per-iteration grouping (shared with the FLUX.2 edit path): a Character-Studio angle
+    // set (11 shared-seed, per-angle prompt) / best-effort pose tier (one per pose, shared
+    // seed, each a `[reference, skeleton]` set) / else the plain per-image reference path.
+    let grouping = flux2_grouping(request);
+    let set_seed = resolve_seed(request, 0);
+    let (seeds, prompts, pose_keypoints): (
+        Vec<i64>,
+        Vec<String>,
+        Option<Vec<Vec<crate::openpose_skeleton::Keypoint>>>,
+    ) = match &grouping {
+        Flux2Grouping::Poses(count) => {
+            // Shared seed so only the pose changes across the set (Python parity).
+            let keypoints = parse_poses(request)
+                .into_iter()
+                .map(|pose| pose.keypoints)
+                .collect();
+            let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
+            (vec![set_seed; *count], prompts, Some(keypoints))
+        }
+        Flux2Grouping::Angles => {
+            // Shared seed so noise-derived attributes (hair, lighting) stay constant
+            // across angles — only the head pose changes.
+            let prompts = CHARACTER_ANGLE_SET_ORDER
+                .iter()
+                .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
+                .collect();
+            (
+                vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()],
+                prompts,
+                None,
+            )
+        }
+        Flux2Grouping::Plain => {
+            let count = request.count as usize;
+            let seeds = (0..count)
+                .map(|index| resolve_seed(request, index))
+                .collect();
+            (seeds, vec![request.prompt.clone(); count], None)
+        }
+    };
+    let total = seeds.len();
+
+    let mut raw_settings = qwen_edit_raw_settings(
+        request,
+        &repo,
+        steps,
+        quant_bits,
+        guidance,
+        references.len(),
+    );
+    match grouping {
+        Flux2Grouping::Angles => {
+            raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
+        }
+        Flux2Grouping::Poses(_) => {
+            raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
+        }
+        Flux2Grouping::Plain => {}
+    }
+
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+
+    let blocking = {
+        let (width, height) = (request.width, request.height);
+        let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
+            for (index, (seed, prompt)) in seeds.into_iter().zip(prompts).enumerate() {
+                // Pose tier: pair the reference with this pose's body-only skeleton (DWPose
+                // body, no hands/face — Python `draw_bodypose`) as a `[reference, skeleton]`
+                // multi-image set. Reference FIRST: the engine VL-encodes references[0] for
+                // the prompt embeds (identity), the skeleton is added dual-latent geometry.
+                let conditioning = match &pose_keypoints {
+                    Some(keypoints) => {
+                        let skeleton = crate::openpose_skeleton::draw_wholebody(
+                            width,
+                            height,
+                            &keypoints[index],
+                            None,
+                            None,
+                            stickwidth,
+                        );
+                        vec![Conditioning::MultiReference {
+                            images: vec![
+                                references[0].clone(),
+                                Image {
+                                    width,
+                                    height,
+                                    pixels: skeleton.into_raw(),
+                                },
+                            ],
+                        }]
+                    }
+                    None => build_edit_conditioning(&references),
+                };
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
+                let (out_w, out_h, pixels) = qwen_edit_generate_one(
+                    generator.as_ref(),
+                    &prompt,
+                    negative_prompt.clone(),
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
+                    conditioning,
+                    &cancel,
+                    &mut on_progress,
+                )?;
+                if tx
+                    .blocking_send(GenEvent::Image {
+                        index,
+                        seed,
+                        width: out_w,
+                        height: out_h,
+                        pixels,
+                    })
+                    .is_err()
+                {
+                    break; // receiver gone — stop generating.
+                }
+            }
+            Ok(())
+        })
+    };
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        adapter_label,
+        &raw_settings,
+        total,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // SDXL advanced conditioning (macOS, epic 3041 / sc-3060): reference (IP-Adapter),
 // img2img edit, masked inpaint, and outpaint on the `sdxl` engine model. The plain
 // txt2img + LoRA path stays on `generate_mlx_stream`; this branch handles every SDXL
@@ -3621,6 +4066,7 @@ mod tests {
             "flux1_schnell",
             "flux1_dev",
             "qwen_image",
+            "qwen_image_edit",
             "flux2_klein_9b",
             "sdxl",
         ] {
@@ -4431,6 +4877,187 @@ mod tests {
         // stretch → exact target dims (aspect not preserved).
         let stretched = fit_rgb(&source, 40, 30, "stretch");
         assert_eq!((stretched.width(), stretched.height()), (40, 30));
+    }
+
+    // --- Qwen-Image-Edit path (sc-3397) ---
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn qwen_edit_model_table_rows() {
+        for id in [
+            "qwen_image_edit",
+            "qwen_image_edit_2509",
+            "qwen_image_edit_2511",
+        ] {
+            let m = mlx_model(id).unwrap();
+            assert_eq!(m.engine_id, "qwen_image_edit");
+            assert_eq!(m.default_repo, "Qwen/Qwen-Image-Edit-2511");
+            assert_eq!(m.default_steps, 40);
+            assert_eq!(m.default_guidance, 4.0);
+            assert_eq!(m.adapter_label, "mlx_qwen");
+            assert!(m.supports_guidance && m.supports_negative_prompt);
+        }
+        // The Lightning distill is intentionally not wired here yet (sc-3398).
+        assert!(mlx_model("qwen_image_edit_2511_lightning").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn qwen_edit_engine_id_maps_variants() {
+        for id in [
+            "qwen_image_edit",
+            "qwen_image_edit_2509",
+            "qwen_image_edit_2511",
+        ] {
+            assert_eq!(qwen_edit_engine_id(id), Some("qwen_image_edit"));
+        }
+        // Base txt2img Qwen, the Lightning distill, and other families have no edit variant.
+        assert_eq!(qwen_edit_engine_id("qwen_image"), None);
+        assert_eq!(qwen_edit_engine_id("qwen_image_edit_2511_lightning"), None);
+        assert_eq!(qwen_edit_engine_id("flux2_klein_9b"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn qwen_edit_reference_ids_prefers_reference_then_source() {
+        // referenceAssetId (character flow) wins over a source.
+        assert_eq!(
+            qwen_edit_reference_ids(&request(json!({
+                "projectId": "p", "referenceAssetId": "ref_1", "sourceAssetId": "src_1"
+            }))),
+            vec!["ref_1".to_owned()]
+        );
+        // sourceAssetId only in edit_image mode.
+        assert_eq!(
+            qwen_edit_reference_ids(&request(json!({
+                "projectId": "p", "mode": "edit_image", "sourceAssetId": "src_1"
+            }))),
+            vec!["src_1".to_owned()]
+        );
+        // sourceAssetId without edit_image mode is ignored (the txt2img path).
+        assert!(qwen_edit_reference_ids(&request(json!({
+            "projectId": "p", "sourceAssetId": "src_1"
+        })))
+        .is_empty());
+        assert!(qwen_edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
+        let model = mlx_model("qwen_image_edit_2511").unwrap();
+        // Default is the family true-CFG default (4.0).
+        assert_eq!(
+            resolve_qwen_edit_guidance(
+                &request(json!({ "projectId": "p", "mode": "edit_image" })),
+                model
+            ),
+            4.0
+        );
+        // guidanceScale (the inert embedded-guidance knob the Python edit path pins at 1.0)
+        // is IGNORED — only trueCfgScale drives the engine's true CFG.
+        assert_eq!(
+            resolve_qwen_edit_guidance(
+                &request(json!({
+                    "projectId": "p", "mode": "edit_image",
+                    "advanced": { "guidanceScale": 1.0 }
+                })),
+                model
+            ),
+            4.0
+        );
+        // trueCfgScale overrides.
+        assert_eq!(
+            resolve_qwen_edit_guidance(
+                &request(json!({
+                    "projectId": "p", "mode": "edit_image",
+                    "advanced": { "trueCfgScale": 6.0 }
+                })),
+                model
+            ),
+            6.0
+        );
+        // The character reference path clamps to [1, 10].
+        assert_eq!(
+            resolve_qwen_edit_guidance(
+                &request(json!({
+                    "projectId": "p", "mode": "character_image",
+                    "advanced": { "trueCfgScale": 50.0 }
+                })),
+                model
+            ),
+            10.0
+        );
+        assert_eq!(
+            resolve_qwen_edit_guidance(
+                &request(json!({
+                    "projectId": "p", "mode": "character_image",
+                    "advanced": { "trueCfgScale": 0.5 }
+                })),
+                model
+            ),
+            1.0
+        );
+        // edit_image floors at 1.0 (the engine needs CFG > 1 to engage).
+        assert_eq!(
+            resolve_qwen_edit_guidance(
+                &request(json!({
+                    "projectId": "p", "mode": "edit_image",
+                    "advanced": { "trueCfgScale": 0.5 }
+                })),
+                model
+            ),
+            1.0
+        );
+    }
+
+    /// Real-weights smoke: Qwen-Image-Edit. Loads `qwen_image_edit` (Qwen-Image-Edit-2511
+    /// snapshot) and generates one image conditioned on a synthetic reference — true CFG
+    /// (guidance 4.0 + a negative prompt). Needs the HF cache (`Qwen/Qwen-Image-Edit-2511`)
+    /// and a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored qwen_edit_real_weights`.
+    /// Uses 4 steps + 512² for speed (the production default is 40 steps).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Qwen-Image-Edit-2511 weights + Metal device"]
+    fn qwen_edit_real_weights_generates_one_image() {
+        let snapshot = hf_snapshot("models--Qwen--Qwen-Image-Edit-2511");
+        let generator = mlx_load(
+            "qwen_image_edit",
+            snapshot,
+            Some(mlx_gen::Quant::Q8),
+            Vec::new(),
+        )
+        .unwrap();
+        let reference = mlx_gen::Image {
+            width: 512,
+            height: 512,
+            pixels: stub_rgb8(512, 512, 7),
+        };
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = qwen_edit_generate_one(
+            generator.as_ref(),
+            "make it a watercolor painting",
+            Some("blurry, low quality".to_owned()),
+            512,
+            512,
+            42,
+            4,
+            4.0,
+            build_edit_conditioning(std::slice::from_ref(&reference)),
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
     }
 
     /// Real-weights smoke: the best-effort pose tier — a `[skeleton, reference]`
