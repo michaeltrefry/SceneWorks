@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-session-logs"
+description = "Enables the get_session_logs command without any pre-configured scope."
+commands.allow = ["get_session_logs"]
+
+[[permission]]
+identifier = "deny-get-session-logs"
+description = "Denies the get_session_logs command without any pre-configured scope."
+commands.deny = ["get_session_logs"]

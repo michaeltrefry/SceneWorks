@@ -2,6 +2,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "start_setup",
+            "get_session_logs",
             "get_app_settings",
             "get_storage_setup",
             "save_storage_setup",

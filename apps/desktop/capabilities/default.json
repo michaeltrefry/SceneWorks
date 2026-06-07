@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "allow-start-setup",
+    "allow-get-session-logs",
     "allow-get-app-settings",
     "allow-get-storage-setup",
     "allow-save-storage-setup",
