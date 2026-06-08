@@ -1834,11 +1834,74 @@ fn mlx_worker_excluded_from_advanced_mode_video_job() {
     let store = store("mlx-video-routing-exclude");
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
-    // first_last_frame is an advanced mode — torch-only even on a Wan model (MLX
-    // covers only text_to_video / image_to_video).
+    // replace_person is an advanced mode that still rides the torch path at this point in
+    // the cutover (it routes to the Wan-VACE path in a later slice); the mlx worker must not
+    // claim it even on a Wan model. (first_last_frame is now MLX-eligible — see below.)
     let job = store
         .create_job(video_job_with(
-            json!({ "model": "wan_2_2", "mode": "first_last_frame" }),
+            json!({ "model": "wan_2_2", "mode": "replace_person" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    let claimed = store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .expect("torch claims the job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn flf_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
+    // sc-3055 cutover: first_last_frame is MLX-eligible on the FLF-capable engines (LTX +
+    // Wan TI2V-5B `wan_2_2`), so a torch worker defers it to an idle mlx worker.
+    for model in ["ltx_2_3", "wan_2_2"] {
+        let store = store(&format!("mlx-video-routing-flf-{model}"));
+        register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+        register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+        let job = store
+            .create_job(video_job_with(
+                json!({
+                    "model": model, "mode": "first_last_frame",
+                    "sourceAssetId": "a", "lastFrameAssetId": "b"
+                }),
+                "auto",
+            ))
+            .expect("job creates");
+
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "{model}: torch defers FLF to the idle mlx worker"
+        );
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .expect("mlx claims the FLF job");
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+    }
+}
+
+#[test]
+fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
+    // FLF on the 14B Wan MoE engines has no engine Keyframe path → stays torch.
+    let store = store("mlx-video-routing-flf-moe");
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+    let job = store
+        .create_job(video_job_with(
+            json!({ "model": "wan_2_2_t2v_14b", "mode": "first_last_frame" }),
             "auto",
         ))
         .expect("job creates");

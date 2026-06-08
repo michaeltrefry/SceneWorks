@@ -996,6 +996,17 @@ fn resolve_wan_conditioning(
     project_path: &Path,
     engine_id: &str,
 ) -> WorkerResult<Vec<Conditioning>> {
+    // first_last_frame is Wan-native only on the TI2V-5B mask-blend keyframe path (sc-3357);
+    // the routing gate (`video_mode_is_mlx_eligible`) already restricts FLF to `wan_2_2`, but
+    // guard here too so a mis-routed 14B MoE job fails clearly instead of silently dropping it.
+    if request.mode == "first_last_frame" {
+        if engine_id != "wan2_2_ti2v_5b" {
+            return Err(WorkerError::InvalidPayload(format!(
+                "first_last_frame is only supported on wan_2_2 (TI2V-5B), not {engine_id}."
+            )));
+        }
+        return resolve_keyframe_conditioning(settings, request, project_path);
+    }
     let required = engine_id == "wan2_2_i2v_14b";
     let accepts = required || engine_id == "wan2_2_ti2v_5b";
     if !accepts {
@@ -1402,13 +1413,17 @@ fn resolve_ltx_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>
 }
 
 /// Optional I2V conditioning for LTX: a `source_asset_id` → a single `Reference` image
-/// (image→video); absent → pure text→video. (Audio is produced either way.)
+/// (image→video); absent → pure text→video. `first_last_frame` → two `Keyframe`s (sc-3055).
+/// (Audio is produced either way.)
 #[cfg(target_os = "macos")]
 fn resolve_ltx_conditioning(
     settings: &Settings,
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<Vec<Conditioning>> {
+    if request.mode == "first_last_frame" {
+        return resolve_keyframe_conditioning(settings, request, project_path);
+    }
     match request.source_asset_id.as_deref() {
         Some(asset_id) => {
             let image = load_reference_image(
@@ -1434,6 +1449,87 @@ fn advanced_bool(request: &VideoRequest, key: &str) -> bool {
         .get(key)
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Read an `advanced` float (JSON number or numeric string), default `fallback` — mirrors the
+/// Python `_advanced_float`.
+#[cfg(target_os = "macos")]
+fn advanced_f32(request: &VideoRequest, key: &str, fallback: f32) -> f32 {
+    request
+        .advanced
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(fallback)
+}
+
+/// Read an `advanced` integer (JSON int or numeric string), default `fallback`.
+#[cfg(target_os = "macos")]
+fn advanced_i32(request: &VideoRequest, key: &str, fallback: i32) -> i32 {
+    request
+        .advanced
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as i32)
+        .unwrap_or(fallback)
+}
+
+/// First/last-frame conditioning (sc-3055 cutover): two [`Conditioning::Keyframe`]s — the source
+/// image pinned at latent frame 0 and the last-frame image at latent frame `-1` (the engine's
+/// Python-style negative-from-end index, so the worker needs no latent-frame math; the engine
+/// bounds-checks it). Mirrors the torch `_ltx_conditioning_images` first_last_frame path: first @
+/// `imageConditioningStrength`, last @ `lastFrameConditioningStrength` (both default 1.0 = fully
+/// pinned). Shared by LTX (`ltx_2_3`) and Wan TI2V-5B (`wan_2_2`), the engines whose providers
+/// advertise `Keyframe`. `imageFrameIndex` (default 0) is forwarded as the first keyframe's latent
+/// index — for the universal FLF case (0) latent 0 == output 0.
+#[cfg(target_os = "macos")]
+fn resolve_keyframe_conditioning(
+    settings: &Settings,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Conditioning>> {
+    let first_id = request.source_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "first_last_frame requires a source image (sourceAssetId).".to_owned(),
+        )
+    })?;
+    let last_id = request.last_frame_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "first_last_frame requires a last-frame image (lastFrameAssetId).".to_owned(),
+        )
+    })?;
+    let first = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        first_id,
+        project_path,
+    )?;
+    let last = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        last_id,
+        project_path,
+    )?;
+    Ok(vec![
+        Conditioning::Keyframe {
+            image: first,
+            frame_idx: advanced_i32(request, "imageFrameIndex", 0),
+            strength: advanced_f32(request, "imageConditioningStrength", 1.0),
+        },
+        Conditioning::Keyframe {
+            image: last,
+            frame_idx: -1,
+            strength: advanced_f32(request, "lastFrameConditioningStrength", 1.0),
+        },
+    ])
 }
 
 /// Raw-settings recorded on a real MLX LTX asset (`advanced` knobs + real-inference markers).
@@ -1799,6 +1895,79 @@ mod tests {
         // LTX adapters: a plain user LoRA is uniform (no per-pass schedule, no moe tag).
         let none = resolve_ltx_adapters(&req).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// The FLF keyframe knobs (sc-3055) parse from JSON numbers + numeric strings and fall back
+    /// to their defaults — these drive the two `Keyframe` strengths + the first keyframe's index.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn advanced_numeric_helpers_parse_flf_keyframe_knobs() {
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "mode": "first_last_frame",
+            "advanced": {
+                "imageConditioningStrength": 0.8,        // JSON number
+                "lastFrameConditioningStrength": "0.65",  // numeric string
+                "imageFrameIndex": 2
+            }
+        }));
+        assert_eq!(advanced_f32(&req, "imageConditioningStrength", 1.0), 0.8);
+        assert_eq!(
+            advanced_f32(&req, "lastFrameConditioningStrength", 1.0),
+            0.65
+        );
+        assert_eq!(advanced_i32(&req, "imageFrameIndex", 0), 2);
+        // Absent keys → the fully-pinned defaults (strength 1.0, first index 0).
+        let bare = request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "a fox" }));
+        assert_eq!(advanced_f32(&bare, "imageConditioningStrength", 1.0), 1.0);
+        assert_eq!(
+            advanced_f32(&bare, "lastFrameConditioningStrength", 1.0),
+            1.0
+        );
+        assert_eq!(advanced_i32(&bare, "imageFrameIndex", 0), 0);
+    }
+
+    /// `resolve_keyframe_conditioning` fails clearly when an FLF source/last-frame asset id is
+    /// missing (the guards run before any project/image IO, so no fixture is needed).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keyframe_conditioning_requires_both_frame_assets() {
+        let settings = Settings::from_env();
+        // No sourceAssetId.
+        let no_first = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "mode": "first_last_frame", "lastFrameAssetId": "asset_last"
+        }));
+        let err = resolve_keyframe_conditioning(&settings, &no_first, Path::new("/tmp/p"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("source image"), "got: {err}");
+        // sourceAssetId but no lastFrameAssetId.
+        let no_last = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "mode": "first_last_frame", "sourceAssetId": "asset_first"
+        }));
+        let err = resolve_keyframe_conditioning(&settings, &no_last, Path::new("/tmp/p"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("last-frame image"), "got: {err}");
+    }
+
+    /// FLF on a 14B Wan MoE engine is rejected at the conditioning resolver (defence-in-depth
+    /// behind the routing gate, which already restricts FLF to `wan_2_2`/TI2V-5B).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_flf_rejected_on_non_ti2v_engine() {
+        let settings = Settings::from_env();
+        let req = request(json!({
+            "projectId": "p", "model": "wan_2_2_t2v_14b", "prompt": "a fox",
+            "mode": "first_last_frame",
+            "sourceAssetId": "a", "lastFrameAssetId": "b"
+        }));
+        let err = resolve_wan_conditioning(&settings, &req, Path::new("/tmp/p"), "wan2_2_t2v_14b")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TI2V-5B"), "got: {err}");
     }
 
     /// An LTX-2.3 snapshot **complete for the current engine** ([`ltx_dir_is_complete`]),

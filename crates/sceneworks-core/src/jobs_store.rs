@@ -1872,10 +1872,11 @@ fn is_wan_video_model(model: &str) -> bool {
 /// expressed by whether an `mlx` worker is registered and idle (see
 /// [`should_defer_video_to_mlx_worker`]).
 ///
-/// MLX covers **`text_to_video` + `image_to_video` on Wan/LTX only**. Everything
-/// else stays on the Python torch path: the advanced job types
-/// (`video_extend`/`video_bridge`/`person_replace`) and the advanced
-/// `video_generate` modes (`first_last_frame`/`replace_person`), SVD (no crate), a
+/// MLX covers `text_to_video` + `image_to_video` on Wan/LTX, plus `first_last_frame`
+/// on the FLF-capable engines (LTX + Wan TI2V-5B `wan_2_2`; sc-3055 cutover — see
+/// [`video_mode_is_mlx_eligible`]). Still on the Python torch path: the advanced job
+/// types (`video_extend`/`video_bridge`/`person_replace`) and the `replace_person`
+/// mode (a later Wan-VACE cutover slice), SVD (svd_xt not linked in the worker yet), a
 /// non-MLX model, a third-party LyCORIS LoRA (the mlx worker's `classify_adapter`
 /// rejects it), and **LoKr-on-Wan** (the diffusers-Wan path applies LoKr via PEFT;
 /// the mlx-video path can't — mirrors `create_video_adapter`). LoKr-on-LTX stays
@@ -1898,7 +1899,7 @@ fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or("image_to_video");
-    if !matches!(mode, "text_to_video" | "image_to_video") {
+    if !video_mode_is_mlx_eligible(model, mode) {
         return false;
     }
     if request_has_lycoris_lora(&job.payload) {
@@ -1908,6 +1909,21 @@ fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         return false;
     }
     true
+}
+
+/// Which `video_generate` modes the in-process Rust MLX worker serves for `model`. Every
+/// routed model serves `text_to_video` + `image_to_video` (sc-3034/3035); `first_last_frame`
+/// is additionally MLX on the FLF-capable engines — LTX (`ltx_2_3`/`ltx_2_3_eros`, the
+/// reference-grounded `Keyframe` path, sc-3052) and Wan TI2V-5B (`wan_2_2`, the mask-blend
+/// multi-keyframe path, sc-3357). The 14B Wan MoE engines have no `Keyframe` path, so FLF on
+/// them stays torch. The advanced clip modes (`extend_clip`/`video_bridge`) + `replace_person`
+/// ride dedicated job types / the Wan-VACE path and are separate cutover slices (sc-3055).
+fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
+    match mode {
+        "text_to_video" | "image_to_video" => true,
+        "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
+        _ => false,
+    }
 }
 
 /// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
@@ -2297,7 +2313,8 @@ fn sort_json_value(value: &mut Value) {
 mod mlx_routing_tests {
     use super::{
         flux2_mlx_eligible, flux_mlx_eligible, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-        request_has_lycoris_lora, sdxl_mlx_eligible, z_image_mlx_eligible,
+        request_has_lycoris_lora, sdxl_mlx_eligible, video_mode_is_mlx_eligible,
+        z_image_mlx_eligible, VIDEO_MLX_ROUTED_MODELS,
     };
     use serde_json::{json, Map, Value};
 
@@ -2533,5 +2550,35 @@ mod mlx_routing_tests {
         assert!(!request_has_lycoris_lora(&object(json!({
             "loras": [{ "path": "unstamped.safetensors" }]
         }))));
+    }
+
+    #[test]
+    fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
+        // Base modes are MLX on every routed model.
+        for model in VIDEO_MLX_ROUTED_MODELS {
+            assert!(video_mode_is_mlx_eligible(model, "text_to_video"));
+            assert!(video_mode_is_mlx_eligible(model, "image_to_video"));
+        }
+        // first_last_frame: MLX on LTX (base + eros) + Wan TI2V-5B (sc-3055 cutover).
+        assert!(video_mode_is_mlx_eligible("ltx_2_3", "first_last_frame"));
+        assert!(video_mode_is_mlx_eligible(
+            "ltx_2_3_eros",
+            "first_last_frame"
+        ));
+        assert!(video_mode_is_mlx_eligible("wan_2_2", "first_last_frame"));
+        // FLF stays torch on the 14B Wan MoE engines (no engine Keyframe path).
+        assert!(!video_mode_is_mlx_eligible(
+            "wan_2_2_t2v_14b",
+            "first_last_frame"
+        ));
+        assert!(!video_mode_is_mlx_eligible(
+            "wan_2_2_i2v_14b",
+            "first_last_frame"
+        ));
+        // The advanced clip modes + replace_person are not video_generate-mode-eligible
+        // (they ride dedicated job types / the Wan-VACE path — separate cutover slices).
+        for mode in ["extend_clip", "video_bridge", "replace_person", "nonsense"] {
+            assert!(!video_mode_is_mlx_eligible("ltx_2_3", mode));
+        }
     }
 }
