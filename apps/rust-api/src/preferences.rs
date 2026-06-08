@@ -1,4 +1,5 @@
-//! UI preferences (theme, …) persisted as a small JSON file in the config dir.
+//! UI preferences (theme, accent, …) persisted as a small JSON file in the
+//! config dir.
 //! Served over plain HTTP because the bundled desktop UI runs at the API's
 //! `http://127.0.0.1:<port>` origin, where both Tauri IPC and origin-keyed
 //! `localStorage` are unreliable across launches (the port — and so the origin —
@@ -18,7 +19,15 @@ pub(crate) struct UiPreferences {
     /// Last-used UI theme (`"light"` or `"dark"`); absent until first set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
+    /// Last-used accent palette id (see `ACCENT_IDS`); absent until first set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accent: Option<String>,
 }
+
+/// User-selectable accent palettes. Keep in sync with web/src/accents.js.
+const ACCENT_IDS: [&str; 7] = [
+    "teal", "indigo", "cobalt", "violet", "coral", "amber", "emerald",
+];
 
 fn preferences_path(state: &AppState) -> PathBuf {
     state.settings.config_dir.join(PREFERENCES_FILENAME)
@@ -49,6 +58,15 @@ fn normalize_theme(input: Option<&str>) -> Option<String> {
     }
 }
 
+/// The valid stored accent for `input`, or `None` if it isn't a known palette.
+fn normalize_accent(input: Option<&str>) -> Option<String> {
+    let value = input.map(str::trim)?;
+    ACCENT_IDS
+        .iter()
+        .find(|id| **id == value)
+        .map(|id| (*id).to_owned())
+}
+
 /// Current UI preferences (empty object on first run).
 pub(crate) async fn get_ui_preferences(
     State(state): State<AppState>,
@@ -66,6 +84,9 @@ pub(crate) async fn set_ui_preferences(
     if let Some(theme) = normalize_theme(payload.theme.as_deref()) {
         prefs.theme = Some(theme);
     }
+    if let Some(accent) = normalize_accent(payload.accent.as_deref()) {
+        prefs.accent = Some(accent);
+    }
     save_preferences(&state, &prefs)
         .map_err(|error| ApiError::internal(format!("Failed to save UI preferences: {error}")))?;
     Ok(Json(prefs))
@@ -73,7 +94,7 @@ pub(crate) async fn set_ui_preferences(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_theme;
+    use super::{normalize_accent, normalize_theme};
 
     #[test]
     fn normalize_theme_accepts_only_known_themes() {
@@ -81,5 +102,17 @@ mod tests {
         assert_eq!(normalize_theme(Some("dark")), Some("dark".to_owned()));
         assert_eq!(normalize_theme(Some("blue")), None);
         assert_eq!(normalize_theme(None), None);
+    }
+
+    #[test]
+    fn normalize_accent_accepts_only_known_palettes() {
+        assert_eq!(normalize_accent(Some("teal")), Some("teal".to_owned()));
+        assert_eq!(
+            normalize_accent(Some(" emerald ")),
+            Some("emerald".to_owned())
+        );
+        assert_eq!(normalize_accent(Some("amber")), Some("amber".to_owned()));
+        assert_eq!(normalize_accent(Some("fuchsia")), None);
+        assert_eq!(normalize_accent(None), None);
     }
 }
