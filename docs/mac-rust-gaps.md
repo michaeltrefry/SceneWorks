@@ -78,7 +78,7 @@ dropped — no silent drops.**
 | Reference / edit conditioning | base `qwen_image` (reference/`edit_image`) | 🔵 Port-pending | epic 3401 |
 | Reference / IP-Adapter / edit | `flux_schnell`, `flux_dev` | 🔵 Viability spike | sc-3535 |
 | `edit_image` (img2img-edit) | `z_image_turbo` | 🔵 Port-pending | epic 3529 (folds into Z-Image-Edit port) |
-| reference-without-pose | `z_image_turbo` | 🔵 Viability spike | sc-3536 |
+| reference-without-pose | `z_image_turbo` | 🟢 Ported (MLX) | sc-3536 (spike GO) → sc-3619 |
 | Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🔵 Port-or-drop spike | sc-3537 |
 
 ## 3. Video

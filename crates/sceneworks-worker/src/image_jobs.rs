@@ -1052,6 +1052,11 @@ fn emit_load_event(event: &str, job_id: &str, engine: &str, adapter_count: usize
 
 /// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
 /// `guidance` is `None` for distilled variants (the engine rejects it on them).
+///
+/// `reference` is the optional identity img2img-init (sc-3619): `(image, strength)` adds a
+/// `Reference` conditioning that seeds the denoise from the reference latents — the plain
+/// (no-ControlNet) Z-Image reference-without-pose path, reusing the same engine img2img the
+/// strict-pose tier already drives. `None` → plain txt2img.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn mlx_generate_one(
@@ -1063,9 +1068,17 @@ fn mlx_generate_one(
     steps: u32,
     guidance: Option<f32>,
     negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let conditioning = match reference {
+        Some((image, strength)) => vec![Conditioning::Reference {
+            image: image.clone(),
+            strength: Some(*strength),
+        }],
+        None => Vec::new(),
+    };
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -1075,6 +1088,7 @@ fn mlx_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance,
+        conditioning,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -1139,6 +1153,14 @@ async fn generate_mlx_stream(
     let seeds: Vec<i64> = (0..count)
         .map(|index| resolve_seed(request, index))
         .collect();
+    // Reference-identity img2img-init (sc-3619): only Z-Image reaches this plain path with a
+    // reference (FLUX is ineligible→torch, Qwen/SDXL divert to their own edit/advanced branches).
+    // Resolve once — the identity is constant across the set — and seed each image's denoise.
+    let identity_init = if request.model == "z_image_turbo" {
+        resolve_zimage_identity_init(request, settings, project_path)?
+    } else {
+        None
+    };
 
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
@@ -1149,6 +1171,7 @@ async fn generate_mlx_stream(
         let seeds = seeds.clone();
         let cancel = cancel.clone();
         let job_id = job.id.clone();
+        // `identity_init` is moved into the closure below (the `move` captures it by value).
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
             let adapter_count = adapters.len();
             emit_load_event(
@@ -1185,6 +1208,7 @@ async fn generate_mlx_stream(
                     steps,
                     guidance,
                     negative_prompt.clone(),
+                    identity_init.as_ref(),
                     &cancel,
                     &mut on_progress,
                 )?;
@@ -4690,6 +4714,7 @@ mod tests {
             steps,
             guidance,
             negative_prompt,
+            None,
             &cancel,
             &mut |p| {
                 if let mlx_gen::Progress::Step { current, .. } = p {
@@ -4969,6 +4994,7 @@ mod tests {
             steps,
             guidance,
             negative,
+            None,
             &cancel,
             &mut |_| {},
         )

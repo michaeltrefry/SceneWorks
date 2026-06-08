@@ -1906,18 +1906,17 @@ fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
             .as_deref(),
         Some("sc-3535")
     );
-    // Z-Image reference without a pose set → viability spike sc-3536.
+    // Z-Image reference without a pose set is now ported to MLX (sc-3536 spike → sc-3619):
+    // the base engine's plain img2img-init path drives the reference identity natively, so
+    // it is supported on the Rust/MLX worker rather than a torch-fallback gap.
     let z_ref = job_of(
         &store,
         JobType::ImageGenerate,
         json!({ "model": "z_image_turbo", "prompt": "p", "referenceAssetId": "asset_1" }),
     );
-    assert_eq!(
-        mac_rust_supported(&z_ref)
-            .unwrap_err()
-            .suggested_epic
-            .as_deref(),
-        Some("sc-3536")
+    assert!(
+        mac_rust_supported(&z_ref).is_ok(),
+        "z-image reference-without-pose should be MLX-supported (sc-3619)"
     );
     // Image understanding folds into the SenseNova port (epic 3180).
     let vqa = job_of(
@@ -1965,6 +1964,11 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     assert!(model_mac_support("qwen_image", "image").features.pose);
     assert!(model_mac_support("z_image_turbo", "image").features.pose);
     assert!(model_mac_support("sdxl", "image").features.pose);
+    // Z-Image reference-identity (no pose) is ported to MLX (sc-3619) → the reference control
+    // is enabled; edit_image still stays torch (epic 3529).
+    let z_image = model_mac_support("z_image_turbo", "image");
+    assert!(z_image.features.reference);
+    assert!(!z_image.features.edit);
     // FLUX.1 reference/edit stay torch (viability spikes) → those controls disabled.
     let flux = model_mac_support("flux_dev", "image");
     assert!(!flux.features.reference);

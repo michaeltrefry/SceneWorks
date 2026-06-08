@@ -1931,8 +1931,8 @@ fn image_model_mac_support(model: &str) -> ModelMacSupport {
         };
     }
     // "Available in some MLX config" probes — bias toward not-disabling so a valid combination
-    // (e.g. a Z-Image reference *with* a pose set) is never blocked. The residual config-only dead
-    // ends (a Z-Image reference *without* a pose) surface as the `mlx_unsupported` submit affordance.
+    // (e.g. a Z-Image reference, with or without a pose set — sc-3619) is never blocked. Any
+    // residual config-only dead ends surface as the `mlx_unsupported` submit affordance.
     let pose = image_request_mlx_eligible(
         model,
         &probe_payload(model, &[("advanced", json!({ "poses": [{}] }))]),
@@ -2200,12 +2200,6 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             "edit_image",
             "Z-Image img2img edit stays on the Python torch path (folds into the Z-Image-Edit port).",
             Some("epic 3529"),
-        ),
-        "z_image_turbo" => UnsupportedReason::new(
-            Some(model),
-            "reference without a pose set",
-            "a Z-Image reference is only MLX-eligible alongside a strict pose set; reference-only stays on torch — viability spike.",
-            Some("sc-3536"),
         ),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
@@ -2773,27 +2767,15 @@ fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
 }
 
 /// Z-Image (sc-3022) MLX-routing conditions, ported from
-/// `_should_route_z_image_to_mlx`: text-to-image only; a reference asset is
-/// allowed only alongside a strict pose set (the Fun-ControlNet pose tier lives
-/// only on MLX — sc-2257/sc-2328, so a reference+pose job must NOT divert to
-/// torch, which would honour count while dropping the poses); a third-party
-/// LyCORIS LoRA falls back to torch while SceneWorks peft LoKr stays on MLX
-/// (sc-2216).
+/// `_should_route_z_image_to_mlx`: text-to-image, reference-identity img2img-init
+/// (sc-3619 — `referenceAssetId` without a pose set, the plain img2img path the
+/// base engine already supports), and reference+pose (the Fun-ControlNet pose tier
+/// lives only on MLX — sc-2257/sc-2328, so a reference+pose job must NOT divert to
+/// torch, which would honour count while dropping the poses). `edit_image`
+/// img2img-edit stays on torch (epic 3529); a third-party LyCORIS LoRA falls back
+/// to torch while SceneWorks peft LoKr stays on MLX (sc-2216).
 fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    if has_reference && !has_poses {
         return false;
     }
     !request_has_lycoris_lora(payload)
@@ -3357,15 +3339,23 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn z_image_reference_without_poses_falls_back_to_torch() {
-        // A plain reference (no poses) has no Z-Image path on MLX → torch.
-        assert!(!z_image_mlx_eligible(&object(
+    fn z_image_reference_without_poses_is_eligible() {
+        // sc-3619: reference-identity img2img-init (no pose) now routes to MLX — the
+        // base engine already supports the plain img2img path, and torch dropped the
+        // reference entirely (it was a no-op on the fallback).
+        assert!(z_image_mlx_eligible(&object(
             json!({ "referenceAssetId": "asset_1" })
         )));
-        // Empty/whitespace reference id is treated as absent → eligible.
+        // Empty/whitespace reference id is treated as absent → plain txt2img, eligible.
         assert!(z_image_mlx_eligible(&object(
             json!({ "referenceAssetId": "   " })
         )));
+        // A reference with empty poses is still reference-only → eligible (not the
+        // pose tier, which needs a non-empty pose set).
+        assert!(z_image_mlx_eligible(&object(json!({
+            "referenceAssetId": "asset_1",
+            "advanced": { "poses": [] }
+        }))));
     }
 
     #[test]
@@ -3375,11 +3365,6 @@ mod mlx_routing_tests {
         assert!(z_image_mlx_eligible(&object(json!({
             "referenceAssetId": "asset_1",
             "advanced": { "poses": [{ "id": "pose_1" }] }
-        }))));
-        // Poses present but empty array → not a pose request → reference falls back.
-        assert!(!z_image_mlx_eligible(&object(json!({
-            "referenceAssetId": "asset_1",
-            "advanced": { "poses": [] }
         }))));
     }
 
