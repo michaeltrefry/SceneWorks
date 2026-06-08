@@ -3,7 +3,7 @@
 // as a Tauri sidecar named for the host target triple. Wired as the
 // tauri.conf.json `beforeBuildCommand` so `tauri build` is self-contained.
 import { execFileSync, execSync } from "node:child_process";
-import { copyFileSync, mkdirSync, chmodSync } from "node:fs";
+import { copyFileSync, mkdirSync, chmodSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -49,14 +49,24 @@ if (!exe) {
 }
 console.log(`build-sidecar: staged ${dest}`);
 
-// macOS: stage the CoreML onnxruntime dylib the Rust DWPose detector (sc-3487)
-// dlopens at runtime (via ORT_DYLIB_PATH, set in setup.rs). Bundled as a Tauri
-// resource (tauri.conf.json `resources` -> `onnxruntime/**/*`) so a packaged,
-// Python-free Mac can still detect poses. The worker links `ort` with
-// `load-dynamic`, so unlike build-time linking this needs no rpath surgery.
+// The Rust DWPose detector (sc-3487) dlopens onnxruntime at runtime via
+// ORT_DYLIB_PATH (set in setup.rs), bundled as a Tauri resource
+// (tauri.conf.json `resources` -> `onnxruntime/**/*`) so a packaged, Python-free
+// Mac can still detect poses. The `onnxruntime` dir must exist on EVERY platform —
+// Tauri errors on a resource glob that matches no files. Only macOS stages the
+// real CoreML dylib (pose detection on the Rust worker is macOS-only); other
+// platforms ship a placeholder so the glob matches and the build succeeds.
+const ortDir = join(desktopDir, "onnxruntime");
+mkdirSync(ortDir, { recursive: true });
 if (triple.includes("apple-darwin")) {
-  const dylibDest = join(desktopDir, "onnxruntime", "libonnxruntime.dylib");
+  const dylibDest = join(ortDir, "libonnxruntime.dylib");
   const py = process.env.PYTHON || "python3";
   run(py, ["apps/desktop/scripts/stage-onnxruntime.py", dylibDest]);
   console.log(`build-sidecar: staged ${dylibDest}`);
+} else {
+  writeFileSync(
+    join(ortDir, "README.txt"),
+    "onnxruntime CoreML dylib is bundled on macOS only (Rust DWPose detector, sc-3487).\n",
+  );
+  console.log(`build-sidecar: ${ortDir} placeholder (non-macOS, no DWPose dylib)`);
 }
