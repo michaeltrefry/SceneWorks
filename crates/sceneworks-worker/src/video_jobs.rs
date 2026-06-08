@@ -923,8 +923,9 @@ fn lora_scale(lora: &Value) -> f32 {
 /// Build the adapter specs for a Wan generation (sc-3034): the Lightning distill pair
 /// (T2V-14B only, tagged high/low) followed by the user LoRAs. On the MoE models a user
 /// `*.high_noise.safetensors` with a `.low_noise` sibling tags high→High / low→Low; a
-/// single-file LoRA is shared (both experts on MoE, the single model on the 5B). LyCORIS
-/// is rejected; peft LoKr is allowed (the engine merges it, like the image path).
+/// single-file LoRA is shared (both experts on MoE, the single model on the 5B). peft LoKr AND
+/// third-party LyCORIS (LoHa / non-peft LoKr) both apply on the MLX Wan/LTX paths now (epic 3641,
+/// sc-3671) — `classify_adapter` returns `Lora` for third-party and the engine detects + merges it.
 #[cfg(target_os = "macos")]
 fn resolve_wan_adapters(
     settings: &Settings,

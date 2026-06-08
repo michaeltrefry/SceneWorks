@@ -4,7 +4,7 @@ import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
 import { extractFamilies, modelLoraFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
-import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock, macModelBlock } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 
 // Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
 // base models accept the optional low-noise expert upload (sc-1991). The 5B model
@@ -204,8 +204,8 @@ export function ModelManagerScreen() {
     presets: recipePresets = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
-  // Mac UI gating (sc-3486): third-party LyCORIS adapters never run in the Rust/MLX flow (sc-3537).
-  const macLycorisBlock = macFeatureBlock(macCapabilities, "lycoris");
+  // Third-party LyCORIS now applies on every MLX provider (epic 3641), so the LyCORIS upload is no
+  // longer Mac-gated.
   const onCancelJob = (job) => jobAction(job, "cancel");
   const onResumeDownloadJob = (job, payload) => jobAction(job, "retry", { body: payload ?? {} });
   const onFreshDownloadJob = (job, payload) => jobAction(job, "retry", { body: payload ?? {} });
@@ -836,7 +836,6 @@ export function ModelManagerScreen() {
             <strong>Import LoRA</strong>
             <span>{importForm.family || "auto-detect"}</span>
           </div>
-          {macLycorisBlock ? <p className="mac-gating-note">{macLycorisBlock.text}</p> : null}
           <div className="segmented-control compact-segment" aria-label="LoRA import source">
             <button
               className={importForm.mode === "url" ? "active" : ""}

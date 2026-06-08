@@ -79,7 +79,7 @@ dropped — no silent drops.**
 | Reference (XLabs IP-Adapter) | `flux_schnell`, `flux_dev` | 🟢 Ported (MLX) | sc-3535 (spike) → epic 3621 (sc-3622–3625) |
 | `edit_image` (img2img-edit) | `z_image_turbo` | 🔵 Port-pending | epic 3529 (folds into Z-Image-Edit port) |
 | reference-without-pose | `z_image_turbo` | 🟢 Ported (MLX) | sc-3536 (spike GO) → sc-3619 |
-| Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🔵 Port (spike GO) | sc-3537 (spike) → **epic 3641** |
+| Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟢 Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3642/3643/3671 engine + sc-3644 routing) |
 
 > **FLUX.1 `edit_image` is not an eradication gap (sc-3535).** The torch `FluxDiffusersAdapter`
 > hard-rejects `edit_image` ("does not support image editing") — FLUX.1 has no edit path on *any*
@@ -101,8 +101,8 @@ dropped — no silent drops.**
 | Advanced `video_generate` modes (`first_last_frame`, `replace_person`) | 🔵 Port-pending | epic 3040 |
 | Advanced job types `video_extend`, `video_bridge` | 🔵 Port-pending | epic 3040 |
 | `person_replace` job type (replace_person) | 🔵 Port-pending | epic 3040 (+ sc-3488 person track) |
-| LoKr-on-Wan (Kronecker adapter on Wan) | 🔵 Port-pending | epic 3040 (LoKr-on-LTX already MLX) |
-| Third-party LyCORIS on video | 🔵 Port (spike GO) | sc-3537 (spike) → **epic 3641** (shared image+video) |
+| LoKr-on-Wan **inference** (Kronecker adapter on Wan generation) | 🟢 Ported (MLX) | sc-3644 (engine `merge_one_lokr` since sc-2393; routing gate flipped — never an engine limit). Wan LoKr *training* stays torch → epic 3039 |
+| Third-party LyCORIS on video | 🟢 Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3671 Wan/LTX engine + sc-3644 routing) |
 
 ## 4. Training (`lora_train`)
 

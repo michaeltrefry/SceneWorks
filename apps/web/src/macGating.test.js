@@ -20,13 +20,13 @@ const gating = {
       supported: false,
       reason: { feature: "image_upscale (Real-ESRGAN)", detail: "torch path.", suggestedEpic: "sc-3489" },
     },
-    lycoris: { supported: true },
+    // LyCORIS is ported to MLX (epic 3641) → no longer a capability feature entry.
   },
   training: { supportedKernels: ["z_image_lora", "sdxl_lora"], lokrOnWanSupported: false },
 };
 
 const torchModel = { id: "kolors", macSupport: { supported: false, reason: { detail: "no MLX engine.", suggestedEpic: "epic 3532" } } };
-const mlxModel = { id: "z_image_turbo", macSupport: { supported: true, features: { pose: true, reference: false, edit: false, lycoris: false } } };
+const mlxModel = { id: "z_image_turbo", macSupport: { supported: true, features: { pose: true, reference: false, edit: false, lycoris: true } } };
 
 describe("macGating helpers", () => {
   it("are all inert when gating is not active (Windows/Linux/observe mode)", () => {
@@ -63,7 +63,7 @@ describe("macGating helpers", () => {
     const block = macFeatureBlock(gating, "imageUpscale");
     expect(block?.blocked).toBe(true);
     expect(block?.text).toContain("sc-3489");
-    // A supported feature is not blocked.
+    // LyCORIS is ported (epic 3641) → not a capability feature, so never blocked.
     expect(macFeatureBlock(gating, "lycoris")).toBeNull();
   });
 

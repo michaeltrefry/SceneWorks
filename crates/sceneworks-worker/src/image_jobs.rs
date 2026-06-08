@@ -277,8 +277,8 @@ pub(crate) async fn run_image_generate_job(
     // Pre-flight LoRA family-compat guardrail (sc-3027): reject an incompatible LoRA
     // (e.g. a Flux LoRA on an SDXL model, or a Wan 5B LoRA on the 14B base) before any
     // heavy load, with the same message the Python worker raised — instead of failing
-    // deep in the engine's strict adapter loader. Network-type rules (peft LoKr stays
-    // on MLX, third-party LyCORIS → torch) are handled by routing + `classify_adapter`.
+    // deep in the engine's strict adapter loader. Network-type handling (peft LoKr AND third-party
+    // LyCORIS both apply on MLX now, epic 3641) is done by routing + `classify_adapter` + the engine.
     sceneworks_core::lora_family::validate_lora_compatibility(
         &request.loras,
         Some(plan.family.as_str()),
@@ -907,39 +907,25 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Classify a LoRA file into the mlx-gen adapter kind. SceneWorks peft-LoKr (stamped
-/// `networkType: lokr`) → `Lokr`; third-party LyCORIS (LoHa / kohya LoKr) is not
-/// reconstructable here → rejected; everything else → `Lora`.
+/// Classify a LoRA file into the mlx-gen adapter `kind`. SceneWorks peft-LoKr (stamped
+/// `networkType: lokr`) → `Lokr` (the engine's metadata-gated `apply_lokr` peft path). Everything
+/// else → `Lora`, INCLUDING third-party LyCORIS (LoHa / kohya non-peft LoKr): since epic 3641
+/// (sc-3642/3643/3671) the engine's `apply_adapter_specs_autoprefix` detects `lokr_*` / `hada_*`
+/// keys by sniff and routes them to its third-party reconstruction regardless of the declared kind,
+/// so `Lora` is the correct hint and the worker no longer rejects them. (A LyCORIS algo the engine
+/// doesn't implement — e.g. (IA)³/OFT — has no `lokr_*`/`hada_*` keys, so the engine's LoRA loader
+/// finds nothing and surfaces a loud "matched nothing" error rather than mis-applying.)
 #[cfg(target_os = "macos")]
 pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     let header = read_safetensors_header(file)
         .map_err(|error| WorkerError::InvalidPayload(format!("LoRA header: {error}")))?;
-    let metadata = header.get("__metadata__");
-    let network_type = metadata
+    let network_type = header
+        .get("__metadata__")
         .and_then(|meta| meta.get("networkType"))
         .and_then(Value::as_str)
         .map(|value| value.trim().to_ascii_lowercase());
     if network_type.as_deref() == Some("lokr") {
         return Ok(AdapterKind::Lokr);
-    }
-    let module = metadata
-        .and_then(|meta| meta.get("ss_network_module"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let lycoris_keys = header
-        .as_object()
-        .map(|object| {
-            object
-                .keys()
-                .any(|key| key.contains("lokr_") || key.contains("hada_"))
-        })
-        .unwrap_or(false);
-    if module.contains("lycoris") || lycoris_keys {
-        return Err(WorkerError::InvalidPayload(
-            "Third-party LyCORIS LoRA (LoHa / kohya LoKr) is not supported on the MLX path."
-                .to_owned(),
-        ));
     }
     Ok(AdapterKind::Lora)
 }

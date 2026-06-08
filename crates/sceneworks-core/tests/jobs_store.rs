@@ -1820,15 +1820,14 @@ fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
         json!({ "model": "qwen_image", "prompt": "p", "advanced": { "poses": [{ "x": 1 }] } }),
     );
     assert!(mac_rust_supported(&pose).is_ok());
-    // Third-party LyCORIS on an otherwise-MLX family → port pending (sc-3537 spike GO → epic 3641).
+    // Third-party LyCORIS now applies on every MLX provider (epic 3641: core sc-3642/3643 +
+    // SDXL/Wan/LTX sc-3671) → no longer a gap, runs on the Rust/MLX flow.
     let lycoris = job_of(
         &store,
         JobType::ImageGenerate,
         json!({ "model": "sdxl", "prompt": "p", "loras": [{ "networkType": "lycoris" }] }),
     );
-    let lycoris_reason = mac_rust_supported(&lycoris).unwrap_err();
-    assert!(lycoris_reason.feature.contains("LyCORIS"));
-    assert_eq!(lycoris_reason.suggested_epic.as_deref(), Some("epic 3641"));
+    assert!(mac_rust_supported(&lycoris).is_ok());
 }
 
 #[test]
@@ -2016,8 +2015,8 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     let qwen_edit = model_mac_support("qwen_image_edit_2511", "image");
     assert!(qwen_edit.features.reference);
     assert!(qwen_edit.features.edit);
-    // LyCORIS is never in the Rust flow yet, for every family.
-    assert!(!model_mac_support("sdxl", "image").features.lycoris);
+    // Third-party LyCORIS now applies on every MLX provider (epic 3641) → supported.
+    assert!(model_mac_support("sdxl", "image").features.lycoris);
     // Video models expose per-mode eligibility; advanced modes are torch-only.
     let wan = model_mac_support("wan_2_2", "video").features.video_modes;
     assert_eq!(wan.get("text_to_video"), Some(&true));
@@ -2057,7 +2056,8 @@ fn mac_capabilities_master_switch_and_infra_features() {
     assert_eq!(epic("poseFromPhoto").as_deref(), Some("sc-3487"));
     assert_eq!(epic("personDetect").as_deref(), Some("sc-3488"));
     assert_eq!(epic("datasetCaptioning"), None);
-    assert_eq!(epic("lycoris").as_deref(), Some("epic 3641"));
+    // LyCORIS is ported to MLX (epic 3641) → no longer a capability gap entry at all.
+    assert!(!mac.features.contains_key("lycoris"));
     assert_eq!(epic("advancedVideoModes").as_deref(), Some("epic 3040"));
     assert!(mac.features["datasetCaptioning"].supported);
     // datasetCaptioning + imageUpscale are the ported (supported) infra features; the
@@ -2970,12 +2970,13 @@ fn explicit_gpu_video_job_is_not_deferred_to_mlx_worker() {
 }
 
 #[test]
-fn lokr_on_wan_video_stays_on_torch() {
+fn lokr_on_wan_video_routes_to_mlx() {
     let store = store("mlx-video-lokr-wan");
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
-    // LoKr-on-Wan → torch: the diffusers-Wan path applies LoKr via PEFT; the
-    // mlx-video path can't (mirrors create_video_adapter).
+    // LoKr-on-Wan now routes to MLX (epic 3641 / sc-3644): the Wan engine merges the Kronecker
+    // delta in-place (merge_one_lokr, sc-2393) — the old torch gate was a routing caution, not an
+    // engine limit. (Wan LoKr *training* still stays torch, epic 3039 — a separate path.)
     let job = store
         .create_job(video_job_with(
             json!({
@@ -2987,16 +2988,10 @@ fn lokr_on_wan_video_stays_on_torch() {
         ))
         .expect("job creates");
 
-    assert!(store
+    let claimed = store
         .claim_next_job("worker-mlx")
         .expect("mlx claim ok")
-        .is_none());
-
-    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
-    let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the LoKr-on-Wan job");
+        .expect("mlx claims the LoKr-on-Wan video job");
     assert_eq!(claimed.id, job.id);
 }
 
@@ -3314,30 +3309,26 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
             .expect("complete job");
     }
 
-    // A third-party LyCORIS LoRA still keeps SDXL on the Python torch path.
+    // A third-party LyCORIS LoRA now applies on the SDXL merge path (epic 3641, sc-3671) → MLX.
     let lycoris = store
         .create_job(image_job_with(
             json!({ "model": "sdxl", "prompt": "p", "loras": [{ "networkType": "lycoris" }] }),
             "auto",
         ))
         .expect("lycoris job creates");
-    assert!(store
+    let claimed = store
         .claim_next_job("worker-mlx")
         .expect("mlx claim ok")
-        .is_none());
-    let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims sdxl lycoris job");
+        .expect("mlx claims sdxl lycoris job");
     assert_eq!(claimed.id, lycoris.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
 #[test]
 fn image_detail_routes_to_mlx_worker() {
     // sc-3060: the tile-ControlNet detail refine (`image_detail`) now runs on the Rust
     // engine for SDXL-family backbones, so it routes to the `mlx` worker (the torch worker
-    // defers); a third-party LyCORIS LoRA keeps it on torch.
+    // defers); a third-party LyCORIS LoRA also runs on MLX now (epic 3641, sc-3671).
     let store = store("mlx-routing-detail");
     let caps = vec![
         WorkerCapability::Gpu,
@@ -3396,7 +3387,7 @@ fn image_detail_routes_to_mlx_worker() {
             .expect("complete detail job");
     }
 
-    // LyCORIS detail job stays on the Python torch path.
+    // A LyCORIS detail job now applies on the SDXL merge path (epic 3641) → MLX.
     let lycoris = store
         .create_job(detail_job(json!({
             "model": "realvisxl",
@@ -3404,16 +3395,12 @@ fn image_detail_routes_to_mlx_worker() {
             "loras": [{ "networkType": "lycoris" }]
         })))
         .expect("lycoris detail job creates");
-    assert!(store
+    let claimed = store
         .claim_next_job("worker-mlx")
         .expect("mlx claim ok")
-        .is_none());
-    let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims lycoris detail job");
+        .expect("mlx claims lycoris detail job");
     assert_eq!(claimed.id, lycoris.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
 #[test]
