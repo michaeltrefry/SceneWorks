@@ -28,6 +28,7 @@ import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { AppContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
+import { ACCENTS, DEFAULT_ACCENT, isAccentId } from "./accents.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -214,6 +215,18 @@ function readStoredTheme() {
     return saved === "dark" || saved === "light" ? saved : "light";
   } catch {
     return "light";
+  }
+}
+
+function readStoredAccent() {
+  if (typeof window === "undefined") {
+    return DEFAULT_ACCENT;
+  }
+  try {
+    const saved = window.localStorage.getItem("sceneworks-accent");
+    return isAccentId(saved) ? saved : DEFAULT_ACCENT;
+  } catch {
+    return DEFAULT_ACCENT;
   }
 }
 
@@ -476,6 +489,17 @@ export function App() {
     apiFetch("/api/v1/ui-preferences", "", {
       method: "PUT",
       body: JSON.stringify({ theme: next }),
+    }).catch(() => {});
+  };
+  const [accent, setAccent] = useState(readStoredAccent);
+  // Same persistence contract as theme: instant localStorage cache + durable
+  // server copy. The PUT sends only the changed field, so the endpoint must
+  // MERGE partial updates (theme writes already rely on this).
+  const changeAccent = (next) => {
+    setAccent(next);
+    apiFetch("/api/v1/ui-preferences", "", {
+      method: "PUT",
+      body: JSON.stringify({ accent: next }),
     }).catch(() => {});
   };
   const activeProjectRef = useRef(null);
@@ -766,6 +790,18 @@ export function App() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    document.documentElement.setAttribute("data-accent", accent);
+    try {
+      window.localStorage.setItem("sceneworks-accent", accent);
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, [accent]);
+
   // Seed the theme from the server on launch (the durable copy; localStorage is
   // only an instant-paint cache). Each toggle persists itself via changeTheme,
   // so there's no save effect to race with this read.
@@ -773,9 +809,14 @@ export function App() {
     let cancelled = false;
     apiFetch("/api/v1/ui-preferences", "")
       .then((prefs) => {
-        const stored = prefs?.theme;
-        if (!cancelled && (stored === "dark" || stored === "light")) {
-          setTheme(stored);
+        if (cancelled) {
+          return;
+        }
+        if (prefs?.theme === "dark" || prefs?.theme === "light") {
+          setTheme(prefs.theme);
+        }
+        if (isAccentId(prefs?.accent)) {
+          setAccent(prefs.accent);
         }
       })
       .catch(() => {});
@@ -1718,6 +1759,20 @@ export function App() {
           <button className="icon-btn" title="Notifications" type="button">
             <Icon.Bell />
           </button>
+          <div className="accent-picker" role="group" aria-label="Accent color">
+            {ACCENTS.map((option) => (
+              <button
+                aria-label={option.name}
+                aria-pressed={accent === option.id}
+                className={accent === option.id ? "accent-swatch active" : "accent-swatch"}
+                key={option.id}
+                onClick={() => changeAccent(option.id)}
+                style={{ "--sw": option.swatch }}
+                title={option.name}
+                type="button"
+              />
+            ))}
+          </div>
           <button
             className="icon-btn"
             onClick={() => changeTheme(theme === "light" ? "dark" : "light")}

@@ -3,8 +3,10 @@ import React, { useId } from "react";
 /**
  * SceneWorks mark — "scene cut" (D1). A rounded square split by a diagonal
  * seam: teal triangle over a solid ground. Colors come from CSS variables
- * (--logo-ground / --logo-seam) so it tracks the active theme; teal is fixed
- * brand color and does not follow the user-selectable accent.
+ * (--logo-ground / --logo-seam) so it tracks the active theme; the triangle is
+ * --teal, which now follows the user-selectable accent (sc-accent) — the teal
+ * palette keeps the fixed #2fa193 brand color, the other palettes derive a
+ * matching --teal.
  */
 export function Logo({ size = 32, title = "SceneWorks", className }) {
   const clipId = useId();

@@ -39,9 +39,13 @@
   --text-muted: oklch(0.5 0.012 240);
   --text-faint: oklch(0.66 0.01 240);
 
-  --accent: oklch(0.66 0.11 178);
-  --accent-strong: oklch(0.55 0.13 178);
-  --accent-soft: oklch(0.94 0.04 178);
+  /* Accent is hue-driven so one [data-accent] swap recolors the whole app.
+     --accent-h / --warm-h are set per palette at the bottom of this block;
+     teal (178 / 235) is the default. */
+  --accent-h: 178;
+  --accent: oklch(0.66 0.11 var(--accent-h));
+  --accent-strong: oklch(0.55 0.13 var(--accent-h));
+  --accent-soft: oklch(0.94 0.04 var(--accent-h));
   --accent-fg: #ffffff;
 
   /* Brand palette — fixed brand colors, theme-independent. */
@@ -55,8 +59,9 @@
   --logo-seam: var(--paper);
   --wordmark-strong: var(--ink);
 
-  --warm: oklch(0.72 0.11 235);
-  --warm-soft: oklch(0.95 0.03 235);
+  --warm-h: 235;
+  --warm: oklch(0.72 0.11 var(--warm-h));
+  --warm-soft: oklch(0.95 0.03 var(--warm-h));
   --danger: oklch(0.62 0.18 25);
   --danger-soft: oklch(0.95 0.04 25);
   --success: oklch(0.62 0.13 155);
@@ -82,9 +87,9 @@
   --text-muted: oklch(0.72 0.012 240);
   --text-faint: oklch(0.56 0.012 240);
 
-  --accent: oklch(0.74 0.11 178);
-  --accent-strong: oklch(0.82 0.12 178);
-  --accent-soft: oklch(0.3 0.06 178);
+  --accent: oklch(0.74 0.11 var(--accent-h));
+  --accent-strong: oklch(0.82 0.12 var(--accent-h));
+  --accent-soft: oklch(0.3 0.06 var(--accent-h));
   --accent-fg: oklch(0.16 0.012 240);
 
   /* On dark: mark ground → mist (full square reads), seam → ink, wordmark → paper. */
@@ -92,8 +97,8 @@
   --logo-seam: var(--ink);
   --wordmark-strong: var(--paper);
 
-  --warm: oklch(0.78 0.11 235);
-  --warm-soft: oklch(0.32 0.05 235);
+  --warm: oklch(0.78 0.11 var(--warm-h));
+  --warm-soft: oklch(0.32 0.05 var(--warm-h));
   --danger-soft: oklch(0.3 0.06 25);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -101,6 +106,21 @@
   --shadow-lg: 0 30px 60px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.4);
   color-scheme: dark;
 }
+
+/* ---------- Accent palettes (user-selectable, sc-accent) ----------
+   Each sets the accent + secondary hue; the light/dark ramps above consume them.
+   `teal` keeps the fixed #2fa193 brand mark; the rest derive a matching --teal. */
+[data-accent="teal"]    { --accent-h: 178; --warm-h: 235; }
+[data-accent="indigo"]  { --accent-h: 274; --warm-h: 320; --teal: oklch(0.58 0.16 274); }
+[data-accent="cobalt"]  { --accent-h: 252; --warm-h: 205; --teal: oklch(0.55 0.16 252); }
+[data-accent="violet"]  { --accent-h: 305; --warm-h: 268; --teal: oklch(0.55 0.18 305); }
+[data-accent="coral"]   { --accent-h: 28;  --warm-h: 350; --teal: oklch(0.62 0.16 28); }
+[data-accent="amber"]   { --accent-h: 80;  --warm-h: 45;  --teal: oklch(0.72 0.13 80);
+                          --accent-fg: oklch(0.24 0.03 80); }
+[data-accent="emerald"] { --accent-h: 152; --warm-h: 128; --teal: oklch(0.56 0.14 152); }
+/* Amber's accent is bright enough to need dark text on chips/buttons in light mode;
+   in dark mode the default ink fg is already correct, so restore it. */
+[data-theme="dark"][data-accent="amber"] { --accent-fg: oklch(0.16 0.012 240); }
 
 /* ---------- Reset ---------- */
 * {
@@ -829,6 +849,32 @@ button:focus-visible {
 
 [data-theme="dark"] .icon-btn.active {
   color: var(--accent);
+}
+
+/* Accent picker — topbar swatch row */
+.accent-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+}
+
+.accent-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: var(--sw);
+  border: 1.5px solid var(--border);
+  transition: transform var(--t-fast) var(--ease-out), box-shadow var(--t-fast);
+}
+
+.accent-swatch:hover {
+  transform: translateY(-1px);
+}
+
+.accent-swatch.active {
+  border-color: var(--sw);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--sw) 38%, transparent);
 }
 
 .dot {
