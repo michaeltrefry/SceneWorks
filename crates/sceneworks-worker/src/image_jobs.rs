@@ -6134,4 +6134,152 @@ mod tests {
         assert!((at(0, 8) - at(15, 8)).abs() < 1e-6);
         assert!((at(8, 0) - at(8, 15)).abs() < 1e-6);
     }
+
+    /// sc-3625 real-Mac E2E (epic 3621): drive the WORKER's FLUX.1 XLabs IP-Adapter reference path
+    /// end to end on real weights — `resolve_flux_ip_adapter_dir` staging from the real HF cache +
+    /// `mlx_load_with_ip` + a real `Conditioning::Reference` dev `true_cfg` render against the
+    /// pinned mlx-gen engine. Guards the worker plumbing the engine-side A/B can't: the staged-dir
+    /// contract + the dev reference render NOT regressing to the pre-#173 saturation (which
+    /// collapsed `true_cfg=4` to a near-uniform white frame). Run (needs FLUX.1-dev +
+    /// `XLabs-AI/flux-ip-adapter` + `openai/clip-vit-large-patch14` in the HF cache):
+    /// ```text
+    /// HF_HUB_CACHE=$HOME/.cache/huggingface/hub \
+    ///   cargo test -p sceneworks-worker --release flux_ip_reference_worker_e2e -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-Mac E2E: loads FLUX.1-dev + XLabs IP-Adapter + CLIP-ViT-L from the HF cache"]
+    fn flux_ip_reference_worker_e2e() {
+        fn hf_cache() -> String {
+            std::env::var("HF_HUB_CACHE").unwrap_or_else(|_| {
+                format!("{}/.cache/huggingface/hub", std::env::var("HOME").unwrap())
+            })
+        }
+        fn hf_snapshot(repo: &str, needs: &str) -> PathBuf {
+            let safe = repo.replace('/', "--");
+            let snaps = PathBuf::from(hf_cache())
+                .join(format!("models--{safe}"))
+                .join("snapshots");
+            std::fs::read_dir(&snaps)
+                .unwrap_or_else(|_| panic!("HF snapshot for {repo}"))
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .find(|p| p.is_dir() && p.join(needs).exists())
+                .unwrap_or_else(|| panic!("a complete {repo} snapshot with {needs}"))
+        }
+
+        // Point the worker's HF-cache resolver + Settings at the real cache + a temp data dir.
+        std::env::set_var("HF_HUB_CACHE", hf_cache());
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var("SCENEWORKS_DATA_DIR", data.path());
+        let settings = Settings::from_env();
+
+        // (1) The worker's OWN staging fn, against the real cache (the net-new sc-3625 fs logic).
+        let staged = resolve_flux_ip_adapter_dir(&settings).expect("stage flux ip-adapter dir");
+        assert!(
+            staged.join("ip_adapter.safetensors").exists(),
+            "staged ip_adapter.safetensors"
+        );
+        assert!(
+            staged.join("image_encoder/model.safetensors").exists(),
+            "staged image_encoder/model.safetensors"
+        );
+
+        // (2) Load FLUX.1-dev through the worker loader with the staged IP dir, resolving the
+        // engine id from the MLX_MODELS table exactly as the real dispatch does (model "flux_dev"
+        // → engine "flux1_dev").
+        let engine_id = mlx_model("flux_dev")
+            .expect("flux_dev in MLX_MODELS")
+            .engine_id;
+        let flux_dev = hf_snapshot("black-forest-labs/FLUX.1-dev", "transformer");
+        let generator = mlx_load_with_ip(engine_id, flux_dev, None, vec![], Some(staged))
+            .unwrap_or_else(|e| panic!("mlx_load_with_ip {engine_id} + ip: {e}"));
+
+        // (3) Reference render through the dev `true_cfg` path (white-dot garbage pre-#173).
+        let reference = {
+            let p = "/tmp/flux_ab/reference.png";
+            if std::path::Path::new(p).exists() {
+                let img = image::open(p).unwrap().to_rgb8();
+                Image {
+                    width: img.width(),
+                    height: img.height(),
+                    pixels: img.into_raw(),
+                }
+            } else {
+                // Synthetic fallback: a solid orange field (still drives the IP branch).
+                Image {
+                    width: 64,
+                    height: 64,
+                    pixels: [255u8, 140, 0]
+                        .iter()
+                        .cycle()
+                        .take(64 * 64 * 3)
+                        .copied()
+                        .collect(),
+                }
+            }
+        };
+        let req = |conditioning, true_cfg| GenerationRequest {
+            prompt: "an oil painting in the bold swirling brushstroke style of Van Gogh".into(),
+            width: 512,
+            height: 512,
+            seed: Some(2),
+            steps: Some(16),
+            true_cfg,
+            conditioning,
+            ..Default::default()
+        };
+        let run = |r: &GenerationRequest| match generator.generate(r, &mut |_| {}).unwrap() {
+            GenerationOutput::Images(mut v) => v.remove(0),
+            _ => unreachable!(),
+        };
+
+        let ref_out = run(&req(
+            vec![Conditioning::Reference {
+                image: reference,
+                strength: Some(0.7),
+            }],
+            Some(4.0),
+        ));
+        let plain = run(&req(vec![], None));
+
+        // Non-degenerate: the pre-#173 saturation collapsed dev true_cfg=4 to a near-uniform white.
+        let n = ref_out.pixels.len() as f64;
+        let mean = ref_out.pixels.iter().map(|&b| b as f64).sum::<f64>() / n;
+        let var = ref_out
+            .pixels
+            .iter()
+            .map(|&b| (b as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n;
+        assert!(
+            var > 200.0,
+            "reference render near-uniform (var={var:.1}) — true_cfg saturation regression"
+        );
+        assert!(
+            mean < 245.0,
+            "reference render near-white (mean={mean:.1}) — true_cfg saturation regression"
+        );
+
+        // The reference actually changed the image vs plain txt2img (IP branch is applied).
+        let diff = ref_out
+            .pixels
+            .iter()
+            .zip(&plain.pixels)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            diff > ref_out.pixels.len() / 10,
+            "reference barely changed the render ({diff} px)"
+        );
+
+        if let Ok(p) = std::env::var("FLUX_IP_WORKER_OUT") {
+            image::RgbImage::from_raw(ref_out.width, ref_out.height, ref_out.pixels.clone())
+                .unwrap()
+                .save(&p)
+                .unwrap();
+            println!("[worker-e2e] wrote {p}");
+        }
+        println!("[worker-e2e] OK: staged dir contract + flux_dev load + dev true_cfg=4 reference render — var={var:.1} mean={mean:.1} diff-vs-txt2img={diff}px");
+    }
 }
