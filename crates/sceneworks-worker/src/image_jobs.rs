@@ -8,7 +8,8 @@
 //! `assetWrites` per image is what streams results into the gallery as they land.
 //!
 //! On macOS, engine-backed families (`z_image_turbo` — sc-3022; `flux_schnell` /
-//! `flux_dev` — sc-3023) run **real** in-process inference via the linked mlx-gen
+//! `flux_dev` — sc-3023; `qwen_image` — sc-3024 / strict pose sc-3575) run **real**
+//! in-process inference via the linked mlx-gen
 //! engine; other models (and non-macOS) fall back to a procedural stub (sc-3020), so
 //! the pipeline stays cross-platform-testable and each new family just adds a row to
 //! the [`MLX_MODELS`] table + links its provider crate.
@@ -103,8 +104,9 @@ const MLX_MODELS: &[MlxModel] = &[
         // Non-distilled true-CFG base: 20 steps + guidance 4.0 + negative prompt
         // (Python MODEL_TARGETS / MlxQwenAdapter). mlx-gen's own default is 4 steps,
         // so steps are passed explicitly. Edit moves to MLX (sc-3397, the `qwen_image_edit`
-        // engine model below); base-Qwen strict-pose ControlNet stays on torch until the
-        // engine port lands (epic 3401).
+        // engine model below); base-Qwen strict-pose ControlNet routes to the
+        // `qwen_image_control` engine variant when `advanced.poses` is present
+        // (epic 3401 / sc-3575).
         sceneworks_id: "qwen_image",
         engine_id: "qwen_image",
         default_repo: "Qwen/Qwen-Image",
@@ -310,6 +312,19 @@ pub(crate) async fn run_image_generate_job(
     let handled = if zimage_control_available(&request, settings) {
         // Z-Image strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
         generate_zimage_control_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if qwen_control_available(&request, settings) {
+        // Qwen strict-pose (advanced.poses) → InstantX ControlNet-Union, one image per pose.
+        generate_qwen_control_stream(
             api,
             settings,
             job,
@@ -1404,7 +1419,12 @@ fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool
 /// else defaults) to a single `.safetensors` in the HF cache. `None` when absent (the
 /// model-download flow fetches it ahead of generation, like base weights).
 #[cfg(target_os = "macos")]
-fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+fn resolve_control_weights_for(
+    request: &ImageRequest,
+    settings: &Settings,
+    default_repo: &'static str,
+    default_file: &'static str,
+) -> Option<PathBuf> {
     let control = request
         .advanced
         .get("controlWeights")
@@ -1418,11 +1438,17 @@ fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Optio
             .unwrap_or(default)
             .to_owned()
     };
-    let repo = str_field("repo", ZIMAGE_CONTROL_REPO);
-    let filename = str_field("filename", ZIMAGE_CONTROL_FILE);
+    let repo = str_field("repo", default_repo);
+    let filename = str_field("filename", default_file);
     let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo)?;
     let path = snapshot.join(filename);
     path.exists().then_some(path)
+}
+
+/// Resolve the Z-Image Fun-Controlnet-Union checkpoint.
+#[cfg(target_os = "macos")]
+fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+    resolve_control_weights_for(request, settings, ZIMAGE_CONTROL_REPO, ZIMAGE_CONTROL_FILE)
 }
 
 /// Pose ControlNet lock strength: `advanced.controlScale` (default 0.9, clamp [0,2]).
@@ -2424,14 +2450,289 @@ async fn generate_flux2_edit_stream(
 }
 
 // ---------------------------------------------------------------------------
+// Qwen-Image strict-pose ControlNet (macOS, epic 3401 / sc-3575): the InstantX
+// `Qwen-Image-ControlNet-Union` variant registered in mlx-gen as `qwen_image_control`.
+// One image per library pose, shared seed, true CFG + character LoRA on the base Qwen model.
+// ---------------------------------------------------------------------------
+
+/// The engine registry id for the Qwen-Image ControlNet-Union variant.
+#[cfg(target_os = "macos")]
+const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
+/// Default InstantX Qwen-Image-ControlNet-Union weights (Apache-2.0, DWPose-trained).
+#[cfg(target_os = "macos")]
+const QWEN_CONTROL_REPO: &str = "InstantX/Qwen-Image-ControlNet-Union";
+#[cfg(target_os = "macos")]
+const QWEN_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+
+/// True when this is the base-Qwen strict-pose tier: `qwen_image` + non-empty object
+/// `advanced.poses`, not edit mode, and base weights available. A `referenceAssetId`, if present,
+/// is ignored for parity with the Python torch `QwenImageControlNetPipeline` path; identity comes
+/// from character LoRA adapters on the base transformer.
+#[cfg(target_os = "macos")]
+fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    request.model == "qwen_image"
+        && request.mode != "edit_image"
+        && !pose_entries(request).is_empty()
+        && resolve_weights_dir(request, settings).is_some()
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_qwen_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+    resolve_control_weights_for(request, settings, QWEN_CONTROL_REPO, QWEN_CONTROL_FILE)
+}
+
+/// Load the Qwen-Image ControlNet-Union generator (base snapshot + InstantX control overlay).
+#[cfg(target_os = "macos")]
+fn qwen_control_load(
+    weights_dir: PathBuf,
+    control_weights: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
+        .with_control(WeightsSource::File(control_weights));
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
+    }
+    mlx_gen::load(QWEN_CONTROL_ENGINE_ID, &spec).map_err(|error| {
+        WorkerError::InvalidPayload(format!("Qwen strict-pose control load failed: {error}"))
+    })
+}
+
+/// Generate one Qwen strict-pose image: the pose skeleton drives the InstantX control branch at
+/// `control_scale`; prompt, true CFG, negative prompt, quant, and LoRA/LoKr mirror base Qwen.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn qwen_control_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: f32,
+    control: Image,
+    control_scale: f32,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance: Some(guidance),
+        conditioning: vec![Conditioning::Control {
+            image: control,
+            kind: ControlKind::Pose,
+            scale: control_scale,
+        }],
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator.generate(&request, on_progress).map_err(|error| {
+        WorkerError::InvalidPayload(format!("Qwen strict-pose generation failed: {error}"))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Qwen strict-pose generator produced no image".to_owned(),
+                )
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::InvalidPayload(
+            "Qwen strict-pose generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn qwen_control_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: f32,
+    control_scale: f32,
+    pose_count: usize,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    raw.insert("guidanceScale".to_owned(), json!(guidance));
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw.insert("controlScale".to_owned(), json!(control_scale));
+    raw.insert("poseCount".to_owned(), json!(pose_count));
+    raw.insert(
+        "controlEngine".to_owned(),
+        Value::String(QWEN_CONTROL_ENGINE_ID.to_owned()),
+    );
+    raw
+}
+
+/// Real Qwen strict-pose generation: one image per pose, each conditioned on a full DWPose
+/// skeleton. Mirrors the Python `_generate_pose_set` path: shared seed, full body/hands/face
+/// skeleton, `advanced.controlScale`, true CFG, and character LoRA identity.
+#[cfg(target_os = "macos")]
+async fn generate_qwen_control_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let qwen = mlx_model("qwen_image")
+        .ok_or_else(|| WorkerError::InvalidPayload("Qwen model row missing".to_owned()))?;
+    let weights_dir = resolve_weights_dir(request, settings)
+        .ok_or_else(|| WorkerError::InvalidPayload("Qwen-Image weights not found".to_owned()))?;
+    let control_weights = resolve_qwen_control_weights(request, settings).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Qwen strict-pose control weights not found (download {QWEN_CONTROL_REPO})."
+        ))
+    })?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let steps = resolve_steps(request, qwen);
+    let guidance = resolve_guidance(request, qwen).unwrap_or(qwen.default_guidance);
+    let negative_prompt = resolve_negative_prompt(request, qwen);
+    let control_scale = resolve_control_scale(request);
+    let adapters = resolve_adapters(request)?;
+    let repo = model_repo(request, qwen);
+    let poses = parse_poses(request);
+    let count = poses.len();
+    let raw_settings = qwen_control_raw_settings(
+        request,
+        &repo,
+        steps,
+        quant_bits,
+        guidance,
+        control_scale,
+        count,
+    );
+    let seed = resolve_seed(request, 0);
+
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+
+    let blocking = {
+        let prompt = request.prompt.clone();
+        let (width, height) = (request.width, request.height);
+        let cancel = cancel.clone();
+        let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+        let job_id = job.id.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let adapter_count = adapters.len();
+            emit_load_event(
+                "image_pipeline_load_start",
+                &job_id,
+                QWEN_CONTROL_ENGINE_ID,
+                adapter_count,
+            );
+            let generator = qwen_control_load(weights_dir, control_weights, quant, adapters)?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                QWEN_CONTROL_ENGINE_ID,
+                adapter_count,
+            );
+            for (index, pose) in poses.into_iter().enumerate() {
+                let skeleton = crate::openpose_skeleton::draw_wholebody(
+                    width,
+                    height,
+                    &pose.keypoints,
+                    pose.hands.as_deref(),
+                    pose.face.as_deref(),
+                    stickwidth,
+                );
+                let control = Image {
+                    width,
+                    height,
+                    pixels: skeleton.into_raw(),
+                };
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
+                let (width, height, pixels) = qwen_control_generate_one(
+                    generator.as_ref(),
+                    &prompt,
+                    negative_prompt.clone(),
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
+                    control,
+                    control_scale,
+                    &cancel,
+                    &mut on_progress,
+                )?;
+                if tx
+                    .blocking_send(GenEvent::Image {
+                        index,
+                        seed,
+                        width,
+                        height,
+                        pixels,
+                    })
+                    .is_err()
+                {
+                    break; // receiver gone — stop generating.
+                }
+            }
+            Ok(())
+        })
+    };
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        "mlx_qwen",
+        &raw_settings,
+        count,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // Qwen-Image-Edit (macOS, sc-3397): the `qwen_image_edit` / `_2509` / `_2511` ids, all
 // served by the engine's single `qwen_image_edit` model (Reference/MultiReference
 // dual-latent). This is where Qwen edit/reference jobs run — `edit_image`, the
 // Character-Studio reference flow (subject variation), the 11-angle set, and the
 // best-effort pose tier (`[reference, skeleton]` multi-image). True CFG (negative prompt
 // + guidance from `trueCfgScale`), LoRA/LoKr, Q4/Q8, fit_image. Base-Qwen strict-pose
-// ControlNet stays on torch until the engine port lands (epic 3401); the `_2511_lightning`
-// distill (sampler + lightx2v LoRA) is sc-3398.
+// ControlNet is handled by the `qwen_image_control` path above; the `_2511_lightning` distill
+// (sampler + lightx2v LoRA) is sc-3398.
 // ---------------------------------------------------------------------------
 
 /// The engine edit-model id for a Qwen SceneWorks model, or `None` if it has no edit
@@ -4339,6 +4640,7 @@ mod tests {
             "flux1_schnell",
             "flux1_dev",
             "qwen_image",
+            "qwen_image_control",
             "qwen_image_edit",
             "flux2_klein_9b",
             "sdxl",
@@ -4601,6 +4903,28 @@ mod tests {
         assert_eq!(poses[0].keypoints[0], Some((0.5, 0.2)));
         assert!(poses[0].hands.is_some());
         assert!(poses[0].face.is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn qwen_control_raw_settings_records_control_recipe() {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "qwen_image",
+            "advanced": {
+                "poses": [{ "id": "pose_1" }],
+                "controlScale": 0.5
+            }
+        }));
+        let raw = qwen_control_raw_settings(&req, "Qwen/Qwen-Image", 20, Some(4), 4.0, 0.5, 1);
+        assert_eq!(
+            raw.get("controlEngine").and_then(Value::as_str),
+            Some(QWEN_CONTROL_ENGINE_ID)
+        );
+        assert_eq!(raw.get("controlScale"), Some(&json!(0.5)));
+        assert_eq!(raw.get("poseCount"), Some(&json!(1)));
+        assert_eq!(raw.get("guidanceScale"), Some(&json!(4.0)));
+        assert_eq!(raw.get("mlxQuantize"), Some(&json!(4)));
     }
 
     /// sc-3031 A/B dump (NOT a CI test): generate ONE image through the **real new-adapter
@@ -4893,6 +5217,87 @@ mod tests {
             control,
             0.9,
             None,
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+    }
+
+    /// Real-weights smoke: Qwen-Image strict-pose ControlNet. Loads the base
+    /// `Qwen/Qwen-Image` snapshot + the cached InstantX ControlNet-Union checkpoint,
+    /// renders one DWPose skeleton, and generates one image through `qwen_image_control`.
+    /// Needs both in the HF cache + a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored qwen_control_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Qwen-Image + InstantX ControlNet weights + Metal device"]
+    fn qwen_control_real_weights_generates_one_pose() {
+        let base = hf_snapshot("models--Qwen--Qwen-Image");
+        let control = hf_snapshot("models--InstantX--Qwen-Image-ControlNet-Union")
+            .join(super::QWEN_CONTROL_FILE);
+        assert!(
+            control.exists(),
+            "Qwen control weights missing: {control:?}"
+        );
+
+        let generator =
+            qwen_control_load(base, control, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
+
+        let kp = crate::openpose_skeleton::normalize_keypoints(&json!([
+            [0.5, 0.2],
+            [0.5, 0.35],
+            [0.42, 0.35],
+            [0.40, 0.5],
+            [0.40, 0.65],
+            [0.58, 0.35],
+            [0.60, 0.5],
+            [0.60, 0.65],
+            [0.45, 0.6],
+            [0.45, 0.8],
+            [0.45, 0.95],
+            [0.55, 0.6],
+            [0.55, 0.8],
+            [0.55, 0.95],
+            [0.48, 0.18],
+            [0.52, 0.18],
+            [0.46, 0.2],
+            [0.54, 0.2]
+        ]));
+        let skeleton = crate::openpose_skeleton::draw_wholebody(
+            512,
+            512,
+            &kp,
+            None,
+            None,
+            crate::openpose_skeleton::body_stickwidth(512, 512),
+        );
+        let control = mlx_gen::Image {
+            width: 512,
+            height: 512,
+            pixels: skeleton.into_raw(),
+        };
+
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = qwen_control_generate_one(
+            generator.as_ref(),
+            "a person standing in a meadow",
+            Some("blurry, low quality".to_owned()),
+            512,
+            512,
+            42,
+            4,
+            4.0,
+            control,
+            0.9,
             &cancel,
             &mut |p| {
                 if let mlx_gen::Progress::Step { current, .. } = p {
