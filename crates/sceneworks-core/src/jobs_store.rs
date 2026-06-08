@@ -2752,15 +2752,14 @@ fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// Python torch path (`FluxDiffusersAdapter`). A third-party LyCORIS LoRA also falls
 /// back to torch: the engine + the worker's `classify_adapter` apply LoRA and peft
 /// LoKr natively, but not arbitrary LyCORIS (which the worker would reject).
+/// FLUX.1 (`flux_schnell` / `flux_dev`) MLX-routing conditions. Text-to-image and
+/// **reference-image** (the XLabs IP-Adapter, epic 3621 — `referenceAssetId`, both
+/// variants: the Rust engine has no diffusers `load_ip_adapter` schnell limitation,
+/// so reference is native on schnell too). `edit_image` stays off — FLUX.1 has no
+/// edit path on any platform (a future Kontext epic, NOT a Python-eradication gap).
+/// A third-party LyCORIS LoRA falls back to torch; SceneWorks peft LoKr stays MLX.
 fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if has_reference {
         return false;
     }
     !request_has_lycoris_lora(payload)
@@ -3391,20 +3390,31 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn flux_edit_reference_and_lycoris_fall_back_to_torch() {
-        // edit_image, reference (IP-Adapter), and third-party LyCORIS all stay on Python.
-        assert!(!flux_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
-        assert!(!flux_mlx_eligible(&object(
+    fn flux_reference_is_eligible() {
+        // Reference (XLabs IP-Adapter, epic 3621) now routes to MLX on both variants —
+        // the Rust engine has no diffusers schnell limitation.
+        assert!(flux_mlx_eligible(&object(
             json!({ "referenceAssetId": "asset_1" })
         )));
+        // A reference + LoRA is still fine.
+        assert!(flux_mlx_eligible(&object(json!({
+            "referenceAssetId": "asset_1",
+            "loras": [{ "networkType": "lora" }]
+        }))));
+    }
+
+    #[test]
+    fn flux_edit_and_lycoris_fall_back_to_torch() {
+        // edit_image (no FLUX.1 edit on any platform — future Kontext) and third-party
+        // LyCORIS stay on Python. Reference does NOT fall back anymore (see above).
+        assert!(!flux_mlx_eligible(&object(json!({ "mode": "edit_image" }))));
         assert!(!flux_mlx_eligible(&object(json!({
             "loras": [{ "networkType": "lycoris" }]
         }))));
-        // Unlike Z-Image, a pose set does NOT rescue a reference: FLUX.1 has no MLX
-        // reference path here, so reference always falls back.
+        // A reference with a LyCORIS LoRA still falls back (LyCORIS forces torch).
         assert!(!flux_mlx_eligible(&object(json!({
             "referenceAssetId": "asset_1",
-            "advanced": { "poses": [{ "id": "p1" }] }
+            "loras": [{ "networkType": "lycoris" }]
         }))));
     }
 

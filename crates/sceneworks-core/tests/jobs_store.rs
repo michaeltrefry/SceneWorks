@@ -1893,19 +1893,17 @@ fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
 #[test]
 fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
     let store = store("oracle-feature-spikes");
-    // FLUX.1 reference (XLabs IP-Adapter) → spike sc-3535 (GO) resolved into the MLX port
-    // epic 3621; still a torch-fallback gap until that engine work lands.
+    // FLUX.1 reference (XLabs IP-Adapter) is now ported to MLX (spike sc-3535 → epic 3621,
+    // sc-3625): the Rust engine drives the IP-Adapter natively on both schnell + dev, so it is
+    // supported on the Rust/MLX worker rather than a torch-fallback gap.
     let flux_ref = job_of(
         &store,
         JobType::ImageGenerate,
         json!({ "model": "flux_dev", "prompt": "p", "referenceAssetId": "asset_1" }),
     );
-    assert_eq!(
-        mac_rust_supported(&flux_ref)
-            .unwrap_err()
-            .suggested_epic
-            .as_deref(),
-        Some("epic 3621")
+    assert!(
+        mac_rust_supported(&flux_ref).is_ok(),
+        "FLUX.1 reference (IP-Adapter) should be MLX-supported (epic 3621)"
     );
     // Z-Image reference without a pose set is now ported to MLX (sc-3536 spike → sc-3619):
     // the base engine's plain img2img-init path drives the reference identity natively, so
@@ -1970,10 +1968,14 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     let z_image = model_mac_support("z_image_turbo", "image");
     assert!(z_image.features.reference);
     assert!(!z_image.features.edit);
-    // FLUX.1 reference/edit stay torch (viability spikes) → those controls disabled.
+    // FLUX.1 reference (XLabs IP-Adapter) is ported to MLX (epic 3621) → reference enabled on
+    // both variants; edit_image stays off (no FLUX.1 edit on any platform — future Kontext).
     let flux = model_mac_support("flux_dev", "image");
-    assert!(!flux.features.reference);
+    assert!(flux.features.reference);
     assert!(!flux.features.edit);
+    let flux_schnell = model_mac_support("flux_schnell", "image");
+    assert!(flux_schnell.features.reference);
+    assert!(!flux_schnell.features.edit);
     // SDXL + FLUX.2 do reference/edit on MLX (epic 3041 / MLX-only family) → enabled.
     let sdxl = model_mac_support("sdxl", "image");
     assert!(sdxl.features.reference);
@@ -2916,11 +2918,13 @@ fn flux_schnell_txt2img_routes_to_mlx_worker() {
 }
 
 #[test]
-fn flux_reference_job_stays_on_torch() {
+fn flux_reference_job_routes_to_mlx() {
     let store = store("mlx-routing-flux-reference");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // FLUX.1 reference/IP-Adapter stays on the Python torch path → mlx refuses it.
+    // FLUX.1 reference/IP-Adapter (epic 3621) now runs natively on the Rust/MLX worker →
+    // torch refuses it, mlx claims it.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "flux_dev", "prompt": "p", "referenceAssetId": "asset_1" }),
@@ -2928,17 +2932,15 @@ fn flux_reference_job_stays_on_torch() {
         ))
         .expect("job creates");
     assert!(store
-        .claim_next_job("worker-mlx")
-        .expect("mlx claim ok")
-        .is_none());
-
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
-    let claimed = store
         .claim_next_job("worker-torch")
         .expect("torch claim ok")
-        .expect("torch claims flux reference job");
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims flux reference job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
 #[test]

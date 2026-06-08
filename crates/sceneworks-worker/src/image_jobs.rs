@@ -1019,6 +1019,20 @@ fn mlx_load(
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
+    mlx_load_with_ip(engine_id, weights_dir, quant, adapters, None)
+}
+
+/// As [`mlx_load`], but optionally installing an IP-Adapter from `ip_adapter_dir`
+/// (`LoadSpec::with_ip_adapter`). Used by the FLUX.1 XLabs IP-Adapter reference path
+/// (epic 3621): the engine then treats a `Conditioning::Reference` as the image prompt.
+#[cfg(target_os = "macos")]
+fn mlx_load_with_ip(
+    engine_id: &str,
+    weights_dir: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+    ip_adapter_dir: Option<PathBuf>,
+) -> WorkerResult<Box<dyn Generator>> {
     let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
@@ -1026,8 +1040,71 @@ fn mlx_load(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
+    if let Some(dir) = ip_adapter_dir {
+        spec = spec.with_ip_adapter(WeightsSource::Dir(dir));
+    }
     mlx_gen::load(engine_id, &spec)
         .map_err(|error| WorkerError::InvalidPayload(format!("{engine_id} load failed: {error}")))
+}
+
+/// XLabs FLUX IP-Adapter repos (epic 3621). The torch `flux_dev` path already declares +
+/// downloads these (the `ipAdapter` block in `image_adapters`); the MLX path reuses the same
+/// HF-cache snapshots — there is no new weight to ship.
+#[cfg(target_os = "macos")]
+const FLUX_IP_ADAPTER_REPO: &str = "XLabs-AI/flux-ip-adapter";
+#[cfg(target_os = "macos")]
+const FLUX_IP_IMAGE_ENCODER_REPO: &str = "openai/clip-vit-large-patch14";
+/// IP-Adapter scale when the request omits `ipAdapterScale` (XLabs resemblance tier 0.7, matching
+/// the torch `FluxDiffusersAdapter`).
+#[cfg(target_os = "macos")]
+const FLUX_IP_SCALE: f32 = 0.7;
+/// `trueCfgScale` default for the FLUX.1-dev IP-Adapter path (real CFG; torch default ~4.0).
+#[cfg(target_os = "macos")]
+const FLUX_IP_TRUE_CFG: f32 = 4.0;
+
+/// The FLUX.1 engine families that carry the XLabs IP-Adapter (both variants — the Rust engine has
+/// no diffusers `load_ip_adapter` schnell limitation).
+#[cfg(target_os = "macos")]
+fn is_flux_model(model: &str) -> bool {
+    matches!(model, "flux_schnell" | "flux_dev")
+}
+
+/// Stage the engine's IP-Adapter dir contract from the two cached HF snapshots:
+/// `<staged>/ip_adapter.safetensors` (XLabs) + `<staged>/image_encoder/model.safetensors`
+/// (openai CLIP-ViT-L). Errors loudly if either snapshot is missing — mirrors the SDXL IP path
+/// (`resolve_ip_adapter_dir`); the repos reach the cache via the model-download flow / the torch
+/// `flux_dev` path, not a new provisioning step.
+#[cfg(target_os = "macos")]
+fn resolve_flux_ip_adapter_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    let missing = || {
+        WorkerError::InvalidPayload(format!(
+            "FLUX IP-Adapter weights not found (download {FLUX_IP_ADAPTER_REPO} + {FLUX_IP_IMAGE_ENCODER_REPO})."
+        ))
+    };
+    let adapter_snap =
+        crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, FLUX_IP_ADAPTER_REPO)
+            .ok_or_else(missing)?;
+    let clip_snap =
+        crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, FLUX_IP_IMAGE_ENCODER_REPO)
+            .ok_or_else(missing)?;
+    let ip_file = adapter_snap.join("ip_adapter.safetensors");
+    let clip_file = clip_snap.join("model.safetensors");
+    if !ip_file.exists() || !clip_file.exists() {
+        return Err(missing());
+    }
+    let staged = settings.data_dir.join("staged").join("flux-ip-adapter");
+    let encoder_dir = staged.join("image_encoder");
+    std::fs::create_dir_all(&encoder_dir)
+        .map_err(|e| WorkerError::InvalidPayload(format!("stage flux ip-adapter dir: {e}")))?;
+    // Re-link each call: the HF-cache targets are immutable, so a stable staged dir is reusable.
+    let link = |src: &Path, dst: PathBuf| -> WorkerResult<()> {
+        let _ = std::fs::remove_file(&dst);
+        std::os::unix::fs::symlink(src, &dst)
+            .map_err(|e| WorkerError::InvalidPayload(format!("stage flux ip-adapter link: {e}")))
+    };
+    link(&ip_file, staged.join("ip_adapter.safetensors"))?;
+    link(&clip_file, encoder_dir.join("model.safetensors"))?;
+    Ok(staged)
 }
 
 /// Emit an `image_pipeline_load_{start,complete}` event from inside a blocking
@@ -1069,6 +1146,7 @@ fn mlx_generate_one(
     guidance: Option<f32>,
     negative_prompt: Option<String>,
     reference: Option<&(Image, f32)>,
+    true_cfg: Option<f32>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -1088,6 +1166,7 @@ fn mlx_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance,
+        true_cfg,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -1153,13 +1232,46 @@ async fn generate_mlx_stream(
     let seeds: Vec<i64> = (0..count)
         .map(|index| resolve_seed(request, index))
         .collect();
-    // Reference-identity img2img-init (sc-3619): only Z-Image reaches this plain path with a
-    // reference (FLUX is ineligible→torch, Qwen/SDXL divert to their own edit/advanced branches).
-    // Resolve once — the identity is constant across the set — and seed each image's denoise.
-    let identity_init = if request.model == "z_image_turbo" {
-        resolve_zimage_identity_init(request, settings, project_path)?
+    // Reference conditioning for the base MLX path, resolved once (constant across the set):
+    //  • Z-Image reference-identity img2img-init (sc-3619), and
+    //  • FLUX.1 XLabs IP-Adapter (epic 3621 — both schnell + dev; `strength = ipAdapterScale`, plus
+    //    real CFG via `trueCfgScale` on dev). Qwen/SDXL reference divert to their own advanced
+    //    branches before reaching here.
+    let has_reference = request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
+    let (identity_init, flux_ip_dir, flux_true_cfg): (
+        Option<(Image, f32)>,
+        Option<PathBuf>,
+        Option<f32>,
+    ) = if request.model == "z_image_turbo" {
+        (
+            resolve_zimage_identity_init(request, settings, project_path)?,
+            None,
+            None,
+        )
+    } else if is_flux_model(&request.model) && has_reference && request.mode != "edit_image" {
+        let reference_id = request
+            .reference_asset_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned();
+        let image = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            &reference_id,
+            project_path,
+        )?;
+        let scale = advanced_f32(request, "ipAdapterScale", FLUX_IP_SCALE, 0.0, 1.0);
+        let ip_dir = resolve_flux_ip_adapter_dir(settings)?;
+        // Real CFG only on dev (schnell is distilled — no CFG).
+        let true_cfg = (request.model == "flux_dev")
+            .then(|| advanced_f32(request, "trueCfgScale", FLUX_IP_TRUE_CFG, 1.0, 10.0));
+        (Some((image, scale)), Some(ip_dir), true_cfg)
     } else {
-        None
+        (None, None, None)
     };
 
     let cancel = CancelFlag::new();
@@ -1171,7 +1283,8 @@ async fn generate_mlx_stream(
         let seeds = seeds.clone();
         let cancel = cancel.clone();
         let job_id = job.id.clone();
-        // `identity_init` is moved into the closure below (the `move` captures it by value).
+        // `identity_init` + `flux_ip_dir` + `flux_true_cfg` are moved into the closure (the `move`
+        // captures them by value).
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
             let adapter_count = adapters.len();
             emit_load_event(
@@ -1180,7 +1293,7 @@ async fn generate_mlx_stream(
                 engine_id,
                 adapter_count,
             );
-            let generator = mlx_load(engine_id, weights_dir, quant, adapters)?;
+            let generator = mlx_load_with_ip(engine_id, weights_dir, quant, adapters, flux_ip_dir)?;
             emit_load_event(
                 "image_pipeline_load_complete",
                 &job_id,
@@ -1209,6 +1322,7 @@ async fn generate_mlx_stream(
                     guidance,
                     negative_prompt.clone(),
                     identity_init.as_ref(),
+                    flux_true_cfg,
                     &cancel,
                     &mut on_progress,
                 )?;
@@ -4715,6 +4829,7 @@ mod tests {
             guidance,
             negative_prompt,
             None,
+            None,
             &cancel,
             &mut |p| {
                 if let mlx_gen::Progress::Step { current, .. } = p {
@@ -4994,6 +5109,7 @@ mod tests {
             steps,
             guidance,
             negative,
+            None,
             None,
             &cancel,
             &mut |_| {},
