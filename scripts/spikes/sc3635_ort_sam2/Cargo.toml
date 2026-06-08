@@ -1,0 +1,27 @@
+# sc-3635 path-selection spike: run SAM2.1 box-prompt segmentation in Rust via `ort`
+# (onnxruntime) with the CoreML/CPU execution providers, and validate mask parity vs
+# the Python onnxruntime + transformers SAM2 baseline (sc3635_reference.py). Standalone
+# crate (empty [workspace]) so it does NOT join the SceneWorks workspace — keeps `ort`
+# (internal unsafe) clear of the workspace `unsafe_code = "forbid"` lint and avoids
+# lockfile churn. Mirrors sc3489_ort_upscale / sc3487_ort_pose.
+[package]
+name = "sc3635_ort_sam2"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# download-binaries: standalone-runnable. The worker uses `load-dynamic` +
+# ORT_DYLIB_PATH (bundling, already wired by sc-3487); that path is reused verbatim.
+ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
+image = "0.25"
+anyhow = "1"
+
+[[bin]]
+name = "sam2"
+path = "src/sam2.rs"
+
+[profile.release]
+opt-level = 3
