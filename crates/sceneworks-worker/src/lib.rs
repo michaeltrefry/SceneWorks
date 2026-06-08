@@ -60,9 +60,16 @@ mod openpose_skeleton;
 // rtmlib path stays the Windows/Linux backend.
 #[cfg(target_os = "macos")]
 mod pose_jobs;
+// Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via `ort`/CoreML,
+// reusing the same bundled onnxruntime sc-3487 ships. macOS-only; the Python torch
+// Real-ESRGAN / AuraSR path stays the Windows/Linux backend.
+#[cfg(target_os = "macos")]
+mod upscale_jobs;
 use downloads::*;
 #[cfg(target_os = "macos")]
 use pose_jobs::*;
+#[cfg(target_os = "macos")]
+use upscale_jobs::*;
 
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
 const DEFAULT_API_URL: &str = "http://localhost:8000";
@@ -591,6 +598,16 @@ async fn run_utility_job(
         JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Pose detection failed.", error)),
+        // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
+        // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
+        // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool
+        // works on a Python-free Mac. macOS-only; off macOS `ImageUpscale` is never
+        // advertised by the Rust worker, so this falls to the `_` arm (Python path).
+        // The routing oracle keeps `engine=aura-sr` on the Python worker.
+        #[cfg(target_os = "macos")]
+        JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
+            .await
+            .map_err(|error| ("Image upscale failed.", error)),
         JobType::PersonTrack => run_person_track_job(api, settings, &job)
             .await
             .map_err(|error| ("Person tracking failed.", error)),

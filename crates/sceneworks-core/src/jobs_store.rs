@@ -1832,12 +1832,22 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // "create from photo" flow + InstantID pose conditioning run Python-free.
         JobType::PoseDetect => Ok(()),
 
-        JobType::ImageUpscale => Err(UnsupportedReason::new(
-            model,
-            "image_upscale (Real-ESRGAN)",
-            "standalone image upscaling runs on the Python torch Real-ESRGAN / AuraSR path.",
-            Some("sc-3489"),
-        )),
+        // Real-ESRGAN image upscaling is now ported to the Rust worker (sc-3489):
+        // RRDBNet x2/x4 via `ort`/CoreML on the macOS MLX worker, so the Image Editor
+        // upscale tool runs Python-free. `aura-sr` (a separate GAN upscaler, no clean
+        // ONNX export) is not ported and stays a tracked Mac gap on the Python path.
+        JobType::ImageUpscale => {
+            if upscale_job_is_mlx_eligible(job) {
+                Ok(())
+            } else {
+                Err(UnsupportedReason::new(
+                    model,
+                    "image_upscale (AuraSR)",
+                    "the Rust upscaler runs Real-ESRGAN; the AuraSR engine stays on the Python torch path.",
+                    Some("sc-3489"),
+                ))
+            }
+        }
 
         JobType::ModelConvert => classify_convert_gap(&job.payload),
 
@@ -2087,12 +2097,15 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         ),
     );
     features.insert(
+        // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489) via
+        // `ort`/CoreML, so the Image Editor upscale tool works on a Python-free Mac.
+        // (`aura-sr` stays on the Python path, but the default engine is real-esrgan,
+        // so the tool itself is available.)
         "imageUpscale".to_owned(),
-        MacFeatureSupport::unsupported(
-            "image_upscale (Real-ESRGAN)",
-            "standalone image upscaling runs on the Python torch Real-ESRGAN / AuraSR path.",
-            "sc-3489",
-        ),
+        MacFeatureSupport {
+            supported: true,
+            reason: None,
+        },
     );
     features.insert(
         "poseFromPhoto".to_owned(),
@@ -2964,6 +2977,27 @@ fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
             .is_some_and(|value| value.trim() == "joy_caption")
 }
 
+/// Whether an `image_upscale` job runs on the Rust/MLX path (epic 3482, sc-3489): the
+/// Real-ESRGAN (RRDBNet) engine — the default — is ported to the Rust worker via
+/// `ort`/CoreML. `aura-sr` (a separate GAN upscaler, no clean ONNX export) stays on the
+/// Python torch worker, so the mlx worker must refuse it. Engine defaults to
+/// `real-esrgan` when absent (mirrors `run_image_upscale`).
+fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::ImageUpscale) {
+        return false;
+    }
+    let engine = job
+        .payload
+        .get("engine")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "real-esrgan".to_owned());
+    matches!(
+        engine.as_str(),
+        "" | "real-esrgan" | "realesrgan" | "real_esrgan"
+    )
+}
+
 /// Training kernels with NO non-Rust fallback — only the in-process Rust mlx worker
 /// can run them. `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049)
 /// retired that Python trainer, leaving the native Rust LTX trainer as the sole path,
@@ -3054,6 +3088,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // backed by the mlx-gen provider. Any future non-JoyCaption captioner stays
         // on the worker that advertises that capability.
         if matches!(job.job_type, JobType::TrainingCaption) && !caption_job_is_mlx_eligible(job) {
+            return false;
+        }
+        // Image upscale (sc-3489): the mlx worker runs Real-ESRGAN (the default engine)
+        // via `ort`/CoreML. `aura-sr` has no Rust path, so the mlx worker refuses it and
+        // it stays on the Python torch worker.
+        if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
             return false;
         }
     }

@@ -1,0 +1,26 @@
+# sc-3489 path-selection spike: run Real-ESRGAN (RRDBNet) in Rust via `ort`
+# (onnxruntime) with the CoreML execution provider, and validate pixel parity vs the
+# shipped Python torch upscaler. Standalone crate (empty [workspace]) so it does NOT
+# join the SceneWorks workspace — keeps `ort` (internal unsafe) clear of the workspace
+# `unsafe_code = "forbid"` lint and avoids lockfile churn. Mirrors sc3487_ort_pose.
+[package]
+name = "sc3489_ort_upscale"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# download-binaries: standalone-runnable. The worker uses `load-dynamic` +
+# ORT_DYLIB_PATH (bundling, already wired by sc-3487); that path is reused verbatim.
+ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
+image = "0.25"
+anyhow = "1"
+
+[[bin]]
+name = "upscale"
+path = "src/upscale.rs"
+
+[profile.release]
+opt-level = 3

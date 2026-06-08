@@ -411,6 +411,12 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // Python-free Mac. The detector auto-provisions its onnx weights on first
             // use (download-on-first-use parity with rtmlib).
             WorkerCapability::PoseDetect,
+            // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
+            // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
+            // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool
+            // works on a Python-free Mac. Only `engine=real-esrgan` (the default) is
+            // served here; `aura-sr` stays on the Python worker (routing oracle).
+            WorkerCapability::ImageUpscale,
         ],
         utilization: None,
     }

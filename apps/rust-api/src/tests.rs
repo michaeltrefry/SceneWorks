@@ -2507,10 +2507,9 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         caps["notAvailableLabel"],
         "Not available on Mac (Rust/MLX only)"
     );
-    assert_eq!(
-        caps["features"]["imageUpscale"]["reason"]["suggestedEpic"],
-        "sc-3489"
-    );
+    // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489) → supported, no reason.
+    assert_eq!(caps["features"]["imageUpscale"]["supported"], true);
+    assert_eq!(caps["features"]["imageUpscale"]["reason"], Value::Null);
     assert_eq!(
         caps["features"]["poseFromPhoto"]["reason"]["suggestedEpic"],
         "sc-3487"

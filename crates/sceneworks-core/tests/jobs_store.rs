@@ -1814,10 +1814,7 @@ fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
 #[test]
 fn mac_rust_supported_names_infra_job_types() {
     let store = store("oracle-infra");
-    let cases = [
-        (JobType::ImageUpscale, "sc-3489"),
-        (JobType::PersonDetect, "sc-3488"),
-    ];
+    let cases = [(JobType::PersonDetect, "sc-3488")];
     for (job_type, epic) in cases {
         let job = job_of(&store, job_type, json!({}));
         let reason = mac_rust_supported(&job).unwrap_err();
@@ -1830,6 +1827,18 @@ fn mac_rust_supported_names_infra_job_types() {
     // DWPose pose detection is ported to the Rust worker (sc-3487) → supported.
     let pose = job_of(&store, JobType::PoseDetect, json!({}));
     assert!(mac_rust_supported(&pose).is_ok());
+    // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489): the default engine
+    // (real-esrgan) is supported; the AuraSR engine stays a tracked Mac gap.
+    let upscale = job_of(&store, JobType::ImageUpscale, json!({}));
+    assert!(mac_rust_supported(&upscale).is_ok());
+    let aura = job_of(
+        &store,
+        JobType::ImageUpscale,
+        json!({ "engine": "aura-sr" }),
+    );
+    let aura_reason = mac_rust_supported(&aura).unwrap_err();
+    assert!(aura_reason.feature.contains("AuraSR"));
+    assert_eq!(aura_reason.suggested_epic.as_deref(), Some("sc-3489"));
     // JoyCaption dataset captioning is ported to the Rust/MLX worker (sc-3556).
     let caption = job_of(
         &store,
@@ -2020,17 +2029,21 @@ fn mac_capabilities_master_switch_and_infra_features() {
             .and_then(|r| r.suggested_epic.as_deref())
             .map(str::to_owned)
     };
-    assert_eq!(epic("imageUpscale").as_deref(), Some("sc-3489"));
+    // Real-ESRGAN upscaling is ported (sc-3489) → supported, no reason/epic.
+    assert_eq!(epic("imageUpscale"), None);
+    assert!(mac.features["imageUpscale"].supported);
     assert_eq!(epic("poseFromPhoto").as_deref(), Some("sc-3487"));
     assert_eq!(epic("personDetect").as_deref(), Some("sc-3488"));
     assert_eq!(epic("datasetCaptioning"), None);
     assert_eq!(epic("lycoris").as_deref(), Some("sc-3537"));
     assert_eq!(epic("advancedVideoModes").as_deref(), Some("epic 3040"));
     assert!(mac.features["datasetCaptioning"].supported);
+    // datasetCaptioning + imageUpscale are the ported (supported) infra features; the
+    // rest stay gated until their port lands.
     assert!(mac
         .features
         .iter()
-        .filter(|(key, _)| key.as_str() != "datasetCaptioning")
+        .filter(|(key, _)| !matches!(key.as_str(), "datasetCaptioning" | "imageUpscale"))
         .all(|(_, f)| !f.supported));
     // Training kernels with a native Rust trainer stay enabled; LoKr-on-Wan does not.
     assert!(mac
