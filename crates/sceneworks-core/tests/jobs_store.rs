@@ -1760,17 +1760,33 @@ fn mac_rust_supported_accepts_eligible_and_mlx_agnostic_jobs() {
 }
 
 #[test]
-fn mac_rust_supported_names_torch_only_image_model() {
+fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
     let store = store("oracle-torch-model");
-    let job = job_of(
-        &store,
-        JobType::ImageGenerate,
-        json!({ "model": "kolors", "prompt": "p" }),
-    );
-    let reason = mac_rust_supported(&job).unwrap_err();
-    assert_eq!(reason.model.as_deref(), Some("kolors"));
-    assert_eq!(reason.suggested_epic.as_deref(), Some("epic 3061"));
-    assert!(reason.error_message().starts_with("mlx_unsupported:"));
+    // Each torch-only model points at its dedicated MLX-porting epic (epic 3482 policy),
+    // not the generic done feasibility epic.
+    let cases = [
+        ("kolors", "epic 3532"),
+        ("chroma1_hd", "epic 3531"),
+        ("z_image_edit", "epic 3529"),
+        ("instantid_realvisxl", "epic 3109"),
+        ("sensenova_u1_8b", "epic 3180"),
+        ("lens_turbo", "epic 3164"),
+    ];
+    for (model, epic) in cases {
+        let job = job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({ "model": model, "prompt": "p" }),
+        );
+        let reason = mac_rust_supported(&job).unwrap_err();
+        assert_eq!(reason.model.as_deref(), Some(model));
+        assert_eq!(
+            reason.suggested_epic.as_deref(),
+            Some(epic),
+            "{model} → {epic}"
+        );
+        assert!(reason.error_message().starts_with("mlx_unsupported:"));
+    }
 }
 
 #[test]

@@ -1849,6 +1849,23 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
     }
 }
 
+/// The dedicated MLX-porting epic for a torch-only image model (epic 3482 policy: every
+/// unported model gets its own port epic + is dropped on Mac until it lands). `None` = a
+/// model we don't have a port epic for yet, which the oracle reports as "needs an epic".
+/// Keep in sync with `docs/mac-rust-gaps.md` §1.
+fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
+    match model {
+        "kolors" => Some("epic 3532"),
+        "instantid_realvisxl" => Some("epic 3109"),
+        "pulid_flux_dev" => Some("epic 3069"),
+        "z_image_edit" => Some("epic 3529"),
+        m if m.starts_with("sensenova") => Some("epic 3180"),
+        m if m.starts_with("lens") => Some("epic 3164"),
+        m if m.starts_with("chroma") => Some("epic 3531"),
+        _ => None,
+    }
+}
+
 /// Name the precise gap for an ineligible `image_generate` / `image_edit` job: a torch-only
 /// model, or a torch-only feature on an otherwise-MLX family. Mirrors the per-family
 /// `*_mlx_eligible` gates so the reason matches why routing refused it.
@@ -1857,12 +1874,13 @@ fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
         return UnsupportedReason::new(None, "image generation", "no model specified.", None);
     };
     if !MLX_ROUTED_MODELS.contains(&model) {
-        return UnsupportedReason::new(
-            Some(model),
-            "torch-only image model",
-            "this model has no Rust/MLX engine; it runs on the Python torch path (InstantID / Kolors / PuLID / SenseNova / Lens / FLUX.2-dev family).",
-            Some("epic 3061"),
-        );
+        let epic = torch_only_image_model_epic(model);
+        let detail = if epic.is_some() {
+            "this model has no Rust/MLX engine yet; it runs on the Python torch path and is dropped on Mac until its port epic lands."
+        } else {
+            "this model has no Rust/MLX engine and no port epic yet — file a porting epic and drop it on Mac (epic 3482 policy)."
+        };
+        return UnsupportedReason::new(Some(model), "torch-only image model", detail, epic);
     }
     if request_has_lycoris_lora(&job.payload) {
         return UnsupportedReason::new(
@@ -1902,8 +1920,8 @@ fn classify_image_gap(job: &JobSnapshot) -> UnsupportedReason {
         "z_image_turbo" if is_edit => UnsupportedReason::new(
             Some(model),
             "edit_image",
-            "Z-Image img2img edit stays on the Python torch path.",
-            None,
+            "Z-Image img2img edit stays on the Python torch path (folds into the Z-Image-Edit port).",
+            Some("epic 3529"),
         ),
         "z_image_turbo" => UnsupportedReason::new(
             Some(model),

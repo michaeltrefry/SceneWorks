@@ -33,21 +33,25 @@ completes) or dropped (UI-gated, sc-3486).
 ## 1. Torch-only image models
 
 Image models in `MODEL_TARGETS` that are **not** in `MLX_ROUTED_MODELS` → the Python torch
-adapter is authoritative on Mac. (`mac_rust_supported` → `epic 3061` by default; dispositions
-below are the per-model calls.)
+adapter is authoritative on Mac. **Policy (Michael, 2026-06-07): every unported model gets its
+own MLX-porting epic and is *dropped on Mac only* (UI-gated, sc-3486) until that port lands —
+Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust_supported` →
+`torch_only_image_model_epic(model)` names the specific epic below.
 
-| Model id | Family | Status | Closing work |
+| Model id | Family | Mac disposition | Porting epic |
 |---|---|---|---|
-| `kolors` | kolors | 🔵 Port-pending | epic 3061 (Kolors) |
-| `instantid_realvisxl` | sdxl (InstantID) | 🔵 Port-pending | epic 3061 (InstantID) |
-| `pulid_flux_dev` | flux (PuLID) | 🔵 Port-pending | epic 3061 (PuLID) |
-| `sensenova_u1_8b`, `sensenova_u1_8b_fast` | sensenova-u1 | 🟠 Drop-candidate | epic 3061 (SenseNova — likely drop) |
-| `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🟠 Drop-candidate | epic 3061 (Lens) |
-| `chroma1_hd`, `chroma1_base`, `chroma1_flash` | chroma | ❓ Triage | **no epic yet** — surfaced by this audit; needs port-or-drop |
-| `z_image_edit` | z-image (edit) | ❓ Triage | **no epic yet** — Z-Image *edit* model is torch-only (txt2img `z_image_turbo` is ported) |
+| `kolors` | kolors (SDXL UNet + ChatGLM3) | 🔵 Port → drop-on-Mac until then | **epic 3532** |
+| `chroma1_hd`, `chroma1_base`, `chroma1_flash` | chroma (FLUX.1-schnell DiT) | 🔵 Port → drop-on-Mac until then | **epic 3531** |
+| `z_image_edit` | z-image (edit) | 🔵 Port → drop-on-Mac until then | **epic 3529** |
+| `instantid_realvisxl` | sdxl (InstantID) | 🔵 Port → drop-on-Mac until then | epic 3109 |
+| `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
+| `sensenova_u1_8b`, `sensenova_u1_8b_fast` | sensenova-u1 | 🔵 Port → drop-on-Mac until then | epic 3180 |
+| `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🔵 Port → drop-on-Mac until then | epic 3164 |
 
-> FLUX.2-**dev** is not in `MODEL_TARGETS` as a Mac target and is out of mlx-gen scope (likely
-> drop); third-party **LyCORIS** is a feature gap, see §2.
+> A torch-only image model with **no** porting epic yet → `torch_only_image_model_epic` returns
+> `None` and the oracle reports "needs a port epic (epic 3482 policy)"; file one + add it to the
+> match. FLUX.2-**dev** is not a Mac `MODEL_TARGETS` entry and is out of mlx-gen scope; third-party
+> **LyCORIS** is a feature gap, see §2.
 
 ## 2. Image feature gaps on MLX-routed families
 
@@ -59,7 +63,8 @@ exclusions). `mac_rust_supported` names each precisely.
 | Strict-pose ControlNet | `qwen_image` (+ `advanced.poses`) | 🔵 Port-pending | epic 3401 (Qwen ControlNet port) |
 | Reference / edit conditioning | base `qwen_image` (reference/`edit_image`) | 🔵 Port-pending | epic 3401 |
 | Reference / IP-Adapter / edit | `flux_schnell`, `flux_dev` | ❓ Triage | no epic — FLUX.1 reference/edit stays torch |
-| `edit_image` / reference-without-pose | `z_image_turbo` | ❓ Triage | no epic — Z-Image img2img-edit stays torch |
+| `edit_image` (img2img-edit) | `z_image_turbo` | 🔵 Port-pending | epic 3529 (folds into Z-Image-Edit port) |
+| reference-without-pose | `z_image_turbo` | ❓ Triage | no epic — reference-identity-only stays torch |
 | Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟠 Drop-candidate | drop (engine applies LoRA + peft LoKr, not arbitrary LyCORIS) |
 
 ## 3. Video
