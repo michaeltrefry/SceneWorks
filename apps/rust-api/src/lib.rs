@@ -148,6 +148,14 @@ pub struct Settings {
     pub worker_timeout_seconds: u64,
     pub jobs_db_path: PathBuf,
     pub run_utility_inprocess: bool,
+    /// Epic 3482 — macOS "MLX-required" mode. When set (the desktop sets it on macOS,
+    /// where it spawns the in-process `mlx` worker), the MPS torch worker never claims an
+    /// MLX-eligible job: it defers unconditionally to the `mlx` worker, and a job no live
+    /// `mlx` worker takes within the grace window fails terminal with `mlx_unavailable`
+    /// instead of silently falling back to MPS (sc-3483). Absent on Windows/Linux/Docker
+    /// (no `mlx` worker) → today's behaviour unchanged. Ships default OFF (observe); the
+    /// final cutover (sc-3492) flips it on for the packaged Mac build.
+    pub mlx_required: bool,
 }
 
 impl Settings {
@@ -184,6 +192,9 @@ impl Settings {
                 .unwrap_or(90),
             jobs_db_path,
             run_utility_inprocess: std::env::var("SCENEWORKS_RUN_UTILITY_INPROCESS")
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
+            mlx_required: std::env::var("SCENEWORKS_MLX_REQUIRED")
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
         }

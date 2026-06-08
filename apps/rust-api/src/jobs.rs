@@ -48,22 +48,55 @@ pub(crate) async fn claim_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<ClaimRequest>,
 ) -> Result<Json<ClaimResponse>, ApiError> {
-    let (response, decision) = store_call(state.clone(), move |store, timeout| {
+    let mlx_required = state.settings.mlx_required;
+    let (response, decision, stranded) = store_call(state.clone(), move |store, timeout| {
         store.mark_stale_workers_interrupted(timeout)?;
-        store.claim_next_job_routed(&payload.worker_id)
+        // macOS MLX-required (sc-3483): before claiming, fail any MLX-eligible job left
+        // stranded because no live `mlx` worker took it within the grace window — reusing
+        // the worker timeout as that window. A no-op when the flag is off, so cross-platform
+        // and Mac-pre-cutover behaviour is unchanged.
+        let stranded = store.fail_stranded_mlx_jobs(mlx_required, timeout)?;
+        let (job, decision) = store.claim_next_job_routed(&payload.worker_id, mlx_required)?;
+        Ok((job, decision, stranded))
     })
     .await?;
+    for job in &stranded {
+        emit_mlx_unavailable(job);
+        publish(&state, "job.updated", job);
+    }
     if let Some(decision) = &decision {
         emit_route_decision(decision);
     }
     if let Some(job) = &response {
         publish(&state, "job.updated", job);
+    }
+    if response.is_some() || !stranded.is_empty() {
         publish_queue(&state).await?;
     }
     Ok(Json(ClaimResponse {
         job: response,
         extra: Default::default(),
     }))
+}
+
+/// Emit the macOS `mlx_unavailable` terminal-routing event as a structured JSON line for
+/// the desktop's stdout capture + the headless `GET /api/v1/logs` buffer (sc-3447/3451/3453).
+/// Mirrors [`emit_route_decision`]: this is the System → Logs surface that turns "no MLX
+/// worker took the job" into a named, actionable line instead of a job silently stuck or
+/// run on MPS (sc-3483). `reason` carries the full actionable error set on the job.
+fn emit_mlx_unavailable(job: &JobSnapshot) {
+    let model = job.payload.get("model").and_then(Value::as_str);
+    let line = json!({
+        "event": "mlx_unavailable",
+        "reportedAt": now_rfc3339(),
+        "jobId": job.id,
+        "jobType": job.job_type.as_str(),
+        "model": model,
+        "reason": job.error,
+    })
+    .to_string();
+    println!("{line}");
+    record_api_event(&line);
 }
 
 /// Emit the MLX↔torch routing decision as a structured JSON line on the API's stdout

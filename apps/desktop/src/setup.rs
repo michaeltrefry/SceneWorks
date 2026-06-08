@@ -835,6 +835,13 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         // The catalog's install-state detection resolves the HF cache from this;
         // it must match the worker's download root or every model reads "missing".
         .env("HF_HOME", huggingface_home().to_string_lossy().to_string());
+    // Epic 3482 (Python Eradication) — macOS "MLX-required" mode is wired through the API
+    // (`Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED`, sc-3483): the MPS worker never
+    // claims an MLX-eligible job and a job no live `mlx` worker takes fails `mlx_unavailable`
+    // instead of running on MPS. It ships default OFF (observe) so nothing is set here yet;
+    // the final cutover (sc-3492) flips it on for macOS at exactly this point —
+    //     #[cfg(target_os = "macos")] { command = command.env("SCENEWORKS_MLX_REQUIRED", "1"); }
+    // — once every Mac Python surface is ported or UI-gated.
     // The in-process utility worker shells out to ffmpeg; point it at the venv's
     // bundled binary since the desktop has no system ffmpeg on PATH.
     if let Some(ffmpeg) = resolve_bundled_ffmpeg() {

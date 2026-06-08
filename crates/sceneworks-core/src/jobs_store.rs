@@ -660,8 +660,109 @@ impl JobsStore {
         })
     }
 
+    /// macOS "MLX-required" grace sweep (epic 3482 / sc-3483). When `mlx_required`, the
+    /// non-mlx (MPS) worker never claims an MLX-eligible job — it defers unconditionally
+    /// to the in-process `mlx` worker (see `should_defer_*`). If no **live** `mlx` worker
+    /// claims such a job within the grace window — because the worker is down, never
+    /// started, or has been crashed longer than the supervisor's auto-restart can
+    /// self-heal — the job would otherwise sit queued forever. This fails those jobs
+    /// terminal (`status = failed`) with an actionable `mlx_unavailable` error naming the
+    /// model + job type, so the failure is loud and points at the real gap instead of
+    /// silently falling back to MPS.
+    ///
+    /// "Live `mlx` worker" = a `gpu_id = 'mlx'` worker that is not offline and has
+    /// heartbeat within the grace window. While one exists (even if it is merely busy),
+    /// this is a no-op and the job waits to be claimed; a transient `mlx` crash that the
+    /// supervisor restarts inside the window therefore never fails a job. `grace_seconds`
+    /// reuses the stale-worker timeout for exactly that reason.
+    ///
+    /// Off (`mlx_required == false`) it returns immediately, so Windows/Linux/Docker and
+    /// the Mac build before the final cutover (sc-3492) are completely unaffected. Returns
+    /// the jobs it failed so the caller can surface the structured event in System → Logs
+    /// and publish their updates.
+    pub fn fail_stranded_mlx_jobs(
+        &self,
+        mlx_required: bool,
+        grace_seconds: u64,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        if !mlx_required {
+            return Ok(Vec::new());
+        }
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_unix_seconds();
+        let grace = i64::try_from(grace_seconds.max(1)).unwrap_or(i64::MAX);
+        let cutoff = format_unix_seconds(now.saturating_sub(grace));
+
+        // A live `mlx` worker (not offline, heartbeat within the window) means MLX-eligible
+        // jobs should wait for it — it may simply be busy. Only when none has checked in
+        // within the window do we treat MLX as unavailable and fail the stranded jobs.
+        let live_mlx_worker = transaction
+            .query_row(
+                "
+                select 1 from workers
+                 where gpu_id = 'mlx'
+                   and status != 'offline'
+                   and last_seen_at >= ?1
+                 limit 1
+                ",
+                params![cutoff],
+                |_row| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if live_mlx_worker {
+            return Ok(Vec::new());
+        }
+
+        // Candidates: still queued and old enough to have outlived the grace window. A job
+        // newer than the cutoff keeps waiting (bounded), so a job created mid-outage isn't
+        // failed instantly — it gets the full window for an `mlx` worker to appear.
+        let mut statement = transaction.prepare(
+            "
+            select * from jobs
+             where status = 'queued'
+               and created_at < ?1
+             order by created_at asc
+            ",
+        )?;
+        let candidates = collect_jobs(statement.query_map(params![cutoff], row_to_job)?)?;
+        drop(statement);
+
+        let now_text = format_unix_seconds(now);
+        let mut failed_ids = Vec::new();
+        for job in candidates {
+            if !job_is_any_mlx_eligible(&job) {
+                continue;
+            }
+            let error = mlx_unavailable_error(&job, grace_seconds);
+            transaction.execute(
+                "
+                update jobs
+                   set status = 'failed',
+                       stage = 'failed',
+                       message = 'MLX worker unavailable.',
+                       error = ?2,
+                       completed_at = ?1,
+                       updated_at = ?1,
+                       worker_id = null
+                 where id = ?3 and status = 'queued'
+                ",
+                params![now_text, error, job.id],
+            )?;
+            failed_ids.push(job.id.clone());
+        }
+        let failed = failed_ids
+            .iter()
+            .map(|id| self.get_job_on_connection(&transaction, id))
+            .collect::<JobsStoreResult<Vec<_>>>()?;
+        transaction.commit()?;
+        Ok(failed)
+    }
+
     pub fn claim_next_job(&self, worker_id: &str) -> JobsStoreResult<Option<JobSnapshot>> {
-        Ok(self.claim_next_job_routed(worker_id)?.0)
+        Ok(self.claim_next_job_routed(worker_id, false)?.0)
     }
 
     /// Like [`Self::claim_next_job`], but also reports the MLX↔torch routing decision
@@ -673,6 +774,7 @@ impl JobsStore {
     pub fn claim_next_job_routed(
         &self,
         worker_id: &str,
+        mlx_required: bool,
     ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>)> {
         let _guard = self.lock.lock();
         let mut connection = self.connect()?;
@@ -732,9 +834,9 @@ impl JobsStore {
         if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
             return Ok((None, None));
         }
-        if should_defer_image_to_mlx_worker(&transaction, &queued, &worker)?
-            || should_defer_video_to_mlx_worker(&transaction, &queued, &worker)?
-            || should_defer_training_to_mlx_worker(&transaction, &queued, &worker)?
+        if should_defer_image_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
+            || should_defer_video_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
+            || should_defer_training_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
         {
             // A non-mlx worker is yielding this MLX-eligible job to an idle mlx worker.
             let decision = RouteDecision::new(
@@ -1522,6 +1624,33 @@ impl RouteDecision {
     }
 }
 
+/// True when *any* MLX-routing predicate (image/detail, video, or training) claims this
+/// job — the union an `mlx` worker would want. Used both to classify a claim for routing
+/// observability (sc-3449) and to identify the jobs the macOS grace sweep must fail when
+/// no `mlx` worker is alive (sc-3483).
+fn job_is_any_mlx_eligible(job: &JobSnapshot) -> bool {
+    job_is_mlx_eligible(job) || video_job_is_mlx_eligible(job) || training_job_is_mlx_eligible(job)
+}
+
+/// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
+/// worker (sc-3483). Names the model + job type so the job card and the System → Logs
+/// surface point at the real gap, never a generic failure. Prefixed `mlx_unavailable:` so
+/// the cause is greppable in logs and distinguishable from `mlx_unsupported` (sc-3484).
+fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
+    let model = job
+        .payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)");
+    format!(
+        "mlx_unavailable: the MLX GPU worker is required on macOS but no live worker \
+         claimed this job within {grace_seconds}s (model={model}, type={job_type}). The \
+         Python/MPS fallback is disabled on Mac — check System → Logs and confirm the MLX \
+         worker is running.",
+        job_type = job.job_type.as_str()
+    )
+}
+
 /// Classify a *successful* claim for routing observability. `None` means the claim was
 /// routing-neutral (the job is not MLX-eligible, so no `mlx` worker would have wanted
 /// it). When a non-`mlx` worker claims an MLX-eligible job, the reason distinguishes a
@@ -1534,10 +1663,7 @@ fn route_decision_for_claim(
     gpu_id: &str,
     worker_id: &str,
 ) -> Option<RouteDecision> {
-    let mlx_eligible = job_is_mlx_eligible(job)
-        || video_job_is_mlx_eligible(job)
-        || training_job_is_mlx_eligible(job);
-    if !mlx_eligible {
+    if !job_is_any_mlx_eligible(job) {
         return None;
     }
     if gpu_id.eq_ignore_ascii_case("mlx") {
@@ -1629,11 +1755,24 @@ fn should_defer_image_to_mlx_worker(
     connection: &Connection,
     job: &JobSnapshot,
     worker: &WorkerSnapshot,
+    mlx_required: bool,
 ) -> JobsStoreResult<bool> {
-    if job.requested_gpu != "auto"
-        || worker.gpu_id.eq_ignore_ascii_case("mlx")
-        || !job_is_mlx_eligible(job)
-    {
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") || !job_is_mlx_eligible(job) {
+        return Ok(false);
+    }
+    // macOS "MLX-required" (epic 3482 / sc-3483): the non-mlx (MPS) worker NEVER claims
+    // an MLX-eligible job — it yields unconditionally, even when no idle `mlx` worker is
+    // ready *right now*. The job waits for the `mlx` worker and, if none takes it within
+    // the grace window, `fail_stranded_mlx_jobs` fails it terminal with `mlx_unavailable`
+    // rather than letting MPS silently run it. This covers explicit-GPU pins too: "never
+    // MPS" is absolute on Mac.
+    if mlx_required {
+        return Ok(true);
+    }
+    // Off (Windows/Linux/Docker, and Mac pre-cutover): unchanged — defer only an `auto`
+    // job to an actually-idle `mlx` worker; otherwise the torch worker is the fallback and
+    // an explicit (non-`auto`) GPU choice is always honoured.
+    if job.requested_gpu != "auto" {
         return Ok(false);
     }
     idle_mlx_worker_can_claim(connection, job, worker)
@@ -1647,11 +1786,16 @@ fn should_defer_video_to_mlx_worker(
     connection: &Connection,
     job: &JobSnapshot,
     worker: &WorkerSnapshot,
+    mlx_required: bool,
 ) -> JobsStoreResult<bool> {
-    if job.requested_gpu != "auto"
-        || worker.gpu_id.eq_ignore_ascii_case("mlx")
-        || !video_job_is_mlx_eligible(job)
-    {
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") || !video_job_is_mlx_eligible(job) {
+        return Ok(false);
+    }
+    // macOS MLX-required (sc-3483): yield unconditionally, same as the image sibling.
+    if mlx_required {
+        return Ok(true);
+    }
+    if job.requested_gpu != "auto" {
         return Ok(false);
     }
     idle_mlx_worker_can_claim(connection, job, worker)
@@ -1668,11 +1812,16 @@ fn should_defer_training_to_mlx_worker(
     connection: &Connection,
     job: &JobSnapshot,
     worker: &WorkerSnapshot,
+    mlx_required: bool,
 ) -> JobsStoreResult<bool> {
-    if job.requested_gpu != "auto"
-        || worker.gpu_id.eq_ignore_ascii_case("mlx")
-        || !training_job_is_mlx_eligible(job)
-    {
+    if worker.gpu_id.eq_ignore_ascii_case("mlx") || !training_job_is_mlx_eligible(job) {
+        return Ok(false);
+    }
+    // macOS MLX-required (sc-3483): yield unconditionally, same as the image sibling.
+    if mlx_required {
+        return Ok(true);
+    }
+    if job.requested_gpu != "auto" {
         return Ok(false);
     }
     idle_mlx_worker_can_claim(connection, job, worker)

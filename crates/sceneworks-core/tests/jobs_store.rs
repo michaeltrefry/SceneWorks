@@ -1583,6 +1583,146 @@ fn mlx_eligible_image_job_falls_back_to_torch_when_no_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
 }
 
+// epic 3482 / sc-3483 — macOS "MLX-required": the MPS worker never claims an MLX-eligible
+// job, and a job no live `mlx` worker takes within the grace window fails terminal with
+// `mlx_unavailable` rather than silently running on MPS. Ships behind a flag (default OFF);
+// the sibling `*_falls_back_to_torch_*` tests above pin the OFF behaviour.
+
+/// Backdate a job's `created_at` so the grace sweep treats it as having outlived the
+/// window (mirrors how `stale_sweep_*` backdates `last_seen_at`).
+fn backdate_job_created_at(store: &JobsStore, job_id: &str) {
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set created_at = '2000-01-01T00:00:00Z' where id = ?1",
+            params![job_id],
+        )
+        .expect("job created_at backdates");
+}
+
+#[test]
+fn mlx_required_defers_eligible_job_even_with_no_idle_mlx_worker() {
+    let store = store("mlx-required-defer");
+    // Only an MPS worker is registered — no idle `mlx` worker to take the job. With the
+    // flag OFF this is exactly the torch fallback; with it ON the MPS worker yields
+    // unconditionally ("never MPS" on Mac).
+    register_gpu_worker(&store, "worker-mps", "mps", image_caps());
+    store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "a misty fjord" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let (claimed, decision) = store
+        .claim_next_job_routed("worker-mps", true)
+        .expect("claim ok");
+    assert!(
+        claimed.is_none(),
+        "MPS worker must not claim the MLX-eligible job when mlx is required"
+    );
+    let decision = decision.expect("a routing decision is reported");
+    assert_eq!(decision.decision, "deferred_to_mlx");
+}
+
+#[test]
+fn mlx_required_fails_stranded_eligible_job_when_no_live_mlx_worker() {
+    let store = store("mlx-required-strand");
+    register_gpu_worker(&store, "worker-mps", "mps", image_caps());
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+    backdate_job_created_at(&store, &job.id);
+
+    let failed = store.fail_stranded_mlx_jobs(true, 90).expect("sweep ok");
+    assert_eq!(failed.len(), 1, "the stranded MLX-eligible job is failed");
+    assert_eq!(failed[0].id, job.id);
+    assert_eq!(failed[0].status, JobStatus::Failed);
+    assert!(
+        failed[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("mlx_unavailable"),
+        "error names the mlx_unavailable cause: {:?}",
+        failed[0].error
+    );
+    // The terminal transition is persisted, not just reported.
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Failed
+    );
+}
+
+#[test]
+fn mlx_required_does_not_fail_when_a_live_mlx_worker_is_present() {
+    let store = store("mlx-required-live");
+    // A live `mlx` worker exists (just registered → recent heartbeat); the job waits for
+    // it instead of being failed — covers the "mlx worker merely busy" case.
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+    backdate_job_created_at(&store, &job.id);
+
+    let failed = store.fail_stranded_mlx_jobs(true, 90).expect("sweep ok");
+    assert!(failed.is_empty(), "a live mlx worker keeps the job queued");
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn fail_stranded_mlx_jobs_is_noop_when_not_required() {
+    let store = store("mlx-required-off");
+    register_gpu_worker(&store, "worker-mps", "mps", image_caps());
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+    backdate_job_created_at(&store, &job.id);
+
+    // Flag off (Windows/Linux/Docker, Mac pre-cutover): the sweep never fails anything.
+    let failed = store.fail_stranded_mlx_jobs(false, 90).expect("sweep ok");
+    assert!(failed.is_empty());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn mlx_required_still_lets_mps_claim_a_non_eligible_model() {
+    // 3483 only kills the MPS fallback for MLX-*eligible* jobs. A torch-only model is not
+    // eligible, so it is NOT deferred and still runs on MPS — surfacing it as a loud
+    // `mlx_unsupported` failure is sc-3484's job, not this slice's.
+    let store = store("mlx-required-noneligible");
+    register_gpu_worker(&store, "worker-mps", "mps", image_caps());
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "kolors", "prompt": "p" }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    let claimed = store
+        .claim_next_job_routed("worker-mps", true)
+        .expect("claim ok")
+        .0
+        .expect("MPS claims the non-eligible job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
 // sc-3449 — claim_next_job_routed reports *why* an MLX-eligible job landed where it did.
 
 #[test]
@@ -1603,7 +1743,7 @@ fn routing_decision_reports_fell_back_to_torch_with_no_mlx_worker() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-torch")
+        .claim_next_job_routed("worker-torch", false)
         .expect("torch claim ok");
     assert_eq!(claimed.expect("torch claims it").id, job.id);
     let decision = decision.expect("routing decision present");
@@ -1629,7 +1769,7 @@ fn routing_decision_reports_deferred_to_mlx_for_torch_worker() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-torch")
+        .claim_next_job_routed("worker-torch", false)
         .expect("torch claim ok");
     assert!(claimed.is_none(), "torch defers to the idle mlx worker");
     let decision = decision.expect("routing decision present");
@@ -1649,7 +1789,7 @@ fn routing_decision_reports_claimed_by_mlx() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-mlx")
+        .claim_next_job_routed("worker-mlx", false)
         .expect("mlx claim ok");
     assert_eq!(claimed.expect("mlx claims it").id, job.id);
     let decision = decision.expect("routing decision present");
@@ -1670,7 +1810,7 @@ fn routing_decision_is_none_for_non_mlx_model() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-torch")
+        .claim_next_job_routed("worker-torch", false)
         .expect("torch claim ok");
     assert!(claimed.is_some(), "torch claims the torch-only job");
     assert!(
@@ -1771,7 +1911,7 @@ fn routing_decision_reports_claimed_by_mlx_for_image_edit() {
 
     // The fix makes the claim non-routing-neutral: an mlx_route_decision is now emitted.
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-mlx")
+        .claim_next_job_routed("worker-mlx", false)
         .expect("mlx claim ok");
     assert_eq!(claimed.expect("mlx claims it").id, job.id);
     let decision = decision.expect("routing decision present");
@@ -1807,7 +1947,7 @@ fn torch_only_image_edit_model_stays_on_torch() {
     // A torch worker is the home for it, and the claim is routing-neutral (no event).
     register_gpu_worker(&store, "worker-torch", "mps", image_edit_caps());
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-torch")
+        .claim_next_job_routed("worker-torch", false)
         .expect("torch claim ok");
     let claimed = claimed.expect("torch claims it");
     assert_eq!(claimed.id, job.id);
