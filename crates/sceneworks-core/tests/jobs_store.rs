@@ -1884,9 +1884,13 @@ fn mac_rust_supported_names_infra_job_types() {
 #[test]
 fn mac_rust_supported_names_advanced_video_and_svd() {
     let store = store("oracle-video");
-    // extend / bridge on a non-LTX (Wan) engine: no IC-LoRA path → torch gap (sc-3522). The
-    // mode is derived from the job type, so a missing payload `mode` still classifies correctly.
-    let extend = job_of(&store, JobType::VideoExtend, json!({ "model": "wan_2_2" }));
+    // extend / bridge on a 14B Wan MoE engine: no `Keyframe` path → torch gap (sc-3522 / sc-3357).
+    // The mode is derived from the job type, so a missing payload `mode` still classifies correctly.
+    let extend = job_of(
+        &store,
+        JobType::VideoExtend,
+        json!({ "model": "wan_2_2_t2v_14b" }),
+    );
     assert_eq!(
         mac_rust_supported(&extend)
             .unwrap_err()
@@ -1894,7 +1898,10 @@ fn mac_rust_supported_names_advanced_video_and_svd() {
             .as_deref(),
         Some("epic 3040")
     );
-    // extend / bridge on the LTX IC-LoRA path are supported (sc-3522).
+    // extend / bridge on the LTX IC-LoRA path + Wan TI2V-5B boundary-keyframe path are supported
+    // (sc-3522 / sc-3357).
+    let wan_extend = job_of(&store, JobType::VideoExtend, json!({ "model": "wan_2_2" }));
+    assert!(mac_rust_supported(&wan_extend).is_ok());
     let ltx_extend = job_of(&store, JobType::VideoExtend, json!({ "model": "ltx_2_3" }));
     assert!(mac_rust_supported(&ltx_extend).is_ok());
     let ltx_bridge = job_of(
@@ -2053,9 +2060,9 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     assert_eq!(wan.get("image_to_video"), Some(&true));
     assert_eq!(wan.get("first_last_frame"), Some(&true)); // Wan TI2V-5B FLF is MLX
     assert_eq!(wan.get("replace_person"), Some(&true)); // → native Wan-VACE (sc-3521)
-                                                        // Wan has no IC-LoRA path → extend/bridge stay torch (sc-3773).
-    assert_eq!(wan.get("extend_clip"), Some(&false));
-    assert_eq!(wan.get("video_bridge"), Some(&false));
+                                                        // Wan TI2V-5B serves extend/bridge via single-frame boundary keyframe conditioning (sc-3357).
+    assert_eq!(wan.get("extend_clip"), Some(&true));
+    assert_eq!(wan.get("video_bridge"), Some(&true));
     // LTX serves the IC-LoRA clip-conditioning modes on MLX → extend/bridge enabled (sc-3522/3773).
     let ltx = model_mac_support("ltx_2_3", "video").features.video_modes;
     assert_eq!(ltx.get("extend_clip"), Some(&true));
@@ -2900,12 +2907,12 @@ fn mlx_worker_excluded_from_advanced_mode_video_job() {
     let store = store("mlx-video-routing-exclude");
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
-    // extend_clip / video_bridge are advanced modes that still ride the torch path (sc-3522);
-    // the mlx worker must not claim them even on a Wan model. (first_last_frame and
-    // replace_person are now MLX-eligible — see below.)
+    // extend_clip / video_bridge stay torch on engines with no keyframe path — the 14B Wan MoE
+    // here (sc-3522 / sc-3357: LTX + Wan TI2V-5B serve them on MLX, the MoE engines do not); the
+    // mlx worker must not claim this one.
     let job = store
         .create_job(video_job_with(
-            json!({ "model": "wan_2_2", "mode": "extend_clip" }),
+            json!({ "model": "wan_2_2_t2v_14b", "mode": "extend_clip" }),
             "auto",
         ))
         .expect("job creates");
@@ -3019,13 +3026,14 @@ fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
 
 #[test]
 fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
-    // sc-3522 cutover: extend_clip / video_bridge are MLX-eligible on the LTX IC-LoRA path,
-    // so a torch worker defers the dedicated job types to an idle mlx worker.
+    // sc-3522 / sc-3357 cutover: extend_clip / video_bridge are MLX-eligible on the LTX IC-LoRA
+    // path and Wan TI2V-5B (`wan_2_2`, boundary-keyframe conditioning), so a torch worker defers
+    // the dedicated job types to an idle mlx worker.
     for (job_type, mode) in [
         (JobType::VideoExtend, "extend_clip"),
         (JobType::VideoBridge, "video_bridge"),
     ] {
-        for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        for model in ["ltx_2_3", "ltx_2_3_eros", "wan_2_2"] {
             let store = store(&format!("mlx-video-routing-clip-{mode}-{model}"));
             register_gpu_worker(&store, "worker-torch", "mps", video_caps());
             register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
@@ -3059,20 +3067,21 @@ fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 }
 
 #[test]
-fn clip_conditioning_video_job_stays_on_torch_for_wan_engines() {
-    // extend_clip / video_bridge have no IC-LoRA keyframe-append path on Wan → stays torch,
-    // even though the mlx worker advertises the VideoExtend/VideoBridge capabilities.
+fn clip_conditioning_video_job_stays_on_torch_for_wan_moe_engines() {
+    // extend_clip / video_bridge have no `Keyframe` path on the 14B Wan MoE engines → stays torch,
+    // even though the mlx worker advertises the VideoExtend/VideoBridge capabilities. (Wan TI2V-5B
+    // `wan_2_2` IS MLX-eligible — sc-3357 — and is covered by the defer test above.)
     for (job_type, mode) in [
         (JobType::VideoExtend, "extend_clip"),
         (JobType::VideoBridge, "video_bridge"),
     ] {
-        let store = store(&format!("mlx-video-routing-clip-wan-{mode}"));
+        let store = store(&format!("mlx-video-routing-clip-wan-moe-{mode}"));
         register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
         let job = store
             .create_job(video_job_typed(
                 job_type.clone(),
-                json!({ "model": "wan_2_2", "mode": mode, "sourceClipAssetId": "left" }),
+                json!({ "model": "wan_2_2_t2v_14b", "mode": mode, "sourceClipAssetId": "left" }),
                 "auto",
             ))
             .expect("job creates");
@@ -3082,7 +3091,7 @@ fn clip_conditioning_video_job_stays_on_torch_for_wan_engines() {
                 .claim_next_job("worker-mlx")
                 .expect("mlx claim ok")
                 .is_none(),
-            "{mode}: mlx worker must not claim a Wan clip job"
+            "{mode}: mlx worker must not claim a 14B Wan MoE clip job"
         );
 
         register_gpu_worker(&store, "worker-torch", "mps", video_caps());

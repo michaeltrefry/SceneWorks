@@ -1790,14 +1790,16 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
 
         JobType::VideoGenerate => Err(classify_video_gap(&job.payload)),
 
-        // Reached only for ineligible extend/bridge jobs (the eligible LTX IC-LoRA path
-        // early-returns `Ok` via `job_is_any_mlx_eligible`). The remaining gap is a
-        // non-LTX (Wan) engine, which has no IC-LoRA keyframe-append path (sc-3522).
+        // Reached only for ineligible extend/bridge jobs (the eligible LTX IC-LoRA path + the Wan
+        // TI2V-5B boundary-keyframe path early-return `Ok` via `job_is_any_mlx_eligible`). The
+        // remaining gap is an engine with no in-context / keyframe path: the 14B Wan MoE engines
+        // and any non-MLX video model (sc-3522 / sc-3357).
         JobType::VideoExtend | JobType::VideoBridge => Err(UnsupportedReason::new(
             model,
-            "extend / bridge on a non-LTX engine",
-            "extend_clip / video_bridge run on MLX only on the LTX IC-LoRA path (ltx_2_3 / ltx_2_3_eros); \
-             the Wan engines have no in-context keyframe-append path, so they stay on the Python torch path.",
+            "extend / bridge on this engine",
+            "extend_clip / video_bridge run on MLX on the LTX IC-LoRA path (ltx_2_3 / ltx_2_3_eros) \
+             and Wan TI2V-5B (wan_2_2, single-frame boundary keyframe conditioning); other engines \
+             (the 14B Wan MoE) have no keyframe path, so they stay on the Python torch path.",
             Some("epic 3040"),
         )),
 
@@ -2244,8 +2246,8 @@ fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             Some(model),
             "advanced video mode",
             "this video_generate mode is not MLX-eligible on this model (first_last_frame / \
-             replace_person route to MLX only on the capable engines; extend_clip / video_bridge \
-             stay torch).",
+             extend_clip / video_bridge / replace_person route to MLX only on the capable engines — \
+             LTX + Wan TI2V-5B for the keyframe/clip modes, Wan-VACE for replace_person).",
             Some("epic 3040"),
         );
     }
@@ -2801,10 +2803,11 @@ const VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
 /// MLX covers `text_to_video` + `image_to_video` on Wan/LTX, `image_to_video` on SVD
 /// (`svd`→`svd_xt`, image-conditioned only — sc-3523), `first_last_frame` on the FLF-capable
 /// engines (LTX + Wan TI2V-5B `wan_2_2`; sc-3520), the clip-conditioning modes `extend_clip` /
-/// `video_bridge` on the LTX IC-LoRA path (sc-3522, the `VideoExtend` / `VideoBridge` job types),
-/// and `replace_person` → native Wan-VACE (the `PersonReplace` job type, sc-3521 — see
+/// `video_bridge` on the LTX IC-LoRA path **and Wan TI2V-5B** (sc-3522 / sc-3357, the `VideoExtend`
+/// / `VideoBridge` job types — Wan via single-frame boundary keyframe conditioning), and
+/// `replace_person` → native Wan-VACE (the `PersonReplace` job type, sc-3521 — see
 /// [`video_mode_is_mlx_eligible`]). Still on the Python torch path: a non-MLX model, and
-/// extend/bridge on the Wan engines (no IC-LoRA keyframe-append path).
+/// extend/bridge on the 14B Wan MoE engines (no `Keyframe` path).
 /// **Third-party LyCORIS (LoHa / non-peft LoKr) and LoKr-on-Wan now run on MLX**
 /// (epic 3641, sc-3671 + sc-3644): the Wan/LTX engine paths reconstruct + merge/residual the delta —
 /// the peft-LoKr-on-Wan merge has existed since sc-2393, and the old `create_video_adapter` torch
@@ -2857,10 +2860,13 @@ fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// multi-keyframe path, sc-3357). The 14B Wan MoE engines have no `Keyframe` path, so FLF on
 /// them stays torch. **SVD (`svd`) is image-conditioned only** — it serves `image_to_video`
 /// exclusively (no text→video, sc-3523). The clip-conditioning modes `extend_clip` /
-/// `video_bridge` are MLX on the **LTX** engines only (`ltx_2_3`/`ltx_2_3_eros`, the IC-LoRA
-/// keyframe-append path — sc-3522, engine `build_clips` sc-3052/3053); the Wan engines have no
-/// IC-LoRA path so they stay torch. `replace_person` is MLX on the replace-capable models
-/// (→ native Wan-VACE, sc-3521).
+/// `video_bridge` are MLX on the **LTX** engines (`ltx_2_3`/`ltx_2_3_eros`, the IC-LoRA
+/// multi-frame keyframe-append path — sc-3522, engine `build_clips` sc-3052/3053) **and Wan
+/// TI2V-5B** (`wan_2_2`, single-frame boundary `Keyframe` conditioning — sc-3357: extend pins the
+/// source clip's last frame, bridge pins the two boundary frames, the same mask-blend primitive as
+/// Wan FLF, matching the torch Wan reference which routed these to plain i2v). The 14B Wan MoE
+/// engines have no `Keyframe` path so they stay torch. `replace_person` is MLX on the
+/// replace-capable models (→ native Wan-VACE, sc-3521).
 fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "svd" {
         return mode == "image_to_video";
@@ -2868,7 +2874,12 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     match mode {
         "text_to_video" | "image_to_video" => true,
         "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
-        "extend_clip" | "video_bridge" => matches!(model, "ltx_2_3" | "ltx_2_3_eros"),
+        // extend_clip / video_bridge: LTX via the IC-LoRA multi-frame keyframe-append (sc-3522),
+        // and Wan TI2V-5B (`wan_2_2`) via single-frame boundary keyframe conditioning (sc-3357 —
+        // extend pins the source clip's last frame, bridge pins the two boundary frames, the same
+        // mask-blend `Keyframe` primitive as Wan FLF). The 14B Wan MoE engines have no `Keyframe`
+        // path, so extend/bridge on them stay torch.
+        "extend_clip" | "video_bridge" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
         // replace_person → native Wan-VACE (sc-3521): the engine `wan_vace` provider serves it
         // regardless of the user-picked replace-capable model (ltx_2_3 / ltx_2_3_eros / wan_2_2,
         // the models that advertise the capability), so admit those.
