@@ -565,9 +565,17 @@ async fn run_utility_job(
         // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link
         // their provider crates. Off macOS the capability is never advertised, so this
         // arm is unreachable there.
-        JobType::VideoGenerate => run_video_generate_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Video generation failed.", error)),
+        // The clip-conditioning advanced video modes (epic 3040, sc-3522) share the video
+        // generation handler — `run_video_generate_job` dispatches `extend_clip` /
+        // `video_bridge` by the request `mode` into the LTX IC-LoRA `VideoClip` path. The API
+        // only routes the LTX-eligible jobs here (`video_job_is_mlx_eligible`); off macOS the
+        // VideoExtend/VideoBridge capabilities are never advertised, so these arms are
+        // unreachable there (the procedural stub would otherwise ignore the conditioning).
+        JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
+            run_video_generate_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Video generation failed.", error))
+        }
         // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
         // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
         // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);

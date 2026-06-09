@@ -361,7 +361,8 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
 
 /// The Apple-Silicon native MLX GPU worker (epic 3018): advertises `image_generate`,
 /// `image_edit` (plain Image Edit, sc-3513), `image_detail` (tile-ControlNet refine,
-/// sc-3060), `video_generate`, and LoRA/LoKr
+/// sc-3060), `video_generate` (+ the `video_extend` / `video_bridge` clip-conditioning
+/// modes on the LTX IC-LoRA path, sc-3522), and LoRA/LoKr
 /// `lora_train` + `lora_train_execute` (epic 3039), served in-process by the linked
 /// mlx-gen engine. `Gpu` (not
 /// `Cpu`) so the API's `worker_supports_job` lets GPU jobs route here; it deliberately
@@ -399,6 +400,14 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // `image_detail` job runs in-process on the engine here too.
             WorkerCapability::ImageDetail,
             WorkerCapability::VideoGenerate,
+            // Clip-conditioning advanced video modes (epic 3040, sc-3522): extend_clip /
+            // video_bridge run the LTX IC-LoRA keyframe-append path in-process. The API gates
+            // these `video_extend` / `video_bridge` jobs to the LTX engines
+            // (`jobs_store::video_job_is_mlx_eligible`); a Wan extend/bridge has no IC-LoRA
+            // path and stays on the Python torch worker, and `replace_person` (PersonReplace)
+            // is a separate Wan-VACE slice not advertised here.
+            WorkerCapability::VideoExtend,
+            WorkerCapability::VideoBridge,
             // Native Rust LoRA/LoKr training (epic 3039): plan validation +
             // real execution, both served in-process by `mlx_gen::load_trainer`.
             WorkerCapability::LoraTrain,

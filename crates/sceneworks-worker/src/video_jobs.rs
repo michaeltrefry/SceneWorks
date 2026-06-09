@@ -32,7 +32,7 @@ use crate::media_jobs::{run_ffmpeg, FfmpegContext};
 use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 #[cfg(target_os = "macos")]
 use mlx_gen::{
-    AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
+    AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Image,
     LoadSpec, MoeExpert, Precision, Progress, Quant, WeightsSource,
 };
 #[cfg(target_os = "macos")]
@@ -1533,6 +1533,318 @@ fn resolve_keyframe_conditioning(
     ])
 }
 
+/// Whether the job's LoRA set includes an IC-LoRA — the in-context conditioning adapter the
+/// LTX extend/bridge keyframe-append path needs (without it the appended clip tokens are inert,
+/// per the engine `apply_ltx_adapters` seam). Port of the torch `lora_looks_like_ic_lora`
+/// (lora_adapters.py): an explicit `icLora`/`isIcLora` flag, a `conditioningRole: ic_lora`, or an
+/// "ic-lora" / "ltx-2-3-ic-" marker anywhere in the id / name / path / file list. The IC-LoRA is a
+/// user-installed LoRA flowing through `request.loras` (not an auto-provisioned fixed repo), so it
+/// rides the existing [`resolve_ltx_adapters`] seam with no new adapter-loading code.
+#[cfg(target_os = "macos")]
+fn loras_contain_ic_lora(loras: &[Value]) -> bool {
+    loras.iter().any(lora_looks_like_ic_lora)
+}
+
+#[cfg(target_os = "macos")]
+fn lora_looks_like_ic_lora(lora: &Value) -> bool {
+    let Some(obj) = lora.as_object() else {
+        // A bare string lora id: sniff the string itself.
+        return lora
+            .as_str()
+            .map(|id| ic_lora_marker(&id.to_lowercase().replace('_', "-")))
+            .unwrap_or(false);
+    };
+    if obj.get("icLora") == Some(&Value::Bool(true))
+        || obj.get("isIcLora") == Some(&Value::Bool(true))
+    {
+        return true;
+    }
+    if let Some(role) = obj.get("conditioningRole").and_then(Value::as_str) {
+        if role.trim().to_lowercase().replace('-', "_") == "ic_lora" {
+            return true;
+        }
+    }
+    let source = obj.get("source").and_then(Value::as_object);
+    // Gather every id/name/path/file string the torch heuristic inspects.
+    let mut haystacks: Vec<String> = Vec::new();
+    for key in [
+        "id",
+        "loraId",
+        "name",
+        "displayName",
+        "installedPath",
+        "sourcePath",
+        "path",
+    ] {
+        if let Some(value) = obj.get(key).and_then(Value::as_str) {
+            haystacks.push(value.to_owned());
+        }
+    }
+    if let Some(source) = source {
+        for key in ["repo", "file", "path"] {
+            if let Some(value) = source.get(key).and_then(Value::as_str) {
+                haystacks.push(value.to_owned());
+            }
+        }
+    }
+    // `files` (or `source.files`) may be a list or a single string.
+    let files = source
+        .and_then(|s| s.get("files"))
+        .or_else(|| obj.get("files"));
+    match files {
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let Some(value) = item.as_str() {
+                    haystacks.push(value.to_owned());
+                }
+            }
+        }
+        Some(Value::String(value)) => haystacks.push(value.clone()),
+        _ => {}
+    }
+    let text = haystacks.join(" ").to_lowercase().replace('_', "-");
+    ic_lora_marker(&text)
+}
+
+/// The torch `lora_looks_like_ic_lora` text test (already `_`→`-` normalised + lowercased).
+#[cfg(target_os = "macos")]
+fn ic_lora_marker(text: &str) -> bool {
+    text.contains("ic-lora") || text.contains("ltx-2-3-ic-")
+}
+
+/// Build the in-context [`Conditioning::VideoClip`] set for extend_clip / video_bridge (sc-3522).
+/// Source-of-truth = torch `_ltx_video_conditioning` (video_adapters.py) + the engine consumer
+/// `mlx_gen_ltx::build_clips`: each source clip's frames are appended as IC-LoRA in-context tokens
+/// at an output **latent** frame index, with a `1 − strength` denoise mask.
+/// - **extend_clip** → one clip pinned at latent frame `0`, strength `videoConditioningStrength`.
+/// - **video_bridge** → a left clip at `0` (strength `videoConditioningStrength`) + a right clip at
+///   latent frame `-1` (the engine's negative-from-end index, `lf + idx`, so the worker needs no
+///   latent-frame math), strength `bridgeRightVideoConditioningStrength`.
+///
+/// Both strengths default to `1.0` (fully pinned), mirroring the torch `_advanced_float` defaults.
+#[cfg(target_os = "macos")]
+fn build_video_clip_conditioning(
+    request: &VideoRequest,
+    left_frames: Vec<Image>,
+    right_frames: Option<Vec<Image>>,
+) -> WorkerResult<Vec<Conditioning>> {
+    let mut conditioning = vec![Conditioning::VideoClip {
+        frames: left_frames,
+        frame_idx: 0,
+        strength: advanced_f32(request, "videoConditioningStrength", 1.0),
+    }];
+    if request.mode == "video_bridge" {
+        let right = right_frames.ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "video_bridge requires a right-side source clip (bridgeRightClipAssetId)."
+                    .to_owned(),
+            )
+        })?;
+        conditioning.push(Conditioning::VideoClip {
+            frames: right,
+            frame_idx: -1,
+            strength: advanced_f32(request, "bridgeRightVideoConditioningStrength", 1.0),
+        });
+    }
+    Ok(conditioning)
+}
+
+/// Resolve an asset id to its on-disk media file path (the source clip mp4), mirroring the asset
+/// lookup in [`load_reference_image`] but returning the path for ffmpeg frame extraction (the
+/// Rust equivalent of the torch `source_asset_media_path`).
+#[cfg(target_os = "macos")]
+fn resolve_clip_media_path(
+    settings: &Settings,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+) -> WorkerResult<PathBuf> {
+    let asset = ProjectStore::new(settings.data_dir.clone(), "worker")
+        .get_asset(project_id, asset_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("source clip asset {asset_id}: {error}"))
+        })?;
+    let rel = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("source clip asset {asset_id} has no media path"))
+        })?;
+    let path = project_path.join(rel);
+    if !path.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "source clip file is missing for asset {asset_id}: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+/// Decode the first `count` frames of a source clip into [`Image`]s for in-context conditioning.
+/// Mirrors the torch reference `decode_video_by_frame(starting_frame=0, frame_cap=num_frames)` /
+/// `video_preprocess` (ltx_pipelines): **sequential** frames from the start at the clip's native
+/// cadence (no fps resample), scaled to the output `width`×`height` (the engine `build_clips`
+/// LANCZOS-downsizes each frame to stage-1 half-res, so this only bounds memory). `count` is the
+/// generation's snapped frame count (`8k+1`); a clip shorter than `count` yields fewer frames,
+/// which the engine VAE encode accepts. Extracted via the shared [`run_ffmpeg`] (binary
+/// resolution + heartbeat/cancel), then loaded off the async runtime.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn extract_clip_frames(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    project_id: &str,
+    project_path: &Path,
+    asset_id: &str,
+    width: u32,
+    height: u32,
+    count: u32,
+) -> WorkerResult<Vec<Image>> {
+    let clip_path = resolve_clip_media_path(settings, project_id, asset_id, project_path)?;
+    let frames_dir = project_path
+        .join("assets")
+        .join(".cond_clips")
+        .join(Uuid::new_v4().simple().to_string());
+    tokio::fs::create_dir_all(&frames_dir).await?;
+    let pattern = frames_dir.join("frame_%05d.png");
+    let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
+    let result = run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            clip_path.display().to_string(),
+            // Plain scale (stretch) to the output dims — matches the engine's LANCZOS resize
+            // model (it re-resizes to stage-1 half-res); bounds the extracted frame footprint.
+            "-vf".to_owned(),
+            format!("scale={width}:{height}"),
+            // First `count` decoded frames, sequential from the start at native cadence.
+            "-frames:v".to_owned(),
+            count.to_string(),
+            "-start_number".to_owned(),
+            "0".to_owned(),
+            pattern.display().to_string(),
+        ],
+        Some(ctx),
+    )
+    .await;
+    // Load the extracted PNGs (sorted by frame index) into `Image`s, off the async runtime.
+    let load = async {
+        result?;
+        let dir = frames_dir.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+            let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
+                .collect();
+            paths.sort();
+            let mut frames = Vec::with_capacity(paths.len());
+            for path in paths {
+                let decoded = image::open(&path)
+                    .map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "conditioning frame {}: {error}",
+                            path.display()
+                        ))
+                    })?
+                    .to_rgb8();
+                frames.push(Image {
+                    width: decoded.width(),
+                    height: decoded.height(),
+                    pixels: decoded.into_raw(),
+                });
+            }
+            Ok(frames)
+        })
+        .await
+        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
+    };
+    let frames = load.await;
+    // Best-effort cleanup of the scratch frame dir regardless of outcome.
+    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
+    let frames = frames?;
+    if frames.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "source clip {asset_id} produced no decodable frames for conditioning"
+        )));
+    }
+    Ok(frames)
+}
+
+/// Resolve extend_clip / video_bridge into the in-context [`Conditioning::VideoClip`] set (sc-3522).
+/// Requires an installed IC-LoRA (the keyframe-append adapter) — mirrors the torch gate
+/// (`_uses_ic_lora_pipeline` + the "requires at least one installed LTX-compatible LoRA" error),
+/// since without it the appended clip tokens are inert. Then decodes each source clip's first
+/// `num_frames` frames and builds the clips. `num_frames` is the generation's snapped frame count,
+/// the same value [`generate_ltx`] passes to the engine.
+#[cfg(target_os = "macos")]
+async fn resolve_video_clip_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Conditioning>> {
+    if !loras_contain_ic_lora(&request.loras) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} requires an installed IC-LoRA (in-context conditioning adapter) — add an \
+             LTX IC-LoRA to the selected preset; without it the source-clip conditioning is inert.",
+            request.mode.replace('_', " ")
+        )));
+    }
+    let left_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{} requires a source clip (sourceClipAssetId).",
+            request.mode.replace('_', " ")
+        ))
+    })?;
+    let num_frames = ltx_frame_count(request.raw_frame_count());
+    let left_frames = extract_clip_frames(
+        api,
+        settings,
+        job,
+        &request.project_id,
+        project_path,
+        left_id,
+        request.width,
+        request.height,
+        num_frames,
+    )
+    .await?;
+    let right_frames = if request.mode == "video_bridge" {
+        let right_id = request
+            .bridge_right_clip_asset_id
+            .as_deref()
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "video_bridge requires a right-side source clip (bridgeRightClipAssetId)."
+                        .to_owned(),
+                )
+            })?;
+        Some(
+            extract_clip_frames(
+                api,
+                settings,
+                job,
+                &request.project_id,
+                project_path,
+                right_id,
+                request.width,
+                request.height,
+                num_frames,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    build_video_clip_conditioning(request, left_frames, right_frames)
+}
+
 /// Raw-settings recorded on a real MLX LTX asset (`advanced` knobs + real-inference markers).
 #[cfg(target_os = "macos")]
 fn ltx_raw_settings(request: &VideoRequest) -> Value {
@@ -1570,12 +1882,21 @@ async fn generate_ltx(
         .get("enhanceTemperature")
         .and_then(|v| v.as_f64())
         .map(|v| v as f32);
+    // extend_clip / video_bridge build in-context VideoClip conditioning from decoded source
+    // clips (async ffmpeg extraction); every other mode resolves keyframe/reference conditioning
+    // synchronously from images.
+    let conditioning = match request.mode.as_str() {
+        "extend_clip" | "video_bridge" => {
+            resolve_video_clip_conditioning(api, settings, job, request, project_path).await?
+        }
+        _ => resolve_ltx_conditioning(settings, request, project_path)?,
+    };
     let input = VideoGenInput {
         engine_id,
         model_dir: resolve_ltx_model_dir(settings, request)?,
         quant: None,
         adapters: resolve_ltx_adapters(request)?,
-        conditioning: resolve_ltx_conditioning(settings, request, project_path)?,
+        conditioning,
         prompt: request.prompt.clone(),
         negative_prompt: None,
         width: request.width,
@@ -1969,6 +2290,170 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("TI2V-5B"), "got: {err}");
+    }
+
+    /// A 1×1 RGB [`Image`] for clip-conditioning construction tests (the engine resizes; the
+    /// content is irrelevant — only the variant / frame_idx / strength mapping is under test).
+    #[cfg(target_os = "macos")]
+    fn pixel(n: u8) -> Image {
+        Image {
+            width: 1,
+            height: 1,
+            pixels: vec![n, n, n],
+        }
+    }
+
+    /// extend_clip → one `VideoClip` pinned at latent frame 0, strength `videoConditioningStrength`
+    /// (default 1.0); the bridge-only right knob is ignored.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn video_clip_conditioning_extend_maps_single_clip_at_zero() {
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "extend it",
+            "mode": "extend_clip",
+            "advanced": { "videoConditioningStrength": 0.7 }
+        }));
+        let cond = build_video_clip_conditioning(&req, vec![pixel(1), pixel(2)], None).unwrap();
+        assert_eq!(cond.len(), 1);
+        match &cond[0] {
+            Conditioning::VideoClip {
+                frames,
+                frame_idx,
+                strength,
+            } => {
+                assert_eq!(frames.len(), 2);
+                assert_eq!(*frame_idx, 0);
+                assert_eq!(*strength, 0.7);
+            }
+            other => panic!("expected VideoClip, got {other:?}"),
+        }
+    }
+
+    /// video_bridge → left clip at 0 (`videoConditioningStrength`) + right clip at -1
+    /// (`bridgeRightVideoConditioningStrength`); both default to 1.0 when absent.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn video_clip_conditioning_bridge_maps_left_zero_right_tail() {
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "bridge them",
+            "mode": "video_bridge",
+            "advanced": { "bridgeRightVideoConditioningStrength": "0.5" }
+        }));
+        let cond =
+            build_video_clip_conditioning(&req, vec![pixel(1)], Some(vec![pixel(2), pixel(3)]))
+                .unwrap();
+        assert_eq!(cond.len(), 2);
+        match (&cond[0], &cond[1]) {
+            (
+                Conditioning::VideoClip {
+                    frames: left,
+                    frame_idx: left_idx,
+                    strength: left_strength,
+                },
+                Conditioning::VideoClip {
+                    frames: right,
+                    frame_idx: right_idx,
+                    strength: right_strength,
+                },
+            ) => {
+                assert_eq!(left.len(), 1);
+                assert_eq!(*left_idx, 0);
+                assert_eq!(*left_strength, 1.0); // default
+                assert_eq!(right.len(), 2);
+                assert_eq!(*right_idx, -1); // engine negative-from-end (lf + idx)
+                assert_eq!(*right_strength, 0.5); // numeric-string advanced knob
+            }
+            other => panic!("expected two VideoClips, got {other:?}"),
+        }
+    }
+
+    /// video_bridge without the right clip frames is a construction error (defence behind the
+    /// resolver's `bridgeRightClipAssetId` guard).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn video_clip_conditioning_bridge_requires_right_clip() {
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "bridge them",
+            "mode": "video_bridge"
+        }));
+        let err = build_video_clip_conditioning(&req, vec![pixel(1)], None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("right-side source clip"), "got: {err}");
+    }
+
+    /// The IC-LoRA detector matches the torch `lora_looks_like_ic_lora` markers (flags, role,
+    /// and "ic-lora" / "ltx-2-3-ic-" in id/name/path/files) and rejects an ordinary LoRA.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ic_lora_detection_matches_torch_markers() {
+        // Explicit flags.
+        assert!(loras_contain_ic_lora(&[json!({ "icLora": true })]));
+        assert!(loras_contain_ic_lora(&[json!({ "isIcLora": true })]));
+        // conditioningRole (with the `-`/`_` normalisation).
+        assert!(loras_contain_ic_lora(&[
+            json!({ "conditioningRole": "IC-Lora" })
+        ]));
+        // Name / id / path markers.
+        assert!(loras_contain_ic_lora(&[
+            json!({ "name": "LTX-2.3-22b-IC-LoRA-Union-Control" })
+        ]));
+        assert!(loras_contain_ic_lora(&[
+            json!({ "id": "ltx_2_3_ic_union" })
+        ]));
+        assert!(loras_contain_ic_lora(&[
+            json!({ "source": { "files": ["my-ic-lora.safetensors"] } })
+        ]));
+        // A bare string id.
+        assert!(loras_contain_ic_lora(&[json!("some-ic-lora-v2")]));
+        // An ordinary LoRA is not an IC-LoRA.
+        assert!(!loras_contain_ic_lora(&[
+            json!({ "name": "cinematic-style", "path": "/loras/cinematic.safetensors" })
+        ]));
+        assert!(!loras_contain_ic_lora(&[]));
+    }
+
+    /// extend/bridge conditioning fails clearly (before any IO) when no IC-LoRA is installed —
+    /// mirrors the torch gate; without the adapter the appended clip tokens are inert.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn video_clip_conditioning_requires_ic_lora() {
+        let settings = Settings::from_env();
+        let api = ApiClient::new(&settings);
+        // The IC-LoRA gate is the resolver's first check, so it returns before touching `job`
+        // / the api / disk — a minimal snapshot suffices.
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-extend-1",
+            "type": "video_extend",
+            "status": "preparing",
+            "projectId": "p",
+            "projectName": "P",
+            "payload": {},
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": null,
+            "progress": 0,
+            "stage": "preparing",
+            "message": "",
+            "error": null,
+            "etaSeconds": null,
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-09T00:00:00Z",
+            "updatedAt": "2026-06-09T00:00:00Z"
+        }))
+        .expect("job snapshot");
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "extend it",
+            "mode": "extend_clip", "sourceClipAssetId": "clip_a",
+            "loras": [{ "name": "cinematic-style" }]
+        }));
+        let err = resolve_video_clip_conditioning(&api, &settings, &job, &req, Path::new("/tmp/p"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("IC-LoRA"), "got: {err}");
     }
 
     /// An LTX-2.3 snapshot **complete for the current engine** ([`ltx_dir_is_complete`]),
