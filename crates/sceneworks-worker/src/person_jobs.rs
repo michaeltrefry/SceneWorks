@@ -42,8 +42,8 @@ use mlx_gen::weights::Weights;
 use mlx_gen::Result as MlxResult;
 use mlx_rs::ops::indexing::TryIndexOp;
 use mlx_rs::ops::{
-    add, concatenate_axis, matmul, maximum, multiply, pad, sigmoid, softmax_axis, split,
-    split_sections, subtract, sum_axis,
+    add, concatenate_axis, maximum, multiply, pad, sigmoid, softmax_axis, split, split_sections,
+    subtract, sum_axis,
 };
 use mlx_rs::Array;
 
@@ -544,10 +544,17 @@ impl Yolo {
         let qh = q.transpose_axes(&[1, 0, 2])?; // (4,N,32)
         let kh = k.transpose_axes(&[1, 2, 0])?; // (4,32,N)
         let scale = Array::from_f32((kd as f32).powf(-0.5));
-        let attn = multiply(&matmul(&qh, &kh)?, &scale)?; // (4,N,N)
+        // The two SDPA matmuls run on the CPU stream (sc-3734). MLX's Metal `matmul` uses a
+        // reduced-precision simdgroup path (≈1e-3 relative — NOT true fp32), which is the
+        // sole source of the C2PSA divergence: on the GPU this attention drifts ~7e-3 from
+        // the fp32 oracle, vs ~5e-6 on the CPU stream (every conv / the depthwise PE / SPPF
+        // are already exact). The map here is tiny (N=400, 4 heads, once per forward), so the
+        // CPU detour is negligible. See `yolo11_mlx_per_block_isolation` + docs/sc-3734.
+        let cpu = mlx_rs::StreamOrDevice::cpu();
+        let attn = multiply(&qh.matmul_device(&kh, &cpu)?, &scale)?; // (4,N,N)
         let attn = softmax_axis(&attn, -1, true)?;
         let vh = v.transpose_axes(&[1, 0, 2])?; // (4,N,64)
-        let out = matmul(&attn, &vh)?.transpose_axes(&[1, 0, 2])?; // (N,4,64)
+        let out = attn.matmul_device(&vh, &cpu)?.transpose_axes(&[1, 0, 2])?; // (N,4,64)
         let x_attn = out.reshape(&[1, h, wd, c])?; // channel = head*64 + d
 
         let v_nhwc = v.reshape(&[1, h, wd, c])?; // v as a feature map for the PE conv

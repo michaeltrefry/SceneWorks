@@ -103,9 +103,12 @@ dependency. `media_jobs.rs` reports `backend:"mlx"`, adapter `yolo11_mlx`, devic
 ### Parity results (`cargo test -p sceneworks-worker person_jobs -- --include-ignored --test-threads=1`)
 Run MLX tests single-threaded — concurrent MLX forwards across test threads corrupt results.
 - Per-block vs `refs.safetensors`: block4 **1.7e-5** (near-bit-exact → backbone correct); block10
-  6.8e-3, block16 5.4e-3, block19 1.3e-2, block22 7.7e-3 — accumulated fp32 backend drift (MLX/Metal
-  vs the torch oracle), first jumping at the C2PSA softmax/matmul. Benign.
-- Final head: class rows **1.98e-3**, box rows **<1px**.
+  6.8e-3, block16 5.4e-3, block19 1.3e-2, block22 7.7e-3. **NOTE (sc-3734): the "benign fp32 drift"
+  label below was WRONG.** The divergence was MLX's Metal `matmul` reduced-precision simdgroup path
+  (≈1e-3 relative — genuine fp32 drift here is ~1e-5) entering only through the C2PSA attention's two
+  SDPA matmuls. Fixed by running those matmuls on the CPU stream (`attention()`); every block is now
+  ≤1.5e-4 and the oracle thresholds are re-tightened to 1e-3. See `docs/sc-3734/findings.md`.
+- Final head: class rows **1.98e-3** (now 1.9e-5 post-fix), box rows **<1px**.
 - End-to-end (letterbox→forward→decode→NMS) reproduces `ultralytics.predict`'s **4 people on
   people.jpg to ≤2px / 0.02 conf** (0.917/0.907/0.906/0.778). Decode/NMS already verified in #485.
 
