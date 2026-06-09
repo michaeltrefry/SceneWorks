@@ -1084,6 +1084,37 @@ fn moe_adapter(path: PathBuf, scale: f32, kind: AdapterKind, expert: MoeExpert) 
     }
 }
 
+/// Build the adapter specs for a Wan-VACE generation (sc-3893 worker routing). Unlike the base Wan
+/// path, VACE-1.3B is a **single dense** transformer: no Lightning distill, no MoE high/low experts.
+/// So every user LoRA/LoKr is applied shared with `moe_expert: None` — the engine `wan_vace` provider
+/// merges diffusers-named LoRA/LoKr (mlx-gen #184) and rejects `moe_expert` tags. `classify_adapter`
+/// tags SceneWorks peft LoKr as `Lokr` and everything else (incl. third-party LyCORIS LoHa / non-peft
+/// LoKr) as `Lora`, which the engine then detects + merges by key sniff (epic 3641).
+#[cfg(target_os = "macos")]
+fn resolve_wan_vace_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let mut specs: Vec<AdapterSpec> = Vec::new();
+    for lora in &request.loras {
+        let path = lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = resolve_lora_file(path)?;
+        let kind = classify_adapter(&file)?;
+        specs.push(AdapterSpec {
+            path: file,
+            scale: lora_scale(lora),
+            kind,
+            pass_scales: None,
+            moe_expert: None,
+        });
+    }
+    Ok(specs)
+}
+
 /// The first-frame conditioning for a Wan generation: required for I2V-14B, optional for
 /// the TI2V-5B (present → image-conditioned mask-blend, absent → pure T2V), and ignored
 /// by the T2V-14B (text-only). Loads `source_asset_id` to an in-memory RGB8 image.
@@ -2939,7 +2970,7 @@ async fn generate_wan_vace(
         engine_id: "wan_vace",
         model_dir,
         quant: resolve_wan_quant(request),
-        adapters: Vec::new(),
+        adapters: resolve_wan_vace_adapters(request)?,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -3309,7 +3340,7 @@ async fn generate_wan_vace_extend_bridge(
         engine_id: "wan_vace",
         model_dir,
         quant: resolve_wan_quant(request),
-        adapters: Vec::new(),
+        adapters: resolve_wan_vace_adapters(request)?,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -3927,6 +3958,66 @@ mod tests {
         let single = dir.join("plain.safetensors");
         std::fs::write(&single, b"x").unwrap();
         assert_eq!(wan_moe_low_noise_sibling(&single), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Minimal valid safetensors (8-byte LE header length + JSON header), optionally stamping
+    /// `__metadata__.networkType` so `classify_adapter` can distinguish peft LoKr from plain LoRA.
+    #[cfg(target_os = "macos")]
+    fn write_lora_fixture(path: &Path, network_type: Option<&str>) {
+        let mut meta = serde_json::Map::new();
+        meta.insert("format".to_owned(), json!("pt"));
+        if let Some(nt) = network_type {
+            meta.insert("networkType".to_owned(), json!(nt));
+        }
+        let mut header = serde_json::Map::new();
+        header.insert("__metadata__".to_owned(), Value::Object(meta));
+        let header_bytes = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        buffer.extend_from_slice(&header_bytes);
+        std::fs::write(path, buffer).unwrap();
+    }
+
+    /// Wan-VACE is single-dense: each user LoRA/LoKr resolves to one shared spec with
+    /// `moe_expert: None` (no Lightning, no high/low split), the kind set by the file's metadata,
+    /// and the scale taken from the request `weight` (sc-3893).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_vace_adapters_are_single_dense() {
+        let dir = std::env::temp_dir().join(format!("sw_vace_lora_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("style.safetensors");
+        let lokr = dir.join("char.safetensors");
+        write_lora_fixture(&plain, None);
+        write_lora_fixture(&lokr, Some("lokr"));
+
+        let req = request(json!({
+            "projectId": "p",
+            "loras": [
+                { "path": plain.to_string_lossy(), "weight": 0.5 },
+                { "path": lokr.to_string_lossy(), "weight": 0.9 },
+            ],
+        }));
+        let specs = resolve_wan_vace_adapters(&req).expect("resolve vace adapters");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].path, plain);
+        assert_eq!(specs[0].kind, AdapterKind::Lora);
+        assert!((specs[0].scale - 0.5).abs() < 1e-6);
+        assert!(specs[0].moe_expert.is_none(), "VACE is single-dense");
+        assert!(specs[0].pass_scales.is_none());
+        assert_eq!(specs[1].kind, AdapterKind::Lokr);
+        assert!((specs[1].scale - 0.9).abs() < 1e-6);
+        assert!(specs[1].moe_expert.is_none());
+
+        // Over the per-job cap → a clear payload error (mirrors the base Wan path).
+        let many: Vec<Value> = (0..MAX_JOB_LORAS + 1)
+            .map(|_| json!({ "path": plain.to_string_lossy() }))
+            .collect();
+        let over = request(json!({ "projectId": "p", "loras": many }));
+        assert!(matches!(
+            resolve_wan_vace_adapters(&over),
+            Err(WorkerError::InvalidPayload(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
