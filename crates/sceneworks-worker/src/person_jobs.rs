@@ -61,6 +61,11 @@ const PAD_VALUE: f32 = 114.0;
 const NMS_IOU: f32 = 0.7;
 /// The fused MLX-layout detector weights in the app cache / model dir.
 const DET_FILE: &str = "yolo11m_fused_mlx.safetensors";
+/// HuggingFace download URL for the fused weights (download-on-first-use, slice 4 /
+/// sc-3636). Public repo, so no credentials are needed — same shape as the DWPose
+/// openmmlab bundles (`pose_jobs`).
+const DET_URL: &str =
+    "https://huggingface.co/SceneWorks/yolo11m-person-detect-mlx/resolve/main/yolo11m_fused_mlx.safetensors";
 
 // ---------------------------------------------------------------------------
 // pure detector math (unit-tested without weights)
@@ -710,14 +715,14 @@ pub(crate) fn detect_people_blocking(
 }
 
 // ---------------------------------------------------------------------------
-// weights resolution (download-on-first-use lands in slice 4 / sc-3636)
+// weights resolution + download-on-first-use
 // ---------------------------------------------------------------------------
 
-/// Resolve the fused MLX detector weights: explicit env pin
+/// Resolve already-present fused MLX detector weights: explicit env pin
 /// (`SCENEWORKS_PERSON_DETECTOR_WEIGHTS`), then the app cache
 /// `<data_dir>/cache/person-detect/`, then the model dir
-/// `<data_dir>/models/person-detect/`. Returns `None` when no weight is present
-/// (slice 4 adds download-on-first-use so the Mac is provisioned automatically).
+/// `<data_dir>/models/person-detect/`. Returns `None` when nothing is staged (then
+/// `ensure_detector_weights` downloads it).
 pub(crate) fn resolve_detector_weights(settings: &Settings) -> Option<PathBuf> {
     if let Ok(pinned) = std::env::var("SCENEWORKS_PERSON_DETECTOR_WEIGHTS") {
         let path = PathBuf::from(pinned);
@@ -732,6 +737,32 @@ pub(crate) fn resolve_detector_weights(settings: &Settings) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Resolve the fused MLX detector weights, downloading them from HuggingFace on first
+/// use (into the app cache). Mirrors `pose_jobs::ensure_one` — atomic `.tmp` + rename so
+/// a partial download is never mistaken for a complete one.
+pub(crate) async fn ensure_detector_weights(
+    settings: &Settings,
+    http_client: &reqwest::Client,
+) -> WorkerResult<PathBuf> {
+    if let Some(path) = resolve_detector_weights(settings) {
+        return Ok(path);
+    }
+    let cache = settings.data_dir.join("cache").join("person-detect");
+    tokio::fs::create_dir_all(&cache).await?;
+    let target = cache.join(DET_FILE);
+    let bytes = http_client
+        .get(DET_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    let tmp = target.with_extension("safetensors.tmp");
+    tokio::fs::write(&tmp, &bytes).await?;
+    tokio::fs::rename(&tmp, &target).await?;
+    Ok(target)
 }
 
 #[cfg(test)]

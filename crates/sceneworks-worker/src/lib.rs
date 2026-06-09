@@ -592,7 +592,7 @@ async fn run_utility_job(
         JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
             .await
             .map_err(|error| ("Timeline export failed.", error)),
-        JobType::PersonDetect => run_person_detect_job(api, settings, &job)
+        JobType::PersonDetect => run_person_detect_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Person detection failed.", error)),
         // DWPose whole-body pose detection (epic 3482, sc-3487): RTMW via

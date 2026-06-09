@@ -309,3 +309,50 @@ fn yolo11_matches_ultralytics_reference_on_photo() {
         );
     }
 }
+
+/// Provisioning parity: download the fused weights from the public HuggingFace URL
+/// (`DET_URL`) into a throwaway dir, then prove a fresh download loads and detects the 4
+/// reference people. Validates the URL + that the hosted artifact is the right weights.
+/// Ignored by default (network); run with the people.jpg fixture staged:
+///   cargo test -p sceneworks-worker person_jobs -- --ignored --nocapture
+#[test]
+#[ignore = "network: downloads the fused weights from HuggingFace"]
+fn yolo11_downloads_and_detects_from_huggingface() {
+    let Some(image) = cache_fixture("people.jpg") else {
+        eprintln!("skipping: people.jpg not staged");
+        return;
+    };
+    let dir = std::env::temp_dir().join("sceneworks-person-detect-dl-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("yolo11m_fused_mlx.safetensors");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = reqwest::Client::new();
+        let bytes = client
+            .get(DET_URL)
+            .send()
+            .await
+            .expect("GET weights")
+            .error_for_status()
+            .expect("200 OK")
+            .bytes()
+            .await
+            .expect("body");
+        tokio::fs::write(&target, &bytes).await.unwrap();
+    });
+    eprintln!(
+        "downloaded {} bytes → {}",
+        std::fs::metadata(&target).unwrap().len(),
+        target.display()
+    );
+
+    let result =
+        detect_people_blocking(target, image, 0.25).expect("detection runs on downloaded weights");
+    assert_eq!(
+        result.detections.len(),
+        4,
+        "4 people from downloaded weights"
+    );
+}

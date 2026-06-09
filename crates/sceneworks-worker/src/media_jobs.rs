@@ -288,6 +288,7 @@ pub(crate) async fn run_frame_extract(
 pub(crate) async fn run_person_detect_job(
     api: &ApiClient,
     settings: &Settings,
+    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -326,7 +327,7 @@ pub(crate) async fn run_person_detect_job(
         ),
     )
     .await?;
-    let result = run_person_detect(api, settings, job).await?;
+    let result = run_person_detect(api, settings, http_client, job).await?;
     update_job(
         api,
         &job.id,
@@ -347,6 +348,7 @@ pub(crate) async fn run_person_detect_job(
 pub(crate) async fn run_person_detect(
     api: &ApiClient,
     settings: &Settings,
+    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<JsonObject> {
     let project_id = required_payload_string(&job.payload, "projectId")?;
@@ -438,7 +440,8 @@ pub(crate) async fn run_person_detect(
             )
         } else {
             let (boxes, device) =
-                run_yolo11_person_detect(settings, media_path.clone(), confidence).await?;
+                run_yolo11_person_detect(settings, http_client, media_path.clone(), confidence)
+                    .await?;
             (
                 boxes,
                 "yolo11m".to_owned(),
@@ -565,15 +568,11 @@ pub(crate) async fn run_person_detect(
 #[cfg(target_os = "macos")]
 async fn run_yolo11_person_detect(
     settings: &Settings,
+    http_client: &reqwest::Client,
     frame_path: PathBuf,
     confidence: f64,
 ) -> WorkerResult<(Vec<Value>, &'static str)> {
-    let weights = crate::person_jobs::resolve_detector_weights(settings).ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "Person detector weights (yolo11m_fused_mlx.safetensors) are not provisioned on this worker."
-                .to_owned(),
-        )
-    })?;
+    let weights = crate::person_jobs::ensure_detector_weights(settings, http_client).await?;
     let conf = confidence as f32;
     let result = tokio::task::spawn_blocking(move || {
         crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
@@ -588,6 +587,7 @@ async fn run_yolo11_person_detect(
 #[cfg(not(target_os = "macos"))]
 async fn run_yolo11_person_detect(
     _settings: &Settings,
+    _http_client: &reqwest::Client,
     _frame_path: PathBuf,
     _confidence: f64,
 ) -> WorkerResult<(Vec<Value>, &'static str)> {
