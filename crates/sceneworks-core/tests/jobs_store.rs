@@ -2047,13 +2047,20 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     assert!(qwen_edit.features.edit);
     // Third-party LyCORIS now applies on every MLX provider (epic 3641) → supported.
     assert!(model_mac_support("sdxl", "image").features.lycoris);
-    // Video models expose per-mode eligibility; extend/bridge stay torch.
+    // Video models expose per-mode eligibility.
     let wan = model_mac_support("wan_2_2", "video").features.video_modes;
     assert_eq!(wan.get("text_to_video"), Some(&true));
     assert_eq!(wan.get("image_to_video"), Some(&true));
     assert_eq!(wan.get("first_last_frame"), Some(&true)); // Wan TI2V-5B FLF is MLX
     assert_eq!(wan.get("replace_person"), Some(&true)); // → native Wan-VACE (sc-3521)
-                                                        // The 14B Wan MoE engines have no FLF Keyframe path → torch.
+                                                        // Wan has no IC-LoRA path → extend/bridge stay torch (sc-3773).
+    assert_eq!(wan.get("extend_clip"), Some(&false));
+    assert_eq!(wan.get("video_bridge"), Some(&false));
+    // LTX serves the IC-LoRA clip-conditioning modes on MLX → extend/bridge enabled (sc-3522/3773).
+    let ltx = model_mac_support("ltx_2_3", "video").features.video_modes;
+    assert_eq!(ltx.get("extend_clip"), Some(&true));
+    assert_eq!(ltx.get("video_bridge"), Some(&true));
+    // The 14B Wan MoE engines have no FLF Keyframe path → torch.
     assert_eq!(
         model_mac_support("wan_2_2_t2v_14b", "video")
             .features
@@ -2090,7 +2097,9 @@ fn mac_capabilities_master_switch_and_infra_features() {
     assert_eq!(epic("datasetCaptioning"), None);
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability gap entry at all.
     assert!(!mac.features.contains_key("lycoris"));
-    assert_eq!(epic("advancedVideoModes").as_deref(), Some("epic 3040"));
+    // The global advancedVideoModes flag is gone (sc-3773) — extend/bridge are gated per-model
+    // via each video model's macSupport.features.videoModes instead.
+    assert!(!mac.features.contains_key("advancedVideoModes"));
     assert!(mac.features["datasetCaptioning"].supported);
     // datasetCaptioning + imageUpscale + personDetect are the ported (supported) infra
     // features; the rest stay gated until their port lands.
