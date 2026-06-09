@@ -2216,49 +2216,16 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             "the Qwen-Image-Edit model needs edit_image+sourceAssetId or character_image+referenceAssetId to route to MLX.",
             None,
         ),
-        // InstantID (sc-3345): single-identity + the 11-view angle set run on MLX. The remaining
-        // gaps are pose-library mode (engine sc-3117) and face-restore (engine sc-3380); a
-        // reference-less / non-character job has no InstantID path at all. Mirrors
-        // `instantid_mlx_eligible` so the named gap matches why routing refused it.
-        "instantid_realvisxl" => {
-            let advanced = payload.get("advanced").and_then(Value::as_object);
-            let has_poses = advanced
-                .and_then(|advanced| advanced.get("poses"))
-                .and_then(Value::as_array)
-                .map(|poses| poses.iter().filter(|pose| pose.is_object()).count())
-                .unwrap_or(0)
-                > 0;
-            let face_restore = match advanced.and_then(|advanced| advanced.get("faceRestore")) {
-                Some(Value::Bool(value)) => *value,
-                Some(Value::Number(number)) => {
-                    number.as_f64().map(|value| value != 0.0).unwrap_or(false)
-                }
-                Some(Value::String(value)) => !value.is_empty(),
-                _ => false,
-            };
-            if has_poses {
-                UnsupportedReason::new(
-                    Some(model),
-                    "InstantID pose-library mode",
-                    "InstantID single-identity + the 11-view angle set run on MLX (sc-3345); the pose-library MultiControlNet mode (IdentityNet + OpenPose) stays on the Python torch path until the engine pose port lands.",
-                    Some("sc-3117"),
-                )
-            } else if face_restore {
-                UnsupportedReason::new(
-                    Some(model),
-                    "InstantID face-restore",
-                    "InstantID identity + angle set run on MLX (sc-3345); the face-restore re-render pass stays on the Python torch path until it is ported.",
-                    Some("sc-3380"),
-                )
-            } else {
-                UnsupportedReason::new(
-                    Some(model),
-                    "InstantID without a character reference",
-                    "InstantID runs on MLX for character_image with a referenceAssetId (single identity + the 11-view angle set, sc-3345); a non-character / reference-less job has no InstantID path.",
-                    None,
-                )
-            }
-        }
+        // InstantID (sc-3345 + sc-3381): single identity, the 11-view angle set, pose-library mode
+        // (engine sc-3117) and face-restore (engine sc-3380) all run on MLX now. The only remaining
+        // non-MLX shape is a reference-less / non-character job, which has no InstantID path at all.
+        // Mirrors `instantid_mlx_eligible` so the named gap matches why routing refused it.
+        "instantid_realvisxl" => UnsupportedReason::new(
+            Some(model),
+            "InstantID without a character reference",
+            "InstantID runs on MLX for character_image with a referenceAssetId (identity, the 11-view angle set, pose-library mode, and face-restore, sc-3345 + sc-3381); a non-character / reference-less job has no InstantID path.",
+            None,
+        ),
         // flux2 / sdxl / realvisxl only fall out via LyCORIS (handled above) — defensive.
         _ => UnsupportedReason::new(
             Some(model),
@@ -2646,10 +2613,10 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux2_klein_9b_true_v2",
     "sdxl",
     "realvisxl",
-    // InstantID on RealVisXL (sc-3345): single-identity + the 11-view angle set route to the
-    // native `mlx-gen-instantid` provider. Pose-library + face-restore InstantID jobs are gated
-    // OUT by `instantid_mlx_eligible` and stay on the torch `InstantIDAdapter` (engine sc-3117 /
-    // sc-3380 not ported).
+    // InstantID on RealVisXL (sc-3345 + sc-3381): identity, the 11-view angle set, pose-library
+    // mode (MultiControlNet IdentityNet + OpenPose), and face-restore all route to the native
+    // `mlx-gen-instantid` provider. The torch `InstantIDAdapter` stays only off-Mac + as the
+    // mlx-down fallback.
     "instantid_realvisxl",
     "chroma1_hd",
     "chroma1_base",
@@ -2750,38 +2717,16 @@ fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
 }
 
-/// InstantID (`instantid_realvisxl`, sc-3345) MLX-routing conditions. The native
-/// `mlx-gen-instantid` provider serves single-identity `character_image` + the 11-view
-/// Character-Studio angle set on Mac. **Pose-library mode (`advanced.poses`) and face-restore
-/// (`advanced.faceRestore`) stay on the torch `InstantIDAdapter`** — the engine has neither
-/// (sc-3117 MultiControlNet pose + sc-3380 face-restore are not ported), so excluding them here
-/// keeps those jobs off the `mlx` worker and lets the torch worker claim them (the Decision-A
-/// fallback, per sc-3060). These exclusions MUST mirror the worker's `instantid_available` gate
-/// so the router and the worker never disagree (a job routed to `mlx` that the worker rejects
-/// would fall through to the procedural stub). Requires a reference face image.
+/// InstantID (`instantid_realvisxl`, sc-3345 + sc-3381) MLX-routing conditions. The native
+/// `mlx-gen-instantid` provider serves the full production surface on Mac: single-identity
+/// `character_image`, the 11-view Character-Studio angle set, pose-library mode (`advanced.poses`
+/// → MultiControlNet IdentityNet + OpenPose, engine sc-3117) and the optional face-restore
+/// re-render (`advanced.faceRestore`, engine sc-3380). So the only gate is a `character_image`
+/// job with a reference face — there is no remaining torch-only InstantID shape. This MUST mirror
+/// the worker's `instantid_available` gate so the router and the worker never disagree (a job
+/// routed to `mlx` that the worker rejects would fall through to the procedural stub).
 fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
-        return false;
-    }
-    let advanced = payload.get("advanced").and_then(Value::as_object);
-    // Pose-library mode: any pose *object* in `advanced.poses` (mirrors the worker's
-    // `pose_entries`, which filters to objects) → torch.
-    let pose_objects = advanced
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .map(|poses| poses.iter().filter(|pose| pose.is_object()).count())
-        .unwrap_or(0);
-    if pose_objects > 0 {
-        return false;
-    }
-    // Face-restore: truthy `advanced.faceRestore` (mirrors the worker's `advanced_flag`) → torch.
-    let face_restore = match advanced.and_then(|advanced| advanced.get("faceRestore")) {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::Number(number)) => number.as_f64().map(|value| value != 0.0).unwrap_or(false),
-        Some(Value::String(value)) => !value.is_empty(),
-        _ => false,
-    };
-    if face_restore {
         return false;
     }
     payload
@@ -3675,7 +3620,7 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn instantid_routes_identity_and_angle_set_but_pose_and_facerestore_stay_torch() {
+    fn instantid_routes_identity_angle_pose_and_facerestore_to_mlx() {
         // Single-identity character image → MLX (the native InstantID provider, sc-3345).
         let identity = object(json!({
             "model": "instantid_realvisxl",
@@ -3685,7 +3630,7 @@ mod mlx_routing_tests {
         assert!(instantid_mlx_eligible(&identity));
         assert!(image_request_mlx_eligible("instantid_realvisxl", &identity));
 
-        // The 11-view angle set is still MLX (angleSet is a worker-side grouping, not a gate).
+        // The 11-view angle set is MLX (angleSet is a worker-side grouping, not a gate).
         assert!(instantid_mlx_eligible(&object(json!({
             "model": "instantid_realvisxl",
             "mode": "character_image",
@@ -3693,20 +3638,20 @@ mod mlx_routing_tests {
             "advanced": { "angleSet": true }
         }))));
 
-        // Pose-library mode (engine sc-3117 not ported) → torch.
-        assert!(!instantid_mlx_eligible(&object(json!({
+        // Pose-library mode (engine sc-3117) → MLX (sc-3381).
+        assert!(instantid_mlx_eligible(&object(json!({
             "model": "instantid_realvisxl",
             "mode": "character_image",
             "referenceAssetId": "asset_1",
             "advanced": { "poses": [{ "id": "a" }] }
         }))));
 
-        // Face-restore (engine sc-3380 not ported) → torch.
-        assert!(!instantid_mlx_eligible(&object(json!({
+        // Face-restore (engine sc-3380) → MLX (sc-3381).
+        assert!(instantid_mlx_eligible(&object(json!({
             "model": "instantid_realvisxl",
             "mode": "character_image",
             "referenceAssetId": "asset_1",
-            "advanced": { "faceRestore": true }
+            "advanced": { "poses": [{ "id": "a" }], "faceRestore": true }
         }))));
 
         // No reference face → not eligible.

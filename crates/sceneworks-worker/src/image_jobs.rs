@@ -46,7 +46,11 @@ use mlx_gen::weights::Weights;
 #[cfg(target_os = "macos")]
 use mlx_gen_face as _;
 #[cfg(target_os = "macos")]
-use mlx_gen_instantid::{InstantId, InstantIdPaths, InstantIdRequest};
+use mlx_gen_instantid::{
+    letterbox as instantid_letterbox, normalize_keypoints as instantid_normalize_keypoints,
+    BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, DEFAULT_OPENPOSE_SCALE,
+    FACE_RESTORE_PROMPT,
+};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -415,11 +419,11 @@ pub(crate) async fn run_image_generate_job(
         .await?;
         true
     } else if instantid_available(&request, settings) {
-        // InstantID identity-preserving character image (sc-3345): single identity or the
-        // 11-view Character-Studio angle set, on RealVisXL + IdentityNet + the native face
-        // stack. Pose-library + faceRestore jobs are NOT eligible (kept on the torch
-        // adapter) — `instantid_available` gates them out so they fall through to the
-        // non-handled path and the torch worker claims them.
+        // InstantID identity-preserving character image (sc-3345 + sc-3381): single identity,
+        // the 11-view Character-Studio angle set, pose-library mode (MultiControlNet IdentityNet +
+        // OpenPose), and the optional face-restore re-render — all on RealVisXL + the native face
+        // stack, zero Python. The torch `InstantIDAdapter` stays only for off-Mac + the mlx-down
+        // fallback (Decision-A).
         generate_instantid_stream(
             api,
             settings,
@@ -4009,18 +4013,18 @@ async fn generate_sdxl_advanced_stream(
 }
 
 // ---------------------------------------------------------------------------
-// InstantID identity-preserving character image (macOS, epic 3109 engine / sc-3345
-// integration): the production `instantid_realvisxl` model — InstantID on RealVisXL +
-// the stock SDXL IdentityNet ControlNet + the native MLX face stack (SCRFD + ArcFace),
-// all in-process with zero Python. Two modes only (torch parity): a single-identity
-// `character_image` (the reference's natural head pose) and the 11-view Character-Studio
-// angle set. Pose-library mode (`advanced.poses`) + face-restore (`advanced.faceRestore`)
-// are NOT handled here — they stay on the torch `InstantIDAdapter` (engine sc-3117 /
-// sc-3380 not yet ported), gated out by `instantid_available` so the torch worker claims
-// them. fp16 only for now (the validated envelope); Q8/Q4 ride explicit `mlxQuantize`
-// (unvalidated at 1024², gated by sc-3329 follow-up). The provider is the bespoke
-// `mlx_gen_instantid::InstantId` (not an inventory `Generator`), so this is a dedicated
-// stream parallel to `generate_sdxl_advanced_stream`, not an MLX_MODELS row.
+// InstantID identity-preserving character image (macOS, epic 3109 engine / sc-3345 + sc-3381
+// integration): the production `instantid_realvisxl` model — InstantID on RealVisXL + the stock
+// SDXL IdentityNet ControlNet + the native MLX face stack (SCRFD + ArcFace), all in-process with
+// zero Python. The FULL torch surface (sc-3381): single-identity `character_image` (the
+// reference's natural head pose), the 11-view Character-Studio angle set, pose-library mode
+// (`advanced.poses` → MultiControlNet IdentityNet + the xinsir OpenPose-SDXL ControlNet, engine
+// sc-3117), and the optional face-restore re-render (`advanced.faceRestore`, engine sc-3380). The
+// torch `InstantIDAdapter` is kept only off-Mac + as the mlx-down fallback (Decision-A). fp16 by
+// default (the validated envelope); Q8/Q4 ride explicit `mlxQuantize` (unvalidated at 1024²,
+// gated by sc-3329 follow-up). The provider is the bespoke `mlx_gen_instantid::InstantId` (not an
+// inventory `Generator`), so this is a dedicated stream parallel to `generate_sdxl_advanced_stream`,
+// not an MLX_MODELS row.
 // ---------------------------------------------------------------------------
 
 /// The SceneWorks model id for native InstantID (production = InstantID on RealVisXL_V5.0).
@@ -4058,12 +4062,66 @@ const INSTANTID_DEFAULT_GUIDANCE: f32 = 3.0;
 const INSTANTID_IP_SCALE: f32 = 0.8;
 #[cfg(target_os = "macos")]
 const INSTANTID_CONTROLNET_SCALE: f32 = 0.8;
+/// The xinsir OpenPose-SDXL ControlNet (Apache-2.0) that drives the body skeleton in pose mode
+/// (`MODEL_TARGETS["instantid_realvisxl"]["openPose"]["repo"]`). Loaded as a stock diffusers SDXL
+/// ControlNet — the engine reads only the safetensors (`config.json` is unused; its config is
+/// fixed to `UNetConfig::sdxl_base()`).
+#[cfg(target_os = "macos")]
+const INSTANTID_OPENPOSE_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
+#[cfg(target_os = "macos")]
+const INSTANTID_OPENPOSE_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// Pose-mode canvas side — the production `_POSE_SIZE` (square 1024); the engine `generate_pose`
+/// uses `req.width` as the square side and renders the skeleton + re-placed face landmarks on it.
+#[cfg(target_os = "macos")]
+const INSTANTID_POSE_SIZE: u32 = 1024;
 
-/// True when this job carries a pose-library set (`advanced.poses`) — InstantID pose mode is
-/// torch-only (engine sc-3117 not ported), so these are excluded from the MLX path.
+/// True when this job carries a pose-library set (`advanced.poses`) — InstantID pose mode
+/// (MultiControlNet IdentityNet + OpenPose, engine sc-3117) now runs natively (sc-3381).
 #[cfg(target_os = "macos")]
 fn instantid_pose_set(request: &ImageRequest) -> bool {
     !pose_entries(request).is_empty()
+}
+
+/// One InstantID render in a job's set: a single identity (the reference's natural head pose), a
+/// canonical Character-Studio view angle, or a library pose (COCO-18 keypoints driving OpenPose).
+#[cfg(target_os = "macos")]
+enum InstantIdShot {
+    Identity,
+    Angle(&'static str),
+    Pose(Vec<BodyPoint>),
+}
+
+/// COCO-18 keypoints for one `advanced.poses` gallery entry, parsed to the engine's `BodyPoint`
+/// (normalized `[0,1]`; `None` for absent / zero-confidence joints) via the engine's own
+/// `normalize_keypoints` — the exact coercion the production `openpose_skeleton.py::normalize_keypoints`
+/// applies (`[x,y]` / `[x,y,conf<=0 → drop]` / `null`, truncated/padded to 18). f64 throughout, so the
+/// engine's bit-exact `draw_bodypose` port renders the same skeleton as the Python path.
+#[cfg(target_os = "macos")]
+fn instantid_pose_keypoints(entry: &Value) -> Vec<BodyPoint> {
+    let raw: Vec<Option<(f64, f64, Option<f64>)>> = entry
+        .get("keypoints")
+        .and_then(Value::as_array)
+        .map(|points| {
+            points
+                .iter()
+                .map(|point| {
+                    let point = point.as_array()?;
+                    let x = point.first()?.as_f64()?;
+                    let y = point.get(1)?.as_f64()?;
+                    Some((x, y, point.get(2).and_then(Value::as_f64)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    instantid_normalize_keypoints(&raw)
+}
+
+/// The OpenPose `controlnet_conditioning_scale` for pose mode (`advanced.openPoseScale`, default
+/// 0.7 — the production default; no web control today, carried verbatim per sc-3381). The
+/// no-face-visible boost to ≥0.85 is applied engine-side.
+#[cfg(target_os = "macos")]
+fn instantid_openpose_scale(request: &ImageRequest) -> f32 {
+    advanced_f32(request, "openPoseScale", DEFAULT_OPENPOSE_SCALE, 0.0, 2.0)
 }
 
 /// The 11-view Character-Studio angle set vs the single-identity path.
@@ -4102,23 +4160,25 @@ fn resolve_instantid_sdxl_base(request: &ImageRequest, settings: &Settings) -> O
 }
 
 /// True when this is a native-MLX-eligible InstantID job: the production model in
-/// `character_image` mode with a reference face, NOT a pose set and NOT face-restore (both
-/// torch-only), whose SDXL base resolves locally. The pose/face-restore exclusions mirror the
-/// `jobs_store::instantid_mlx_eligible` routing predicate so the worker and the router agree.
+/// `character_image` mode with a reference face whose SDXL base resolves locally. Identity, the
+/// 11-view angle set, pose-library mode (`advanced.poses`), and face-restore (`advanced.faceRestore`)
+/// all run natively now (sc-3381). Mirrors the `jobs_store::instantid_mlx_eligible` routing
+/// predicate so the worker and the router agree.
 #[cfg(target_os = "macos")]
 fn instantid_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == INSTANTID_MODEL
         && request.mode == "character_image"
         && non_empty(&request.reference_asset_id)
-        && !instantid_pose_set(request)
-        && !advanced_flag(request, "faceRestore")
         && resolve_instantid_sdxl_base(request, settings).is_some()
 }
 
-/// The number of images an InstantID job produces: 11 for an angle set, else `request.count`.
+/// The number of images an InstantID job produces: one per pose for a pose set, 11 for an angle
+/// set, else `request.count`.
 #[cfg(target_os = "macos")]
 fn instantid_image_count(request: &ImageRequest) -> u32 {
-    if instantid_angle_set(request) {
+    if instantid_pose_set(request) {
+        pose_entries(request).len() as u32
+    } else if instantid_angle_set(request) {
         CHARACTER_ANGLE_SET_ORDER.len() as u32
     } else {
         request.count
@@ -4198,6 +4258,9 @@ fn instantid_raw_settings(
     ip_scale: f32,
     controlnet_scale: f32,
     angle_set: bool,
+    pose_set: bool,
+    face_restore: bool,
+    openpose_scale: f32,
 ) -> JsonObject {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -4219,6 +4282,12 @@ fn instantid_raw_settings(
     );
     if angle_set {
         raw.insert("angleSet".to_owned(), Value::Bool(true));
+    }
+    // Pose mode telemetry (parity with the torch `_run_pose` recipe keys): the OpenPose strength
+    // and whether the face-restore re-render ran.
+    if pose_set {
+        raw.insert("openPoseScale".to_owned(), json!(openpose_scale));
+        raw.insert("faceRestore".to_owned(), Value::Bool(face_restore));
     }
     raw
 }
@@ -4326,11 +4395,49 @@ async fn ensure_instantid_weights(
     ))
 }
 
+/// Resolve the xinsir OpenPose-SDXL ControlNet for pose mode (sc-3381): env override
+/// (`SCENEWORKS_INSTANTID_OPENPOSE`, a dir or file) → HF cache snapshot → download-on-first-use
+/// into the app cache. The engine loads only the safetensors (its ControlNet config is fixed to
+/// `sdxl_base`), so a `File` source is sufficient.
+#[cfg(target_os = "macos")]
+async fn ensure_instantid_openpose(settings: &Settings) -> WorkerResult<WeightsSource> {
+    if let Ok(path) = std::env::var("SCENEWORKS_INSTANTID_OPENPOSE") {
+        let path = PathBuf::from(path);
+        if path.is_dir() {
+            return Ok(WeightsSource::Dir(path));
+        }
+        if path.is_file() {
+            return Ok(WeightsSource::File(path));
+        }
+    }
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, INSTANTID_OPENPOSE_REPO) {
+        let file = snapshot.join(INSTANTID_OPENPOSE_FILE);
+        if file.exists() {
+            return Ok(WeightsSource::File(file));
+        }
+    }
+    let dir = settings.data_dir.join("cache").join("instantid-openpose");
+    let client = reqwest::Client::new();
+    let file = ensure_instantid_file(
+        &client,
+        &dir,
+        INSTANTID_OPENPOSE_FILE,
+        &format!(
+            "https://huggingface.co/{INSTANTID_OPENPOSE_REPO}/resolve/main/{INSTANTID_OPENPOSE_FILE}"
+        ),
+    )
+    .await?;
+    Ok(WeightsSource::File(file))
+}
+
 /// Real InstantID generation: resolve the reference + weights on the async side, then load the
 /// bespoke `InstantId` provider once + generate each image on the blocking thread (the MLX
-/// model is `!Send`). The engine `generate`/`generate_angle` expose neither a step-progress
-/// callback nor a `CancelFlag`, so streaming is per-image (no `Step`/`Decoding` events) and
-/// cancellation is honoured between images. Reuses [`consume_gen_events`] for the asset writes.
+/// model is `!Send`). Covers all four production modes — single identity, the 11-view angle set,
+/// pose-library mode (`advanced.poses` → MultiControlNet IdentityNet + OpenPose, sc-3117), and the
+/// optional face-restore re-render (`advanced.faceRestore`, sc-3380) — with zero Python (sc-3381).
+/// The engine `generate*` expose neither a step-progress callback nor a `CancelFlag`, so streaming
+/// is per-image (no `Step`/`Decoding` events) and cancellation is honoured between images. Reuses
+/// [`consume_gen_events`] for the asset writes.
 #[cfg(target_os = "macos")]
 async fn generate_instantid_stream(
     api: &ApiClient,
@@ -4383,6 +4490,9 @@ async fn generate_instantid_stream(
         .unwrap_or(INSTANTID_SDXL_REPO)
         .to_owned();
     let angle_set = instantid_angle_set(request);
+    let pose_set = instantid_pose_set(request);
+    let face_restore = advanced_flag(request, "faceRestore");
+    let openpose_scale = instantid_openpose_scale(request);
     let raw_settings = instantid_raw_settings(
         request,
         &repo,
@@ -4392,13 +4502,38 @@ async fn generate_instantid_stream(
         ip_scale,
         controlnet_scale,
         angle_set,
+        pose_set,
+        face_restore,
+        openpose_scale,
     );
 
-    // Per-image work items: (seed, prompt, optional canonical view angle). The angle set is a
-    // shared seed (only the head pose changes across the 11 views — noise-derived attributes
-    // stay constant); single identity is per-seed at the reference's natural pose.
+    // Pose mode additionally needs the xinsir OpenPose-SDXL ControlNet; face-restore reuses the
+    // already-resolved native face stack. Resolved only when a pose set is present.
+    let openpose = if pose_set {
+        Some(ensure_instantid_openpose(settings).await?)
+    } else {
+        None
+    };
+
+    // Per-image work items: (seed, prompt, shot). Pose + angle sets share ONE seed so the
+    // noise-derived attributes InstantID does not lock (hair, wardrobe, lighting) stay constant
+    // across the set — only the head pose changes; single identity is per-seed at the reference's
+    // natural pose. Pose mode keeps the literal prompt (no angle augment) and carries each pose's
+    // COCO-18 keypoints.
     let (width, height) = (request.width, request.height);
-    let work: Vec<(i64, String, Option<&'static str>)> = if angle_set {
+    let work: Vec<(i64, String, InstantIdShot)> = if pose_set {
+        let set_seed = resolve_seed(request, 0);
+        pose_entries(request)
+            .into_iter()
+            .map(|entry| {
+                (
+                    set_seed,
+                    request.prompt.clone(),
+                    InstantIdShot::Pose(instantid_pose_keypoints(entry)),
+                )
+            })
+            .collect()
+    } else if angle_set {
         let set_seed = resolve_seed(request, 0);
         CHARACTER_ANGLE_SET_ORDER
             .iter()
@@ -4406,13 +4541,19 @@ async fn generate_instantid_stream(
                 (
                     set_seed,
                     augment_prompt_for_angle(&request.prompt, angle),
-                    Some(angle),
+                    InstantIdShot::Angle(angle),
                 )
             })
             .collect()
     } else {
         (0..request.count as usize)
-            .map(|index| (resolve_seed(request, index), request.prompt.clone(), None))
+            .map(|index| {
+                (
+                    resolve_seed(request, index),
+                    request.prompt.clone(),
+                    InstantIdShot::Identity,
+                )
+            })
             .collect()
     };
     let total = work.len();
@@ -4439,6 +4580,12 @@ async fn generate_instantid_stream(
                     WorkerError::InvalidPayload(format!("InstantID quantize failed: {error}"))
                 })?;
             }
+            // Attach the OpenPose ControlNet for pose mode (quantizes with the stack if quant is on).
+            if let Some(openpose) = &openpose {
+                model = model.with_openpose(openpose).map_err(|error| {
+                    WorkerError::InvalidPayload(format!("InstantID OpenPose ControlNet: {error}"))
+                })?;
+            }
             let scrfd = Weights::from_file(&scrfd_path).map_err(|error| {
                 WorkerError::InvalidPayload(format!(
                     "InstantID SCRFD weights {scrfd_path:?}: {error}"
@@ -4452,33 +4599,81 @@ async fn generate_instantid_stream(
             let model = model.with_face(&scrfd, &arcface).map_err(|error| {
                 WorkerError::InvalidPayload(format!("InstantID face stack: {error}"))
             })?;
+
+            // Face-restore (pose mode only, mirroring `_run_pose`) re-imposes the reference identity
+            // on the small full-body face. Compute the reference ArcFace embedding ONCE, from the
+            // same square-letterboxed reference the pose render detects on, so the restore identity
+            // matches the generation identity.
+            let restore_embedding = if face_restore && pose_set {
+                let canvas =
+                    instantid_letterbox(&reference, INSTANTID_POSE_SIZE, INSTANTID_POSE_SIZE);
+                let face = model
+                    .largest_face(
+                        &canvas.pixels,
+                        INSTANTID_POSE_SIZE as usize,
+                        INSTANTID_POSE_SIZE as usize,
+                    )
+                    .map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "InstantID face-restore reference: {error}"
+                        ))
+                    })?;
+                Some(face.embedding)
+            } else {
+                None
+            };
             emit_load_event("image_pipeline_load_complete", &job_id, "instantid", 0);
 
-            for (index, (seed, prompt, angle)) in work.into_iter().enumerate() {
+            for (index, (seed, prompt, shot)) in work.into_iter().enumerate() {
                 if cancel.is_cancelled() {
                     break;
                 }
-                // Angle set uses a square canvas (the engine forces `req.height = req.width`
-                // for the canonical landmark pack — the sc-2009 kps-aspect rule); single
-                // identity keeps the requested W×H (the engine letterboxes the reference).
+                // Pose mode renders on a square `_POSE_SIZE` canvas (the engine places the skeleton
+                // + re-placed face landmarks there); identity/angle keep the requested W×H (the
+                // engine letterboxes the reference / squares the canonical landmark pack).
+                let (req_w, req_h) = match &shot {
+                    InstantIdShot::Pose(_) => (INSTANTID_POSE_SIZE, INSTANTID_POSE_SIZE),
+                    _ => (width, height),
+                };
                 let req = InstantIdRequest {
                     prompt,
                     negative: negative_prompt.clone(),
-                    width,
-                    height,
+                    width: req_w,
+                    height: req_h,
                     steps: steps as usize,
                     guidance,
                     ip_adapter_scale: ip_scale,
                     controlnet_scale,
+                    openpose_scale,
                     seed: seed as u64,
                 };
-                let out = match angle {
-                    Some(angle) => model.generate_angle(&req, &reference, angle),
-                    None => model.generate(&req, &reference),
+                let mut out = match &shot {
+                    InstantIdShot::Angle(angle) => model.generate_angle(&req, &reference, angle),
+                    InstantIdShot::Pose(keypoints) => {
+                        model.generate_pose(&req, &reference, keypoints)
+                    }
+                    InstantIdShot::Identity => model.generate(&req, &reference),
                 }
                 .map_err(|error| {
                     WorkerError::InvalidPayload(format!("InstantID generation failed: {error}"))
                 })?;
+                // Face-restore pass (pose mode + faceRestore). A no-op engine-side on a back/occluded
+                // view (no face detected in the render), mirroring the torch `face_box is not None`
+                // gate. Uses the gender-neutral `FACE_RESTORE_PROMPT` (the Python `_FACE_RESTORE_PROMPT`
+                // gender bug is fixed worker-side too, sc-3381).
+                if let (InstantIdShot::Pose(_), Some(embedding)) = (&shot, &restore_embedding) {
+                    let restore_req = InstantIdRequest {
+                        prompt: FACE_RESTORE_PROMPT.to_owned(),
+                        ..req.clone()
+                    };
+                    out = model
+                        .restore_face(&restore_req, &out, embedding)
+                        .map_err(|error| {
+                            WorkerError::InvalidPayload(format!(
+                                "InstantID face-restore failed: {error}"
+                            ))
+                        })?;
+                }
                 if tx
                     .blocking_send(GenEvent::Image {
                         index,

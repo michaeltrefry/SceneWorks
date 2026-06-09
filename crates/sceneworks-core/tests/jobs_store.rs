@@ -1800,9 +1800,9 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
     let cases = [
         ("kolors", "epic 3532"),
         ("z_image_edit", "epic 3529"),
-        // instantid_realvisxl is NO LONGER wholly torch-only (sc-3345: identity + angle set run on
-        // MLX); its remaining per-feature gaps are covered by
-        // `mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped`.
+        // instantid_realvisxl is NOT torch-only — its full surface (identity, angle set, pose mode,
+        // face-restore) runs on MLX (sc-3345 + sc-3381); covered by
+        // `mac_rust_supported_instantid_identity_angle_pose_and_facerestore_ok`.
         ("sensenova_u1_8b", "epic 3180"),
         ("lens_turbo", "epic 3164"),
     ];
@@ -1824,7 +1824,7 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
 }
 
 #[test]
-fn mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped() {
+fn mac_rust_supported_instantid_identity_angle_pose_and_facerestore_ok() {
     let store = store("oracle-instantid");
     // Single-identity InstantID character image → supported (the native provider, sc-3345).
     let identity = job_of(
@@ -1852,7 +1852,7 @@ fn mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped() {
     );
     assert!(mac_rust_supported(&angle_set).is_ok());
 
-    // Pose-library mode is still a tracked gap → engine sc-3117.
+    // Pose-library mode now runs natively (engine sc-3117 → sc-3381).
     let pose = job_of(
         &store,
         JobType::ImageGenerate,
@@ -1863,11 +1863,9 @@ fn mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped() {
             "advanced": { "poses": [{ "id": "a" }] }
         }),
     );
-    let pose_reason = mac_rust_supported(&pose).unwrap_err();
-    assert_eq!(pose_reason.model.as_deref(), Some("instantid_realvisxl"));
-    assert_eq!(pose_reason.suggested_epic.as_deref(), Some("sc-3117"));
+    assert!(mac_rust_supported(&pose).is_ok());
 
-    // Face-restore is still a tracked gap → engine sc-3380.
+    // Pose + face-restore now runs natively (engine sc-3380 → sc-3381).
     let face_restore = job_of(
         &store,
         JobType::ImageGenerate,
@@ -1875,12 +1873,23 @@ fn mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped() {
             "model": "instantid_realvisxl",
             "mode": "character_image",
             "referenceAssetId": "asset_1",
-            "advanced": { "faceRestore": true }
+            "advanced": { "poses": [{ "id": "a" }], "faceRestore": true }
         }),
     );
-    let fr_reason = mac_rust_supported(&face_restore).unwrap_err();
-    assert_eq!(fr_reason.model.as_deref(), Some("instantid_realvisxl"));
-    assert_eq!(fr_reason.suggested_epic.as_deref(), Some("sc-3380"));
+    assert!(mac_rust_supported(&face_restore).is_ok());
+
+    // A character job WITHOUT a reference face has no InstantID path → the one remaining gap.
+    let no_reference = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({
+            "model": "instantid_realvisxl",
+            "mode": "character_image",
+            "prompt": "p"
+        }),
+    );
+    let reason = mac_rust_supported(&no_reference).unwrap_err();
+    assert_eq!(reason.model.as_deref(), Some("instantid_realvisxl"));
 }
 
 #[test]

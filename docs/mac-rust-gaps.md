@@ -79,8 +79,8 @@ dropped — no silent drops.**
 | reference-without-pose | `z_image_turbo` | 🟢 Ported (MLX) | sc-3536 (spike GO) → sc-3619 |
 | Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟢 Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3642/3643/3671 engine + sc-3644 routing) |
 | InstantID identity + 11-view angle set | `instantid_realvisxl` (`character_image` + `referenceAssetId`) | 🟢 Ported (MLX) | epic 3109 (engine) → sc-3345 (worker integration + routing) |
-| InstantID pose-library mode | `instantid_realvisxl` (`advanced.poses`) | 🔵 Port-pending | sc-3117 (engine MultiControlNet pose) → sc-3381 (torch retirement) |
-| InstantID face-restore | `instantid_realvisxl` (`advanced.faceRestore`) | 🔵 Port-pending | sc-3380 (engine face-restore re-render) → sc-3381 |
+| InstantID pose-library mode | `instantid_realvisxl` (`advanced.poses`) | 🟢 Ported (MLX) | sc-3117 (engine MultiControlNet pose) → sc-3381 (worker integration + routing) |
+| InstantID face-restore | `instantid_realvisxl` (`advanced.faceRestore`) | 🟢 Ported (MLX) | sc-3380 (engine face-restore re-render) → sc-3381 (worker integration + routing) |
 
 > **FLUX.1 `edit_image` is not an eradication gap (sc-3535).** The torch `FluxDiffusersAdapter`
 > hard-rejects `edit_image` ("does not support image editing") — FLUX.1 has no edit path on *any*
