@@ -512,6 +512,21 @@ export function ImageStudio() {
       setPrompt(defaultCharacterPrompt(character));
     }
   }, [mode, characterId, characters]);
+  // Seed the model's curated default negative prompt when entering character mode
+  // with an empty box (sc-3857). InstantID/RealVisXL declares one to fight its
+  // shiny/over-saturated look; running character mode with an empty negative was
+  // the main reason Image Studio output trailed Character Studio. Only fills an
+  // empty box, so it never clobbers a typed, restored, or preset negative.
+  useEffect(() => {
+    if (mode !== "character_image" || negativePrompt !== "") {
+      return;
+    }
+    const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
+    if (typeof ui.defaultNegativePrompt === "string" && ui.defaultNegativePrompt) {
+      setNegativePrompt(ui.defaultNegativePrompt);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, model]);
   const resolutionOptions = useMemo(
     () =>
       selectedModel?.limits?.resolutions?.length
