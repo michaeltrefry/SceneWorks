@@ -1877,7 +1877,8 @@ fn mac_rust_supported_names_infra_job_types() {
 #[test]
 fn mac_rust_supported_names_advanced_video_and_svd() {
     let store = store("oracle-video");
-    // Advanced video job type.
+    // extend / bridge on a non-LTX (Wan) engine: no IC-LoRA path → torch gap (sc-3522). The
+    // mode is derived from the job type, so a missing payload `mode` still classifies correctly.
     let extend = job_of(&store, JobType::VideoExtend, json!({ "model": "wan_2_2" }));
     assert_eq!(
         mac_rust_supported(&extend)
@@ -1886,6 +1887,15 @@ fn mac_rust_supported_names_advanced_video_and_svd() {
             .as_deref(),
         Some("epic 3040")
     );
+    // extend / bridge on the LTX IC-LoRA path are supported (sc-3522).
+    let ltx_extend = job_of(&store, JobType::VideoExtend, json!({ "model": "ltx_2_3" }));
+    assert!(mac_rust_supported(&ltx_extend).is_ok());
+    let ltx_bridge = job_of(
+        &store,
+        JobType::VideoBridge,
+        json!({ "model": "ltx_2_3_eros" }),
+    );
+    assert!(mac_rust_supported(&ltx_bridge).is_ok());
     // SVD image→video is now MLX-supported (sc-3523: `svd`→`svd_xt`, image-conditioned only).
     let svd = job_of(
         &store,
@@ -2815,12 +2825,22 @@ fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
 // --- Video routing (epic 3018, sc-3036) ---
 
 fn video_caps() -> Vec<WorkerCapability> {
-    vec![WorkerCapability::Gpu, WorkerCapability::VideoGenerate]
+    vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::VideoGenerate,
+        // The macOS MLX worker also advertises the clip-conditioning job types (sc-3522).
+        WorkerCapability::VideoExtend,
+        WorkerCapability::VideoBridge,
+    ]
 }
 
 fn video_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
+    video_job_typed(JobType::VideoGenerate, payload, requested_gpu)
+}
+
+fn video_job_typed(job_type: JobType, payload: Value, requested_gpu: &str) -> CreateJob {
     CreateJob {
-        job_type: JobType::VideoGenerate,
+        job_type,
         project_id: Some("project-1".to_owned()),
         project_name: Some("Project 1".to_owned()),
         payload: object(payload),
@@ -2946,6 +2966,84 @@ fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
         .expect("torch claims the job");
     assert_eq!(claimed.id, job.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+#[test]
+fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
+    // sc-3522 cutover: extend_clip / video_bridge are MLX-eligible on the LTX IC-LoRA path,
+    // so a torch worker defers the dedicated job types to an idle mlx worker.
+    for (job_type, mode) in [
+        (JobType::VideoExtend, "extend_clip"),
+        (JobType::VideoBridge, "video_bridge"),
+    ] {
+        for model in ["ltx_2_3", "ltx_2_3_eros"] {
+            let store = store(&format!("mlx-video-routing-clip-{mode}-{model}"));
+            register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+            register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+            let job = store
+                .create_job(video_job_typed(
+                    job_type.clone(),
+                    json!({
+                        "model": model, "mode": mode,
+                        "sourceClipAssetId": "left", "bridgeRightClipAssetId": "right"
+                    }),
+                    "auto",
+                ))
+                .expect("job creates");
+
+            assert!(
+                store
+                    .claim_next_job("worker-torch")
+                    .expect("torch claim ok")
+                    .is_none(),
+                "{model}/{mode}: torch defers the clip job to the idle mlx worker"
+            );
+            let claimed = store
+                .claim_next_job("worker-mlx")
+                .expect("mlx claim ok")
+                .expect("mlx claims the clip job");
+            assert_eq!(claimed.id, job.id);
+            assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+        }
+    }
+}
+
+#[test]
+fn clip_conditioning_video_job_stays_on_torch_for_wan_engines() {
+    // extend_clip / video_bridge have no IC-LoRA keyframe-append path on Wan → stays torch,
+    // even though the mlx worker advertises the VideoExtend/VideoBridge capabilities.
+    for (job_type, mode) in [
+        (JobType::VideoExtend, "extend_clip"),
+        (JobType::VideoBridge, "video_bridge"),
+    ] {
+        let store = store(&format!("mlx-video-routing-clip-wan-{mode}"));
+        register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+
+        let job = store
+            .create_job(video_job_typed(
+                job_type.clone(),
+                json!({ "model": "wan_2_2", "mode": mode, "sourceClipAssetId": "left" }),
+                "auto",
+            ))
+            .expect("job creates");
+
+        assert!(
+            store
+                .claim_next_job("worker-mlx")
+                .expect("mlx claim ok")
+                .is_none(),
+            "{mode}: mlx worker must not claim a Wan clip job"
+        );
+
+        register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+        let claimed = store
+            .claim_next_job("worker-torch")
+            .expect("torch claim ok")
+            .expect("torch claims the Wan clip job");
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    }
 }
 
 #[test]

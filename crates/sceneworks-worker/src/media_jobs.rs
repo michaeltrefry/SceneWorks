@@ -596,6 +596,25 @@ async fn run_yolo11_person_detect(
     ))
 }
 
+/// Seconds the final frame-extraction seek is held inside the clip. `sample_timestamps`
+/// is inclusive of both ends, so its last sample is exactly `duration` — but a video has
+/// no frame at `duration` (the last decodable frame sits ~`1/fps` before it), and an
+/// `ffmpeg -ss duration` accurate seek then yields no output and fails the whole track.
+/// 0.2 s clears one frame for any clip ≥ 5 fps without meaningfully moving the sample.
+/// macOS-only, like its sole caller `assemble_real_person_track` (the Python Win/Linux
+/// path samples/extracts separately).
+#[cfg(target_os = "macos")]
+const FRAME_SEEK_GUARD_SECONDS: f64 = 0.2;
+
+/// Clamp a sample timestamp to a frame-extraction seek that always lands on a real frame:
+/// never past `duration - FRAME_SEEK_GUARD_SECONDS`. Only the final inclusive-end sample is
+/// affected; every interior sample passes through unchanged. The tracker still records the
+/// logical sample time — only the seek used to pull pixels is clamped.
+#[cfg(target_os = "macos")]
+pub(crate) fn frame_seek_timestamp(timestamp: f64, duration: f64) -> f64 {
+    timestamp.min((duration - FRAME_SEEK_GUARD_SECONDS).max(0.0))
+}
+
 /// The real (model-backed) outcome of `assemble_real_person_track`: the resampled track frames
 /// plus the metadata `run_person_track` folds into the sidecar.
 struct RealPersonTrack {
@@ -658,7 +677,7 @@ async fn assemble_real_person_track(
             "ffmpeg",
             source_media_path,
             &frame_path,
-            timestamp,
+            frame_seek_timestamp(timestamp, duration),
             1280,
             720,
             Some(ffmpeg_context),
@@ -2089,5 +2108,305 @@ pub(crate) async fn run_ffmpeg(
         ))
     } else {
         Err(WorkerError::InvalidPayload(bounded))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod frame_seek_tests {
+    use super::*;
+    use crate::person_track::sample_timestamps;
+
+    #[test]
+    fn frame_seek_clamps_only_the_final_inclusive_end_sample() {
+        // sample_timestamps is inclusive of both ends → the last sample == duration, which
+        // is not a decodable frame. The seek clamp must pull exactly that sample inside the
+        // clip and leave every interior sample (and t=0) untouched.
+        let duration = 8.0;
+        let stamps = sample_timestamps(duration);
+        let last = *stamps.last().expect("non-empty");
+        assert_eq!(last, duration, "final sample sits on the inclusive end");
+
+        for &ts in &stamps {
+            let seek = frame_seek_timestamp(ts, duration);
+            assert!(
+                seek <= duration - FRAME_SEEK_GUARD_SECONDS + 1e-9,
+                "seek {seek} must stay a frame inside the {duration}s clip"
+            );
+            if ts < duration - FRAME_SEEK_GUARD_SECONDS {
+                assert_eq!(seek, ts, "interior samples pass through unchanged");
+            }
+        }
+        // The final sample is the one that gets clamped.
+        assert_eq!(
+            frame_seek_timestamp(last, duration),
+            duration - FRAME_SEEK_GUARD_SECONDS
+        );
+    }
+
+    #[test]
+    fn frame_seek_never_goes_negative_on_tiny_clips() {
+        // A clip shorter than the guard clamps to 0 rather than a negative seek.
+        assert_eq!(frame_seek_timestamp(0.1, 0.1), 0.0);
+        assert_eq!(frame_seek_timestamp(0.0, 0.0), 0.0);
+    }
+}
+
+/// Real-Mac end-to-end validation for the native-MLX Replace-Person pipeline
+/// (epic 3704 / sc-3709): a short person video → ffmpeg frame sampling → MLX YOLO11
+/// detect (sc-3633) → SORT/ByteTrack assembly (sc-3634) → MLX SAM2 segment (sc-3706/3709)
+/// → per-frame masks on disk → `maskState`. This is the model-path twin of
+/// [`assemble_real_person_track`] / [`segment_assembly_frames`], driven through the same
+/// blocking seams but without the ApiClient/ProjectStore plumbing (that plumbing carries no
+/// MLX work). It cannot run in CI — there is no GPU or weights on the runner — so it is
+/// `#[ignore]` and skips cleanly unless a clip is staged. macOS-only, like the pipeline.
+///
+/// Run on Apple Silicon with a short clip that contains a clearly-visible person:
+///
+/// ```text
+/// SCENEWORKS_PERSON_E2E_VIDEO=/path/to/person_clip.mp4 \
+/// SCENEWORKS_PERSON_E2E_DURATION=4 \
+///   cargo test -p sceneworks-worker --lib \
+///   person_track_e2e -- --ignored --nocapture
+/// ```
+///
+/// The YOLO11 and SAM2 weights download on first use from the public `SceneWorks/*` HF
+/// repos (or pin them with `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` / `SCENEWORKS_SAM2_WEIGHTS`).
+#[cfg(all(test, target_os = "macos"))]
+mod person_track_e2e_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// The staged source clip (`SCENEWORKS_PERSON_E2E_VIDEO`), or `None` to skip.
+    fn staged_video() -> Option<PathBuf> {
+        let path = PathBuf::from(std::env::var("SCENEWORKS_PERSON_E2E_VIDEO").ok()?);
+        path.exists().then_some(path)
+    }
+
+    /// Clip duration in seconds (`SCENEWORKS_PERSON_E2E_DURATION`, default 4.0), used to pick
+    /// the 2-FPS sample cadence — the same `sample_timestamps` the real job uses.
+    fn staged_duration() -> f64 {
+        std::env::var("SCENEWORKS_PERSON_E2E_DURATION")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(4.0)
+            .clamp(1.0, 3600.0)
+    }
+
+    #[test]
+    #[ignore = "real Mac E2E: set SCENEWORKS_PERSON_E2E_VIDEO to a person clip; downloads YOLO11 + SAM2 weights; Apple Silicon only"]
+    fn person_track_e2e_detect_track_segment_writes_masks_and_active_state() {
+        let Some(video) = staged_video() else {
+            eprintln!(
+                "skipping: set SCENEWORKS_PERSON_E2E_VIDEO to a short clip containing a person"
+            );
+            return;
+        };
+
+        // Isolated scratch: a throwaway data dir (weights cache) + a fake project root the
+        // segmentation pass writes masks into, exactly as `run_person_track` would.
+        let scratch = std::env::temp_dir().join("sw-person-track-e2e");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let data_dir = scratch.join("data");
+        let project_path = scratch.join("project");
+        let frames_dir = scratch.join("frames");
+        std::fs::create_dir_all(&project_path).expect("project dir");
+        std::fs::create_dir_all(&frames_dir).expect("frames dir");
+        // `ensure_*_weights` resolve their cache under `settings.data_dir`.
+        std::env::set_var("SCENEWORKS_DATA_DIR", &data_dir);
+        let settings = crate::Settings::from_env();
+
+        let timestamps = crate::person_track::sample_timestamps(staged_duration());
+        assert!(!timestamps.is_empty(), "sample cadence produced no frames");
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let http = reqwest::Client::new();
+
+            // 1. Provision the real detector weights (download-on-first-use), then sample +
+            //    detect each frame exactly as `assemble_real_person_track` does.
+            let det_weights = crate::person_jobs::ensure_detector_weights(&settings, &http)
+                .await
+                .expect("yolo11 weights provisioned");
+            let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
+                Vec::with_capacity(timestamps.len());
+            let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
+            for (index, &timestamp) in timestamps.iter().enumerate() {
+                let frame_path = frames_dir.join(format!("frame_{index:04}.png"));
+                render_frame_png(
+                    "ffmpeg",
+                    &video,
+                    &frame_path,
+                    frame_seek_timestamp(timestamp, staged_duration()),
+                    1280,
+                    720,
+                    None,
+                )
+                .await
+                .expect("ffmpeg renders the sample frame");
+                let weights_for_frame = det_weights.clone();
+                let frame_for_task = frame_path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::person_jobs::detect_people_blocking(
+                        weights_for_frame,
+                        frame_for_task,
+                        0.25,
+                    )
+                })
+                .await
+                .expect("detect task joins")
+                .expect("yolo11 detection runs");
+                let boxes = result
+                    .detections
+                    .iter()
+                    .map(|d| {
+                        (
+                            crate::person_track::xyxy_to_normalized(
+                                d.x1 as f64,
+                                d.y1 as f64,
+                                d.x2 as f64,
+                                d.y2 as f64,
+                                result.width,
+                                result.height,
+                            ),
+                            d.score as f64,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                per_frame.push((timestamp, boxes));
+                frame_paths.push(frame_path);
+            }
+
+            // Per-frame detection summary, so a failed lock is legible (e.g. a person who
+            // never clears the tracker's high-confidence threshold).
+            for (timestamp, boxes) in &per_frame {
+                let max_conf = boxes.iter().map(|b| b.1).fold(0.0_f64, f64::max);
+                eprintln!(
+                    "  t={timestamp:>6.3}s  detections={}  maxConf={max_conf:.3}",
+                    boxes.len()
+                );
+            }
+            let total_detections: usize = per_frame.iter().map(|(_, boxes)| boxes.len()).sum();
+            assert!(
+                total_detections > 0,
+                "YOLO11 found no people in any sampled frame — is the clip a person video?"
+            );
+
+            // 2. Select the single highest-confidence detection across all frames — the
+            //    clear, lockable person a user would click (robust to early low-confidence
+            //    false positives on textured scenes like waves). The tracker only confirms a
+            //    new identity from a high-confidence box, so the selection must be one.
+            let (selected_timestamp, selected_box, selected_conf) = per_frame
+                .iter()
+                .flat_map(|(timestamp, boxes)| boxes.iter().map(move |b| (*timestamp, b.0, b.1)))
+                .max_by(|a, b| {
+                    a.2.partial_cmp(&b.2)
+                        .expect("detection confidence is finite")
+                })
+                .expect("at least one detection exists");
+            eprintln!(
+                "selection: t={selected_timestamp:.3}s conf={selected_conf:.3} \
+                 box=({:.3},{:.3},{:.3},{:.3})",
+                selected_box.x, selected_box.y, selected_box.width, selected_box.height
+            );
+            assert!(
+                selected_conf >= 0.5,
+                "best detection conf {selected_conf:.3} is below the tracker's high-confidence \
+                 floor (0.5) — the clip never yields a confidently-trackable person"
+            );
+
+            let observations = crate::person_track::observe(per_frame);
+            let assembly = crate::person_track::assemble_track(
+                &observations,
+                selected_box,
+                selected_timestamp,
+                &timestamps,
+            );
+            assert!(
+                assembly.target_track_id.is_some(),
+                "tracker failed to lock onto the selected person"
+            );
+            let detected_total = assembly
+                .frames
+                .iter()
+                .filter(|frame| frame.detected)
+                .count();
+            assert!(detected_total > 0, "no detected target frames to segment");
+
+            // 3. Provision the real SAM2 weights and segment every detected frame, writing
+            //    masks under `person-tracks/{track_id}/masks/` (the production layout).
+            let seg_weights = crate::person_segment::ensure_segmenter_weights(&settings, &http)
+                .await
+                .expect("sam2 weights provisioned");
+            let track_id = "track_e2e";
+            let masks_dir = project_path
+                .join("person-tracks")
+                .join(track_id)
+                .join("masks");
+            std::fs::create_dir_all(&masks_dir).expect("masks dir");
+
+            let mut generated = 0usize;
+            for (index, frame) in assembly.frames.iter().enumerate() {
+                if !frame.detected {
+                    continue;
+                }
+                let out_path = masks_dir.join(format!("frame_{:06}.png", index + 1));
+                let box_norm = (
+                    frame.box_.x,
+                    frame.box_.y,
+                    frame.box_.width,
+                    frame.box_.height,
+                );
+                let weights_for_task = seg_weights.clone();
+                let frame_for_task = frame_paths[index].clone();
+                let out_for_task = out_path.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::person_segment::segment_person_blocking(
+                        weights_for_task,
+                        frame_for_task,
+                        box_norm,
+                        out_for_task,
+                    )
+                })
+                .await
+                .expect("segment task joins")
+                .expect("sam2 segmentation runs");
+
+                // The mask is a real binary `L` PNG aligned to the 1280×720 frame with a
+                // non-empty foreground (SAM2 actually selected the person, not a blank map).
+                let mask = image::open(&out_path).expect("mask PNG opens").to_luma8();
+                assert_eq!(
+                    (mask.width(), mask.height()),
+                    (1280, 720),
+                    "mask must match the rendered frame size"
+                );
+                let foreground = mask.pixels().filter(|pixel| pixel.0[0] > 127).count();
+                assert!(
+                    foreground > 0,
+                    "frame {index} mask has no foreground — SAM2 produced an empty mask"
+                );
+                generated += 1;
+            }
+
+            // 4. The maskState rollup must report `active` — every detected frame segmented —
+            //    which is the success signal `run_person_track` writes to the sidecar.
+            let mask_state = crate::person_segment::rollup_mask_state(generated, detected_total);
+            eprintln!(
+                "person-track E2E: sampled={} detected={} segmented={} maskState={}",
+                timestamps.len(),
+                detected_total,
+                generated,
+                mask_state
+            );
+            assert_eq!(
+                generated, detected_total,
+                "every detected frame should segment"
+            );
+            assert_eq!(
+                mask_state, "active",
+                "all detected frames segmented → maskState=active"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
