@@ -85,7 +85,6 @@ import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macBlockedModels,
-  macFeatureBlock,
   macVideoModeBlock,
 } from "../macGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
@@ -643,15 +642,12 @@ export function VideoStudio() {
     ["video_bridge", "Bridge"],
     ["replace_person", "Replace person"],
   ];
-  // Mac UI gating (sc-3486): disable the video modes that run on the Python torch path —
-  // per-model FLF eligibility + the torch-only advanced modes (extend/bridge/replace).
-  const macAdvancedVideoBlock = macFeatureBlock(macCapabilities, "advancedVideoModes");
-  // extend_clip + video_bridge share the IC-LoRA clip-conditioning path (sc-3522): both are
-  // gated by the `advancedVideoModes` capability the same way (MLX-eligible on LTX only).
-  const macVideoModeBlockFor = (value) =>
-    value === "extend_clip" || value === "video_bridge"
-      ? macAdvancedVideoBlock
-      : macVideoModeBlock(selectedModel, macCapabilities, value);
+  // Mac UI gating (sc-3486, sc-3773): every video mode is disabled per-model via the selected
+  // model's `macSupport.features.videoModes` — FLF on the non-Keyframe Wan MoE engines,
+  // replace_person on non-replace models, and the LTX IC-LoRA clip-conditioning modes
+  // (extend_clip / video_bridge) on non-LTX models. On LTX, extend/bridge stay enabled because
+  // the in-process Rust worker serves them, so the old coarse global flag is gone.
+  const macVideoModeBlockFor = (value) => macVideoModeBlock(selectedModel, macCapabilities, value);
   const matchingTracks = personTracks.filter((track) => track.sourceAssetId === sourceClipAssetId);
   const latestDetectionJob = jobs
     .filter(

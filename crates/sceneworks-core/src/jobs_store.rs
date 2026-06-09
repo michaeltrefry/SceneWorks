@@ -1997,11 +1997,15 @@ fn image_model_mac_support(model: &str) -> ModelMacSupport {
 }
 
 /// The `video_generate` modes the UI offers, in display order, so the gating mirrors
-/// [`video_mode_is_mlx_eligible`] for every mode a Mac user could pick.
+/// [`video_mode_is_mlx_eligible`] for every mode a Mac user could pick. The clip-conditioning
+/// modes `extend_clip` / `video_bridge` are included (sc-3773) so the Mac UI gates them
+/// per-model — MLX on the LTX IC-LoRA path, torch on Wan — rather than via a coarse global flag.
 const VIDEO_UI_MODES: &[&str] = &[
     "text_to_video",
     "image_to_video",
     "first_last_frame",
+    "extend_clip",
+    "video_bridge",
     "replace_person",
 ];
 
@@ -2108,8 +2112,8 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         // Person detection + tracking are ported to the Rust worker (sc-3488 /
         // sc-3633/3634/3709): native-MLX YOLO11 detection, SORT/ByteTrack track assembly,
         // and SAM2 per-frame segmentation all run in-process, so the Replace-Person
-        // detect → track → mask flow works on a Python-free Mac. (replace_person
-        // end-to-end still needs the video-gen/inpaint half — see `advancedVideoModes`.)
+        // detect → track → mask flow works on a Python-free Mac. (The replace_person
+        // video-gen half is gated per-model via each video model's `videoModes`.)
         "personDetect".to_owned(),
         MacFeatureSupport {
             supported: true,
@@ -2123,15 +2127,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
             reason: None,
         },
     );
-    features.insert(
-        "advancedVideoModes".to_owned(),
-        MacFeatureSupport::unsupported(
-            "advanced video (extend / bridge)",
-            "extend_clip / video_bridge are still torch-only; first_last_frame (sc-3520) and \
-             replace_person → Wan-VACE (sc-3521) now run on MLX.",
-            "epic 3040",
-        ),
-    );
+    // The former global `advancedVideoModes` flag is gone (sc-3773): every video mode — including
+    // the LTX IC-LoRA clip-conditioning modes extend_clip / video_bridge — is now gated per-model
+    // via each model's `macSupport.features.videoModes`, so a Mac user on LTX is no longer blocked
+    // from a mode the in-process Rust worker can run.
     MacCapabilities {
         platform: platform.to_owned(),
         mac_gating_active,

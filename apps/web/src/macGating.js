@@ -91,8 +91,9 @@ export function macVideoModeBlock(model, caps, mode) {
   return null;
 }
 
-// A non-model Python surface (lycoris, imageUpscale, poseFromPhoto, personDetect,
-// datasetCaptioning, advancedVideoModes). Returns `{ blocked, reason, text }` or `null`.
+// A non-model Python surface (imageUpscale, poseFromPhoto, personDetect, datasetCaptioning).
+// Returns `{ blocked, reason, text }` or `null`. Video modes are gated per-model via
+// macVideoModeBlock, not here (sc-3773).
 export function macFeatureBlock(caps, key) {
   if (!macGatingActive(caps)) return null;
   const feature = caps?.features?.[key];

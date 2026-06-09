@@ -78,6 +78,16 @@ describe("macGating helpers", () => {
     expect(macVideoModeBlock(video, gating, "replace_person")?.blocked).toBe(true);
   });
 
+  it("gates the LTX clip-conditioning modes per-model (sc-3773)", () => {
+    // extend_clip / video_bridge ride the LTX IC-LoRA path: enabled on LTX, blocked on Wan.
+    const ltx = { id: "ltx_2_3", macSupport: { features: { videoModes: { extend_clip: true, video_bridge: true } } } };
+    const wan = { id: "wan_2_2", macSupport: { features: { videoModes: { extend_clip: false, video_bridge: false } } } };
+    expect(macVideoModeBlock(ltx, gating, "extend_clip")).toBeNull();
+    expect(macVideoModeBlock(ltx, gating, "video_bridge")).toBeNull();
+    expect(macVideoModeBlock(wan, gating, "extend_clip")?.blocked).toBe(true);
+    expect(macVideoModeBlock(wan, gating, "video_bridge")?.blocked).toBe(true);
+  });
+
   it("falls back to the bare label when a reason is missing", () => {
     expect(macReasonText(gating, null)).toBe("Not available on Mac (Rust/MLX only)");
   });
