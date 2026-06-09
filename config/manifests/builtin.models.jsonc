@@ -1489,12 +1489,14 @@
         "model": "${HF_CACHE}/SG161222/RealVisXL_V5.0"
       },
       "defaults": {
-        // sc-2009 spike: ~30 steps at guidance 5.0; identity scale 0.8, landmark
-        // scale 0.45 (looser pose) .. 0.8 (frontal lock). The reference-strength
-        // slider drives ipAdapterScale; controlnetConditioningScale rides advanced.
+        // ~30 steps; guidance 3.0 (lowered from 5.0 per sc-3857 render tuning —
+        // RealVisXL is CFG-sensitive and 3.0 holds identity with much less of the
+        // over-saturated/over-contrast look). identity scale 0.8, landmark scale
+        // 0.45 (looser pose) .. 0.8 (frontal lock). The reference-strength slider
+        // drives ipAdapterScale; controlnetConditioningScale rides advanced.
         "resolution": "1024x1024",
         "steps": 30,
-        "guidanceScale": 5.0,
+        "guidanceScale": 3.0,
         "count": 4,
         // sc-3857: sampler/scheduler default to model-native (apply_sampler no-op)
         // so behaviour is unchanged until the user picks from the menu below.
@@ -1520,7 +1522,7 @@
       },
       "ui": {
         "label": "InstantID (RealVisXL)",
-        "description": "Identity-preserving character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on RealVisXL_V5.0 (photoreal SDXL, openrail++ commercial-OK) with InstantID's ArcFace embedding + 5-point-landmark ControlNet — the sc-2009 winner for faithful likeness with scene freedom (vs IP-Adapter resemblance only). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 5.0; ~22GB peak on Apple Silicon. Needs the InstantID weights (~4GB) + antelopev2 face pack, fetched on first use.",
+        "description": "Identity-preserving character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on RealVisXL_V5.0 (photoreal SDXL, openrail++ commercial-OK) with InstantID's ArcFace embedding + 5-point-landmark ControlNet — the sc-2009 winner for faithful likeness with scene freedom (vs IP-Adapter resemblance only). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 3.0; ~22GB peak on Apple Silicon. Needs the InstantID weights (~4GB) + antelopev2 face pack, fetched on first use.",
         "recommendedFor": ["character_image"],
         // InstantID identity tuning surfaced in the character-image picker. The
         // reference-strength slider drives ipAdapterScale (default raised to 0.8 for

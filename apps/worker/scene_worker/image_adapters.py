@@ -588,12 +588,14 @@ MODEL_TARGETS = {
         # reference-driven character model (no plain text_to_image / edit_image).
         "family": "sdxl",
         "supportsEdit": False,
-        # Per the sc-2009 spike: ~30 steps at guidance 5.0; identity holds with
+        # ~30 steps; guidance lowered 5.0 -> 3.0 (sc-3857) after Michael's render
+        # tuning — RealVisXL is CFG-sensitive and 3.0 holds identity with markedly
+        # less of the over-saturated/over-contrast look. identity holds with
         # ip_adapter_scale ~0.8 and controlnet_conditioning_scale 0.45 (looser pose)
-        # .. 0.8 (frontal lock). Both ride advanced (ipAdapterScale /
+        # .. 0.8 (frontal lock). All ride advanced (guidanceScale / ipAdapterScale /
         # controlnetConditioningScale); the adapter defaults them when absent.
         "steps": 30,
-        "guidanceScale": 5.0,
+        "guidanceScale": 3.0,
         # RealVisXL ships fp16-variant weights; from_pretrained falls back to the
         # default precision if the variant is absent (see InstantIDAdapter).
         "variant": "fp16",

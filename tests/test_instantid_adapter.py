@@ -144,7 +144,7 @@ def test_builtin_realvisxl_target_is_wired():
     assert target["supportsEdit"] is False
     assert target["repo"] == "SG161222/RealVisXL_V5.0"
     assert target["steps"] == 30
-    assert target["guidanceScale"] == 5.0
+    assert target["guidanceScale"] == 3.0
     instant = target["instantId"]
     assert instant["repo"] == "InstantX/InstantID"
     assert instant["controlnetSubfolder"] == "ControlNetModel"
