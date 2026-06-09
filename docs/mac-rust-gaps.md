@@ -53,7 +53,6 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 | Model id | Family | Mac disposition | Porting epic |
 |---|---|---|---|
 | `kolors` | kolors (SDXL UNet + ChatGLM3) | 🔵 Port → drop-on-Mac until then | **epic 3532** |
-| `chroma1_hd`, `chroma1_base`, `chroma1_flash` | chroma (FLUX.1-schnell DiT) | 🔵 Port → drop-on-Mac until then | **epic 3531** |
 | `z_image_edit` | z-image (edit) | 🔵 Port → drop-on-Mac until then | **epic 3529** |
 | `instantid_realvisxl` | sdxl (InstantID) | 🔵 Port → drop-on-Mac until then | epic 3109 |
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
@@ -136,6 +135,8 @@ Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
 - Image base families: `z_image_turbo`, `flux_schnell`, `flux_dev`, `qwen_image` (txt2img),
   `qwen_image_edit{,_2509,_2511,_2511_lightning}`, `flux2_klein_9b{,_kv,_true_v2}`, `sdxl`,
   `realvisxl` (epic 3018).
+- Chroma text-to-image: `chroma1_hd`, `chroma1_base`, `chroma1_flash` (FLUX.1-schnell-derived
+  DiT, T5-only true-CFG; `mlx-gen-chroma`) — epic 3531 / sc-3843.
 - SDXL advanced shapes — reference/IP-Adapter, `edit_image`, masked inpaint, outpaint, and
   tile-detail (`image_detail` on `sdxl`/`realvisxl`) — epic 3041 / sc-3060.
 - FLUX.2-klein single-file conversion in-process Rust (`flux2_klein_diffusers`, sc-3136).

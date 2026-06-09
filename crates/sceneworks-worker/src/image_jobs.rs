@@ -26,6 +26,8 @@ use mlx_gen::{
     GenerationRequest, Generator, Image, LoadSpec, Progress, Quant, WeightsSource,
 };
 #[cfg(target_os = "macos")]
+use mlx_gen_chroma as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_flux as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_flux2 as _;
@@ -237,6 +239,46 @@ const MLX_MODELS: &[MlxModel] = &[
         default_guidance: 7.0,
         supports_negative_prompt: true,
         adapter_label: "mlx_sdxl",
+    },
+    // Chroma (epic 3531, sc-3843) — FLUX.1-schnell-derived DiT, T5-only conditioning. The engine
+    // is a TRUE-CFG family: its descriptor advertises `supports_guidance=false` +
+    // `supports_negative_prompt=true`, so the CFG scale is forwarded as `true_cfg` (NOT the
+    // distilled `guidance` scalar, which the engine rejects) — see [`uses_true_cfg`] /
+    // [`resolve_true_cfg`]. HD/Base are full true-CFG (the manifest pre-fills 40 steps + guidance
+    // 3.0; the engine's own defaults are 28 steps + 4.0 — the request carries the manifest values).
+    // Each SceneWorks id maps 1:1 to the engine registry id of the same name.
+    MlxModel {
+        sceneworks_id: "chroma1_hd",
+        engine_id: "chroma1_hd",
+        default_repo: "lodestones/Chroma1-HD",
+        default_steps: 40,
+        supports_guidance: false,
+        default_guidance: 3.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_chroma",
+    },
+    MlxModel {
+        sceneworks_id: "chroma1_base",
+        engine_id: "chroma1_base",
+        default_repo: "lodestones/Chroma1-Base",
+        default_steps: 40,
+        supports_guidance: false,
+        default_guidance: 3.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_chroma",
+    },
+    // Flash is the few-step distilled checkpoint: ~8 steps, CFG baked toward 1.0 (single forward —
+    // the negative prompt is effectively inert at true_cfg≈1). It shares the true-CFG descriptor,
+    // so `true_cfg` still carries the scale (default 1.0).
+    MlxModel {
+        sceneworks_id: "chroma1_flash",
+        engine_id: "chroma1_flash",
+        default_repo: "lodestones/Chroma1-Flash",
+        default_steps: 8,
+        supports_guidance: false,
+        default_guidance: 1.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_chroma",
     },
 ];
 
@@ -870,6 +912,38 @@ fn resolve_guidance(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
     Some(scale)
 }
 
+/// True for a TRUE-CFG family whose engine reads the CFG scale from `true_cfg` (with a real
+/// negative prompt) and **rejects** the distilled `guidance` scalar — i.e. Chroma (epic 3531),
+/// uniquely identified by `supports_guidance=false` + `supports_negative_prompt=true`. The
+/// guidance-distilled families (`z_image_turbo`, `flux_schnell`) are `false`/`false` (no CFG at
+/// all), and the `guidance`-scalar families (qwen / sdxl / flux2 …) are `true`/*. For a true-CFG
+/// family the worker forwards `advanced.guidanceScale` as `true_cfg`, not `guidance`.
+#[cfg(target_os = "macos")]
+fn uses_true_cfg(model: &MlxModel) -> bool {
+    !model.supports_guidance && model.supports_negative_prompt
+}
+
+/// Resolve the true-CFG scale for a true-CFG family (Chroma). `None` for every other family
+/// (their CFG, if any, flows through [`resolve_guidance`]). The scale is `advanced.guidanceScale`
+/// (the same user knob) else the family default — forwarded to the engine as `GenerationRequest.true_cfg`.
+#[cfg(target_os = "macos")]
+fn resolve_true_cfg(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
+    if !uses_true_cfg(model) {
+        return None;
+    }
+    let scale = request
+        .advanced
+        .get("guidanceScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(model.default_guidance);
+    Some(scale)
+}
+
 /// The negative prompt to pass to the engine. `None` for variants without true CFG
 /// (the engine rejects `negative_prompt` on the distilled families) and for an empty
 /// prompt (the true-CFG engines fall back to their own neutral negative).
@@ -1208,10 +1282,19 @@ async fn generate_mlx_stream(
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, model);
     let guidance = resolve_guidance(request, model);
+    // True-CFG families (Chroma) carry the CFG scale in `true_cfg`, not `guidance` (which their
+    // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
+    let model_true_cfg = resolve_true_cfg(request, model);
     let negative_prompt = resolve_negative_prompt(request, model);
     let adapters = resolve_adapters(request)?;
     let repo = model_repo(request, model);
-    let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance);
+    let raw_settings = mlx_raw_settings(
+        request,
+        &repo,
+        steps,
+        quant_bits,
+        guidance.or(model_true_cfg),
+    );
     let engine_id = model.engine_id;
     let adapter_label = model.adapter_label;
     let count = request.count as usize;
@@ -1259,6 +1342,10 @@ async fn generate_mlx_stream(
     } else {
         (None, None, None)
     };
+    // The CFG scale passed to the engine as `true_cfg`: the FLUX.1-dev reference path's scale if
+    // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
+    // distilled families, which carry CFG (if any) through `guidance` instead.
+    let true_cfg = flux_true_cfg.or(model_true_cfg);
 
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
@@ -1269,7 +1356,7 @@ async fn generate_mlx_stream(
         let seeds = seeds.clone();
         let cancel = cancel.clone();
         let job_id = job.id.clone();
-        // `identity_init` + `flux_ip_dir` + `flux_true_cfg` are moved into the closure (the `move`
+        // `identity_init` + `flux_ip_dir` + `true_cfg` are moved into the closure (the `move`
         // captures them by value).
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
             let adapter_count = adapters.len();
@@ -1308,7 +1395,7 @@ async fn generate_mlx_stream(
                     guidance,
                     negative_prompt.clone(),
                     identity_init.as_ref(),
-                    flux_true_cfg,
+                    true_cfg,
                     &cancel,
                     &mut on_progress,
                 )?;
@@ -4768,6 +4855,9 @@ mod tests {
             "qwen_image_edit",
             "flux2_klein_9b",
             "sdxl",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
         ] {
             assert!(ids.contains(&id), "registry missing {id}");
         }

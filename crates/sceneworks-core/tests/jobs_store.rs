@@ -1773,6 +1773,18 @@ fn mac_rust_supported_accepts_eligible_and_mlx_agnostic_jobs() {
         json!({ "model": "z_image_turbo", "prompt": "p" }),
     );
     assert!(mac_rust_supported(&eligible).is_ok());
+    // Chroma text-to-image (epic 3531 / sc-3843) is now MLX-eligible on every variant.
+    for id in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+        let chroma = job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({ "model": id, "prompt": "p" }),
+        );
+        assert!(
+            mac_rust_supported(&chroma).is_ok(),
+            "{id} should be MLX-eligible"
+        );
+    }
     // MLX-agnostic job types run in-process with no Python torch dependency.
     let download = job_of(&store, JobType::ModelDownload, json!({ "repo": "x/y" }));
     assert!(mac_rust_supported(&download).is_ok());
@@ -1787,7 +1799,6 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
     // not the generic done feasibility epic.
     let cases = [
         ("kolors", "epic 3532"),
-        ("chroma1_hd", "epic 3531"),
         ("z_image_edit", "epic 3529"),
         ("instantid_realvisxl", "epic 3109"),
         ("sensenova_u1_8b", "epic 3180"),
@@ -2012,6 +2023,13 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
     let z_image = model_mac_support("z_image_turbo", "image");
     assert!(z_image.supported);
     assert!(z_image.reason.is_none());
+    // Chroma (epic 3531 / sc-3843) is now MLX-routed — all three variants stay in the picker
+    // and no longer report an `mlx_unsupported` port-epic gap.
+    for id in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+        let chroma = model_mac_support(id, "image");
+        assert!(chroma.supported, "{id} should be MLX-supported");
+        assert!(chroma.reason.is_none(), "{id} should carry no gap reason");
+    }
     // SVD is now MLX-routed (sc-3523, image→video only) so it stays in the picker, like Wan/LTX;
     // a genuinely engine-less video model id is still hidden.
     assert!(model_mac_support("svd", "video").supported);

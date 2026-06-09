@@ -2160,7 +2160,8 @@ fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
         "z_image_edit" => Some("epic 3529"),
         m if m.starts_with("sensenova") => Some("epic 3180"),
         m if m.starts_with("lens") => Some("epic 3164"),
-        m if m.starts_with("chroma") => Some("epic 3531"),
+        // Chroma (chroma1_*) was ported to MLX (epic 3531 / sc-3843) — it is now in
+        // `MLX_ROUTED_MODELS`, so it never reaches this torch-only gap classifier.
         _ => None,
     }
 }
@@ -2599,6 +2600,9 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux2_klein_9b_true_v2",
     "sdxl",
     "realvisxl",
+    "chroma1_hd",
+    "chroma1_base",
+    "chroma1_flash",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -2651,6 +2655,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
             flux2_mlx_eligible(payload)
         }
         "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -2777,6 +2782,17 @@ fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// img2img-edit stays on torch (epic 3529). Third-party LyCORIS now applies on the core MLX loader
 /// (epic 3641), so only `edit_image` keeps a Z-Image job off MLX.
 fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
+/// Chroma (epic 3531, sc-3843) MLX-routing conditions. Chroma is **text-to-image only**
+/// (`text_to_image` + `style_variations`; no edit / reference / ControlNet — those would be
+/// later engine ports), so every non-edit `image_generate` job routes to the in-process Rust
+/// `mlx-gen-chroma` worker on Mac. An `edit_image` mode — which Chroma has no path for on any
+/// platform — stays off MLX (defensive; the UI never offers edit for Chroma). All three variants
+/// (`chroma1_hd` / `chroma1_base` / `chroma1_flash`) share this gate. Third-party LyCORIS and peft
+/// LoKr apply on the core MLX loader (epic 3641 / sc-3842), so a LoRA never forces torch.
+fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
