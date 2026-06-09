@@ -6,8 +6,22 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField.jsx";
+import { CharacterAdvancedOptions, useCharacterAdvancedOptions } from "../components/CharacterAdvancedOptions.jsx";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 import { extractFamilies } from "../presetUtils.js";
+
+// Curated negative prompts seeded into the advanced panel for each Character
+// Studio flow (sc-3857). These are the baseline the editable Negative prompt
+// control starts from — the anti-`airbrushed/waxy/plastic/blurry` terms are what
+// keep RealVisXL's photoreal output from going shiny/over-contrasty. Angle and
+// pose differ: angle guards face framing (hat/hood/occluded face), pose guards
+// the body (extra limbs/fingers, cropped/out-of-frame).
+const ANGLE_SET_NEGATIVE_PROMPT =
+  "hat, hood, hoodie, scarf, holding object, paper, hands near face, covering face, occluded face, cropped, " +
+  "multiple people, plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, deformed, blurry";
+const POSE_LIBRARY_NEGATIVE_PROMPT =
+  "cropped, out of frame, multiple people, extra limbs, deformed hands, extra fingers, " +
+  "plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, blurry";
 
 // Resolve a character generation job's produced images from the full asset
 // catalog. Using the catalog (not just latestAssets, which is the single most
@@ -499,6 +513,12 @@ export function CharacterAngleSet({
   // Family-filtered LoRA picker (sc-2223): apply an existing LoRA of this character
   // to its turnaround (the dataset-bootstrapping loop). Filtered to the backbone's family.
   const loraSelection = useLoraSelection(loras, activeAngleModel);
+  // Advanced tuning (sc-3857): Guidance, Reference strength, Identity structure,
+  // Steps, Sampler/Scheduler, editable Negative prompt, Seed. Defaults track the
+  // active backbone; values fold into the job's `advanced` dict at submit.
+  const advanced = useCharacterAdvancedOptions(activeAngleModel, {
+    defaultNegativePrompt: ANGLE_SET_NEGATIVE_PROMPT,
+  });
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
@@ -572,16 +592,15 @@ export function CharacterAngleSet({
         characterId,
         referenceAssetId,
         prompt: prompt.trim(),
-        negativePrompt:
-          "hat, hood, hoodie, scarf, holding object, paper, hands near face, covering face, occluded face, cropped, " +
-          "multiple people, plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, deformed, blurry",
+        negativePrompt: advanced.negativePrompt,
         // angleSet makes the worker emit one image per pack angle regardless of count;
         // count must satisfy the API's 1-8 guard, so send 1 (the worker overrides it).
         count: 1,
+        seed: advanced.seedValue,
         width: 1024,
         height: 1024,
         loras: loraSelection.serializedLoras,
-        advanced: { angleSet: true, ipAdapterScale: 0.8 },
+        advanced: advanced.buildAdvanced({ angleSet: true }),
       });
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
@@ -651,6 +670,7 @@ export function CharacterAngleSet({
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
+      <CharacterAdvancedOptions state={advanced} />
       {activeJobs.length ? (
         <div className="worker-progress-card-stack local-job-stack">
           {activeJobs.map((job) => (
@@ -917,6 +937,13 @@ export function CharacterPoseLibrary({
   const { byId } = usePoseLibrary({ loadUserPoses });
   // Family-filtered LoRA picker (sc-2223), filtered to the active pose backbone's family.
   const loraSelection = useLoraSelection(loras, activePoseModel);
+  // Advanced tuning (sc-3857) — same panel as the angle set. The pose-specific
+  // Pose lock strength (controlScale) + Restore face stay in the main controls
+  // below; this adds Guidance / Reference strength / Identity structure / Steps /
+  // Sampler / editable Negative prompt / Seed.
+  const advanced = useCharacterAdvancedOptions(activePoseModel, {
+    defaultNegativePrompt: POSE_LIBRARY_NEGATIVE_PROMPT,
+  });
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
   const [faceRestore, setFaceRestore] = React.useState(false);
   // Strict ControlNet pose-lock strength (sc-2257). Only the strict tier
@@ -1000,21 +1027,19 @@ export function CharacterPoseLibrary({
         characterId,
         referenceAssetId,
         prompt: prompt.trim(),
-        negativePrompt:
-          "cropped, out of frame, multiple people, extra limbs, deformed hands, extra fingers, " +
-          "plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, blurry",
+        negativePrompt: advanced.negativePrompt,
         // The worker emits one image per pose in `advanced.poses` regardless of count;
         // count must satisfy the API's 1-8 guard, so send 1.
         count: 1,
+        seed: advanced.seedValue,
         width: 1024,
         height: 1024,
         loras: loraSelection.serializedLoras,
-        advanced: {
+        advanced: advanced.buildAdvanced({
           poses,
-          ipAdapterScale: 0.8,
           faceRestore,
           ...(supportsControlScale ? { controlScale } : {}),
-        },
+        }),
       });
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
@@ -1119,6 +1144,7 @@ export function CharacterPoseLibrary({
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
+      <CharacterAdvancedOptions state={advanced} />
       {activeJobs.length ? (
         <div className="worker-progress-card-stack local-job-stack">
           {activeJobs.map((job) => (

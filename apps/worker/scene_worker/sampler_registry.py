@@ -50,7 +50,15 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-SUPPORTED_SAMPLERS: tuple[str, ...] = ("default", "euler", "heun", "dpmpp", "unipc")
+SUPPORTED_SAMPLERS: tuple[str, ...] = (
+    "default",
+    "euler",
+    "euler_a",
+    "heun",
+    "dpmpp",
+    "dpmpp_sde",
+    "unipc",
+)
 SUPPORTED_SCHEDULERS: tuple[str, ...] = (
     "default",
     "simple",
@@ -69,7 +77,10 @@ class SamplerSpec:
     config_overrides: dict[str, Any]
 
 
-_SAMPLERS: dict[str, SamplerSpec | None] = {
+# Flow-matching scheduler specs — used for flow pipelines (Z-Image, Qwen, FLUX,
+# Wan, …). UNCHANGED from epic 1753; the family selector below routes flow pipes
+# here so their behaviour is byte-identical.
+_FLOW_SAMPLERS: dict[str, SamplerSpec | None] = {
     "default": None,
     "euler": SamplerSpec("FlowMatchEulerDiscreteScheduler", {}),
     "heun": SamplerSpec("FlowMatchHeunDiscreteScheduler", {}),
@@ -91,6 +102,22 @@ _SAMPLERS: dict[str, SamplerSpec | None] = {
         "UniPCMultistepScheduler",
         {"use_flow_sigmas": True, "use_dynamic_shifting": True},
     ),
+}
+
+# Standard (epsilon / v-prediction) scheduler specs — used for SDXL-family pipes
+# (InstantID/RealVisXL, Kolors, base SDXL). These are the classic diffusers
+# solvers WITHOUT the flow flags; pairing them with the ``karras`` scheduler axis
+# gives e.g. "DPM++ 2M Karras" (``dpmpp``) and "DPM++ SDE Karras" (``dpmpp_sde``,
+# the RealVisXL-recommended combo). ``dpmpp_sde`` uses the multistep
+# ``sde-dpmsolver++`` algorithm so no extra ``torchsde`` dependency is needed.
+_STD_SAMPLERS: dict[str, SamplerSpec | None] = {
+    "default": None,
+    "euler": SamplerSpec("EulerDiscreteScheduler", {}),
+    "euler_a": SamplerSpec("EulerAncestralDiscreteScheduler", {}),
+    "heun": SamplerSpec("HeunDiscreteScheduler", {}),
+    "dpmpp": SamplerSpec("DPMSolverMultistepScheduler", {"algorithm_type": "dpmsolver++"}),
+    "dpmpp_sde": SamplerSpec("DPMSolverMultistepScheduler", {"algorithm_type": "sde-dpmsolver++"}),
+    "unipc": SamplerSpec("UniPCMultistepScheduler", {}),
 }
 
 # Per-scheduler sigma-spacing flags. "simple" explicitly turns the alternates
@@ -179,6 +206,40 @@ def _snapshot_original(pipe: Any) -> None:
         "cls": type(scheduler),
         "config": snapshot_config,
     }
+
+
+def _scheduler_family(pipe: Any) -> str:
+    """Classify the pipe's NATIVE scheduler as ``"flow"`` or ``"standard"``.
+
+    Flow-matching pipes (Z-Image, Qwen, FLUX, Wan) load a ``FlowMatch*``
+    scheduler / ``flow_prediction`` config; SDXL-family pipes (InstantID,
+    Kolors, base SDXL) load epsilon/v-prediction solvers. The selection drives
+    which spec table ``apply_sampler`` uses so an SDXL pipe never gets a
+    flow-mode scheduler (which would break its dynamics) and a flow pipe stays
+    byte-identical to the epic-1753 behaviour.
+
+    Detection reads the SNAPSHOT of the original scheduler when present (so a
+    prior swap on a cached pipe can't flip the classification), else the live
+    scheduler.
+    """
+    snapshot = getattr(pipe, "_sceneworks_original_scheduler", None)
+    if snapshot:
+        name = getattr(snapshot.get("cls"), "__name__", "") or ""
+        config = snapshot.get("config") or {}
+    else:
+        scheduler = getattr(pipe, "scheduler", None)
+        if scheduler is None:
+            return "standard"
+        name = type(scheduler).__name__
+        config = _coerce_config(getattr(scheduler, "config", None))
+    if name.startswith("FlowMatch"):
+        return "flow"
+    prediction = config.get("prediction_type") if hasattr(config, "get") else None
+    if isinstance(prediction, str) and "flow" in prediction:
+        return "flow"
+    if hasattr(config, "get") and config.get("use_flow_sigmas"):
+        return "flow"
+    return "standard"
 
 
 def _coerce_config(config: Any) -> dict[str, Any]:
@@ -336,7 +397,24 @@ def apply_sampler(
             "restored": restored,
         }
 
-    spec = _SAMPLERS.get(sampler_key)
+    # Route to the spec table matching the pipe's prediction family so SDXL
+    # (epsilon) pipes get standard solvers and flow pipes keep their flow-mode
+    # solvers. A sampler key valid in one family but absent from the other
+    # (e.g. ``euler_a`` / ``dpmpp_sde`` are standard-only) degrades to "keep the
+    # current class, apply the scheduler axis only" rather than hard-failing.
+    family = _scheduler_family(pipe)
+    samplers_table = _STD_SAMPLERS if family == "standard" else _FLOW_SAMPLERS
+    if sampler_key in samplers_table:
+        spec = samplers_table[sampler_key]
+    else:
+        spec = None
+        if sampler_key != "default":
+            _emit(
+                "sampler_unavailable_for_family",
+                adapter=adapter,
+                sampler=sampler_key,
+                family=family,
+            )
     sigma_flags = _SCHEDULER_SIGMA_FLAGS.get(scheduler_key, {})
 
     # Build the target class. When sampler == "default" we keep whatever the
@@ -417,6 +495,7 @@ def apply_sampler(
         adapter=adapter,
         sampler=sampler_key,
         scheduler=scheduler_key,
+        family=family,
         shift=shift_value,
         schedulerClass=getattr(target_cls, "__name__", None),
         droppedFlags=dropped,
@@ -426,6 +505,7 @@ def apply_sampler(
     return {
         "sampler": sampler_key,
         "scheduler": scheduler_key,
+        "family": family,
         "shift": shift_value,
         "schedulerClass": getattr(target_cls, "__name__", None),
         "appliedFlags": sorted(filtered),

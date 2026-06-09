@@ -108,6 +108,7 @@ class DPMSolverMultistepScheduler(_StubScheduler):
         self,
         *,
         num_train_timesteps: int = 1000,
+        algorithm_type: str = "dpmsolver++",
         use_flow_sigmas: bool = False,
         prediction_type: str = "epsilon",
         use_karras_sigmas: bool = False,
@@ -117,6 +118,7 @@ class DPMSolverMultistepScheduler(_StubScheduler):
     ) -> None:
         super().__init__(
             num_train_timesteps=num_train_timesteps,
+            algorithm_type=algorithm_type,
             use_flow_sigmas=use_flow_sigmas,
             prediction_type=prediction_type,
             use_karras_sigmas=use_karras_sigmas,
@@ -166,6 +168,38 @@ class UniPCMultistepScheduler(_StubScheduler):
             raise ValueError("mu required when use_dynamic_shifting=True")
 
 
+class EulerDiscreteScheduler(_StubScheduler):
+    """Standard (epsilon) SDXL scheduler stub. set_timesteps has no ``mu``."""
+
+    def __init__(
+        self,
+        *,
+        num_train_timesteps: int = 1000,
+        prediction_type: str = "epsilon",
+        use_karras_sigmas: bool = False,
+        use_exponential_sigmas: bool = False,
+        use_beta_sigmas: bool = False,
+    ) -> None:
+        super().__init__(
+            num_train_timesteps=num_train_timesteps,
+            prediction_type=prediction_type,
+            use_karras_sigmas=use_karras_sigmas,
+            use_exponential_sigmas=use_exponential_sigmas,
+            use_beta_sigmas=use_beta_sigmas,
+        )
+
+    def set_timesteps(self, num_inference_steps: int, device: Any = None) -> None:
+        self.config.num_inference_steps = num_inference_steps  # type: ignore[union-attr]
+
+
+class EulerAncestralDiscreteScheduler(EulerDiscreteScheduler):
+    pass
+
+
+class HeunDiscreteScheduler(EulerDiscreteScheduler):
+    pass
+
+
 class OldHeunScheduler(_StubScheduler):
     """Simulates an older diffusers build where FlowMatchHeun has no
     ``use_dynamic_shifting`` parameter — registry must drop the flag."""
@@ -182,6 +216,9 @@ def fake_diffusers(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     module.FlowMatchHeunDiscreteScheduler = FlowMatchHeunDiscreteScheduler
     module.DPMSolverMultistepScheduler = DPMSolverMultistepScheduler
     module.UniPCMultistepScheduler = UniPCMultistepScheduler
+    module.EulerDiscreteScheduler = EulerDiscreteScheduler
+    module.EulerAncestralDiscreteScheduler = EulerAncestralDiscreteScheduler
+    module.HeunDiscreteScheduler = HeunDiscreteScheduler
     monkeypatch.setitem(sys.modules, "diffusers", module)
     return module
 
@@ -194,6 +231,13 @@ def _make_default_pipe() -> SimpleNamespace:
     # Mirror a real diffusers FlowMatch pipe: scheduler has a `config` view
     # that exposes the trained params.
     base = FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0)
+    return _make_pipe(base)
+
+
+def _make_standard_pipe() -> SimpleNamespace:
+    # Mirror an SDXL-family (epsilon) pipe: a non-FlowMatch scheduler whose
+    # config declares prediction_type="epsilon" (InstantID/RealVisXL, Kolors).
+    base = EulerDiscreteScheduler(num_train_timesteps=1000, prediction_type="epsilon")
     return _make_pipe(base)
 
 
@@ -440,6 +484,57 @@ def test_no_scheduler_attribute_is_treated_as_noop(
     pipe = SimpleNamespace()  # no `scheduler` attr at all
     result = apply_sampler(pipe, "euler", "karras")
     assert result["noop"] is True
+
+
+def test_standard_pipe_routes_to_epsilon_dpmpp(fake_diffusers: ModuleType) -> None:
+    """An SDXL/epsilon pipe must get the STANDARD DPM++ (no flow flags, no
+    flow_prediction) — applying flow mode to SDXL would break its dynamics."""
+    pipe = _make_standard_pipe()
+    result = apply_sampler(pipe, "dpmpp", "default")
+    assert result["family"] == "standard"
+    assert isinstance(pipe.scheduler, DPMSolverMultistepScheduler)
+    assert pipe.scheduler.config.prediction_type == "epsilon"
+    assert pipe.scheduler.config.use_flow_sigmas is False
+    assert pipe.scheduler.config.algorithm_type == "dpmsolver++"
+
+
+def test_dpmpp_sde_karras_on_standard_pipe(fake_diffusers: ModuleType) -> None:
+    """dpmpp_sde + karras == "DPM++ SDE Karras" (the RealVisXL combo): SDE
+    multistep algorithm + Karras sigmas, still epsilon (no flow flags)."""
+    pipe = _make_standard_pipe()
+    result = apply_sampler(pipe, "dpmpp_sde", "karras")
+    assert result["family"] == "standard"
+    assert pipe.scheduler.config.algorithm_type == "sde-dpmsolver++"
+    assert pipe.scheduler.config.use_karras_sigmas is True
+    assert pipe.scheduler.config.use_flow_sigmas is False
+
+
+def test_euler_ancestral_on_standard_pipe(fake_diffusers: ModuleType) -> None:
+    pipe = _make_standard_pipe()
+    result = apply_sampler(pipe, "euler_a", "default")
+    assert result["noop"] is False
+    assert isinstance(pipe.scheduler, EulerAncestralDiscreteScheduler)
+
+
+def test_flow_pipe_still_routes_to_flow_dpmpp(fake_diffusers: ModuleType) -> None:
+    """Regression guard: family routing must leave flow pipes byte-identical to
+    the epic-1753 behaviour — flow_prediction, not the epsilon path."""
+    pipe = _make_default_pipe()
+    result = apply_sampler(pipe, "dpmpp", "default")
+    assert result["family"] == "flow"
+    assert pipe.scheduler.config.use_flow_sigmas is True
+    assert pipe.scheduler.config.prediction_type == "flow_prediction"
+
+
+def test_standard_only_sampler_on_flow_pipe_degrades_gracefully(
+    fake_diffusers: ModuleType,
+) -> None:
+    """dpmpp_sde / euler_a are standard-only. Selecting one on a flow pipe must
+    NOT install a wrong (epsilon) class — it keeps the flow scheduler class."""
+    pipe = _make_default_pipe()
+    apply_sampler(pipe, "dpmpp_sde", "default")
+    assert isinstance(pipe.scheduler, FlowMatchEulerDiscreteScheduler)
+    assert not isinstance(pipe.scheduler, DPMSolverMultistepScheduler)
 
 
 def test_sampler_selection_from_advanced_normalizes_inputs() -> None:

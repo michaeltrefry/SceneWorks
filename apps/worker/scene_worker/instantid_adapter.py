@@ -50,6 +50,7 @@ from .image_adapters import (
     select_torch_dtype,
 )
 from .lora_adapters import LoraPipelineState, apply_loras_to_pipeline
+from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .settings import WorkerSettings
 
 _VENDOR = Path(__file__).resolve().parent / "_vendor" / "instantid"
@@ -636,6 +637,15 @@ class InstantIDAdapter:
             model_id=request.model,
             previous_state=self._loaded_lora_state,
         )
+        # Optional sampler / scheduler swap (sc-3857). InstantID is an SDXL
+        # (epsilon) pipe, so the registry routes it to the standard solver table
+        # — e.g. dpmpp_sde + karras = "DPM++ SDE Karras" (the RealVisXL-
+        # recommended combo, sharper than the default discrete schedule). A
+        # "default"/"default" selection is a true no-op; applied once on the
+        # cached pipe before the angle/pose loop so every image in the set shares
+        # the same scheduler.
+        sampler_key, scheduler_key, scheduler_shift = sampler_selection_from_advanced(request.advanced)
+        apply_sampler(pipe, sampler_key, scheduler_key, scheduler_shift, adapter=self.id)
         torch = importlib.import_module("torch")
         device = select_torch_device(torch, settings.gpu_id)
         label = model_target["label"]

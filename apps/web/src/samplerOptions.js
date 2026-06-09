@@ -7,9 +7,11 @@
 export const SAMPLER_LABELS = {
   default: "Model default",
   euler: "Euler",
+  euler_a: "Euler ancestral",
   heun: "Heun (2nd-order)",
-  dpmpp: "DPM++ (flow)",
-  unipc: "UniPC (flow)",
+  dpmpp: "DPM++ (2M)",
+  dpmpp_sde: "DPM++ SDE",
+  unipc: "UniPC",
 };
 
 export const SCHEDULER_LABELS = {
@@ -21,7 +23,7 @@ export const SCHEDULER_LABELS = {
   beta: "Beta",
 };
 
-const SAMPLER_ORDER = ["default", "euler", "heun", "dpmpp", "unipc"];
+const SAMPLER_ORDER = ["default", "euler", "euler_a", "heun", "dpmpp", "dpmpp_sde", "unipc"];
 const SCHEDULER_ORDER = ["default", "simple", "shift", "karras", "exponential", "beta"];
 
 function uniqueOrdered(values, order) {
