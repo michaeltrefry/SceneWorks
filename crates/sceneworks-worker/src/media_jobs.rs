@@ -596,9 +596,143 @@ async fn run_yolo11_person_detect(
     ))
 }
 
+/// The real (model-backed) outcome of `assemble_real_person_track`: the resampled track frames
+/// plus the metadata `run_person_track` folds into the sidecar.
+struct RealPersonTrack {
+    frames: Vec<Value>,
+    average_confidence: f64,
+    /// "degraded" for this slice (box-derived masks); SAM2 per-frame masks arrive in sc-3709.
+    mask_state: &'static str,
+    quality: Value,
+    tracker_meta: Value,
+}
+
+/// Track the selected person through real source content: sample frames at the 2-FPS cadence, run
+/// the native-MLX YOLO11 detector (sc-3633) on each, associate the boxes into track identities with
+/// the SORT/ByteTrack tracker, and resample the chosen identity onto the sample cadence (sc-3634).
+/// macOS-only (MLX detector); the Python Ultralytics path serves Windows/Linux.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn assemble_real_person_track(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    source_media_path: &std::path::Path,
+    detection: &Value,
+    selected_timestamp: f64,
+    duration: f64,
+    confidence: f64,
+) -> WorkerResult<RealPersonTrack> {
+    use crate::person_track as pt;
+
+    let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
+    let weights = crate::person_jobs::ensure_detector_weights(settings, http_client).await?;
+    let conf = confidence as f32;
+    let timestamps = pt::sample_timestamps(duration);
+
+    let work_dir = std::env::temp_dir().join(format!("sw-person-track-{}", job.id));
+    tokio::fs::create_dir_all(&work_dir).await?;
+
+    let mut device = "mlx";
+    let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
+        Vec::with_capacity(timestamps.len());
+    for (index, &timestamp) in timestamps.iter().enumerate() {
+        check_cancel(api, &job.id, "Person tracking canceled during sampling.").await?;
+        let frame_path = work_dir.join(format!("frame_{index:04}.png"));
+        let ffmpeg_context = FfmpegContext {
+            api,
+            settings,
+            job_id: &job.id,
+            cancel_message: "Person tracking canceled by user.",
+        };
+        render_frame_png(
+            "ffmpeg",
+            source_media_path,
+            &frame_path,
+            timestamp,
+            1280,
+            720,
+            Some(ffmpeg_context),
+        )
+        .await?;
+        let weights_for_frame = weights.clone();
+        let frame_for_task = frame_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
+        })
+        .await
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("person track detect task: {error}"))
+        })??;
+        device = result.device;
+        let boxes = result
+            .detections
+            .iter()
+            .map(|d| {
+                (
+                    pt::xyxy_to_normalized(
+                        d.x1 as f64,
+                        d.y1 as f64,
+                        d.x2 as f64,
+                        d.y2 as f64,
+                        result.width,
+                        result.height,
+                    ),
+                    d.score as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        per_frame.push((timestamp, boxes));
+        let _ = tokio::fs::remove_file(&frame_path).await;
+    }
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+
+    let observations = pt::observe(per_frame);
+    let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, &timestamps);
+    if assembly.target_track_id.is_none() || assembly.detected_frames == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "Selected person was not found in the source video. Re-run detection or adjust the selection."
+                .to_owned(),
+        ));
+    }
+
+    Ok(RealPersonTrack {
+        frames: pt::frames_to_json(&assembly.frames),
+        average_confidence: pt::average_confidence(&assembly.frames),
+        mask_state: "degraded",
+        quality: assembly.quality,
+        tracker_meta: json!({
+            "backend": "mlx",
+            "device": device,
+            "model": "yolo11m",
+            "tracker": "sort_bytetrack",
+        }),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+async fn assemble_real_person_track(
+    _api: &ApiClient,
+    _settings: &Settings,
+    _http_client: &reqwest::Client,
+    _job: &JobSnapshot,
+    _source_media_path: &std::path::Path,
+    _detection: &Value,
+    _selected_timestamp: f64,
+    _duration: f64,
+    _confidence: f64,
+) -> WorkerResult<RealPersonTrack> {
+    Err(WorkerError::InvalidPayload(
+        "Real person tracking runs on the Python worker on this platform.".to_owned(),
+    ))
+}
+
 pub(crate) async fn run_person_track_job(
     api: &ApiClient,
     settings: &Settings,
+    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -631,7 +765,7 @@ pub(crate) async fn run_person_track_job(
         ),
     )
     .await?;
-    let result = run_person_track(api, settings, job).await?;
+    let result = run_person_track(api, settings, http_client, job).await?;
     update_job(
         api,
         &job.id,
@@ -652,6 +786,7 @@ pub(crate) async fn run_person_track_job(
 pub(crate) async fn run_person_track(
     api: &ApiClient,
     settings: &Settings,
+    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<JsonObject> {
     let project_id = required_payload_string(&job.payload, "projectId")?;
@@ -685,16 +820,99 @@ pub(crate) async fn run_person_track(
         .get("duration")
         .map_or(6.0, |value| value_f64(value, 6.0))
         .clamp(1.0, 3600.0);
-    let frames = track_frames_from_detection(&detection, duration);
-    let average_confidence = frames
-        .iter()
-        .map(|frame| {
-            frame
-                .get("confidence")
-                .map_or(0.0, |value| value_f64(value, 0.0))
+    let confidence = job
+        .payload
+        .get("advanced")
+        .and_then(|advanced| advanced.get("confidence"))
+        .or_else(|| job.payload.get("confidence"))
+        .map_or(0.25, |value| value_f64(value, 0.25))
+        .clamp(0.01, 1.0);
+    let is_preview = job
+        .payload
+        .get("preview")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // The selection frame's source timestamp (recorded in the representative frame's lineage).
+    let selected_timestamp = job
+        .payload
+        .get("representativeFrameAssetId")
+        .and_then(Value::as_str)
+        .and_then(|asset_id| store.get_asset(project_id, asset_id).ok())
+        .and_then(|asset| {
+            asset
+                .get("lineage")
+                .and_then(|lineage| lineage.get("sourceTimestamp"))
+                .map(|value| value_f64(value, 0.0))
         })
-        .sum::<f64>()
-        / (frames.len().max(1) as f64);
+        .unwrap_or(0.0);
+
+    // Preview jobs (CPU worker) keep the procedural placeholder. Real jobs run the native-MLX
+    // YOLO11 detector (sc-3633) per sampled frame + the SORT/ByteTrack tracker (sc-3634). maskState
+    // stays "degraded" (box-derived masks via `load_track_masks`) until the SAM2 segmenter is wired
+    // in (sc-3709).
+    let (
+        frames,
+        average_confidence,
+        mask_state,
+        person_active,
+        tracker_model,
+        tracker_adapter,
+        quality_value,
+        tracker_meta,
+    ): (Vec<Value>, f64, &str, bool, String, &str, Value, Value) = if is_preview {
+        let frames = track_frames_from_detection(&detection, duration);
+        let avg = frames
+            .iter()
+            .map(|frame| {
+                frame
+                    .get("confidence")
+                    .map_or(0.0, |value| value_f64(value, 0.0))
+            })
+            .sum::<f64>()
+            / (frames.len().max(1) as f64);
+        (
+            frames,
+            avg,
+            "deferred",
+            false,
+            "procedural-person-tracker".to_owned(),
+            "procedural_person_tracking",
+            Value::Null,
+            Value::Null,
+        )
+    } else {
+        let source_media_rel = required_value_str(source_file, "path")?;
+        let source_media_path = safe_project_path(&project_path, source_media_rel)?;
+        if !source_media_path.exists() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Source media not found: {}",
+                source_media_path.display()
+            )));
+        }
+        let real = assemble_real_person_track(
+            api,
+            settings,
+            http_client,
+            job,
+            &source_media_path,
+            &detection,
+            selected_timestamp,
+            duration,
+            confidence,
+        )
+        .await?;
+        (
+            real.frames,
+            real.average_confidence,
+            real.mask_state,
+            true,
+            "yolo11m".to_owned(),
+            "yolo11_bytetrack",
+            real.quality,
+            real.tracker_meta,
+        )
+    };
+
     let track_id = format!("track_{}", Uuid::new_v4().simple());
     let track_name =
         optional_payload_string(&job.payload, "trackName").unwrap_or("Selected person");
@@ -709,6 +927,39 @@ pub(crate) async fn run_person_track(
         .get("displayName")
         .cloned()
         .unwrap_or(Value::Null);
+
+    let mut status = serde_json::Map::new();
+    status.insert(
+        "sampleRateFps".to_owned(),
+        json!(PERSON_TRACK_SAMPLE_RATE_FPS),
+    );
+    status.insert("maskState".to_owned(), json!(mask_state));
+    status.insert(
+        "averageConfidence".to_owned(),
+        json!(round_to(average_confidence, 4)),
+    );
+    status.insert(
+        "correctionState".to_owned(),
+        json!("ready_for_box_corrections"),
+    );
+    status.insert("personTrackingActive".to_owned(), json!(person_active));
+    if person_active {
+        status.insert("quality".to_owned(), quality_value);
+        status.insert("tracker".to_owned(), tracker_meta.clone());
+    }
+
+    let mut normalized = serde_json::Map::new();
+    normalized.insert(
+        "sampleRateFps".to_owned(),
+        json!(PERSON_TRACK_SAMPLE_RATE_FPS),
+    );
+    normalized.insert("personDetectionActive".to_owned(), json!(person_active));
+    normalized.insert("personTrackingActive".to_owned(), json!(person_active));
+    if person_active {
+        normalized.insert("maskState".to_owned(), json!(mask_state));
+        normalized.insert("tracker".to_owned(), tracker_meta);
+    }
+
     let track = json!({
         "schemaVersion": 1,
         "id": track_id.clone(),
@@ -721,27 +972,17 @@ pub(crate) async fn run_person_track(
         "selectedDetection": detection,
         "frames": frames,
         "corrections": [],
-        "status": {
-            "sampleRateFps": PERSON_TRACK_SAMPLE_RATE_FPS,
-            "maskState": "deferred",
-            "averageConfidence": round_to(average_confidence, 3),
-            "correctionState": "ready_for_box_corrections",
-            "personTrackingActive": false
-        },
+        "status": Value::Object(status),
         "recipe": {
             "mode": "person_track",
-            "model": "procedural-person-tracker",
-            "adapter": "procedural_person_tracking",
+            "model": tracker_model,
+            "adapter": tracker_adapter,
             "prompt": format!("Track {track_name}"),
             "negativePrompt": "",
             "seed": 0,
             "loras": [],
             "stylePreset": "none",
-            "normalizedSettings": {
-                "sampleRateFps": PERSON_TRACK_SAMPLE_RATE_FPS,
-                "personDetectionActive": false,
-                "personTrackingActive": false
-            },
+            "normalizedSettings": Value::Object(normalized),
             "rawAdapterSettings": { "selectedDetection": raw_selected_detection }
         },
         "lineage": {

@@ -70,6 +70,8 @@ mod upscale_jobs;
 // Apple Silicon, and the Python Ultralytics path stays the Windows/Linux backend.
 #[cfg(target_os = "macos")]
 mod person_jobs;
+#[cfg(target_os = "macos")]
+mod person_track;
 use downloads::*;
 #[cfg(target_os = "macos")]
 use pose_jobs::*;
@@ -613,7 +615,7 @@ async fn run_utility_job(
         JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Image upscale failed.", error)),
-        JobType::PersonTrack => run_person_track_job(api, settings, &job)
+        JobType::PersonTrack => run_person_track_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Person tracking failed.", error)),
         _ => {
