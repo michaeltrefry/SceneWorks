@@ -5059,6 +5059,95 @@ mod tests {
         );
     }
 
+    /// Load + generate one small image for a TRUE-CFG family (Chroma): the CFG scale rides
+    /// `true_cfg` (not the distilled `guidance` scalar the engine rejects), mirroring
+    /// [`generate_mlx_stream`]'s wiring. Sibling of [`smoke_generate_one`].
+    #[cfg(target_os = "macos")]
+    fn smoke_generate_one_true_cfg(
+        sceneworks_id: &str,
+        snapshot: std::path::PathBuf,
+        true_cfg: Option<f32>,
+        negative_prompt: Option<String>,
+    ) {
+        let model = mlx_model(sceneworks_id).unwrap();
+        let generator = mlx_load(
+            model.engine_id,
+            snapshot,
+            Some(mlx_gen::Quant::Q8),
+            Vec::new(),
+        )
+        .unwrap();
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let steps = model.default_steps;
+        let (w, h, pixels) = mlx_generate_one(
+            generator.as_ref(),
+            "a serene mountain lake at dawn",
+            512,
+            512,
+            42,
+            steps,
+            None,
+            negative_prompt,
+            None,
+            true_cfg,
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+    }
+
+    /// Real-weights smoke: Chroma1-HD full true-CFG (sc-3843). Exercises the true-CFG worker
+    /// path (`true_cfg` carries the scale; the engine rejects `guidance`). Needs the HF cache
+    /// (`lodestones/Chroma1-HD`) + a Metal device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Chroma1-HD weights + Metal device"]
+    fn chroma_hd_real_weights_generates_one_image() {
+        smoke_generate_one_true_cfg(
+            "chroma1_hd",
+            hf_snapshot("models--lodestones--Chroma1-HD"),
+            Some(3.0),
+            Some("blurry, low quality".to_owned()),
+        );
+    }
+
+    /// Real-weights smoke: Chroma1-Base (beta-sigma schedule, same true-CFG path as HD).
+    /// Needs the HF cache (`lodestones/Chroma1-Base`) + a Metal device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Chroma1-Base weights + Metal device"]
+    fn chroma_base_real_weights_generates_one_image() {
+        smoke_generate_one_true_cfg(
+            "chroma1_base",
+            hf_snapshot("models--lodestones--Chroma1-Base"),
+            Some(3.0),
+            Some("blurry, low quality".to_owned()),
+        );
+    }
+
+    /// Real-weights smoke: Chroma1-Flash few-step distilled (true_cfg≈1, negative inert).
+    /// Needs the HF cache (`lodestones/Chroma1-Flash`) + a Metal device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Chroma1-Flash weights + Metal device"]
+    fn chroma_flash_real_weights_generates_one_image() {
+        smoke_generate_one_true_cfg(
+            "chroma1_flash",
+            hf_snapshot("models--lodestones--Chroma1-Flash"),
+            Some(1.0),
+            None,
+        );
+    }
+
     // --- Z-Image strict-pose control path (sc-3028) ---
 
     #[cfg(target_os = "macos")]
