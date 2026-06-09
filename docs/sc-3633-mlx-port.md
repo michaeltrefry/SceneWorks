@@ -66,3 +66,48 @@ existing letterbox, but emit NHWC f32 Array) → forward → existing `decode`+`
 - The engine `Weights` loader: how to construct from a `.safetensors` path + `.require(name)->Array`
   (used across mlx-gen; e.g. `mlx-gen-wan/tests/*` `fn load(name)->Weights`). Confirm the public path.
 - `Array` channel-split (`split`/slicing) + `transpose_axes` for the NCHW↔NHWC compares.
+
+## DONE — native mlx-rs YOLO11m forward implemented + parity-verified (2026-06-09)
+
+The full forward is in `crates/sceneworks-worker/src/person_jobs.rs` (`Yolo`/`YoloForward`),
+built from `mlx_gen::nn::{conv2d,silu,upsample_nearest}` + `mlx_rs::ops`. The `ort` `Detector`,
+`build_session`, and the `ort`/`zip` imports are gone from the person-detect path (`ort` stays
+for `pose_jobs`). `mlx-rs` (pmetal-mlx-rs, same rev mlx-gen pins) is now a first-class macOS
+dependency. `media_jobs.rs` reports `backend:"mlx"`, adapter `yolo11_mlx`, device `mlx`.
+
+### Architecture, straight from the fused state-dict (authoritative source of truth)
+- **Every** C3k2 block (2/4/6/8/13/16/19/22) is `c3k=True, n=1` with an inner `C3k(n=2)` — the
+  `model.<i>.m.0.cv3` + `m.0.m.{0,1}` keys prove it. So all eight are structurally identical,
+  differing only in channel dims (read from the weights). The standard-YAML "c3k=False for early/
+  neck blocks" does NOT hold for this checkpoint — trust the weights, not the yaml.
+- Bottleneck residual is on everywhere: C3k2 defaults `shortcut=True` and the yaml never overrides
+  it; all inner bottlenecks have `c1==c2`. (Confirmed: block4 parity is near-bit-exact.)
+- C2PSA (block 10): `num_heads=4, key_dim=32, head_dim=64`, scale `32^-0.5`; PE is a depthwise 3×3
+  on `v` reshaped to a feature map; ffn.1 has no activation.
+- Detect: DFL bin indices are read straight from `model.23.dfl.conv.weight` ([0..15]); anchors are
+  cell-center (+0.5) row-major over 80²@8 / 40²@16 / 20²@32; output assembled `[xywh, sigmoid(cls)]`
+  → transposed to `(1,84,8400)` channel-major for the existing `decode()`.
+
+### Two implementation gotchas
+- **`mlx_rs::ops::conv2d` only supports `groups=1`** → depthwise convs (C2PSA `pe`, Detect `cv3`
+  DWConv, all `[C,3,3,1]`) are a manual 9-tap shift/multiply/accumulate (pad-by-1, per-channel tap
+  broadcast over a `try_index` range slice). SPPF 5×5 max-pool uses the same shift trick (−inf pad,
+  25-tap elementwise `maximum`).
+- **`Array::as_slice` returns the PHYSICAL buffer, not the logical order.** The head ends in a
+  `transpose_axes`, so the `(1,84,8400)` output is a non-contiguous view; calling `as_slice` on it
+  directly hands back the pre-transpose `(1,8400,84)` data → `decode` reads scrambled rows (the
+  symptom was 327 post-NMS boxes). Fix: `reshape(&[-1])` first to force a logical-order copy. (The
+  oracle test's `flat()` already did this, which is why per-block parity passed while the e2e path
+  failed — a useful tell.)
+
+### Parity results (`cargo test -p sceneworks-worker person_jobs -- --include-ignored --test-threads=1`)
+Run MLX tests single-threaded — concurrent MLX forwards across test threads corrupt results.
+- Per-block vs `refs.safetensors`: block4 **1.7e-5** (near-bit-exact → backbone correct); block10
+  6.8e-3, block16 5.4e-3, block19 1.3e-2, block22 7.7e-3 — accumulated fp32 backend drift (MLX/Metal
+  vs the torch oracle), first jumping at the C2PSA softmax/matmul. Benign.
+- Final head: class rows **1.98e-3**, box rows **<1px**.
+- End-to-end (letterbox→forward→decode→NMS) reproduces `ultralytics.predict`'s **4 people on
+  people.jpg to ≤2px / 0.02 conf** (0.917/0.907/0.906/0.778). Decode/NMS already verified in #485.
+
+Weight provisioning (download-on-first-use, HF host) is still slice 4 / sc-3636 — the resolver reads
+the staged `yolo11m_fused_mlx.safetensors` from the app cache / model dir for now.

@@ -33,14 +33,6 @@ uuid = { version = "1.11", features = ["v4"] }
 axum = "0.7"
 tower = { version = "0.5", features = ["util"] }
 
-# macOS NAX-presence guard (tests/nax_guard.rs): exercises a 16-bit fused SDPA op
-# directly against mlx-rs to prove the workspace .cargo/config.toml deployment-target
-# pin is in effect. Pinned to the SAME rev mlx-gen uses so Cargo builds MLX once
-# (a different rev would compile pmetal-mlx-sys twice). mlx-gen itself is already a
-# (macOS) dependency above and is usable from integration tests as-is.
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "e59ffd88014340e6a49b26de95446b8b76a57932" }
-
 # Native MLX image+video inference engine (epic 2337), linked in-process so the
 # Rust GPU worker dispatches generation with no Python adapter/sidecar (epic 3018).
 # macOS-only: mlx-gen builds Apple MLX from source and is meaningless off Apple
@@ -86,6 +78,13 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # shared rev so MLX builds once with the unchanged mlx-rs pin (e59ffd88, identical
 # across the bump -> no MLX rebuild).
 mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+# `mlx-rs` (pmetal-mlx-rs fork) — used directly by the native MLX YOLO11 person
+# detector (person_jobs.rs, sc-3633) for the ops the shared `mlx_gen::nn` layer does
+# not cover: CSP channel splits, depthwise convs, SPPF max-pool, the C2PSA attention,
+# and the DFL/anchor decode. Pinned to the SAME rev mlx-gen uses so MLX builds once
+# (a different rev would compile pmetal-mlx-sys twice). Also exercised by the NAX
+# guard test (tests/nax_guard.rs).
+mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "e59ffd88014340e6a49b26de95446b8b76a57932" }
 mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
 # FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
 # builds once; self-registers `flux1_schnell`/`flux1_dev` via inventory only when

@@ -1,9 +1,12 @@
 //! Unit tests for the YOLO11 person detector (sc-3633). The pure detector math
 //! (letterbox / decode / NMS / normalization) is covered without weights; the
-//! `#[ignore]` parity test runs the real `yolo11m.onnx` against a captured
-//! `ultralytics.predict` reference when the weights are staged in the app cache.
+//! `#[ignore]` parity tests run the native MLX forward against a captured per-block
+//! reference oracle (`refs.safetensors`) and reproduce `ultralytics.predict`'s boxes,
+//! when the fused MLX weights + fixtures are staged in the app cache.
 
 use super::*;
+use mlx_gen::weights::Weights;
+use mlx_rs::Array;
 use std::path::PathBuf;
 
 #[test]
@@ -149,15 +152,109 @@ fn cache_fixture(name: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-/// Real-weights parity: the Rust detector must reproduce `ultralytics.predict`
-/// on bus.jpg (4 people). Ignored by default — run with the model + fixtures
-/// staged in the app cache:
+/// Flatten an array to a contiguous f32 vec in logical row-major order (forces a copy
+/// of a transposed view), so two arrays of equal shape compare element-by-element.
+fn flat(a: &Array) -> Vec<f32> {
+    a.reshape(&[-1])
+        .expect("flatten")
+        .as_slice::<f32>()
+        .to_vec()
+}
+
+/// Max absolute difference between two equally-shaped arrays.
+fn max_abs_diff(got: &Array, want: &Array) -> f32 {
+    assert_eq!(got.shape(), want.shape(), "shape mismatch");
+    flat(got)
+        .iter()
+        .zip(flat(want))
+        .map(|(g, w)| (g - w).abs())
+        .fold(0.0f32, f32::max)
+}
+
+/// Per-block + final parity: the native MLX forward, fed the oracle's exact letterboxed
+/// input, must match the captured reference (`refs.safetensors`) block-for-block. This is
+/// the make-or-break correctness gate for the port — it isolates the forward pass from
+/// the (separately-verified) letterbox/decode/NMS math. Ignored by default — run with the
+/// fused weights + oracle staged in the app cache:
 ///   cargo test -p sceneworks-worker person_jobs -- --ignored --nocapture
 #[test]
-#[ignore = "requires staged yolo11m.onnx + bus.jpg fixtures in the app cache"]
-fn yolo11_matches_ultralytics_reference_on_bus() {
-    let (Some(onnx), Some(image), Some(reference)) = (
-        cache_fixture("yolo11m.onnx"),
+#[ignore = "requires staged yolo11m_fused_mlx.safetensors + refs.safetensors in the app cache"]
+fn yolo11_mlx_forward_matches_reference_oracle() {
+    let (Some(weights), Some(refs)) = (
+        cache_fixture("yolo11m_fused_mlx.safetensors"),
+        cache_fixture("refs.safetensors"),
+    ) else {
+        eprintln!("skipping: fixtures not staged");
+        return;
+    };
+
+    let model = Yolo::load(&weights).expect("weights load");
+    let oracle = Weights::from_file(&refs).expect("refs load");
+    // The oracle input is NCHW (1,3,640,640); the forward runs NHWC.
+    let input = oracle
+        .require("input")
+        .expect("input tensor")
+        .transpose_axes(&[0, 2, 3, 1])
+        .expect("nhwc");
+    let fwd = model.run(&input).expect("forward runs");
+
+    // Block tensors are NHWC; the oracle is NCHW — transpose back before comparing.
+    // block4 is near-bit-exact (proves the whole backbone CSP assembly). The deeper
+    // blocks accumulate fp32 backend drift (MLX/Metal vs the torch oracle, ~1e-2 by the
+    // neck — first jumping at the C2PSA softmax/matmul); that drift is benign and proven
+    // not to move results by the box/class assertions below + the e2e box parity test.
+    let checks = [
+        ("block4", &fwd.block4, 1e-3f32),
+        ("block10", &fwd.block10, 2e-2),
+        ("block16", &fwd.block16, 2e-2),
+        ("block19", &fwd.block19, 2e-2),
+        ("block22", &fwd.block22, 2e-2),
+    ];
+    for (name, got_nhwc, tol) in checks {
+        let got = got_nhwc.transpose_axes(&[0, 3, 1, 2]).expect("nchw");
+        let diff = max_abs_diff(&got, oracle.require(name).expect(name));
+        eprintln!("{name}: max|Δ| = {diff:.3e} (tol {tol:.0e})");
+        assert!(diff < tol, "{name} max|Δ| {diff:.3e} exceeds {tol:.0e}");
+    }
+
+    // The head output `(1,84,8400)`: rows 0..4 are box geometry in letterbox px, rows
+    // 4..84 are class probabilities. Assert them separately — box error is a sub-pixel
+    // tolerance, class error a tight probability tolerance.
+    let want_final = oracle.require("final").expect("final");
+    let gf = flat(&fwd.output);
+    let wf = flat(want_final);
+    let (mut box_d, mut cls_d) = (0.0f32, 0.0f32);
+    for r in 0..84usize {
+        for a in 0..8400usize {
+            let d = (gf[r * 8400 + a] - wf[r * 8400 + a]).abs();
+            if r < 4 {
+                box_d = box_d.max(d);
+            } else {
+                cls_d = cls_d.max(d);
+            }
+        }
+    }
+    eprintln!("final box-rows(0..4) max|Δ| = {box_d:.3e} px");
+    eprintln!("final cls-rows(4..84) max|Δ| = {cls_d:.3e}");
+    assert!(
+        box_d < 2.0,
+        "final box rows max|Δ| {box_d:.3e} px exceeds 2px"
+    );
+    assert!(
+        cls_d < 5e-3,
+        "final class rows max|Δ| {cls_d:.3e} exceeds 5e-3"
+    );
+}
+
+/// End-to-end parity: the full detector (letterbox → MLX forward → decode → NMS) must
+/// reproduce `ultralytics.predict`'s 4 people on the staged photo. Ignored by default —
+/// run with the model + fixtures staged in the app cache:
+///   cargo test -p sceneworks-worker person_jobs -- --ignored --nocapture
+#[test]
+#[ignore = "requires staged yolo11m_fused_mlx.safetensors + people.jpg fixtures in the app cache"]
+fn yolo11_matches_ultralytics_reference_on_photo() {
+    let (Some(weights), Some(image), Some(reference)) = (
+        cache_fixture("yolo11m_fused_mlx.safetensors"),
         cache_fixture("people.jpg"),
         cache_fixture("ref_people.json"),
     ) else {
@@ -165,13 +262,17 @@ fn yolo11_matches_ultralytics_reference_on_bus() {
         return;
     };
 
-    let result = detect_people_blocking(onnx, image, 0.25).expect("detection runs");
+    let result = detect_people_blocking(weights, image, 0.25).expect("detection runs");
     eprintln!(
         "device={} detections={}",
         result.device,
         result.detections.len()
     );
-    assert_eq!((result.width, result.height), (810, 1080), "bus.jpg dims");
+    assert_eq!(
+        (result.width, result.height),
+        (810, 1080),
+        "people.jpg dims"
+    );
 
     let ref_json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(reference).unwrap()).unwrap();

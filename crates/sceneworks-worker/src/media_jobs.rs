@@ -442,9 +442,9 @@ pub(crate) async fn run_person_detect(
             (
                 boxes,
                 "yolo11m".to_owned(),
-                "yolo11_ort",
+                "yolo11_mlx",
                 true,
-                json!({ "backend": "ort", "device": device, "model": "yolo11m" }),
+                json!({ "backend": "mlx", "device": device, "model": "yolo11m" }),
             )
         };
     let source_display_name = source_asset
@@ -558,9 +558,9 @@ pub(crate) async fn run_person_detect(
     Ok(result)
 }
 
-/// Run the YOLO11 onnx person detector on a rendered frame, returning the
+/// Run the native MLX YOLO11 person detector on a rendered frame, returning the
 /// normalized detection array (Python `run_person_detect` shape) + the device
-/// the model ran on. macOS-only: `ort`/CoreML is the Apple-Silicon backend
+/// the model ran on. macOS-only: MLX (mlx-rs) is the Apple-Silicon backend
 /// (epic 3482, sc-3633); the Python Ultralytics path serves Windows/Linux.
 #[cfg(target_os = "macos")]
 async fn run_yolo11_person_detect(
@@ -568,14 +568,15 @@ async fn run_yolo11_person_detect(
     frame_path: PathBuf,
     confidence: f64,
 ) -> WorkerResult<(Vec<Value>, &'static str)> {
-    let onnx = crate::person_jobs::resolve_detector_onnx(settings).ok_or_else(|| {
+    let weights = crate::person_jobs::resolve_detector_weights(settings).ok_or_else(|| {
         WorkerError::InvalidPayload(
-            "Person detector weights (yolo11m.onnx) are not provisioned on this worker.".to_owned(),
+            "Person detector weights (yolo11m_fused_mlx.safetensors) are not provisioned on this worker."
+                .to_owned(),
         )
     })?;
     let conf = confidence as f32;
     let result = tokio::task::spawn_blocking(move || {
-        crate::person_jobs::detect_people_blocking(onnx, frame_path, conf)
+        crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
     })
     .await
     .map_err(|error| WorkerError::InvalidPayload(format!("person detect task: {error}")))??;
