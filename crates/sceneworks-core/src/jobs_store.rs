@@ -3023,10 +3023,14 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         {
             return false;
         }
-        // Video (sc-3036): the mlx worker claims only MLX-eligible `video_generate`
-        // jobs (Wan/LTX text_to_video / image_to_video). The advanced video job types
-        // (extend / bridge / person-replace) and torch-only `video_generate` cases
-        // (advanced modes, SVD, non-MLX model, LoKr-on-Wan) stay on the Python worker.
+        // Video (sc-3036 + the epic-3040 cutover): the mlx worker claims MLX-eligible
+        // `video_generate` jobs (Wan/LTX text_to_video / image_to_video + SVD
+        // image_to_video) plus the advanced job types now ported to the Rust engine —
+        // `first_last_frame` (LTX + Wan TI2V-5B, sc-3520), `extend_clip` / `video_bridge`
+        // (LTX IC-LoRA, sc-3522), and `person_replace` → native Wan-VACE (sc-3521). The
+        // per-(model, mode) gate in `video_job_is_mlx_eligible` keeps each mode to its
+        // capable engines; everything it rejects — a non-MLX model, Wan extend/bridge
+        // (no IC-LoRA keyframe-append path), LoKr-on-Wan — stays on the Python worker.
         if matches!(
             job.job_type,
             JobType::VideoGenerate

@@ -2155,10 +2155,13 @@ def create_video_adapter(job: dict[str, Any] | None = None) -> VideoGenerationAd
         payload = (job or {}).get("payload", {})
         model = str(payload.get("model", "ltx_2_3"))
         target = model_target(model)
-        # Epic 3018 (sc-3036/sc-3037): MLX-eligible video (Wan/LTX text_to_video /
-        # image_to_video) is claimed by the in-process Rust GPU worker (gpu_id "mlx").
-        # The Python worker only receives torch-path jobs (advanced modes, SVD, non-MLX
-        # models, LoKr-on-Wan), so auto-dispatch routes straight to the native LTX /
+        # Epic 3018 (sc-3036/sc-3037) + the epic-3040 cutover: MLX-eligible video is
+        # claimed by the in-process Rust GPU worker (gpu_id "mlx") — Wan/LTX
+        # text_to_video / image_to_video, SVD image_to_video, first_last_frame (LTX +
+        # Wan TI2V-5B), extend_clip / video_bridge (LTX IC-LoRA) and replace_person
+        # (Wan-VACE). The Python worker receives the torch-path remainder (non-MLX
+        # models, Wan extend/bridge, LoKr-on-Wan) plus all video on Windows/Linux where
+        # there is no MLX worker, so auto-dispatch routes straight to the native LTX /
         # Diffusers torch adapters — the old MlxVideoAdapter path was removed at cutover.
         if target["adapter"] == "ltx_video":
             return LtxPipelinesVideoAdapter()
