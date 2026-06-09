@@ -72,6 +72,12 @@ mod upscale_jobs;
 mod person_jobs;
 #[cfg(target_os = "macos")]
 mod person_track;
+// Native-MLX SAM2 person segmentation (epic 3704, sc-3709): the `mlx-gen-sam2`
+// box-prompt segmenter generates per-frame masks in `run_person_track`. macOS-only
+// like person_jobs (mlx-gen builds MLX from source); the Python SAM2 path stays the
+// Windows/Linux backend.
+#[cfg(target_os = "macos")]
+mod person_segment;
 use downloads::*;
 #[cfg(target_os = "macos")]
 use pose_jobs::*;

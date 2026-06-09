@@ -1804,12 +1804,13 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             Some("epic 3040 (+ sc-3488)"),
         )),
 
-        JobType::PersonDetect | JobType::PersonTrack => Err(UnsupportedReason::new(
-            None,
-            "person detect / track (YOLO/SAM2)",
-            "person detection/tracking runs on the Python onnxruntime/torch path.",
-            Some("sc-3488"),
-        )),
+        // Person detection + tracking are now ported to the Rust worker (epic 3482,
+        // sc-3488): native-MLX YOLO11 detection (sc-3633), SORT/ByteTrack track assembly
+        // (sc-3634), and SAM2 per-frame segmentation (sc-3709) all run in-process on the
+        // macOS MLX worker, so the Replace-Person detect → track → mask flow is
+        // Python-free. (replace_person end-to-end still needs the video-gen/inpaint half,
+        // a tracked torch gap on `PersonReplace` below — epic 3040.)
+        JobType::PersonDetect | JobType::PersonTrack => Ok(()),
 
         // DWPose pose detection is now ported to the Rust worker (sc-3487): RTMW
         // whole-body via `ort`/CoreML on the macOS MLX worker, so the Pose Library
@@ -2097,12 +2098,16 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         ),
     );
     features.insert(
+        // Person detection + tracking are ported to the Rust worker (sc-3488 /
+        // sc-3633/3634/3709): native-MLX YOLO11 detection, SORT/ByteTrack track assembly,
+        // and SAM2 per-frame segmentation all run in-process, so the Replace-Person
+        // detect → track → mask flow works on a Python-free Mac. (replace_person
+        // end-to-end still needs the video-gen/inpaint half — see `advancedVideoModes`.)
         "personDetect".to_owned(),
-        MacFeatureSupport::unsupported(
-            "person detect / track (YOLO/SAM2)",
-            "person detection/tracking runs on the Python onnxruntime/torch path.",
-            "sc-3488",
-        ),
+        MacFeatureSupport {
+            supported: true,
+            reason: None,
+        },
     );
     features.insert(
         "datasetCaptioning".to_owned(),

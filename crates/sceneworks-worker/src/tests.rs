@@ -448,6 +448,14 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "training_caption"));
+    // Real, model-backed person detect/track are ported to the MLX worker (sc-3709): the
+    // worker advertises the non-preview capabilities so the API routes real jobs here.
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "person_detect"));
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "person_track"));
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "gpu"));

@@ -68,16 +68,18 @@ tower = { version = "0.5", features = ["util"] }
 # desktop packager (build-sidecar.mjs) has a dylib to stage and dev runs work.
 ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "download-binaries"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
-# Rev 6404de7 (mlx-gen main): adds third-party LyCORIS (LoHa / non-peft kohya LoKr)
-# application across ALL providers (epic 3641, mlx-gen #171/#172/#174) — the core
-# AdaptableHost loader (flux/flux2/qwen-image/z-image) plus the SDXL merge path, the
-# Wan in-place merge, and the LTX forward residual. On top of the prior rev's
-# Qwen-Image ControlNet strict pose (epic 3401), LoRA/LoKr trainer surface (epic 3039),
-# Wan/LTX converter stack, Wan-VACE provider + per-request control_scale (epic 3040),
-# JoyCaption captioner (epic 3550), and the XLabs FLUX IP-Adapter (epic 3621). One
-# shared rev so MLX builds once with the unchanged mlx-rs pin (e59ffd88, identical
-# across the bump -> no MLX rebuild).
-mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+# Rev 0ed3019 (mlx-gen main): adds the native-MLX SAM2 segmenter crate `mlx-gen-sam2`
+# (epic 3704, mlx-gen #176/#177/#179 — Hiera encoder + FPN neck + prompt encoder +
+# two-way mask decoder + box→mask segmenter), consumed by the Rust person-track
+# segmenter (sc-3709). On top of the prior rev's third-party LyCORIS (epic 3641,
+# #171/#172/#174), the core AdaptableHost loader (flux/flux2/qwen-image/z-image) plus
+# the SDXL merge path, the Wan in-place merge, the LTX forward residual, Qwen-Image
+# ControlNet strict pose (epic 3401), LoRA/LoKr trainer surface (epic 3039), Wan/LTX
+# converter stack, Wan-VACE provider + per-request control_scale (epic 3040), JoyCaption
+# captioner (epic 3550), and the XLabs FLUX IP-Adapter (epic 3621). One shared rev so
+# MLX builds once with the unchanged mlx-rs pin (e59ffd88, identical across the bump ->
+# no MLX rebuild).
+mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 # `mlx-rs` (pmetal-mlx-rs fork) — used directly by the native MLX YOLO11 person
 # detector (person_jobs.rs, sc-3633) for the ops the shared `mlx_gen::nn` layer does
 # not cover: CSP channel splits, depthwise convs, SPPF max-pool, the C2PSA attention,
@@ -85,32 +87,38 @@ mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec8
 # (a different rev would compile pmetal-mlx-sys twice). Also exercised by the NAX
 # guard test (tests/nax_guard.rs).
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "e59ffd88014340e6a49b26de95446b8b76a57932" }
-mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 # FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
 # builds once; self-registers `flux1_schnell`/`flux1_dev` via inventory only when
 # linked + referenced (`use mlx_gen_flux as _;` in image_jobs.rs).
-mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 # Qwen-Image provider (epic 3018, sc-3024). Self-registers `qwen_image`.
-mlx-gen-qwen-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+mlx-gen-qwen-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 # FLUX.2-klein provider (epic 3018, sc-3025). Self-registers `flux2_klein_9b`
 # (txt2img) + `flux2_klein_9b_edit` + `flux2_klein_9b_kv_edit` (edit = sc-3029).
-mlx-gen-flux2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+mlx-gen-flux2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 # SDXL provider (epic 3018, sc-3026). Self-registers `sdxl` (also serves the
 # `realvisxl` finetune — same arch). Replaces the in-process _vendor/mlx_sd path.
-mlx-gen-sdxl = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+mlx-gen-sdxl = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 # Wan2.2 video provider (epic 3018, sc-3034). Self-registers `wan2_2_ti2v_5b`
 # (dense T2V/TI2V), `wan2_2_t2v_14b` + `wan2_2_i2v_14b` (dual-expert MoE) via
 # inventory when linked + referenced (`use mlx_gen_wan as _;` in video_jobs.rs).
-mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 # LTX-2.3 video provider (epic 3018, sc-3035). Self-registers `ltx_2_3` (T2V/I2V +
 # synchronized audio, 2-stage distilled). Linked + referenced (`use mlx_gen_ltx as _;`
 # in video_jobs.rs); the Gemma-3 text encoder is resolved by the engine (HF cache / env).
 # Same rev as the other mlx-gen crates (sc-3060 bump) so MLX + the shared core build once.
-mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 # JoyCaption image-to-text provider (epic 3550, sc-3556). Self-registers
 # `fancyfeast/llama-joycaption-beta-one-hf-llava` into mlx-gen's captioner
 # registry for native dataset captioning on the macOS MLX worker.
-mlx-gen-joycaption = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "6404de77ec82f5acaa370f487cb530c145345bb2" }
+mlx-gen-joycaption = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
+# SAM2 (Segment Anything 2) segmenter (epic 3704, sc-3705..3709). A plain utility
+# crate (NOT a self-registering generation provider) — `person_segment.rs` builds a
+# `Sam2Segmenter` directly from the converted MLX weights to produce per-frame person
+# masks in `run_person_track`. Same git rev + mlx-rs pin as the other mlx-gen crates so
+# MLX builds once.
+mlx-gen-sam2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0ed301962c9ec6e055b1cfeff2c75c7448006887" }
 
 [lints]
 workspace = true

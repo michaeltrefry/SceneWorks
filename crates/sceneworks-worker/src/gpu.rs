@@ -417,6 +417,15 @@ pub(crate) fn mlx_gpu() -> DiscoveredGpu {
             // works on a Python-free Mac. Only `engine=real-esrgan` (the default) is
             // served here; `aura-sr` stays on the Python worker (routing oracle).
             WorkerCapability::ImageUpscale,
+            // Real, model-backed person detection + tracking (epic 3482, sc-3488 /
+            // sc-3633/3634/3709): the native-MLX YOLO11 detector + SORT/ByteTrack tracker +
+            // SAM2 segmenter run in-process (`person_jobs` / `person_track` /
+            // `person_segment`), replacing the Python onnxruntime/torch path so the
+            // Replace-Person detect → track → mask flow works on a Python-free Mac. A
+            // `preview: true` job still routes to the CPU placeholder's procedural preview
+            // capability (`required_capability` in jobs_store).
+            WorkerCapability::PersonDetect,
+            WorkerCapability::PersonTrack,
         ],
         utilization: None,
     }

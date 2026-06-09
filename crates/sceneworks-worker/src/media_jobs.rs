@@ -601,7 +601,8 @@ async fn run_yolo11_person_detect(
 struct RealPersonTrack {
     frames: Vec<Value>,
     average_confidence: f64,
-    /// "degraded" for this slice (box-derived masks); SAM2 per-frame masks arrive in sc-3709.
+    /// Sidecar `maskState` from the SAM2 segmentation pass (sc-3709): active / generated /
+    /// degraded (segmenter unavailable → box-mask fallback) / missing (segmentation off).
     mask_state: &'static str,
     quality: Value,
     tracker_meta: Value,
@@ -618,11 +619,14 @@ async fn assemble_real_person_track(
     settings: &Settings,
     http_client: &reqwest::Client,
     job: &JobSnapshot,
+    project_path: &std::path::Path,
     source_media_path: &std::path::Path,
     detection: &Value,
+    track_id: &str,
     selected_timestamp: f64,
     duration: f64,
     confidence: f64,
+    segment_enabled: bool,
 ) -> WorkerResult<RealPersonTrack> {
     use crate::person_track as pt;
 
@@ -635,6 +639,10 @@ async fn assemble_real_person_track(
     tokio::fs::create_dir_all(&work_dir).await?;
 
     let mut device = "mlx";
+    // Keep each rendered frame (don't delete in-loop): the segmentation pass re-reads
+    // the detected target frames by the same sample index. They share the cadence, so
+    // assembly frame `i` ↔ `timestamps[i]` ↔ `frame_paths[i]`.
+    let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
     let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
         Vec::with_capacity(timestamps.len());
     for (index, &timestamp) in timestamps.iter().enumerate() {
@@ -684,31 +692,152 @@ async fn assemble_real_person_track(
             })
             .collect::<Vec<_>>();
         per_frame.push((timestamp, boxes));
-        let _ = tokio::fs::remove_file(&frame_path).await;
+        frame_paths.push(frame_path);
     }
-    let _ = tokio::fs::remove_dir_all(&work_dir).await;
 
     let observations = pt::observe(per_frame);
     let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, &timestamps);
     if assembly.target_track_id.is_none() || assembly.detected_frames == 0 {
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
         return Err(WorkerError::InvalidPayload(
             "Selected person was not found in the source video. Re-run detection or adjust the selection."
                 .to_owned(),
         ));
     }
 
+    // SAM2 segmentation pass (sc-3709): write a per-frame mask for each detected target
+    // frame and fold the result into `maskState`. Any segmenter unavailability degrades
+    // gracefully to box-derived masks (handled by the replacement loader), never failing
+    // a track that already located the person.
+    let mut frames_json = pt::frames_to_json(&assembly.frames);
+    let mask_state = segment_assembly_frames(
+        api,
+        settings,
+        http_client,
+        job,
+        project_path,
+        track_id,
+        &assembly.frames,
+        &frame_paths,
+        &mut frames_json,
+        segment_enabled,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+
     Ok(RealPersonTrack {
-        frames: pt::frames_to_json(&assembly.frames),
+        frames: frames_json,
         average_confidence: pt::average_confidence(&assembly.frames),
-        mask_state: "degraded",
+        mask_state,
         quality: assembly.quality,
         tracker_meta: json!({
             "backend": "mlx",
             "device": device,
             "model": "yolo11m",
             "tracker": "sort_bytetrack",
+            "segmenter": if segment_enabled { "sam2.1_hiera_large" } else { "disabled" },
         }),
     })
+}
+
+/// Segment each detected target frame with the native-MLX SAM2 segmenter, write the
+/// masks under `person-tracks/{track_id}/masks/frame_{index:06}.png`, set each frame's
+/// `mask` path, and roll the outcome up into a `maskState` (Python `segment_track`):
+/// `missing` (segmentation disabled), `degraded` (segmenter/weights unavailable or every
+/// frame failed → box-mask fallback at replacement time), `generated` (some frames
+/// segmented), `active` (all detected frames segmented). Frame ordering matches the
+/// assembly: frame `i` reads `frame_paths[i]` and the mask filename is 1-based (`i + 1`),
+/// matching the Python sidecar.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn segment_assembly_frames(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    project_path: &std::path::Path,
+    track_id: &str,
+    frames: &[crate::person_track::TrackFrame],
+    frame_paths: &[PathBuf],
+    frames_json: &mut [Value],
+    segment_enabled: bool,
+) -> &'static str {
+    let detected_total = frames.iter().filter(|frame| frame.detected).count();
+    if detected_total == 0 {
+        return "missing";
+    }
+    if !segment_enabled {
+        return "missing";
+    }
+
+    // Resolve/download the SAM2 weights once; any failure degrades to box masks.
+    let weights = match crate::person_segment::ensure_segmenter_weights(settings, http_client).await
+    {
+        Ok(path) => path,
+        Err(_) => return "degraded",
+    };
+    let masks_dir = project_path
+        .join("person-tracks")
+        .join(track_id)
+        .join("masks");
+    if tokio::fs::create_dir_all(&masks_dir).await.is_err() {
+        return "degraded";
+    }
+
+    let mut generated = 0usize;
+    for (index, frame) in frames.iter().enumerate() {
+        if !frame.detected {
+            continue;
+        }
+        let Some(frame_path) = frame_paths.get(index) else {
+            continue;
+        };
+        if check_cancel(
+            api,
+            &job.id,
+            "Person tracking canceled during segmentation.",
+        )
+        .await
+        .is_err()
+        {
+            // Cancellation surfaces through the outer job poll; stop segmenting and keep
+            // whatever masks were already written.
+            break;
+        }
+        let rel = format!("person-tracks/{track_id}/masks/frame_{:06}.png", index + 1);
+        let out_path = project_path.join(&rel);
+        let weights_for_task = weights.clone();
+        let frame_for_task = frame_path.clone();
+        let box_norm = (
+            frame.box_.x,
+            frame.box_.y,
+            frame.box_.width,
+            frame.box_.height,
+        );
+        let out_for_task = out_path.clone();
+        let segmented = tokio::task::spawn_blocking(move || {
+            crate::person_segment::segment_person_blocking(
+                weights_for_task,
+                frame_for_task,
+                box_norm,
+                out_for_task,
+            )
+        })
+        .await;
+        match segmented {
+            Ok(Ok(())) => {
+                if let Some(entry) = frames_json.get_mut(index) {
+                    entry["mask"] = Value::String(rel);
+                }
+                generated += 1;
+            }
+            // A single frame's failure is non-fatal (matches Python's per-frame `except:
+            // continue`); the frame keeps `mask: null` and falls back to a box mask.
+            _ => continue,
+        }
+    }
+
+    crate::person_segment::rollup_mask_state(generated, detected_total)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -718,11 +847,14 @@ async fn assemble_real_person_track(
     _settings: &Settings,
     _http_client: &reqwest::Client,
     _job: &JobSnapshot,
+    _project_path: &std::path::Path,
     _source_media_path: &std::path::Path,
     _detection: &Value,
+    _track_id: &str,
     _selected_timestamp: f64,
     _duration: f64,
     _confidence: f64,
+    _segment_enabled: bool,
 ) -> WorkerResult<RealPersonTrack> {
     Err(WorkerError::InvalidPayload(
         "Real person tracking runs on the Python worker on this platform.".to_owned(),
@@ -846,10 +978,22 @@ pub(crate) async fn run_person_track(
         })
         .unwrap_or(0.0);
 
+    // Segmentation is on by default (Python `advanced.segment`); a per-frame SAM2 mask is
+    // written for each detected target frame. `segment: false` skips it (maskState=missing).
+    let segment_enabled = job
+        .payload
+        .get("advanced")
+        .and_then(|advanced| advanced.get("segment"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    // The track id is generated up front so the SAM2 segmentation pass can write masks under
+    // `person-tracks/{track_id}/masks/` before the sidecar is assembled.
+    let track_id = format!("track_{}", Uuid::new_v4().simple());
+
     // Preview jobs (CPU worker) keep the procedural placeholder. Real jobs run the native-MLX
-    // YOLO11 detector (sc-3633) per sampled frame + the SORT/ByteTrack tracker (sc-3634). maskState
-    // stays "degraded" (box-derived masks via `load_track_masks`) until the SAM2 segmenter is wired
-    // in (sc-3709).
+    // YOLO11 detector (sc-3633) per sampled frame + the SORT/ByteTrack tracker (sc-3634), then
+    // segment each detected frame with the native-MLX SAM2 segmenter (sc-3709) → maskState
+    // active / generated / degraded / missing.
     let (
         frames,
         average_confidence,
@@ -894,11 +1038,14 @@ pub(crate) async fn run_person_track(
             settings,
             http_client,
             job,
+            &project_path,
             &source_media_path,
             &detection,
+            &track_id,
             selected_timestamp,
             duration,
             confidence,
+            segment_enabled,
         )
         .await?;
         (
@@ -913,7 +1060,6 @@ pub(crate) async fn run_person_track(
         )
     };
 
-    let track_id = format!("track_{}", Uuid::new_v4().simple());
     let track_name =
         optional_payload_string(&job.payload, "trackName").unwrap_or("Selected person");
     let representative_frame_asset_id = job

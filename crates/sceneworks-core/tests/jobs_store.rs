@@ -1833,16 +1833,20 @@ fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
 #[test]
 fn mac_rust_supported_names_infra_job_types() {
     let store = store("oracle-infra");
-    let cases = [(JobType::PersonDetect, "sc-3488")];
-    for (job_type, epic) in cases {
-        let job = job_of(&store, job_type, json!({}));
-        let reason = mac_rust_supported(&job).unwrap_err();
-        assert_eq!(
-            reason.suggested_epic.as_deref(),
-            Some(epic),
-            "job type maps to {epic}"
-        );
-    }
+    // Person detection + tracking are ported to the Rust worker (sc-3488 /
+    // sc-3633/3634/3709): native-MLX YOLO11 + SORT/ByteTrack + SAM2 segmentation → both
+    // supported. (replace_person end-to-end still needs epic 3040 — asserted below.)
+    let person_detect = job_of(&store, JobType::PersonDetect, json!({}));
+    assert!(mac_rust_supported(&person_detect).is_ok());
+    let person_track = job_of(&store, JobType::PersonTrack, json!({}));
+    assert!(mac_rust_supported(&person_track).is_ok());
+    // replace_person stays a tracked torch gap (the video-gen/inpaint half, epic 3040).
+    let replace = job_of(&store, JobType::PersonReplace, json!({}));
+    let replace_reason = mac_rust_supported(&replace).unwrap_err();
+    assert!(replace_reason
+        .suggested_epic
+        .as_deref()
+        .is_some_and(|epic| epic.contains("epic 3040")));
     // DWPose pose detection is ported to the Rust worker (sc-3487) → supported.
     let pose = job_of(&store, JobType::PoseDetect, json!({}));
     assert!(mac_rust_supported(&pose).is_ok());
@@ -2054,18 +2058,25 @@ fn mac_capabilities_master_switch_and_infra_features() {
     assert_eq!(epic("imageUpscale"), None);
     assert!(mac.features["imageUpscale"].supported);
     assert_eq!(epic("poseFromPhoto").as_deref(), Some("sc-3487"));
-    assert_eq!(epic("personDetect").as_deref(), Some("sc-3488"));
+    // Person detect/track is ported (sc-3488 / sc-3633/3634/3709) → supported, no epic.
+    assert_eq!(epic("personDetect"), None);
+    assert!(mac.features["personDetect"].supported);
     assert_eq!(epic("datasetCaptioning"), None);
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability gap entry at all.
     assert!(!mac.features.contains_key("lycoris"));
     assert_eq!(epic("advancedVideoModes").as_deref(), Some("epic 3040"));
     assert!(mac.features["datasetCaptioning"].supported);
-    // datasetCaptioning + imageUpscale are the ported (supported) infra features; the
-    // rest stay gated until their port lands.
+    // datasetCaptioning + imageUpscale + personDetect are the ported (supported) infra
+    // features; the rest stay gated until their port lands.
     assert!(mac
         .features
         .iter()
-        .filter(|(key, _)| !matches!(key.as_str(), "datasetCaptioning" | "imageUpscale"))
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "datasetCaptioning" | "imageUpscale" | "personDetect"
+            )
+        })
         .all(|(_, f)| !f.supported));
     // Training kernels with a native Rust trainer stay enabled; LoKr-on-Wan does not.
     assert!(mac
