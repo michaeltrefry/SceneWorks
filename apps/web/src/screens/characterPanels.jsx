@@ -713,6 +713,11 @@ export function CharacterAssets({
   if (!selectedCharacter) {
     return null;
   }
+  const referenceAssetIds = new Set(
+    (selectedCharacter.references ?? [])
+      .map((reference) => reference?.assetId ?? reference?.id)
+      .filter(Boolean),
+  );
   const scopedAssets = (assets ?? [])
     .filter(
       (asset) =>
@@ -720,7 +725,8 @@ export function CharacterAssets({
         // character's asset library (sc-2296) — the Assets tab is the home for
         // every piece of media made for or referencing this character.
         (asset.type === "image" || asset.type === "frame" || asset.type === "video") &&
-        (asset.recipe?.normalizedSettings?.characterId === characterId ||
+        (referenceAssetIds.has(asset.id) ||
+          asset.recipe?.normalizedSettings?.characterId === characterId ||
           (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === characterId)),
     )
     .sort((left, right) => new Date(right.createdAt ?? 0) - new Date(left.createdAt ?? 0));

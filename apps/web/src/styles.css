@@ -3105,6 +3105,53 @@ label {
   gap: 8px;
 }
 
+.character-asset-linker {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.character-asset-linker label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.character-asset-linker button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: background var(--t-fast), border-color var(--t-fast), transform var(--t-fast);
+}
+
+.character-asset-linker button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.character-asset-linker button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.character-asset-linker p {
+  color: var(--text-muted);
+}
+
 .asset-tag-list,
 .asset-tile-tags {
   display: flex;

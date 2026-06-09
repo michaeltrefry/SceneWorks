@@ -160,7 +160,7 @@ export function CharacterStudio() {
   const characterImageAssetIds = useMemo(
     () =>
       selectedCharacter
-        ? imageAssets.filter((asset) => assetMatchesCharacter(asset, selectedCharacter.id)).map((asset) => asset.id)
+        ? imageAssets.filter((asset) => assetMatchesCharacter(asset, selectedCharacter.id, selectedCharacter)).map((asset) => asset.id)
         : [],
     [imageAssets, selectedCharacter?.id],
   );

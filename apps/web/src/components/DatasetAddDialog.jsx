@@ -6,14 +6,17 @@ import { Modal } from "./Modal.jsx";
 // (recipe.normalizedSettings.characterId) or generated referencing it
 // (metadata.characterReferences[].characterId). Mirrors the per-character
 // gallery filter so the Character tab surfaces the same images.
-export function assetMatchesCharacter(asset, characterId) {
+export function assetMatchesCharacter(asset, characterId, character = null) {
   if (!characterId) {
     return false;
   }
   if (asset?.recipe?.normalizedSettings?.characterId === characterId) {
     return true;
   }
-  return (asset?.metadata?.characterReferences ?? []).some((reference) => reference?.characterId === characterId);
+  if ((asset?.metadata?.characterReferences ?? []).some((reference) => reference?.characterId === characterId)) {
+    return true;
+  }
+  return (character?.references ?? []).some((reference) => (reference?.assetId ?? reference?.id) === asset?.id);
 }
 
 function assetTitle(asset) {
@@ -97,8 +100,11 @@ export function DatasetAddDialog({
   // Character tab: this character's images (including its Character Studio
   // outputs, which the Library tab hides), minus current members.
   const characterCandidates = useMemo(
-    () => assets.filter((asset) => assetMatchesCharacter(asset, characterId) && !memberSet.has(asset.id)),
-    [assets, characterId, memberSet],
+    () => {
+      const selectedCharacter = characters.find((character) => character.id === characterId) ?? null;
+      return assets.filter((asset) => assetMatchesCharacter(asset, characterId, selectedCharacter) && !memberSet.has(asset.id));
+    },
+    [assets, characterId, characters, memberSet],
   );
 
   function toggle(id) {

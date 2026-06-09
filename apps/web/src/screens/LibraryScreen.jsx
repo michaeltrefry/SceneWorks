@@ -13,6 +13,8 @@ export function LibraryScreen() {
     createVqaJob,
     deleteAsset,
     purgeAsset,
+    characters = [],
+    addCharacterReference,
     importAsset,
     setPreviewAsset,
     sendAssetToImage,
@@ -95,6 +97,19 @@ export function LibraryScreen() {
     await importAsset(file);
     setIsImporting(false);
     event.target.value = "";
+  }
+
+  async function moveAssetToCharacter(asset, characterId) {
+    const updated = await addCharacterReference?.(characterId, {
+      assetId: asset.id,
+      approved: false,
+      role: "asset",
+      notes: "Added from Asset Library.",
+    });
+    if (!updated) {
+      throw new Error("Could not add this asset to the character.");
+    }
+    return updated;
   }
 
   const imageCount = libraryAssets.filter((asset) => asset.type === "image").length;
@@ -190,6 +205,8 @@ export function LibraryScreen() {
           onSendImage={onSendImage}
           onSendVideo={onSendVideo}
           onSendEditor={onSendEditor}
+          characters={characters}
+          onMoveToCharacter={addCharacterReference ? moveAssetToCharacter : null}
           updateAssetStatus={updateAssetStatus}
           updateAssetTags={updateAssetTags}
           availableTags={availableTags}

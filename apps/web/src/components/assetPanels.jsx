@@ -153,6 +153,96 @@ function AssetTags({ asset, availableTags = [], updateAssetTags = () => {} }) {
   );
 }
 
+function assetSupportsCharacterLink(asset) {
+  return (
+    ["image", "frame", "upload", "video"].includes(asset?.type) ||
+    asset?.file?.mimeType?.startsWith("image/") ||
+    asset?.file?.mimeType?.startsWith("video/")
+  );
+}
+
+function assetLinkedToCharacter(asset, character) {
+  const characterId = character?.id;
+  if (!asset?.id || !characterId) {
+    return false;
+  }
+  if (asset.recipe?.normalizedSettings?.characterId === characterId) {
+    return true;
+  }
+  if ((asset.metadata?.characterReferences ?? []).some((reference) => reference?.characterId === characterId)) {
+    return true;
+  }
+  return (character.references ?? []).some((reference) => (reference?.assetId ?? reference?.id) === asset.id);
+}
+
+function CharacterAssetLinker({ asset, characters = [], onMoveToCharacter }) {
+  const availableCharacters = React.useMemo(
+    () => characters.filter((character) => !character?.archived),
+    [characters],
+  );
+  const [characterId, setCharacterId] = React.useState(availableCharacters[0]?.id ?? "");
+  const [message, setMessage] = React.useState("");
+  const [moving, setMoving] = React.useState(false);
+
+  React.useEffect(() => {
+    setMessage("");
+    setMoving(false);
+  }, [asset?.id]);
+
+  React.useEffect(() => {
+    if (!availableCharacters.some((character) => character.id === characterId)) {
+      setCharacterId(availableCharacters[0]?.id ?? "");
+    }
+  }, [availableCharacters, characterId]);
+
+  if (!assetSupportsCharacterLink(asset) || !availableCharacters.length || typeof onMoveToCharacter !== "function") {
+    return null;
+  }
+
+  const selectedCharacter = availableCharacters.find((character) => character.id === characterId) ?? null;
+  const alreadyLinked = assetLinkedToCharacter(asset, selectedCharacter);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!selectedCharacter || alreadyLinked || moving) {
+      return;
+    }
+    setMoving(true);
+    setMessage("");
+    try {
+      await onMoveToCharacter(asset, selectedCharacter.id);
+      setMessage(`Added to ${selectedCharacter.name}'s assets.`);
+    } catch (err) {
+      setMessage(err?.message ?? "Could not add this asset to the character.");
+    } finally {
+      setMoving(false);
+    }
+  }
+
+  return (
+    <form className="character-asset-linker" onSubmit={submit}>
+      <label>
+        Character
+        <select aria-label="Target character" onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+          {availableCharacters.map((character) => (
+            <option key={character.id} value={character.id}>
+              {character.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        disabled={!selectedCharacter || alreadyLinked || moving}
+        title={alreadyLinked ? "Already in this character's assets" : undefined}
+        type="submit"
+      >
+        {moving ? "Moving..." : alreadyLinked ? "Already added" : "Move to Character"}
+      </button>
+      {message ? <p aria-live="polite">{message}</p> : null}
+    </form>
+  );
+}
+
 export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId }) {
   if (!assets.length) {
     return <div className="empty-panel">No assets in this view</div>;
@@ -254,6 +344,8 @@ export function AssetDetail({
   onSendImage,
   onSendVideo,
   onSendEditor,
+  characters = [],
+  onMoveToCharacter,
   updateAssetStatus,
   updateAssetTags,
   availableTags,
@@ -279,6 +371,7 @@ export function AssetDetail({
       <p>{asset.recipe?.prompt ?? "No prompt"}</p>
       <AssetTags asset={asset} availableTags={availableTags} updateAssetTags={updateAssetTags} />
       <RatingControl asset={asset} updateAssetStatus={updateAssetStatus} />
+      <CharacterAssetLinker asset={asset} characters={characters} onMoveToCharacter={onMoveToCharacter} />
       <div className="detail-actions">
         <button onClick={() => updateAssetStatus(asset, { favorite: !asset.status?.favorite })} type="button">
           {asset.status?.favorite ? "Unfavorite" : "Favorite"}

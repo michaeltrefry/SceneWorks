@@ -2338,6 +2338,72 @@ describe("SceneWorks app shell", () => {
     expect([...section.querySelectorAll("button")].some((button) => button.textContent.startsWith("Media (2)"))).toBe(true);
   });
 
+  it("surfaces assets moved from the Library in the Character Assets tab immediately", async () => {
+    const movedAsset = {
+      id: "asset-moved",
+      type: "image",
+      displayName: "Library Portrait",
+      projectId: "project-1",
+      recipe: { prompt: "library portrait" },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            addCharacterReference: () => {},
+            archiveCharacter: () => {},
+            assets: [movedAsset],
+            attachCharacterLora: () => {},
+            characters: [
+              {
+                id: "char-1",
+                name: "Mira",
+                type: "person",
+                references: [{ assetId: "asset-moved", role: "asset", approved: false }],
+                approvedReferences: [],
+                looks: [],
+                loras: [],
+              },
+            ],
+            createCharacter: () => {},
+            createCharacterLook: () => {},
+            createCharacterTestJob: () => {},
+            deleteAsset: () => {},
+            deleteCharacterLook: () => {},
+            detachCharacterLora: () => {},
+            imageModels: [],
+            latestImageAssets: [movedAsset],
+            loras: [],
+            setPreviewAsset: () => {},
+            sendCharacterToImage: () => {},
+            sendCharacterToVideo: () => {},
+            purgeAsset: () => {},
+            removeCharacterReference: () => {},
+            updateAssetStatus: () => {},
+            updateCharacter: () => {},
+            updateCharacterLook: () => {},
+            updateCharacterLora: () => {},
+            updateCharacterReference: () => {},
+          },
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    await act(async () => {
+      container.querySelector("#character-tab-assets").click();
+    });
+    const section = [...container.querySelectorAll(".character-section")].find(
+      (item) => item.querySelector(".eyebrow")?.textContent === "Character assets",
+    );
+    expect(section).toBeTruthy();
+    expect(section.textContent).toContain("Generated for Mira (1)");
+    expect(section.querySelectorAll(".character-asset-thumb")).toHaveLength(1);
+    expect([...section.querySelectorAll("button")].some((button) => button.textContent.startsWith("Media (1)"))).toBe(true);
+  });
+
   it("switches the active character via the compact selector (sc-2025)", async () => {
     const baseContext = {
       activeProject: { id: "project-1", name: "Noir" },
@@ -8415,6 +8481,123 @@ describe("SceneWorks app shell", () => {
       container.querySelector('button[aria-label="Remove portrait tag"]').click();
     });
     expect(updateAssetTags).toHaveBeenLastCalledWith(portrait, []);
+  });
+
+  it("moves a Library asset into a selected character's assets", async () => {
+    const addCharacterReference = vi.fn(async () => ({ id: "char-2", references: [] }));
+    const asset = {
+      id: "asset-portrait",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Portrait One",
+      recipe: { prompt: "studio portrait" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Characters" },
+            assets: [asset],
+            characters: [
+              { id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
+              { id: "char-2", name: "Dax", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
+            ],
+            addCharacterReference,
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: asset,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    await changeField(container.querySelector('select[aria-label="Target character"]'), "char-2");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Move to Character").click();
+    });
+    await settle();
+
+    expect(addCharacterReference).toHaveBeenCalledWith("char-2", {
+      assetId: "asset-portrait",
+      approved: false,
+      role: "asset",
+      notes: "Added from Asset Library.",
+    });
+    expect(container.textContent).toContain("Added to Dax's assets.");
+  });
+
+  it("disables the Library move action for a character that already owns the asset", async () => {
+    const addCharacterReference = vi.fn();
+    const asset = {
+      id: "asset-portrait",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Portrait One",
+      recipe: { prompt: "studio portrait" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Characters" },
+            assets: [asset],
+            characters: [
+              {
+                id: "char-1",
+                name: "Mira",
+                type: "person",
+                references: [{ assetId: "asset-portrait", role: "asset" }],
+                approvedReferences: [],
+                looks: [],
+                loras: [],
+              },
+            ],
+            addCharacterReference,
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: asset,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+            updateAssetTags: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    const button = [...container.querySelectorAll("button")].find((item) => item.textContent === "Already added");
+    expect(button).toBeTruthy();
+    expect(button.disabled).toBe(true);
+    await act(async () => {
+      button.click();
+    });
+    expect(addCharacterReference).not.toHaveBeenCalled();
   });
 
   it("excludes Character Studio outputs from the Asset Library (sc-2024)", async () => {
