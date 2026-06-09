@@ -1085,6 +1085,198 @@ fn resolve_wan_conditioning(
     }
 }
 
+/// Which boundary frame of a source clip to extract for Wan-native clip conditioning (sc-3357).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ClipFramePosition {
+    /// The clip's first decoded frame (the right-side clip's head for `video_bridge`).
+    First,
+    /// The clip's last decoded frame (the source tail for `extend_clip` / the left-side clip).
+    Last,
+}
+
+/// Build the Wan-native boundary [`Conditioning::Keyframe`] set for extend_clip / video_bridge
+/// (sc-3357). Wan TI2V-5B has no in-context clip-append path (LTX's IC-LoRA `VideoClip`); its only
+/// clip primitive is the single-frame mask-blend `Keyframe` (the same one Wan FLF rides). So the
+/// faithful Wan-native form — matching the torch Wan reference, which routed these modes to plain
+/// i2v (`_pipeline_kind` → `"image"`, never IC-LoRA/VACE) — pins the clip *boundary* frame(s):
+/// - **extend_clip** → the source clip's last frame pinned at latent frame `0` (continue from it),
+///   strength `videoConditioningStrength`.
+/// - **video_bridge** → the left clip's last frame at `0` (`videoConditioningStrength`) + the right
+///   clip's first frame at latent frame `-1` (the engine's negative-from-end index), strength
+///   `bridgeRightVideoConditioningStrength`. Mechanically identical to first_last_frame.
+///
+/// Both strengths default to `1.0` (fully pinned), mirroring [`build_video_clip_conditioning`] and
+/// the torch `_advanced_float` defaults. This is the single-frame fidelity ceiling for Wan; richer
+/// motion-tail continuity is the LTX IC-LoRA path or native Wan-VACE (sc-3385 routing matrix).
+#[cfg(target_os = "macos")]
+fn build_wan_boundary_conditioning(
+    request: &VideoRequest,
+    left_frame: Image,
+    right_frame: Option<Image>,
+) -> WorkerResult<Vec<Conditioning>> {
+    let mut conditioning = vec![Conditioning::Keyframe {
+        image: left_frame,
+        frame_idx: 0,
+        strength: advanced_f32(request, "videoConditioningStrength", 1.0),
+    }];
+    if request.mode == "video_bridge" {
+        let right = right_frame.ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "video_bridge requires a right-side source clip (bridgeRightClipAssetId)."
+                    .to_owned(),
+            )
+        })?;
+        conditioning.push(Conditioning::Keyframe {
+            image: right,
+            frame_idx: -1,
+            strength: advanced_f32(request, "bridgeRightVideoConditioningStrength", 1.0),
+        });
+    }
+    Ok(conditioning)
+}
+
+/// Resolve extend_clip / video_bridge into Wan-native boundary [`Conditioning::Keyframe`]s
+/// (sc-3357). Wan-native clip conditioning is **only** the TI2V-5B mask-blend keyframe path, so
+/// guard the engine (the routing gate `video_mode_is_mlx_eligible` already restricts these to
+/// `wan_2_2`, but fail clearly here too if a 14B MoE job is mis-routed). Extracts the boundary
+/// frame(s) — the source clip's last frame (+ the right clip's first frame for bridge) — then maps
+/// them via [`build_wan_boundary_conditioning`]. Unlike the LTX path this needs **no** IC-LoRA.
+#[cfg(target_os = "macos")]
+async fn resolve_wan_clip_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &str,
+) -> WorkerResult<Vec<Conditioning>> {
+    if engine_id != "wan2_2_ti2v_5b" {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} is only supported on wan_2_2 (TI2V-5B), not {engine_id}.",
+            request.mode.replace('_', " ")
+        )));
+    }
+    let left_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{} requires a source clip (sourceClipAssetId).",
+            request.mode.replace('_', " ")
+        ))
+    })?;
+    let left_frame = extract_clip_boundary_frame(
+        api,
+        settings,
+        job,
+        &request.project_id,
+        project_path,
+        left_id,
+        request.width,
+        request.height,
+        ClipFramePosition::Last,
+    )
+    .await?;
+    let right_frame = if request.mode == "video_bridge" {
+        let right_id = request
+            .bridge_right_clip_asset_id
+            .as_deref()
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "video_bridge requires a right-side source clip (bridgeRightClipAssetId)."
+                        .to_owned(),
+                )
+            })?;
+        Some(
+            extract_clip_boundary_frame(
+                api,
+                settings,
+                job,
+                &request.project_id,
+                project_path,
+                right_id,
+                request.width,
+                request.height,
+                ClipFramePosition::First,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    build_wan_boundary_conditioning(request, left_frame, right_frame)
+}
+
+/// Decode a single boundary frame (first or last) of a source clip into an [`Image`], scaled to the
+/// output `width`×`height` (sc-3357, the Wan boundary-keyframe conditioning input). The last frame
+/// uses ffmpeg `-sseof` to seek near the end + `-update 1` so each decoded frame overwrites the lone
+/// output, leaving the final frame; the first frame is a plain `-frames:v 1`. Extracted via the
+/// shared [`run_ffmpeg`] (binary resolution + heartbeat/cancel), then loaded off the async runtime.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn extract_clip_boundary_frame(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    project_id: &str,
+    project_path: &Path,
+    asset_id: &str,
+    width: u32,
+    height: u32,
+    position: ClipFramePosition,
+) -> WorkerResult<Image> {
+    let clip_path = resolve_clip_media_path(settings, project_id, asset_id, project_path)?;
+    let frames_dir = project_path
+        .join("assets")
+        .join(".cond_clips")
+        .join(Uuid::new_v4().simple().to_string());
+    tokio::fs::create_dir_all(&frames_dir).await?;
+    let out = frames_dir.join("boundary.png");
+    let mut args = vec!["ffmpeg".to_owned(), "-nostdin".to_owned(), "-y".to_owned()];
+    if position == ClipFramePosition::Last {
+        // Seek to ~2s before EOF; short clips clamp to the start (whole clip decoded). `-update 1`
+        // overwrites the single output per frame, so the final decoded frame is what remains.
+        args.push("-sseof".to_owned());
+        args.push("-2".to_owned());
+    }
+    args.push("-i".to_owned());
+    args.push(clip_path.display().to_string());
+    args.push("-vf".to_owned());
+    args.push(format!("scale={width}:{height}"));
+    if position == ClipFramePosition::Last {
+        args.push("-update".to_owned());
+        args.push("1".to_owned());
+    } else {
+        args.push("-frames:v".to_owned());
+        args.push("1".to_owned());
+    }
+    args.push(out.display().to_string());
+    let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
+    let result = run_ffmpeg(args, Some(ctx)).await;
+    let load = async {
+        result?;
+        let path = out.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+            let decoded = image::open(&path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "boundary conditioning frame {}: {error}",
+                        path.display()
+                    ))
+                })?
+                .to_rgb8();
+            Ok(Image {
+                width: decoded.width(),
+                height: decoded.height(),
+                pixels: decoded.into_raw(),
+            })
+        })
+        .await
+        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
+    };
+    let frame = load.await;
+    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
+    frame
+}
+
 /// Map `advanced.mlxQuantize` to a quant level (≤0 → dense, ≤4 → Q4, else Q8). Absent →
 /// `None`: dense bf16, or the engine builds it quantized from a pre-quantized snapshot.
 #[cfg(target_os = "macos")]
@@ -1337,12 +1529,22 @@ async fn generate_wan(
         let trimmed = request.negative_prompt.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     };
+    // extend_clip / video_bridge build single-frame boundary `Keyframe` conditioning from the
+    // source clip(s) (async ffmpeg frame extraction, sc-3357); every other mode resolves
+    // keyframe/reference conditioning synchronously from images.
+    let conditioning = match request.mode.as_str() {
+        "extend_clip" | "video_bridge" => {
+            resolve_wan_clip_conditioning(api, settings, job, request, project_path, engine_id)
+                .await?
+        }
+        _ => resolve_wan_conditioning(settings, request, project_path, engine_id)?,
+    };
     let input = VideoGenInput {
         engine_id,
         model_dir: resolve_wan_model_dir(settings, &request.model, engine_id)?,
         quant: resolve_wan_quant(request),
         adapters: resolve_wan_adapters(settings, request, engine_id)?,
-        conditioning: resolve_wan_conditioning(settings, request, project_path, engine_id)?,
+        conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
         width: request.width,
@@ -3555,6 +3757,80 @@ mod tests {
             "mode": "video_bridge"
         }));
         let err = build_video_clip_conditioning(&req, vec![pixel(1)], None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("right-side source clip"), "got: {err}");
+    }
+
+    /// Wan extend_clip → one boundary `Keyframe` at latent frame 0 (the source clip's last frame),
+    /// strength `videoConditioningStrength` (default 1.0); the right frame is ignored (sc-3357).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_boundary_conditioning_extend_pins_last_frame_at_zero() {
+        let req = request(json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "extend it",
+            "mode": "extend_clip",
+            "advanced": { "videoConditioningStrength": 0.7 }
+        }));
+        let cond = build_wan_boundary_conditioning(&req, pixel(1), Some(pixel(2))).unwrap();
+        assert_eq!(cond.len(), 1);
+        match &cond[0] {
+            Conditioning::Keyframe {
+                frame_idx,
+                strength,
+                ..
+            } => {
+                assert_eq!(*frame_idx, 0);
+                assert_eq!(*strength, 0.7);
+            }
+            other => panic!("expected Keyframe, got {other:?}"),
+        }
+    }
+
+    /// Wan video_bridge → left clip's last frame at 0 (`videoConditioningStrength`) + right clip's
+    /// first frame at -1 (`bridgeRightVideoConditioningStrength`); mechanically FLF (sc-3357).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_boundary_conditioning_bridge_pins_both_boundaries() {
+        let req = request(json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "bridge them",
+            "mode": "video_bridge",
+            "advanced": { "bridgeRightVideoConditioningStrength": "0.5" }
+        }));
+        let cond = build_wan_boundary_conditioning(&req, pixel(1), Some(pixel(2))).unwrap();
+        assert_eq!(cond.len(), 2);
+        match (&cond[0], &cond[1]) {
+            (
+                Conditioning::Keyframe {
+                    frame_idx: left_idx,
+                    strength: left_strength,
+                    ..
+                },
+                Conditioning::Keyframe {
+                    frame_idx: right_idx,
+                    strength: right_strength,
+                    ..
+                },
+            ) => {
+                assert_eq!(*left_idx, 0);
+                assert_eq!(*left_strength, 1.0); // default
+                assert_eq!(*right_idx, -1); // engine negative-from-end
+                assert_eq!(*right_strength, 0.5); // numeric-string advanced knob
+            }
+            other => panic!("expected two Keyframes, got {other:?}"),
+        }
+    }
+
+    /// Wan video_bridge without the right boundary frame is a construction error (defence behind
+    /// the resolver's `bridgeRightClipAssetId` guard).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_boundary_conditioning_bridge_requires_right_frame() {
+        let req = request(json!({
+            "projectId": "p", "model": "wan_2_2", "prompt": "bridge them",
+            "mode": "video_bridge"
+        }));
+        let err = build_wan_boundary_conditioning(&req, pixel(1), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("right-side source clip"), "got: {err}");
