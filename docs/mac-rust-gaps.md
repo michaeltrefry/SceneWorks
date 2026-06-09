@@ -123,7 +123,7 @@ in-process Rust path. Per Michael's 2026-06-07 decision, all four spikes are **p
 | Surface | Job type(s) | Python backend | Status | Closing work |
 |---|---|---|---|---|
 | DWPose pose detection (photo→skeleton) | `pose_detect` | onnxruntime (RTMPose) | ✅ Ported (Rust `ort`/CoreML, macOS MLX worker) | sc-3487 |
-| Person detect / track | `person_detect`, `person_track` | YOLO / SAM2 | 🔵 Port-pending | sc-3488 |
+| Person detect / track | `person_detect`, `person_track` | YOLO / SAM2 | 🔵 Port-pending (all **MLX**) | sc-3488 → YOLO detect sc-3633 (ort→**MLX**, CoreML hangs), ByteTrack sc-3634, **SAM2 segmenter = MLX engine epic 3704** (spike sc-3635 GO→MLX; CoreML net-negative for the Hiera ViT) + wiring sc-3709, routing sc-3636 |
 | Image upscaler (standalone) | `image_upscale` | Real-ESRGAN / AuraSR (torch) | ✅ Ported (Real-ESRGAN via Rust `ort`/CoreML, macOS MLX worker; **AuraSR** engine stays on Python) | sc-3489 |
 | Dataset captioning | `training_caption` | JoyCaption MLX provider (Python torch fallback off-MLX) | ✅ Ported (macOS MLX worker) | sc-3556 |
 | Wan/LTX model conversion | `model_convert` (non-`flux2_klein_diffusers` converter) | `mlx_video.convert_*` (Python) | 🔵 Port-pending | sc-3491 (= sc-3224) |
