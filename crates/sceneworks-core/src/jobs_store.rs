@@ -2875,9 +2875,11 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
         "text_to_video" | "image_to_video" => true,
         "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
         // extend_clip / video_bridge: LTX via the IC-LoRA multi-frame keyframe-append (sc-3522),
-        // and Wan TI2V-5B (`wan_2_2`) via single-frame boundary keyframe conditioning (sc-3357 —
-        // extend pins the source clip's last frame, bridge pins the two boundary frames, the same
-        // mask-blend `Keyframe` primitive as Wan FLF). The 14B Wan MoE engines have no `Keyframe`
+        // and Wan (`wan_2_2`) — the worker prefers native Wan-VACE ControlClip for genuine motion
+        // continuity (sc-3812, tier C: real source frames pinned at the kept positions + a
+        // generated-span mask) and falls back to the TI2V-5B single-frame boundary keyframe path
+        // (sc-3357) when the VACE snapshot is unprovisioned. Both run MLX-native, so `wan_2_2` is
+        // eligible regardless of which the worker picks. The 14B Wan MoE engines have neither
         // path, so extend/bridge on them stay torch.
         "extend_clip" | "video_bridge" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
         // replace_person → native Wan-VACE (sc-3521): the engine `wan_vace` provider serves it

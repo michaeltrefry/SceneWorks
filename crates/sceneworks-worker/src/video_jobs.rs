@@ -151,6 +151,51 @@ pub(crate) async fn run_video_generate_job(
             wan_vace_raw_settings(&request),
             Some(status),
         )
+    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
+        && wan_engine_id(&request.model) == Some("wan2_2_ti2v_5b")
+        && wan_available(&request, settings)
+    {
+        // sc-3812 (tier C): route Wan extend/bridge to native Wan-VACE for genuine motion
+        // continuity (the model attends to real source frames, not one boundary still). Falls
+        // back to the sc-3357 single-frame TI2V-5B keyframe path when the VACE snapshot is
+        // unprovisioned, so the mode keeps working on the weights the user already has. The
+        // engine substitution under the `wan_2_2` pick is recorded honestly in raw-settings.
+        match resolve_wan_vace_model_dir(settings) {
+            Ok(model_dir) => (
+                generate_wan_vace_extend_bridge(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    backend,
+                    model_dir,
+                )
+                .await?,
+                WAN_VACE_ADAPTER,
+                wan_vace_extend_raw_settings(&request),
+                None,
+            ),
+            Err(_) => {
+                let engine_id =
+                    wan_engine_id(&request.model).expect("checked wan2_2_ti2v_5b above");
+                (
+                    generate_wan(
+                        api,
+                        settings,
+                        job,
+                        &request,
+                        &project_path,
+                        engine_id,
+                        backend,
+                    )
+                    .await?,
+                    WAN_ADAPTER,
+                    wan_raw_settings(&request),
+                    None,
+                )
+            }
+        }
     } else if let Some(engine_id) =
         wan_engine_id(&request.model).filter(|_| wan_available(&request, settings))
     {
@@ -2665,21 +2710,7 @@ async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResul
         let indices = crate::person_replace::resample_indices(paths.len(), count);
         indices
             .into_iter()
-            .map(|index| {
-                let decoded = image::open(&paths[index])
-                    .map_err(|error| {
-                        WorkerError::InvalidPayload(format!(
-                            "source frame {}: {error}",
-                            paths[index].display()
-                        ))
-                    })?
-                    .to_rgb8();
-                Ok(Image {
-                    width: decoded.width(),
-                    height: decoded.height(),
-                    pixels: decoded.into_raw(),
-                })
-            })
+            .map(|index| decode_png_image(&paths[index]))
             .collect()
     })
     .await
@@ -2932,6 +2963,367 @@ async fn generate_wan_vace(
         frame_total,
     );
     Ok((decoded, status))
+}
+
+// ---------------------------------------------------------------------------
+// Wan extend_clip / video_bridge — native Wan-VACE ControlClip (sc-3812, tier C).
+//
+// The TI2V-5B single-frame path (`build_wan_boundary_conditioning`, sc-3357) conditions on one
+// boundary still, so it morphs *from* a frozen frame and cannot inherit the source clip's motion.
+// Routing these modes to the `wan_vace` engine instead lets the model attend to *several real*
+// source frames pinned at the kept positions (mask black = keep) while it generates the rest of the
+// timeline freely (mask white = regenerate over a neutral-gray control video). That is the whole
+// point of extend/bridge — genuine motion continuity — at the cost of the smaller VACE-1.3B base
+// (vs TI2V-5B), so the single-frame path stays the baseline/fallback. No reference images: the
+// content comes from the kept frames, not a character (the engine's reference path is optional).
+// Raw-settings record `model = wan_vace` + `fidelityTier = vace_controlclip` so the engine
+// substitution under the user's `wan_2_2` pick is an inspectable fact on the asset, not a black box.
+
+/// Mid-gray (≈0 after the engine's `2·x/255 − 1` normalization) control frame for the
+/// to-generate span: a neutral `reactive = video·mask` signal so the masked region is generated
+/// freely from the kept frames + prompt, never biased toward a frozen filler image.
+#[cfg(target_os = "macos")]
+fn neutral_control_frame(width: u32, height: u32) -> Image {
+    Image {
+        width,
+        height,
+        pixels: vec![128u8; (width as usize) * (height as usize) * 3],
+    }
+}
+
+/// A solid W×H mask (`0` = keep the control frame, `255` = regenerate; the engine binarizes at
+/// 0.5), matching the `image::RgbImage` form `person_track_masks` produces for replace_person.
+#[cfg(target_os = "macos")]
+fn solid_mask(width: u32, height: u32, value: u8) -> image::RgbImage {
+    image::RgbImage::from_pixel(width, height, image::Rgb([value, value, value]))
+}
+
+/// How many real source frames to pin as the motion anchor per kept boundary (sc-3812). More =
+/// truer continuity but fewer freely-generated frames. Overridable via advanced `motionAnchorFrames`
+/// (per side); defaults to ~⅓ of the output budget (split across the two boundaries for bridge), and
+/// is clamped so at least 5 frames (one z16 chunk) are left to generate.
+#[cfg(target_os = "macos")]
+fn extend_anchor_frames(request: &VideoRequest, frame_count: usize) -> usize {
+    let per_side = if request.mode == "video_bridge" { 2 } else { 1 };
+    let max_total = frame_count.saturating_sub(5).max(1);
+    let max_per_side = (max_total / per_side).max(1);
+    let default = (frame_count / 3 / per_side).max(1);
+    let requested = request
+        .advanced
+        .get("motionAnchorFrames")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as usize)
+        .unwrap_or(default);
+    requested.clamp(1, max_per_side)
+}
+
+/// Decode the `take`-end `count` frames of a source clip (its head or tail) to letterboxed W×H
+/// engine [`Image`]s, in temporal order (sc-3812). Unlike [`load_source_video_frames`] — which
+/// resamples the *whole* clip evenly — this keeps *consecutive* real frames so the model sees the
+/// clip's actual motion velocity at the boundary. Decodes only the kept subset (`decode_png_image`).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn load_clip_anchor_frames(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    project_id: &str,
+    project_path: &Path,
+    asset_id: &str,
+    width: u32,
+    height: u32,
+    count: usize,
+    take: ClipFramePosition,
+) -> WorkerResult<Vec<Image>> {
+    let media_path = resolve_clip_media_path(settings, project_id, asset_id, project_path)?;
+    let work_dir = std::env::temp_dir().join(format!(
+        "sw-anchor-frames-{}-{}",
+        job.id,
+        Uuid::new_v4().simple()
+    ));
+    tokio::fs::create_dir_all(&work_dir).await?;
+    let pattern = work_dir.join("src_%05d.png");
+    let filters = format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,\
+         pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={FRAME_PAD_COLOR},format=rgb24",
+    );
+    let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
+    let extract = run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            media_path.display().to_string(),
+            "-vf".to_owned(),
+            filters,
+            "-start_number".to_owned(),
+            "0".to_owned(),
+            pattern.display().to_string(),
+        ],
+        Some(ctx),
+    )
+    .await;
+    let frames = match extract {
+        Ok(()) => select_anchor_frames(work_dir.clone(), count, take).await,
+        Err(error) => Err(error),
+    };
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    frames
+}
+
+/// Pick the head/tail `count` consecutive PNGs from `work_dir` (sorted) and decode them to engine
+/// [`Image`]s, preserving temporal order. Fewer available than `count` ⇒ all of them (short clip).
+#[cfg(target_os = "macos")]
+async fn select_anchor_frames(
+    work_dir: PathBuf,
+    count: usize,
+    take: ClipFramePosition,
+) -> WorkerResult<Vec<Image>> {
+    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("png"))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            return Err(WorkerError::InvalidPayload(
+                "source clip produced no decodable frames".to_owned(),
+            ));
+        }
+        let take_n = count.min(paths.len());
+        let selected = match take {
+            ClipFramePosition::Last => &paths[paths.len() - take_n..],
+            ClipFramePosition::First => &paths[..take_n],
+        };
+        selected.iter().map(|path| decode_png_image(path)).collect()
+    })
+    .await
+    .map_err(|error| WorkerError::InvalidPayload(format!("frame decode task: {error}")))?
+}
+
+/// Decode one RGB PNG into an engine [`Image`] (shared by the resample + anchor frame selectors).
+#[cfg(target_os = "macos")]
+fn decode_png_image(path: &Path) -> WorkerResult<Image> {
+    let decoded = image::open(path)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("source frame {}: {error}", path.display()))
+        })?
+        .to_rgb8();
+    Ok(Image {
+        width: decoded.width(),
+        height: decoded.height(),
+        pixels: decoded.into_raw(),
+    })
+}
+
+/// Build the Wan-VACE extend/bridge ControlClip (sc-3812): real source frames pinned at the kept
+/// positions (mask black) and a neutral-gray generated span (mask white). For `extend_clip` the
+/// left-clip tail anchors the start and the continuation is generated; for `video_bridge` both
+/// clips' boundary anchors are pinned at the two ends and the gap between them is generated. The
+/// control clip is `frame_count` long (`1 + 4·k`, the engine's z16-chunk constraint) with no
+/// reference images. `masking_strength`/`mode` are inert in the WanVACE mask math (carried for the
+/// shared [`Conditioning::ControlClip`] contract), so they take the neutral defaults.
+#[cfg(target_os = "macos")]
+fn build_extend_bridge_vace_conditioning(
+    request: &VideoRequest,
+    width: u32,
+    height: u32,
+    frame_count: usize,
+    left_anchor: Vec<Image>,
+    right_anchor: Option<Vec<Image>>,
+) -> WorkerResult<Vec<Conditioning>> {
+    let neutral = neutral_control_frame(width, height);
+    let keep_mask = solid_mask(width, height, 0);
+    let gen_mask = solid_mask(width, height, 255);
+    let mut frames: Vec<Image> = Vec::with_capacity(frame_count);
+    let mut masks: Vec<image::RgbImage> = Vec::with_capacity(frame_count);
+    let left_n = left_anchor.len();
+    match request.mode.as_str() {
+        "extend_clip" => {
+            if left_n + 1 > frame_count {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "extend_clip: {left_n} anchor frames leave no room to generate in a \
+                     {frame_count}-frame clip — reduce motionAnchorFrames."
+                )));
+            }
+            for frame in left_anchor {
+                frames.push(frame);
+                masks.push(keep_mask.clone());
+            }
+            for _ in left_n..frame_count {
+                frames.push(neutral.clone());
+                masks.push(gen_mask.clone());
+            }
+        }
+        "video_bridge" => {
+            let right = right_anchor.ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "video_bridge requires a right-side source clip (bridgeRightClipAssetId)."
+                        .to_owned(),
+                )
+            })?;
+            let right_n = right.len();
+            if left_n + right_n + 1 > frame_count {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "video_bridge: {left_n}+{right_n} anchor frames leave no gap to generate in a \
+                     {frame_count}-frame clip — reduce motionAnchorFrames."
+                )));
+            }
+            for frame in left_anchor {
+                frames.push(frame);
+                masks.push(keep_mask.clone());
+            }
+            for _ in 0..(frame_count - left_n - right_n) {
+                frames.push(neutral.clone());
+                masks.push(gen_mask.clone());
+            }
+            for frame in right {
+                frames.push(frame);
+                masks.push(keep_mask.clone());
+            }
+        }
+        other => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "build_extend_bridge_vace_conditioning: unexpected mode {other}"
+            )))
+        }
+    }
+    build_vace_conditioning(frames, masks, Vec::new(), 1.0, ReplacementMode::default())
+}
+
+/// Raw-settings for a Wan-VACE extend/bridge asset: the request `advanced` knobs + the real-inference
+/// markers, recording the actual engine (`wan_vace`) and `fidelityTier` so the substitution under the
+/// user's `wan_2_2` pick is an inspectable fact (sc-3812). Unlike [`wan_vace_raw_settings`] there is
+/// no `replacementMode` (these modes are not person-replacement).
+#[cfg(target_os = "macos")]
+fn wan_vace_extend_raw_settings(request: &VideoRequest) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String("wan_vace".to_owned()));
+    raw.insert(
+        "frameCount".to_owned(),
+        json!(wan_frame_count(request.raw_frame_count())),
+    );
+    raw.insert("fps".to_owned(), json!(request.fps));
+    raw.insert(
+        "fidelityTier".to_owned(),
+        Value::String("vace_controlclip".to_owned()),
+    );
+    Value::Object(raw)
+}
+
+/// Resolve an extend_clip / video_bridge request into a native Wan-VACE generation (sc-3812, tier C).
+/// Loads the real source-clip anchor frames (the left clip's tail for extend; both clips' boundaries
+/// for bridge), builds the source-at-kept-positions + generated-span ControlClip, and runs the
+/// `wan_vace` engine. The TI2V-5B single-frame path ([`generate_wan`]) remains the baseline/fallback,
+/// chosen by the dispatch seam when the VACE snapshot is unprovisioned.
+#[cfg(target_os = "macos")]
+async fn generate_wan_vace_extend_bridge(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+    model_dir: PathBuf,
+) -> WorkerResult<DecodedVideo> {
+    let frame_count = wan_frame_count(request.raw_frame_count()) as usize;
+    let anchor = extend_anchor_frames(request, frame_count);
+    let left_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{} requires a source clip (sourceClipAssetId).",
+            request.mode.replace('_', " ")
+        ))
+    })?;
+    let left_anchor = load_clip_anchor_frames(
+        api,
+        settings,
+        job,
+        &request.project_id,
+        project_path,
+        left_id,
+        request.width,
+        request.height,
+        anchor,
+        ClipFramePosition::Last,
+    )
+    .await?;
+    let right_anchor = if request.mode == "video_bridge" {
+        let right_id = request
+            .bridge_right_clip_asset_id
+            .as_deref()
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "video_bridge requires a right-side source clip (bridgeRightClipAssetId)."
+                        .to_owned(),
+                )
+            })?;
+        Some(
+            load_clip_anchor_frames(
+                api,
+                settings,
+                job,
+                &request.project_id,
+                project_path,
+                right_id,
+                request.width,
+                request.height,
+                anchor,
+                ClipFramePosition::First,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let conditioning = build_extend_bridge_vace_conditioning(
+        request,
+        request.width,
+        request.height,
+        frame_count,
+        left_anchor,
+        right_anchor,
+    )?;
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let steps = request.advanced.get("steps").and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .map(|value| value as u32)
+    });
+    let guidance = request.advanced.get("guidanceScale").and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .map(|value| value as f32)
+    });
+    let input = VideoGenInput {
+        engine_id: "wan_vace",
+        model_dir,
+        quant: resolve_wan_quant(request),
+        adapters: Vec::new(),
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: frame_count as u32,
+        fps: request.fps,
+        steps,
+        guidance,
+        seed: resolve_video_seed(request) as u64,
+        control_scale: Some(advanced_f32(request, "conditioningScale", 1.0)),
+        ..VideoGenInput::default()
+    };
+    generate_video(api, settings, job, backend, input).await
 }
 
 #[cfg(test)]
@@ -3187,6 +3579,129 @@ mod tests {
         .is_err());
     }
 
+    /// sc-3812 extend: the ControlClip pins the real tail frames at the front (mask black = keep)
+    /// and fills the rest of the budget with a neutral-gray generated span (mask white), no refs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extend_vace_conditioning_pins_tail_and_generates_rest() {
+        let anchor = |v: u8| Image {
+            width: 2,
+            height: 2,
+            pixels: vec![v; 12],
+        };
+        let req = request(json!({
+            "projectId": "p", "model": "wan_2_2", "mode": "extend_clip",
+            "prompt": "keep walking", "sourceClipAssetId": "clip_a"
+        }));
+        let conditioning = build_extend_bridge_vace_conditioning(
+            &req,
+            2,
+            2,
+            5,
+            vec![anchor(11), anchor(22)],
+            None,
+        )
+        .expect("extend conditioning builds");
+        assert_eq!(conditioning.len(), 1); // ControlClip only, no Reference
+        match &conditioning[0] {
+            Conditioning::ControlClip { frames, mask, .. } => {
+                assert_eq!(frames.len(), 5);
+                assert_eq!(mask.len(), 5);
+                // First two are the real tail frames, kept (black mask).
+                assert_eq!(frames[0].pixels[0], 11);
+                assert_eq!(frames[1].pixels[0], 22);
+                assert_eq!(mask[0].pixels[0], 0);
+                assert_eq!(mask[1].pixels[0], 0);
+                // The rest is the neutral-gray generated span (white mask).
+                assert_eq!(frames[2].pixels[0], 128);
+                assert_eq!(frames[4].pixels[0], 128);
+                assert_eq!(mask[2].pixels[0], 255);
+                assert_eq!(mask[4].pixels[0], 255);
+            }
+            other => panic!("expected ControlClip, got {other:?}"),
+        }
+    }
+
+    /// sc-3812 bridge: both clips' boundary anchors are kept at the two ends; the gap between them
+    /// is the generated span. A missing right clip / over-budget anchors fail clearly.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bridge_vace_conditioning_keeps_both_ends_generates_gap() {
+        let anchor = |v: u8| Image {
+            width: 1,
+            height: 1,
+            pixels: vec![v; 3],
+        };
+        let req = request(json!({
+            "projectId": "p", "model": "wan_2_2", "mode": "video_bridge",
+            "prompt": "connect", "sourceClipAssetId": "left", "bridgeRightClipAssetId": "right"
+        }));
+        let conditioning = build_extend_bridge_vace_conditioning(
+            &req,
+            1,
+            1,
+            5,
+            vec![anchor(10)],
+            Some(vec![anchor(90)]),
+        )
+        .expect("bridge conditioning builds");
+        match &conditioning[0] {
+            Conditioning::ControlClip { frames, mask, .. } => {
+                assert_eq!(frames.len(), 5);
+                // Left end kept, gap generated, right end kept.
+                assert_eq!((frames[0].pixels[0], mask[0].pixels[0]), (10, 0));
+                assert_eq!((frames[1].pixels[0], mask[1].pixels[0]), (128, 255));
+                assert_eq!((frames[3].pixels[0], mask[3].pixels[0]), (128, 255));
+                assert_eq!((frames[4].pixels[0], mask[4].pixels[0]), (90, 0));
+            }
+            other => panic!("expected ControlClip, got {other:?}"),
+        }
+        // video_bridge without a right clip is rejected.
+        assert!(
+            build_extend_bridge_vace_conditioning(&req, 1, 1, 5, vec![anchor(10)], None).is_err()
+        );
+        // Anchors that leave no gap are rejected.
+        assert!(build_extend_bridge_vace_conditioning(
+            &req,
+            1,
+            1,
+            5,
+            vec![anchor(1), anchor(2), anchor(3)],
+            Some(vec![anchor(4), anchor(5)]),
+        )
+        .is_err());
+    }
+
+    /// sc-3812 motion anchor: defaults to ~⅓ of the budget (halved per side for bridge), honors an
+    /// explicit `motionAnchorFrames`, and always clamps so ≥5 frames stay generatable.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extend_anchor_frames_defaults_and_clamps() {
+        let extend = request(json!({
+            "projectId": "p", "model": "wan_2_2", "mode": "extend_clip", "prompt": "x"
+        }));
+        assert_eq!(extend_anchor_frames(&extend, 81), 27); // 81/3
+        let bridge = request(json!({
+            "projectId": "p", "model": "wan_2_2", "mode": "video_bridge", "prompt": "x"
+        }));
+        assert_eq!(extend_anchor_frames(&bridge, 81), 13); // (81/3)/2
+
+        let explicit = request(json!({
+            "projectId": "p", "model": "wan_2_2", "mode": "extend_clip", "prompt": "x",
+            "advanced": { "motionAnchorFrames": 4 }
+        }));
+        assert_eq!(extend_anchor_frames(&explicit, 81), 4);
+
+        // Over-budget request clamps so 5 frames remain to generate (81 - 5 = 76).
+        let greedy = request(json!({
+            "projectId": "p", "model": "wan_2_2", "mode": "extend_clip", "prompt": "x",
+            "advanced": { "motionAnchorFrames": 999 }
+        }));
+        assert_eq!(extend_anchor_frames(&greedy, 81), 76);
+        // Minimum-length clip still yields a usable anchor.
+        assert_eq!(extend_anchor_frames(&extend, 5), 1);
+    }
+
     /// `replacement_status_value` reports the honest mask/track provenance the sidecar folds in.
     #[cfg(target_os = "macos")]
     #[test]
@@ -3284,6 +3799,73 @@ mod tests {
         let decoded =
             run_video_generation(input, &cancel, &mut on_progress).expect("VACE generation");
         assert!(decoded.fps >= 1);
+        assert!(decoded.audio.is_none(), "Wan-VACE emits no audio");
+        assert!(steps > 0, "denoise progress streamed");
+        assert!(decoded
+            .frames
+            .iter()
+            .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
+    }
+
+    /// Real in-process Wan-VACE extend/bridge through the engine (sc-3812): build the tier-C
+    /// control clip (real anchor frames pinned + a neutral generated span, no references) and run
+    /// the assembled snapshot, asserting RGB8 frames stream back. `#[ignore]` — the weights live
+    /// outside CI; run manually on a Mac with the snapshot assembled (the real-Mac gate; the A/B
+    /// vs the TI2V-5B single-frame path is the practical fidelity judge, sc-3800).
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Wan-VACE snapshot; run manually on a Mac with it assembled"]
+    #[test]
+    fn wan_vace_extend_bridge_real_weights() {
+        let Some(model_dir) = wan_vace_dir() else {
+            eprintln!("skipping wan_vace_extend_bridge_real_weights: no assembled snapshot found");
+            return;
+        };
+        let (w, h) = (256u32, 256u32);
+        // Two distinct real "source" frames as the extend motion anchor; the engine generates the
+        // remaining 3 frames of the 5-frame budget over the neutral span.
+        let anchor = |v: u8| Image {
+            width: w,
+            height: h,
+            pixels: vec![v; (w * h * 3) as usize],
+        };
+        let req = request(json!({
+            "projectId": "p", "model": "wan_2_2", "mode": "extend_clip",
+            "prompt": "the camera keeps gliding forward, cinematic",
+            "sourceClipAssetId": "clip_a"
+        }));
+        let conditioning = build_extend_bridge_vace_conditioning(
+            &req,
+            w,
+            h,
+            5,
+            vec![anchor(90), anchor(110)],
+            None,
+        )
+        .expect("extend conditioning builds");
+        let input = VideoGenInput {
+            engine_id: "wan_vace",
+            model_dir,
+            conditioning,
+            prompt: req.prompt.clone(),
+            width: w,
+            height: h,
+            frames: 5,
+            fps: 16,
+            steps: Some(8),
+            seed: 11,
+            control_scale: Some(1.0),
+            ..VideoGenInput::default()
+        };
+        let cancel = CancelFlag::new();
+        let mut steps = 0u32;
+        let mut on_progress = |progress: Progress| {
+            if let Progress::Step { .. } = progress {
+                steps += 1;
+            }
+        };
+        let decoded =
+            run_video_generation(input, &cancel, &mut on_progress).expect("VACE extend generation");
+        assert_eq!(decoded.frames.len(), 5);
         assert!(decoded.audio.is_none(), "Wan-VACE emits no audio");
         assert!(steps > 0, "denoise progress streamed");
         assert!(decoded
