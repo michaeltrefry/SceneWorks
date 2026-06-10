@@ -7,6 +7,7 @@ import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField.jsx";
 import { CharacterAdvancedOptions, useCharacterAdvancedOptions } from "../components/CharacterAdvancedOptions.jsx";
+import { KeypointCollectionField } from "../components/KeypointCollectionField.jsx";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 import { extractFamilies } from "../presetUtils.js";
 
@@ -521,6 +522,19 @@ export function CharacterAngleSet({
   });
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
+  // Key Point Library override (sc-4435/sc-4450): only InstantID consumes the angle
+  // kps collection (it's the landmark-ControlNet family — `identityStructure`); the
+  // prompt-driven tiers iterate the built-in angle prompts and ignore it. `""` = run
+  // the active default collection. `overrideCount` sizes the run to a chosen
+  // collection's variable angle count; null falls back to the backbone's nominal count.
+  const supportsKpsCollections = Boolean(activeAngleModel?.ui?.identityStructure);
+  const [keypointCollectionId, setKeypointCollectionId] = React.useState("");
+  const [overrideCount, setOverrideCount] = React.useState(null);
+  const onPickCollection = React.useCallback((id, collection) => {
+    setKeypointCollectionId(id);
+    setOverrideCount(id ? (collection?.orderedPresetIds?.length ?? null) : null);
+  }, []);
+  const effectiveAngleCount = overrideCount ?? angleCount;
   const [submitting, setSubmitting] = React.useState(false);
   const [status, setStatus] = React.useState("");
   const fileInputRef = React.useRef(null);
@@ -546,6 +560,13 @@ export function CharacterAngleSet({
       setSelectedAngleModelId(availableModels[0]?.id ?? "");
     }
   }, [availableModels, selectedAngleModelId]);
+  // Clear a stale angle-set override when switching to a backbone that can't use it.
+  React.useEffect(() => {
+    if (!supportsKpsCollections) {
+      setKeypointCollectionId("");
+      setOverrideCount(null);
+    }
+  }, [supportsKpsCollections]);
 
   if (!activeAngleModel || !selectedCharacter) {
     return null;
@@ -600,7 +621,10 @@ export function CharacterAngleSet({
         width: 1024,
         height: 1024,
         loras: loraSelection.serializedLoras,
-        advanced: advanced.buildAdvanced({ angleSet: true }),
+        advanced: advanced.buildAdvanced({
+          angleSet: true,
+          ...(supportsKpsCollections && keypointCollectionId ? { keypointCollectionId } : {}),
+        }),
       });
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
@@ -657,13 +681,16 @@ export function CharacterAngleSet({
         <p className="inline-warning">No approved reference yet — upload one below or approve a reference above.</p>
       )}
       <LoraPickerField selection={loraSelection} />
+      {supportsKpsCollections ? (
+        <KeypointCollectionField value={keypointCollectionId} onChange={onPickCollection} />
+      ) : null}
       <div className="inline-create">
         <button onClick={() => fileInputRef.current?.click()} type="button">
           Upload reference
         </button>
         <input accept="image/*" hidden onChange={onUpload} ref={fileInputRef} type="file" />
         <button disabled={!referenceAssetId || submitting} onClick={generate} type="button">
-          {submitting ? "Starting…" : `Generate angle set (${angleCount} views)`}
+          {submitting ? "Starting…" : `Generate angle set (${effectiveAngleCount} views)`}
         </button>
       </div>
       <label>
@@ -686,7 +713,7 @@ export function CharacterAngleSet({
               }}
               thumbnailsVariant="image-grid"
               thumbnailAssets={jobImageAssets(job, assets)}
-              expectedThumbnailCount={angleCount}
+              expectedThumbnailCount={effectiveAngleCount}
               onThumbnailClick={(previewed) => onPreview?.(previewed, jobImageAssets(job, assets))}
               onCancel={onCancel}
               onRetry={onRetry}

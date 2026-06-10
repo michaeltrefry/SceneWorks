@@ -7,6 +7,7 @@ import { FullscreenPreview } from "./components/assetPanels.jsx";
 import { fallbackModels, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { PoseLibraryScreen } from "./screens/PoseLibraryScreen.jsx";
+import { KeyPointLibraryScreen } from "./screens/KeyPointLibraryScreen.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { DocumentStudio } from "./screens/DocumentStudio.jsx";
@@ -175,6 +176,7 @@ const navSections = [
       { id: "Library", label: "Assets", icon: Icon.Library },
       { id: "LibraryDataSets", label: "Data Sets", icon: Icon.Train },
       { id: "Poses", label: "Pose Library", icon: Icon.Character },
+      { id: "Keypoints", label: "Key Point Library", icon: Icon.Character },
       { id: "Presets", icon: Icon.Preset },
       { id: "Models", icon: Icon.Model },
     ],
@@ -193,6 +195,10 @@ const viewTitles = {
   Library: { title: "Assets", blurb: "Browse stills and clips across all your projects." },
   LibraryDataSets: { title: "Data Sets", blurb: "Create and caption training datasets." },
   Poses: { title: "Pose Library", blurb: "Manage whole-body pose skeletons and create new ones from photos." },
+  Keypoints: {
+    title: "Key Point Library",
+    blurb: "Capture face-angle framing presets and compose angle-set collections for character turnarounds.",
+  },
   Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
   Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
   Document: { title: "Document Studio", blurb: "Generate interleaved text-image documents — guides, storyboards, tutorials." },
@@ -1802,6 +1808,10 @@ export function App() {
 
         {activeView === "Poses" ? (
           <PoseLibraryScreen />
+        ) : null}
+
+        {activeView === "Keypoints" ? (
+          <KeyPointLibraryScreen />
         ) : null}
 
         {activeView === "Image" ? (
