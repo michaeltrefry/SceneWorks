@@ -1464,6 +1464,8 @@ fn run_video_generation(
         quantize: input.quant,
         precision: Precision::Bf16,
         control: None,
+        // MultiControlNet (sc-3378) is image-only; video providers ignore it.
+        extra_controls: Vec::new(),
         ip_adapter: None,
         adapters: input.adapters,
     };

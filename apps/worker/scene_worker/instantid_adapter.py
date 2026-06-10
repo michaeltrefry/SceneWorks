@@ -170,7 +170,10 @@ ANGLE_SET_ORDER: tuple[str, ...] = (
 # the kps-distortion rule). The face is small at full-body framing, so a face-restoration
 # pass re-imposes identity afterward (sc-2063 spike: ~0.38 -> ~0.88 ArcFace cosine).
 _POSE_SIZE: int = 1024
-_FACE_RESTORE_PROMPT = "close-up portrait of the woman's face, soft natural light, photorealistic, sharp focus"
+# Gender-neutral on purpose (sc-3381): this prompt is applied to EVERY character during the
+# face-restore re-render, so it must not assume a gender. (The native MLX engine's
+# `FACE_RESTORE_PROMPT` is the same neutral wording.)
+_FACE_RESTORE_PROMPT = "close-up portrait of the face, soft natural light, photorealistic, sharp focus"
 
 
 class InstantIDAdapter:

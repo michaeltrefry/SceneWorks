@@ -53,9 +53,7 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 | Model id | Family | Mac disposition | Porting epic |
 |---|---|---|---|
 | `kolors` | kolors (SDXL UNet + ChatGLM3) | 🔵 Port → drop-on-Mac until then | **epic 3532** |
-| `instantid_realvisxl` | sdxl (InstantID) | 🔵 Port → drop-on-Mac until then | epic 3109 |
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
-| `sensenova_u1_8b`, `sensenova_u1_8b_fast` | sensenova-u1 | 🔵 Port → drop-on-Mac until then | epic 3180 |
 | `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🔵 Port → drop-on-Mac until then | epic 3164 |
 
 > A torch-only image model with **no** porting epic yet → `torch_only_image_model_epic` returns
@@ -78,6 +76,7 @@ dropped — no silent drops.**
 | `edit_image` (img2img-edit) | `z_image_turbo`, `z_image_edit` | 🟢 Ported (MLX) | epic 3529 / sc-3923 (engine `Conditioning::Reference` img2img; Turbo weights) |
 | reference-without-pose | `z_image_turbo` | 🟢 Ported (MLX) | sc-3536 (spike GO) → sc-3619 |
 | Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟢 Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3642/3643/3671 engine + sc-3644 routing) |
+| InstantID (identity, 11-view angle set, pose-library mode, face-restore) | `instantid_realvisxl` (`character_image` + `referenceAssetId`) | 🟢 Ported (MLX) | epic 3109 (engine: #153 identity/angle, #193 pose+restore — sc-3117/3380) → sc-3345 (identity+angle integration) + sc-3381 (pose+restore integration). Torch path kept as off-Mac + Mac-fallback (Decision-A); venv strip is the final epic-3482 step. |
 
 > **FLUX.1 `edit_image` is not an eradication gap (sc-3535).** The torch `FluxDiffusersAdapter`
 > hard-rejects `edit_image` ("does not support image editing") — FLUX.1 has no edit path on *any*
@@ -128,7 +127,7 @@ in-process Rust path. Per Michael's 2026-06-07 decision, all four spikes are **p
 | Image upscaler (standalone) | `image_upscale` | Real-ESRGAN / AuraSR (torch) | ✅ Ported (Real-ESRGAN via Rust `ort`/CoreML, macOS MLX worker; **AuraSR** engine stays on Python) | sc-3489 |
 | Dataset captioning | `training_caption` | JoyCaption MLX provider (Python torch fallback off-MLX) | ✅ Ported (macOS MLX worker) | sc-3556 |
 | Wan/LTX model conversion | `model_convert` (non-`flux2_klein_diffusers` converter) | `mlx_video.convert_*` (Python) | 🔵 Port-pending | sc-3491 (= sc-3224) |
-| Image understanding / interleave | `image_vqa`, `image_interleave` | torch (SenseNova-U1) | 🔵 Port-pending | epic 3180 (SenseNova port — its understanding surface) |
+| Image understanding / interleave | `image_vqa`, `image_interleave` | torch (SenseNova-U1) | 🔵 Port-pending (engine done; worker wiring next) | epic 3180 / **sc-3905** (consumed via `T2iModel::vqa`/`interleave_gen` — the `Generator` registry emits Images/Video only; SenseNova image modes already ported, sc-3900) |
 
 ## 6. Already ported — NOT gaps (context)
 
@@ -139,6 +138,11 @@ Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
   `realvisxl` (epic 3018).
 - Chroma text-to-image: `chroma1_hd`, `chroma1_base`, `chroma1_flash` (FLUX.1-schnell-derived
   DiT, T5-only true-CFG; `mlx-gen-chroma`) — epic 3531 / sc-3843.
+- SenseNova-U1 image modes: `sensenova_u1_8b`, `sensenova_u1_8b_fast` — T2I, instruction edit
+  (`edit_image` → Reference), and Character Studio (`character_image` → MultiReference, incl. the
+  angle set), base + 8-step distill, Q4/Q8 (`mlx-gen-sensenova`, NEO-Unify; dual CFG: text via
+  `guidance`, image via `true_cfg`). No ControlNet (strict pose stays torch), no user LoRA. epic
+  3180 / sc-3900. **VQA + Document Studio (interleave) are still pending — see §5 / sc-3905.**
 - SDXL advanced shapes — reference/IP-Adapter, `edit_image`, masked inpaint, outpaint, and
   tile-detail (`image_detail` on `sdxl`/`realvisxl`) — epic 3041 / sc-3060.
 - Z-Image img2img-edit: `z_image_edit` + `z_image_turbo` `edit_image` mode (Turbo weights via the

@@ -2155,14 +2155,17 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
     match model {
         "kolors" => Some("epic 3532"),
-        "instantid_realvisxl" => Some("epic 3109"),
+        // InstantID (instantid_realvisxl) was ported to MLX (epic 3109 engine / sc-3345) — it is
+        // now in `MLX_ROUTED_MODELS`, so it never reaches this torch-only classifier. Its
+        // remaining gaps (pose-library mode, face-restore) are named per-feature in
+        // `classify_image_gap`, not as a whole-model gap.
         "pulid_flux_dev" => Some("epic 3069"),
         // z_image_edit was ported to MLX (epic 3529 / sc-3923) — it is now in
         // `MLX_ROUTED_MODELS`, so it never reaches this torch-only gap classifier.
-        m if m.starts_with("sensenova") => Some("epic 3180"),
         m if m.starts_with("lens") => Some("epic 3164"),
-        // Chroma (chroma1_*) was ported to MLX (epic 3531 / sc-3843) — it is now in
-        // `MLX_ROUTED_MODELS`, so it never reaches this torch-only gap classifier.
+        // Chroma (chroma1_*, epic 3531 / sc-3843) and SenseNova-U1 (sensenova_u1_8b[_fast],
+        // epic 3180 / sc-3900) were ported to MLX — they are now in `MLX_ROUTED_MODELS`, so
+        // neither reaches this torch-only gap classifier.
         _ => None,
     }
 }
@@ -2205,6 +2208,38 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             Some(model),
             "edit without a reference/source image",
             "the Qwen-Image-Edit model needs edit_image+sourceAssetId or character_image+referenceAssetId to route to MLX.",
+            None,
+        ),
+        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => {
+            let has_poses = payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .and_then(|advanced| advanced.get("poses"))
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty());
+            if has_poses {
+                UnsupportedReason::new(
+                    Some(model),
+                    "strict pose (ControlNet)",
+                    "SenseNova-U1 has no ControlNet/skeleton conditioning — the strict-pose tier is not an MLX path; it stays on the Python torch path (dropped on Mac).",
+                    Some("epic 3180"),
+                )
+            } else {
+                UnsupportedReason::new(
+                    Some(model),
+                    "edit/character without a reference",
+                    "SenseNova-U1 edit needs edit_image+sourceAssetId, and Character Studio needs character_image+referenceAssetId, to route to MLX.",
+                    None,
+                )
+            }
+        }
+        // InstantID (sc-3345 identity + angle set; sc-3381 pose mode + face-restore): the full
+        // surface runs on MLX for `character_image` + `referenceAssetId`. Only a non-character /
+        // reference-less job has no InstantID path. Mirrors `instantid_mlx_eligible`.
+        "instantid_realvisxl" => UnsupportedReason::new(
+            Some(model),
+            "InstantID without a character reference",
+            "InstantID runs on MLX for character_image with a referenceAssetId (single identity, the 11-view angle set, pose-library mode, and face-restore); a non-character / reference-less job has no InstantID path.",
             None,
         ),
         // flux2 / sdxl / realvisxl only fall out via LyCORIS (handled above) — defensive.
@@ -2595,9 +2630,16 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux2_klein_9b_true_v2",
     "sdxl",
     "realvisxl",
+    // InstantID on RealVisXL (sc-3345): single-identity + the 11-view angle set route to the
+    // native `mlx-gen-instantid` provider. Pose-library + face-restore InstantID jobs are gated
+    // OUT by `instantid_mlx_eligible` and stay on the torch `InstantIDAdapter` (engine sc-3117 /
+    // sc-3380 not ported).
+    "instantid_realvisxl",
     "chroma1_hd",
     "chroma1_base",
     "chroma1_flash",
+    "sensenova_u1_8b",
+    "sensenova_u1_8b_fast",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -2650,7 +2692,9 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
             flux2_mlx_eligible(payload)
         }
         "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
+        "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
+        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -2691,6 +2735,22 @@ fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
 fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
+}
+
+/// InstantID (`instantid_realvisxl`) MLX-routing conditions. The native `mlx-gen-instantid`
+/// provider now serves the FULL surface on Mac: single-identity `character_image`, the 11-view
+/// Character-Studio angle set (sc-3345), AND pose-library mode + face-restore (sc-3381, on the
+/// #193 engine — `generate_pose` MultiControlNet IdentityNet+OpenPose / `restore_face`). So every
+/// `character_image` job with a reference face routes to MLX; only a non-character / reference-less
+/// job stays off. Mirrors the worker's `instantid_available` gate so the router and worker agree.
+fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
+        return false;
+    }
+    payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// FLUX.2-klein MLX-routing conditions. FLUX.2-klein is an **MLX-only** family (no torch backend),
@@ -2798,6 +2858,41 @@ fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// LoKr apply on the core MLX loader (epic 3641 / sc-3842), so a LoRA never forces torch.
 fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
+/// SenseNova-U1 (sc-3900, epic 3180) MLX-routing conditions. The unified NEO-Unify model serves
+/// three image modes on the single `sensenova_u1_8b` / `sensenova_u1_8b_fast` ids: plain T2I
+/// (base path), instruction edit (`edit_image` → `Conditioning::Reference`), and Character Studio
+/// (`character_image` → `Conditioning::MultiReference`, incl. the angle set) — all via the Rust
+/// worker. It has NO ControlNet, so the strict-pose tier (`advanced.poses`) is unsupported and
+/// drops to torch on non-Mac (it has no Mac path — epic 3482). Edit/character require the
+/// reference the it2i path needs; plain T2I is always eligible. User LoRAs are not supported
+/// (`supports_lora=false`) and the manifest surfaces no LoRA slot, so no LoRA gate is needed.
+fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    if has_poses {
+        // No skeleton/ControlNet conditioning — strict pose is not an MLX SenseNova path.
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_source = payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    match payload.get("mode").and_then(Value::as_str) {
+        Some("edit_image") => has_source || has_reference,
+        Some("character_image") => has_reference,
+        // Plain T2I (text_to_image / no mode) — eligible with or without an inert reference.
+        _ => true,
+    }
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
@@ -3047,9 +3142,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if worker.gpu_id.eq_ignore_ascii_case("mlx") {
         // Image: sc-3026 txt2img/LoRA + sc-3060 reference/edit/inpaint/outpaint +
         // image_detail + sc-3513 the `image_edit` job type (plain Image Edit). A
-        // torch-only edit model (kolors/sensenova/lens/pulid/instantid) is not
-        // MLX-eligible, so the mlx worker refuses it and it stays on torch.
-        // (z_image_edit was ported to MLX, epic 3529 / sc-3923.)
+        // torch-only edit model (kolors/lens/pulid) is not MLX-eligible, so the mlx
+        // worker refuses it and it stays on torch. (z_image_edit was ported to MLX,
+        // epic 3529 / sc-3923; instantid + sensenova are MLX-routed too.)
         if matches!(
             job.job_type,
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
@@ -3351,9 +3446,9 @@ fn sort_json_value(value: &mut Value) {
 #[cfg(test)]
 mod mlx_routing_tests {
     use super::{
-        flux2_mlx_eligible, flux_mlx_eligible, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-        sdxl_mlx_eligible, video_mode_is_mlx_eligible, z_image_mlx_eligible,
-        VIDEO_MLX_ROUTED_MODELS,
+        flux2_mlx_eligible, flux_mlx_eligible, image_request_mlx_eligible, instantid_mlx_eligible,
+        qwen_edit_mlx_eligible, qwen_mlx_eligible, sdxl_mlx_eligible, video_mode_is_mlx_eligible,
+        z_image_mlx_eligible, VIDEO_MLX_ROUTED_MODELS,
     };
     use serde_json::{json, Map, Value};
 
@@ -3599,6 +3694,40 @@ mod mlx_routing_tests {
         assert!(sdxl_mlx_eligible(&object(json!({
             "mode": "edit_image",
             "loras": [{ "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn instantid_routes_all_character_modes_to_mlx() {
+        // The full InstantID surface is native (sc-3345 identity + angle; sc-3381 pose + restore):
+        // every character_image + referenceAssetId shape routes to MLX.
+        for advanced in [
+            json!({}),
+            json!({ "angleSet": true }),
+            json!({ "poses": [{ "id": "a" }] }),
+            json!({ "faceRestore": true }),
+            json!({ "poses": [{ "id": "a" }], "faceRestore": true }),
+        ] {
+            let payload = object(json!({
+                "model": "instantid_realvisxl",
+                "mode": "character_image",
+                "referenceAssetId": "asset_1",
+                "advanced": advanced,
+            }));
+            assert!(instantid_mlx_eligible(&payload));
+            assert!(image_request_mlx_eligible("instantid_realvisxl", &payload));
+        }
+
+        // No reference face → not eligible.
+        assert!(!instantid_mlx_eligible(&object(json!({
+            "model": "instantid_realvisxl",
+            "mode": "character_image"
+        }))));
+
+        // Non-character mode → not eligible (InstantID is a character flow).
+        assert!(!instantid_mlx_eligible(&object(json!({
+            "model": "instantid_realvisxl",
+            "mode": "text_to_image"
         }))));
     }
 
