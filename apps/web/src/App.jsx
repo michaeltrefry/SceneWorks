@@ -1613,6 +1613,10 @@ export function App() {
     updatePreset,
     deletePreset,
     duplicatePreset,
+    // Auth (sc-4168): pairing token for screens that call apiFetch directly
+    // (Image Editor, Logs, Pose Library, useUserPoseLoader). Empty string when
+    // the deployment doesn't require auth.
+    token,
     // Training (sc-1651 Phase B batch 7)
     authenticated,
     trainingDatasets,

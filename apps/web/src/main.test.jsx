@@ -589,6 +589,38 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Queue");
   });
 
+  // sc-4168 regression: App must provide `token` through AppContext. Screens that
+  // call apiFetch directly (Logs, Image Editor, Pose Library, useUserPoseLoader)
+  // read it from context; before the fix they got `undefined` and never sent the
+  // X-SceneWorks-Token header, breaking every pairing-token deployment.
+  it("provides the pairing token through context so screens send X-SceneWorks-Token", async () => {
+    window.localStorage.setItem("sceneworks-token", "pair-tok-123");
+    const logsTokens = [];
+    const baseFetch = global.fetch.getMockImplementation();
+    global.fetch = vi.fn((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/api/v1/logs")) {
+        logsTokens.push(new Headers(options.headers).get("X-SceneWorks-Token"));
+        return Promise.resolve(response([]));
+      }
+      return baseFetch(url, options);
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Logs").click();
+    });
+    await settle();
+
+    expect(logsTokens.length).toBeGreaterThan(0);
+    expect(logsTokens.every((value) => value === "pair-tok-123")).toBe(true);
+  });
+
   it("gates the studios behind workspace creation when no projects exist", async () => {
     const requests = [];
     global.fetch.mockImplementation((url, options = {}) => {
