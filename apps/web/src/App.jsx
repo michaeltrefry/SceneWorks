@@ -734,7 +734,7 @@ export function App() {
       },
       { active: 0 },
     );
-  }, [jobs]);
+  }, [jobs, queueSummary]);
   const filteredJobs = useMemo(() => {
     if (projectFilter === "all") {
       return jobs;

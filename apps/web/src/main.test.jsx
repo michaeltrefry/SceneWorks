@@ -589,6 +589,34 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Queue");
   });
 
+  // sc-4193 regression (F-WEB-3): the queueCounts memo reads queueSummary, so a
+  // queue.updated SSE event (which changes queueSummary but NOT jobs) must refresh
+  // the topbar "Queue N" chip. Before the fix the memo's deps were [jobs] only, so
+  // queue-only updates served stale counts until the next jobs mutation.
+  it("updates the Queue chip on a queue.updated event with no jobs change", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    const queueChip = () => [...container.querySelectorAll(".queue-chip")][0];
+    expect(queueChip()?.textContent).toContain("Queue 0");
+
+    // Pure queue.updated: two active jobs, and no job.updated to mutate `jobs`.
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["queue.updated"]({
+        data: JSON.stringify({
+          counts: { active: 2, queued: 2 },
+          activeJobs: [{ id: "job-a" }, { id: "job-b" }],
+        }),
+      });
+    });
+    await settle();
+
+    expect(queueChip()?.textContent).toContain("Queue 2");
+  });
+
   // sc-4168 regression: App must provide `token` through AppContext. Screens that
   // call apiFetch directly (Logs, Image Editor, Pose Library, useUserPoseLoader)
   // read it from context; before the fix they got `undefined` and never sent the
