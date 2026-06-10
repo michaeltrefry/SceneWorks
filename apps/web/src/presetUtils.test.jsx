@@ -4,6 +4,7 @@ import {
   buildStudioPresetPayload,
   cleanPresetDefaults,
   clearPresetDefault,
+  editModelForAsset,
   finiteNumberOrUndefined,
   presetMatchesModel,
   presetNameTaken,
@@ -201,5 +202,36 @@ describe("applyPresetDefault + clearPresetDefault round-trip", () => {
     box.setter(2); // user manually edits after the preset applied
     clearPresetDefault(box.setter, snapshots, "count");
     expect(box.get()).toBe(2);
+  });
+});
+
+// sc-4162 regression: editModelForAsset previously lived in App.jsx and called
+// modelLoraFamilies without importing it — a ReferenceError on the family-sibling
+// path (any asset whose generating model can't edit).
+describe("editModelForAsset", () => {
+  const t2iOnly = { id: "z_image_turbo", family: "z-image", capabilities: ["text_to_image"] };
+  const editSibling = { id: "z_image_edit", family: "z-image", capabilities: ["edit_image"] };
+  const editSelf = { id: "qwen_image_edit", family: "qwen-image", capabilities: ["image_edit"] };
+  const models = [t2iOnly, editSibling, editSelf];
+
+  it("prefers the generating model when it is edit-capable", () => {
+    expect(editModelForAsset({ recipe: { model: "qwen_image_edit" } }, models)).toBe("qwen_image_edit");
+  });
+
+  it("falls back to a same-family edit-capable sibling when the source model cannot edit", () => {
+    expect(editModelForAsset({ recipe: { model: "z_image_turbo" } }, models)).toBe("z_image_edit");
+  });
+
+  it("matches a family sibling when the generating model is not in the catalog", () => {
+    expect(editModelForAsset({ recipe: { model: "z-image" } }, models)).toBe("z_image_edit");
+  });
+
+  it("returns null when no family-matched edit model exists", () => {
+    expect(editModelForAsset({ recipe: { model: "z_image_turbo" } }, [t2iOnly, editSelf])).toBe(null);
+  });
+
+  it("returns null for assets without a recipe model", () => {
+    expect(editModelForAsset({ recipe: {} }, models)).toBe(null);
+    expect(editModelForAsset(null, models)).toBe(null);
   });
 });

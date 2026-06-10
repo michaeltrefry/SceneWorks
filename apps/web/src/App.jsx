@@ -19,6 +19,7 @@ import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { SettingsScreen } from "./screens/SettingsScreen.jsx";
 import { LogsScreen } from "./screens/LogsScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
+import { editModelForAsset } from "./presetUtils.js";
 import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
@@ -1332,35 +1333,6 @@ export function App() {
     setActiveView("Image");
   }
 
-  // Resolve an edit-capable model whose family matches the image's generating model.
-  // Prefers the exact generating model when it can edit, then any same-family
-  // edit-capable model; returns null so Image Studio keeps its default edit model
-  // when nothing matches.
-  function editModelForAsset(asset) {
-    const sourceModelId = asset?.recipe?.model;
-    if (!sourceModelId) {
-      return null;
-    }
-    const canEdit = (item) => {
-      const caps = item?.capabilities ?? [];
-      return caps.includes("edit_image") || caps.includes("image_edit");
-    };
-    const sourceModel = imageModels.find((item) => item.id === sourceModelId);
-    if (sourceModel && canEdit(sourceModel)) {
-      return sourceModel.id;
-    }
-    const families = modelLoraFamilies(sourceModel ?? { family: sourceModelId });
-    if (families.length) {
-      const sibling = imageModels.find(
-        (item) => canEdit(item) && modelLoraFamilies(item).some((family) => families.includes(family)),
-      );
-      if (sibling) {
-        return sibling.id;
-      }
-    }
-    return null;
-  }
-
   // "Edit" from the fullscreen preview: open Image Studio in edit mode with this
   // image as the source, preselecting the family-matched edit model when possible.
   function sendAssetToImageEdit(asset) {
@@ -1373,7 +1345,7 @@ export function App() {
       view: "Image",
       assetId: asset.id,
       mode: "edit_image",
-      model: editModelForAsset(asset),
+      model: editModelForAsset(asset, imageModels),
     });
     setActiveView("Image");
   }

@@ -110,6 +110,36 @@ export function loraMatchesModel(lora, model) {
   return !modelFamilies.length || !families.length || families.some((family) => modelFamilies.includes(family));
 }
 
+// Resolve an edit-capable model whose family matches the asset's generating model.
+// Prefers the exact generating model when it can edit, then any same-family
+// edit-capable model; returns null so Image Studio keeps its default edit model
+// when nothing matches.
+export function editModelForAsset(asset, imageModels) {
+  const sourceModelId = asset?.recipe?.model;
+  if (!sourceModelId) {
+    return null;
+  }
+  const models = Array.isArray(imageModels) ? imageModels : [];
+  const canEdit = (item) => {
+    const caps = item?.capabilities ?? [];
+    return caps.includes("edit_image") || caps.includes("image_edit");
+  };
+  const sourceModel = models.find((item) => item.id === sourceModelId);
+  if (sourceModel && canEdit(sourceModel)) {
+    return sourceModel.id;
+  }
+  const families = modelLoraFamilies(sourceModel ?? { family: sourceModelId });
+  if (families.length) {
+    const sibling = models.find(
+      (item) => canEdit(item) && modelLoraFamilies(item).some((family) => families.includes(family)),
+    );
+    if (sibling) {
+      return sibling.id;
+    }
+  }
+  return null;
+}
+
 export function loraLooksLikeIcLora(lora) {
   if (lora?.icLora === true || lora?.isIcLora === true) {
     return true;
