@@ -2209,16 +2209,6 @@ const ZIMAGE_ADAPTER_LABEL: &str = "mlx_z_image";
 #[cfg(target_os = "macos")]
 const CHARACTER_ANGLE_SET_ORDER: [&str; 11] = sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER;
 
-/// The default kps preset for a canonical angle name, or the `front` preset if an unknown name
-/// slips through (callers iterate [`CHARACTER_ANGLE_SET_ORDER`], so the fallback is unreachable
-/// in practice — it just keeps the lookup total). Reads the canonical
-/// [`sceneworks_core::angle_kps`] table (sc-4424 presets, now the library built-ins — sc-4434).
-#[cfg(target_os = "macos")]
-fn instantid_angle_kps(angle: &str) -> [(f32, f32); 5] {
-    sceneworks_core::angle_kps::angle_kps(angle)
-        .unwrap_or(sceneworks_core::angle_kps::BUILTIN_ANGLE_KPS[0].1)
-}
-
 /// The per-angle continuation clause appended to the user's prompt (parity with
 /// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
 #[cfg(target_os = "macos")]
@@ -3288,7 +3278,7 @@ fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
 #[cfg(target_os = "macos")]
 fn grouped_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
     if instantid_available(request, settings) {
-        instantid_image_count(request)
+        instantid_image_count(request, settings)
     } else if qwen_edit_available(request, settings) {
         match flux2_grouping(request) {
             Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
@@ -4665,15 +4655,56 @@ fn instantid_available(request: &ImageRequest, settings: &Settings) -> bool {
         && resolve_instantid_sdxl_base(request, settings).is_some()
 }
 
-/// The number of images an InstantID job produces: `n` for a pose set, 11 for an angle set, else
-/// `request.count`.
+/// The number of images an InstantID job produces: `n` for a pose set, the active angle
+/// collection's length for an angle set (sc-4450 — variable N, not fixed 11), else `request.count`.
 #[cfg(target_os = "macos")]
-fn instantid_image_count(request: &ImageRequest) -> u32 {
+fn instantid_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
     match instantid_mode(request) {
         InstantIdMode::PoseSet(count) => count as u32,
-        InstantIdMode::AngleSet => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+        InstantIdMode::AngleSet => active_angle_collection(request, settings).1.len() as u32,
         InstantIdMode::Identity => request.count,
     }
+}
+
+/// Resolve the active angle-set collection for this job (sc-4450): the per-generation override
+/// (`advanced.keypointCollectionId`) → the user default → the built-in 11. Built-in fallback on
+/// any store error so angle generation never hard-fails on a Key Point Library hiccup.
+#[cfg(target_os = "macos")]
+fn active_angle_collection(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> (
+    String,
+    Vec<sceneworks_core::project_store::ResolvedAnglePreset>,
+) {
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let override_id = advanced_str(request, "keypointCollectionId", "");
+    let override_id = override_id.trim();
+    let override_id = (!override_id.is_empty()).then_some(override_id);
+    store
+        .resolve_angle_collection(override_id)
+        .unwrap_or_else(|_| {
+            (
+                sceneworks_core::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID.to_owned(),
+                builtin_angle_presets(),
+            )
+        })
+}
+
+/// The built-in 11 as resolved angle presets (the worker-side fallback when the store is
+/// unreachable, sc-4450).
+#[cfg(target_os = "macos")]
+fn builtin_angle_presets() -> Vec<sceneworks_core::project_store::ResolvedAnglePreset> {
+    use sceneworks_core::{angle_kps, project_store::ResolvedAnglePreset};
+    angle_kps::BUILTIN_ANGLE_KPS
+        .iter()
+        .map(|(angle, kps)| ResolvedAnglePreset {
+            preset_id: angle_kps::builtin_preset_id(angle),
+            name: angle_kps::builtin_angle_display_name(angle),
+            angle: Some((*angle).to_owned()),
+            kps: *kps,
+        })
+        .collect()
 }
 
 /// Resolve InstantID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` →
@@ -4990,6 +5021,9 @@ async fn generate_instantid_stream(
     let mode = instantid_mode(request);
     let angle_set = matches!(mode, InstantIdMode::AngleSet);
     let pose_set = matches!(mode, InstantIdMode::PoseSet(_));
+    // The active Key Point Library collection drives the angle set (sc-4450): per-generation
+    // override > user default > built-in 11. Resolved once (and only for angle jobs).
+    let angle_collection = angle_set.then(|| active_angle_collection(request, settings));
     let openpose_scale = advanced_f32(request, "openPoseScale", INSTANTID_OPENPOSE_SCALE, 0.0, 2.0);
     let face_restore = advanced_flag(request, "faceRestore");
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
@@ -5017,6 +5051,18 @@ async fn generate_instantid_stream(
     if face_restore {
         raw_settings.insert("faceRestore".to_owned(), Value::Bool(true));
     }
+    // Record which collection + ordered presets produced the set, so each asset (by index) maps
+    // back to the preset that rendered it (sc-4450).
+    if let Some((collection_id, presets)) = &angle_collection {
+        raw_settings.insert("keypointCollectionId".to_owned(), json!(collection_id));
+        raw_settings.insert(
+            "anglePresetIds".to_owned(),
+            json!(presets
+                .iter()
+                .map(|preset| preset.preset_id.clone())
+                .collect::<Vec<_>>()),
+        );
+    }
 
     // Per-image work items: (seed, prompt, action). Pose + angle sets share one seed (only the
     // pose changes across the set — noise-derived attributes stay constant); single identity is
@@ -5038,14 +5084,21 @@ async fn generate_instantid_stream(
         }
         InstantIdMode::AngleSet => {
             let set_seed = resolve_seed(request, 0);
-            CHARACTER_ANGLE_SET_ORDER
-                .iter()
-                .map(|&angle| {
-                    (
-                        set_seed,
-                        augment_prompt_for_angle(&request.prompt, angle),
-                        InstantIdAction::Angle(instantid_angle_kps(angle)),
-                    )
+            // One image per preset in the active collection's order (sc-4450). Built-in presets
+            // carry their canonical angle so the prompt still gets the per-angle clause; custom
+            // presets render to their kps with the base prompt.
+            let presets = angle_collection
+                .as_ref()
+                .map(|(_, presets)| presets.clone())
+                .unwrap_or_else(builtin_angle_presets);
+            presets
+                .into_iter()
+                .map(|preset| {
+                    let prompt = match &preset.angle {
+                        Some(angle) => augment_prompt_for_angle(&request.prompt, angle),
+                        None => request.prompt.clone(),
+                    };
+                    (set_seed, prompt, InstantIdAction::Angle(preset.kps))
                 })
                 .collect()
         }
@@ -6580,7 +6633,7 @@ mod tests {
         let mut failures: Vec<String> = Vec::new();
         println!("\n  view                 kps-dist   area%   id-cos   verdict");
         for &angle in CHARACTER_ANGLE_SET_ORDER.iter() {
-            let kps = instantid_angle_kps(angle);
+            let kps = sceneworks_core::angle_kps::angle_kps(angle).expect("built-in angle kps");
             let req = InstantIdRequest {
                 prompt: augment_prompt_for_angle("a portrait photo of a woman", angle),
                 negative: "blurry, low quality, deformed".to_owned(),

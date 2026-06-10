@@ -71,6 +71,17 @@ pub const GLOBAL_KEYPOINTS_PROJECT_NAME: &str = "Key Point Library";
 /// The user angle-set collections store, relative to the global keypoints project.
 const KEYPOINT_COLLECTIONS_FILE: &str = "keypoint-collections.json";
 
+/// One resolved angle preset for generation (sc-4450): the kps to draw + a display name + (for
+/// built-ins) the canonical angle name that drives prompt augmentation. User presets have
+/// `angle: None` (no canonical prompt clause). Produced by [`ProjectStore::resolve_angle_collection`].
+#[derive(Debug, Clone)]
+pub struct ResolvedAnglePreset {
+    pub preset_id: String,
+    pub name: String,
+    pub angle: Option<String>,
+    pub kps: [(f32, f32); 5],
+}
+
 pub type ProjectStoreResult<T> = Result<T, ProjectStoreError>;
 
 #[derive(Debug)]
@@ -1732,6 +1743,79 @@ impl ProjectStore {
         write_user_collections(&project_path, &collections)
     }
 
+    /// Resolve the active angle-set collection to its ordered presets (kps + name + optional
+    /// canonical angle) for generation (sc-4450). Selection: an explicit `collection_id` override
+    /// → the user's default → the built-in default (the 11). Referenced presets that no longer
+    /// resolve (e.g. a custom preset deleted after being added) are skipped; if nothing resolves,
+    /// falls back to the built-in 11. Returns `(collection_id_used, presets)`.
+    pub fn resolve_angle_collection(
+        &self,
+        collection_id: Option<&str>,
+    ) -> ProjectStoreResult<(String, Vec<ResolvedAnglePreset>)> {
+        let collections = self.list_keypoint_collections()?;
+        let target = match collection_id {
+            Some(id) => collections
+                .iter()
+                .find(|collection| collection.get("id").and_then(Value::as_str) == Some(id)),
+            None => collections.iter().find(|collection| {
+                collection.get("isDefault").and_then(Value::as_bool) == Some(true)
+            }),
+        };
+        let used_id = target
+            .and_then(|collection| collection.get("id").and_then(Value::as_str))
+            .unwrap_or(crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID)
+            .to_owned();
+        let ordered: Vec<String> = target
+            .and_then(|collection| collection.get("orderedPresetIds"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let user_presets = self.list_user_keypoint_presets()?;
+        let mut resolved = Vec::with_capacity(ordered.len());
+        for id in &ordered {
+            if let Some(angle) = id.strip_prefix("builtin_") {
+                if let Some(kps) = crate::angle_kps::angle_kps(angle) {
+                    resolved.push(ResolvedAnglePreset {
+                        preset_id: id.clone(),
+                        name: crate::angle_kps::builtin_angle_display_name(angle),
+                        angle: Some(angle.to_owned()),
+                        kps,
+                    });
+                }
+            } else if let Some(record) = user_presets
+                .iter()
+                .find(|preset| preset.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            {
+                if let Some(kps) = parse_kps_tuple(record.get("kps")) {
+                    resolved.push(ResolvedAnglePreset {
+                        preset_id: id.clone(),
+                        name: record
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(id)
+                            .to_owned(),
+                        angle: None,
+                        kps,
+                    });
+                }
+            }
+        }
+        if resolved.is_empty() {
+            return Ok((
+                crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID.to_owned(),
+                builtin_resolved_presets(),
+            ));
+        }
+        Ok((used_id, resolved))
+    }
+
     /// Write the generation-set JSON for a job from the worker-reported facts.
     /// Idempotent — overwrites the same `<id>.json` on re-applied updates.
     pub fn write_generation_set(
@@ -3059,6 +3143,34 @@ fn parse_normalized_kps(value: Option<&Value>) -> ProjectStoreResult<Vec<Value>>
     Ok(out)
 }
 
+/// Parse a stored/served kps record (`[[x,y]×5]`) into a fixed `[(f32,f32);5]`, or `None` if it
+/// isn't exactly 5 numeric pairs. Used to resolve a collection's presets for generation (sc-4450).
+fn parse_kps_tuple(value: Option<&Value>) -> Option<[(f32, f32); 5]> {
+    let points = value.and_then(Value::as_array)?;
+    if points.len() != 5 {
+        return None;
+    }
+    let mut out = [(0.0f32, 0.0f32); 5];
+    for (slot, point) in out.iter_mut().zip(points) {
+        let pair = point.as_array().filter(|values| values.len() == 2)?;
+        *slot = (pair[0].as_f64()? as f32, pair[1].as_f64()? as f32);
+    }
+    Some(out)
+}
+
+/// The built-in 11 as resolved angle presets (the generation fallback / default set, sc-4450).
+fn builtin_resolved_presets() -> Vec<ResolvedAnglePreset> {
+    crate::angle_kps::BUILTIN_ANGLE_KPS
+        .iter()
+        .map(|(angle, kps)| ResolvedAnglePreset {
+            preset_id: crate::angle_kps::builtin_preset_id(angle),
+            name: crate::angle_kps::builtin_angle_display_name(angle),
+            angle: Some((*angle).to_owned()),
+            kps: *kps,
+        })
+        .collect()
+}
+
 /// Map a stored `type:"keypoint"` asset → a Key Point Library preset record.
 fn keypoint_asset_to_preset(asset: &Value) -> Value {
     json!({
@@ -4286,6 +4398,56 @@ mod tests {
             .delete_keypoint_collection(&collection_id)
             .expect("delete user collection");
         assert_eq!(store.list_keypoint_collections().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn resolve_angle_collection_default_override_and_custom_preset() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+
+        // No user collection → the built-in 11 in order.
+        let (id, presets) = store.resolve_angle_collection(None).expect("resolve");
+        assert_eq!(id, crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID);
+        assert_eq!(presets.len(), 11);
+        assert_eq!(presets[0].preset_id, "builtin_front");
+        assert_eq!(presets[0].angle.as_deref(), Some("front"));
+
+        // A user preset (real source image) + a collection mixing it with a built-in.
+        let upload = stage_kps_upload(&data_dir, "upload-mix.png");
+        let preset = store
+            .create_keypoint_asset(&json!({
+                "name": "My Angle", "kps": front_kps(), "sourceUploadPath": upload
+            }))
+            .expect("preset");
+        let preset_id = preset["id"].as_str().unwrap().to_owned();
+        let collection = store
+            .upsert_keypoint_collection(&json!({
+                "name": "Mix",
+                "orderedPresetIds": [preset_id, "builtin_left_profile"],
+                "isDefault": true,
+            }))
+            .expect("collection");
+        let collection_id = collection["id"].as_str().unwrap().to_owned();
+
+        // Default now resolves to the user's collection (2 presets, in order).
+        let (id, presets) = store.resolve_angle_collection(None).expect("resolve");
+        assert_eq!(id, collection_id);
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets[0].name, "My Angle");
+        assert!(
+            presets[0].angle.is_none(),
+            "custom preset has no canonical angle"
+        );
+        assert_eq!(presets[1].preset_id, "builtin_left_profile");
+        assert_eq!(presets[1].angle.as_deref(), Some("left_profile"));
+
+        // Explicit override to the built-in default beats the user default.
+        let (id, presets) = store
+            .resolve_angle_collection(Some(crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID))
+            .expect("resolve override");
+        assert_eq!(id, crate::angle_kps::BUILTIN_DEFAULT_COLLECTION_ID);
+        assert_eq!(presets.len(), 11);
     }
 
     #[test]
