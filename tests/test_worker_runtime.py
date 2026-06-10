@@ -9794,6 +9794,7 @@ def _refine_settings(**overrides):
 class _FakeRefiner:
     """Stands in for PromptRefiner in handler tests — no torch/transformers."""
 
+    id = "prompt_refiner"
     instances = []
 
     def __init__(self, *, model_name_or_path, gpu_id, max_new_tokens):
@@ -9801,16 +9802,29 @@ class _FakeRefiner:
         self.gpu_id = gpu_id
         self.max_new_tokens = max_new_tokens
         self.loaded = False
+        self.load_calls = 0
         _FakeRefiner.instances.append(self)
 
     def loaded_models(self):
         return [self.model_name_or_path] if self.loaded and self.model_name_or_path else []
 
     def load(self):
+        self.load_calls += 1
         self.loaded = True
+
+    def unload(self):
+        freed = self.loaded
+        self.loaded = False
+        return freed
 
     def refine(self, prompt, *, guide, workflow):
         return f"Refined ({workflow}): {prompt}"
+
+
+def _refine_adapters(**overrides):
+    """A worker-loop-style adapter dict holding a single resident _FakeRefiner."""
+    refiner = _FakeRefiner(model_name_or_path=overrides.get("model_name_or_path", ""), gpu_id="cpu", max_new_tokens=512)
+    return {"prompt_refiner": refiner}
 
 
 def test_build_system_prompt_uses_workflow_medium_and_embeds_guide():
@@ -9834,6 +9848,47 @@ def test_prompt_refiner_load_unavailable_without_backend():
     # surfaces a clear PromptRefineUnavailable rather than an opaque ImportError.
     with pytest.raises(PromptRefineUnavailable):
         PromptRefiner(model_name_or_path="some/model", gpu_id="cpu").load()
+
+
+def test_prompt_refiner_load_is_idempotent_when_already_resident(monkeypatch):
+    # sc-4191: a second load() for the same checkpoint must not re-import torch /
+    # re-run from_pretrained — it returns immediately while the model is resident.
+    refiner = PromptRefiner(model_name_or_path="some/model", gpu_id="cpu")
+    refiner.model = object()  # pretend the checkpoint is resident
+    refiner._loaded_model_name = "some/model"
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("load() must not reload while the same model is resident")
+
+    monkeypatch.setattr("scene_worker.prompt_refine.require_inference_backend_for_gpu_worker", _boom)
+    refiner.load()  # no exception → early-returned without touching the backend
+
+
+def test_prompt_refiner_unload_frees_and_is_safe_when_empty():
+    # sc-4191: unload() drops the resident model and reports it; a no-op when
+    # nothing is loaded so evict_other_image_adapters can call it unconditionally.
+    refiner = PromptRefiner(model_name_or_path="some/model", gpu_id="cpu")
+    assert refiner.unload() is False  # nothing loaded yet
+
+    released = {}
+
+    refiner.model = object()
+    refiner.tokenizer = object()
+    refiner.torch = object()
+    refiner._loaded_model_name = "some/model"
+    import scene_worker.prompt_refine as pr
+
+    orig = pr.release_inference_memory
+    pr.release_inference_memory = lambda torch: released.setdefault("called", True)
+    try:
+        assert refiner.unload() is True
+    finally:
+        pr.release_inference_memory = orig
+
+    assert released.get("called") is True
+    assert refiner.model is None
+    assert refiner.tokenizer is None
+    assert refiner.loaded_models() == []
 
 
 def test_prompt_refiner_refine_applies_chat_template_and_cleans():
@@ -9888,20 +9943,42 @@ def test_prompt_refiner_refine_applies_chat_template_and_cleans():
 
 def test_run_prompt_refine_job_writes_refined_result(monkeypatch):
     monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
-    monkeypatch.setattr("scene_worker.runtime.PromptRefiner", _FakeRefiner)
     _FakeRefiner.instances = []
+    adapters = _refine_adapters()
     api = _DryRunApi()
     job = {"id": "job-refine-1", "type": "prompt_refine", "payload": {"prompt": "dog in park", "workflow": "image"}}
 
-    run_prompt_refine_job(api, _refine_settings(), job)
+    run_prompt_refine_job(api, _refine_settings(), job, adapters)
 
     terminal = api.progress[-1]
     assert terminal["status"] == "completed"
     assert terminal["result"]["refinedPrompt"] == "Refined (image): dog in park"
     assert terminal["result"]["originalPrompt"] == "dog in park"
     # Loaded the model before refining; emitted a loading_model stage.
-    assert _FakeRefiner.instances[0].loaded is True
+    assert adapters["prompt_refiner"].loaded is True
     assert any(entry["stage"] == "loading_model" for entry in api.progress)
+
+
+def test_run_prompt_refine_job_reuses_resident_refiner(monkeypatch):
+    """sc-4191: repeat prompt_refine jobs must reuse the one resident refiner and
+    its already-loaded model, never construct a new instance or reload per job."""
+    monkeypatch.setattr("scene_worker.runtime.emit", lambda payload: None)
+    _FakeRefiner.instances = []
+    adapters = _refine_adapters()
+    refiner = adapters["prompt_refiner"]
+    api = _DryRunApi()
+
+    for n in range(3):
+        job = {"id": f"job-refine-reuse-{n}", "type": "prompt_refine", "payload": {"prompt": "dog", "workflow": "image"}}
+        run_prompt_refine_job(api, _refine_settings(), job, adapters)
+
+    # Exactly one refiner ever constructed across three jobs.
+    assert len(_FakeRefiner.instances) == 1
+    assert _FakeRefiner.instances[0] is refiner
+    # load() is called each job but stays cheap (idempotent in the real adapter);
+    # the fake just records it. The instance is reused, not rebuilt.
+    assert refiner.load_calls == 3
+    assert refiner.loaded is True
 
 
 def test_run_prompt_refine_job_reports_failure(monkeypatch):
@@ -9911,11 +9988,11 @@ def test_run_prompt_refine_job_reports_failure(monkeypatch):
         def refine(self, prompt, *, guide, workflow):
             raise PromptRefineUnavailable("Could not load the prompt-refinement model.")
 
-    monkeypatch.setattr("scene_worker.runtime.PromptRefiner", _BoomRefiner)
     api = _DryRunApi()
+    adapters = {"prompt_refiner": _BoomRefiner(model_name_or_path="", gpu_id="cpu", max_new_tokens=512)}
     job = {"id": "job-refine-2", "type": "prompt_refine", "payload": {"prompt": "dog", "workflow": "image"}}
 
-    run_prompt_refine_job(api, _refine_settings(), job)
+    run_prompt_refine_job(api, _refine_settings(), job, adapters)
 
     terminal = api.progress[-1]
     assert terminal["status"] == "failed"

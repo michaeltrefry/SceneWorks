@@ -1404,15 +1404,17 @@ def run_training_caption_worker_job(api: ApiClient, settings: WorkerSettings, jo
     )
 
 
-def run_prompt_refine_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
+def run_prompt_refine_job(api: ApiClient, settings: WorkerSettings, job: dict, image_adapters: dict) -> None:
     job_id = job["id"]
     payload = job.get("payload") or {}
     prompt = (payload.get("prompt") or "").strip()
-    refiner = PromptRefiner(
-        model_name_or_path=payload.get("model") or getattr(settings, "prompt_refine_model", "") or "",
-        gpu_id=getattr(settings, "gpu_id", "auto"),
-        max_new_tokens=getattr(settings, "prompt_refine_max_new_tokens", 512),
-    )
+    # Reuse the long-lived resident refiner (sc-4191) instead of reloading the 3B
+    # LLM per job. Only override the checkpoint when the job names a specific one;
+    # otherwise keep whatever is resident (the configured/default model).
+    refiner = image_adapters["prompt_refiner"]
+    requested_model = (payload.get("model") or getattr(settings, "prompt_refine_model", "") or "").strip()
+    if requested_model:
+        refiner.model_name_or_path = requested_model
     try:
         heartbeat_with_loaded_models(api, settings, "busy", job_id, refiner.loaded_models)
         update_job(
@@ -1420,6 +1422,9 @@ def run_prompt_refine_job(api: ApiClient, settings: WorkerSettings, job: dict) -
             job_id,
             {"status": "loading_model", "stage": "loading_model", "progress": 0.1, "message": "Loading refinement model."},
         )
+        # Free any other resident family before loading so we never hold an image
+        # pipeline and the refine LLM at once; load() is a no-op if already resident.
+        evict_other_image_adapters(image_adapters, getattr(refiner, "id", "prompt_refiner"))
         refiner.load()
         update_job(
             api,
@@ -1478,6 +1483,13 @@ def run_worker_loop(settings: WorkerSettings) -> None:
         "chroma_diffusers": ChromaDiffusersAdapter(),
         "instantid_sdxl": InstantIDAdapter(),
         "pulid_flux": PuLIDFluxAdapter(),
+        # Resident prompt-refine LLM (sc-4191): one instance, kept loaded across
+        # prompt_refine jobs and evicted by evict_other_image_adapters like the rest.
+        "prompt_refiner": PromptRefiner(
+            model_name_or_path=getattr(settings, "prompt_refine_model", "") or "",
+            gpu_id=getattr(settings, "gpu_id", "auto"),
+            max_new_tokens=getattr(settings, "prompt_refine_max_new_tokens", 512),
+        ),
     }
     max_registration_attempts = 20
 
@@ -1537,7 +1549,7 @@ def run_worker_loop(settings: WorkerSettings) -> None:
             elif job["type"] in CAPTION_JOB_TYPES:
                 run_training_caption_worker_job(api, settings, job)
             elif job["type"] in PROMPT_REFINE_JOB_TYPES:
-                run_prompt_refine_job(api, settings, job)
+                run_prompt_refine_job(api, settings, job, image_adapters)
             else:
                 update_job(
                     api,

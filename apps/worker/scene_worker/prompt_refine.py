@@ -13,6 +13,7 @@ import re
 from typing import Any, Optional
 
 from .image_adapters import (
+    release_inference_memory,
     require_inference_backend_for_gpu_worker,
     select_torch_device,
     select_torch_dtype,
@@ -80,7 +81,16 @@ def clean_output(text: str) -> str:
 class PromptRefiner:
     """Loads a small instruction LLM in-process and rewrites prompts. Mirrors
     `JoyCaptioner`: lazy `load()`, shared MPS-aware device/dtype helpers, and a
-    `model.generate` call."""
+    `model.generate` call.
+
+    Held as a long-lived resident adapter in the worker loop's adapter dict
+    (sc-4191): ``load()`` is idempotent so repeat ``prompt_refine`` jobs reuse the
+    already-resident 3B LLM instead of paying a fresh multi-GB
+    ``from_pretrained`` per job, and ``unload()`` lets ``evict_other_image_adapters``
+    free it before another family loads."""
+
+    #: Stable adapter id used as the resident-dict key and evict keep-id.
+    id = "prompt_refiner"
 
     def __init__(self, *, model_name_or_path: str, gpu_id: str, max_new_tokens: int = 512) -> None:
         self.model_name_or_path = model_name_or_path or DEFAULT_REFINE_MODEL
@@ -91,11 +101,40 @@ class PromptRefiner:
         self.torch = None
         self.device = None
         self.torch_dtype = None
+        # Tracks which checkpoint is currently resident so load() can skip a
+        # redundant reload and detect a within-job model switch.
+        self._loaded_model_name: Optional[str] = None
 
     def loaded_models(self) -> list[str]:
         return [self.model_name_or_path] if self.model is not None else []
 
+    def unload(self) -> bool:
+        """Drop the resident model/tokenizer and return cached accelerator blocks
+        to the OS. Returns True if anything was freed (so ``evict_other_image_adapters``
+        can report it). gc.collect() must precede empty_cache() or the dropped
+        ``nn.Module`` reference cycles keep the multi-GB weights resident."""
+        if self.model is None and self.tokenizer is None:
+            return False
+        torch = self.torch
+        self.model = None
+        self.tokenizer = None
+        self.torch = None
+        self.device = None
+        self.torch_dtype = None
+        self._loaded_model_name = None
+        if torch is not None:
+            release_inference_memory(torch)
+        return True
+
     def load(self) -> None:
+        # Resident reuse: the requested checkpoint is already loaded → no-op.
+        if self.model is not None and self._loaded_model_name == self.model_name_or_path:
+            return
+        # A different refine model was requested: free the resident one first so
+        # we never hold two multi-GB LLMs at once (mirrors a within-family switch).
+        if self.model is not None:
+            self.unload()
+
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -116,6 +155,7 @@ class PromptRefiner:
             )
             self.model.to(self.device)
             self.model.eval()
+            self._loaded_model_name = self.model_name_or_path
         except PromptRefineError:
             raise
         except Exception as exc:
