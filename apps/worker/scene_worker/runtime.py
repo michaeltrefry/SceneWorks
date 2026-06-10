@@ -1189,10 +1189,9 @@ def run_upscale_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None
         job,
         kind_label="Image upscale",
         setup=setup,
-        # On OOM, release the activation pool instead of restarting the child:
-        # the lazily-loaded upscale engine is the only resident and dropping the
-        # pool reclaims it without losing the worker's other cached state.
-        oom_restart=False,
+        # Release the activation pool, then restart like every other GPU
+        # handler — a poisoned CUDA context can't reliably reclaim VRAM in
+        # place (sc-4187; the no-restart behavior here was drift, not policy).
         on_oom=release_image_worker_memory,
     )
 
@@ -1227,8 +1226,7 @@ def run_detail_job(api: ApiClient, settings: WorkerSettings, job: dict) -> None:
         job,
         kind_label="Detail enhancement",
         setup=setup,
-        # Same OOM policy as run_upscale_job: release the pool, keep the child.
-        oom_restart=False,
+        # Same OOM policy as run_upscale_job (sc-4187): release, then restart.
         on_oom=release_image_worker_memory,
     )
 

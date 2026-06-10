@@ -6884,6 +6884,57 @@ def test_video_job_failure_runs_cleanup_to_free_gpu(monkeypatch):
     assert events["status"] == "failed"
 
 
+def test_upscale_and_detail_jobs_restart_after_cuda_oom(monkeypatch):
+    # sc-4187: upscale/detail set needs_oom_restart but never restarted — the
+    # worker kept running with a poisoned CUDA context. They now release the
+    # activation pool and restart like every other GPU handler.
+    from scene_worker.runtime import run_detail_job, run_upscale_job
+
+    class Api:
+        def __init__(self):
+            self.status = None
+
+        def post(self, path, payload):
+            if path.endswith("/heartbeat"):
+                return {}
+            if path.endswith("/progress"):
+                self.status = payload.get("status")
+                return {"status": payload["status"], "stage": payload.get("stage")}
+            raise AssertionError(path)
+
+        def get(self, _path):
+            return {"cancelRequested": False}
+
+    for handler, runner_target in (
+        (run_upscale_job, "scene_worker.runtime.run_image_upscale"),
+        (run_detail_job, "scene_worker.runtime.run_image_detail"),
+    ):
+        released = {"count": 0}
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("CUDA error: out of memory")
+
+        monkeypatch.setattr(runner_target, boom)
+        monkeypatch.setattr("scene_worker.runtime.find_project_path", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            "scene_worker.runtime.release_image_worker_memory",
+            lambda: released.__setitem__("count", released["count"] + 1),
+        )
+        monkeypatch.setattr(
+            "scene_worker.runtime.run_blocking_job_step",
+            lambda *_args, **_kwargs: _args[4](lambda: False),
+        )
+        api = Api()
+        with pytest.raises(SystemExit):
+            handler(
+                api,
+                SimpleNamespace(worker_id="worker-1", gpu_id="0", data_dir=Path(".")),
+                {"id": "job-oom", "payload": {"projectId": "project-1"}},
+            )
+        assert api.status == "failed"
+        assert released["count"] == 1, handler.__name__
+
+
 def test_video_job_nonoom_failure_does_not_restart(monkeypatch):
     events = {"cleanup": 0, "status": None}
 
