@@ -23,9 +23,12 @@ name: macOS MLX worker
 # all external contributors' workflows" enabled in the repo Actions settings as
 # defense in depth.
 
+# Epic-3018 stories merged to main via PR #456 and `rust-mlx-integration` was
+# deleted; epic work now branches off and PRs into main (sc-4177 re-pointed the
+# lane after it sat dead on the deleted branch).
 on:
   push:
-    branches: [rust-mlx-integration]
+    branches: [main]
     paths: &mlx_paths
       - "crates/**"
       - "apps/rust-worker/**"
@@ -34,7 +37,7 @@ on:
       - ".cargo/config.toml"
       - ".github/workflows/macos-mlx.yml"
   pull_request:
-    branches: [rust-mlx-integration]
+    branches: [main]
     paths: *mlx_paths
   workflow_dispatch:
 
