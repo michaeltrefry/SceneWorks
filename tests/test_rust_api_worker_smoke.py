@@ -28,6 +28,12 @@ from scene_worker.runtime import (
 )
 from scene_worker.settings import WorkerSettings
 
+# Every test here drives the compiled Rust API binary (the `rust_api` fixture
+# spawns `cargo run -p sceneworks-rust-api`), so the whole module is e2e: it
+# must run in the CI step that follows the Rust build, not in the lightweight
+# worker-suite step (sc-4180).
+pytestmark = pytest.mark.e2e
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -184,7 +190,6 @@ def test_python_worker_protocol_round_trips_against_rust_api_binary(rust_api):
     assert completed["cancelRequested"] is True
 
 
-@pytest.mark.e2e
 def test_python_worker_completes_procedural_image_job_against_rust_api_binary(
     rust_api, tmp_path, monkeypatch
 ):
@@ -295,7 +300,6 @@ class _RecordingImageAdapter:
         )
 
 
-@pytest.mark.e2e
 def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api, tmp_path, monkeypatch):
     """sc-2226: a character_image angle set AND pose set, each carrying a `loras` array,
     submitted through the Rust API binary and run by the in-process worker, deliver those

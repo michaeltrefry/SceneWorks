@@ -40,9 +40,12 @@ jobs:
       - name: Install contract test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest==9.0.2 httpx==0.28.1 "pillow>=12.0.0,<13" "numpy>=2.0,<3"
+          python -m pip install pytest==9.0.2 httpx==0.28.1 "pillow>=12.0.0,<13" "numpy>=2.0,<3" "opencv-python-headless>=4.10,<5"
       - name: Run worker test suite
-        run: python -m pytest -q tests/test_worker_runtime.py tests/test_worker_gpu.py tests/test_person_adapters.py
+        # Marker expression instead of a hardcoded file list so new test files
+        # are picked up automatically; e2e/parity-marked tests run in their own
+        # later steps against the built Rust API (sc-4180).
+        run: python -m pytest -q tests/ -m "not e2e and not parity" --strict-markers
       - name: Run scaffold and compose checks
         run: |
           npm run check
