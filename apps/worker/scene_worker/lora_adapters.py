@@ -642,7 +642,10 @@ def clear_loras(pipe: Any, adapter_names: tuple[str, ...], *, adapter_id: str) -
     # unload_lora_weights (LoRA-only) leaves behind and would leak into the next
     # job (epic 2193). Fall back to unload for pipelines without delete_adapters.
     if hasattr(pipe, "delete_adapters"):
-        pipe.delete_adapters(list(adapter_names))
+        # Only the non-LyCORIS leftovers: the restored LyCORIS names were never
+        # peft adapters, and delete_adapters raises on unknown names — which
+        # would fail the next job on a mixed-adapter cached pipeline (sc-4181).
+        pipe.delete_adapters(remaining)
         return
     if hasattr(pipe, "unload_lora_weights"):
         pipe.unload_lora_weights()

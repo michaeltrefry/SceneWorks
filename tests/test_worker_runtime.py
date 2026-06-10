@@ -1634,6 +1634,21 @@ def test_clear_loras_prefers_delete_adapters_so_lokr_is_removed():
     assert pipe.unloaded == 0
 
 
+def test_clear_loras_mixed_lycoris_and_peft_deletes_only_peft_names(monkeypatch):
+    # sc-4181: on a cached pipeline holding a LyCORIS net AND a peft adapter,
+    # clear_loras must pass only the non-LyCORIS leftovers to delete_adapters —
+    # the full list includes the just-restored LyCORIS name, which diffusers'
+    # delete_adapters rejects, failing the next job.
+    monkeypatch.setattr(
+        "scene_worker.lora_adapters._restore_lycoris_nets",
+        lambda module, names: {"lyc_style"},
+    )
+    pipe = FakeTargetedLoraPipe()
+    clear_loras(pipe, ("lyc_style", "char"), adapter_id="sdxl_test")
+    assert pipe.deleted == [["char"]]
+    assert pipe.unloaded == 0
+
+
 def test_set_adapter_weights_on_module_applies_and_guards():
     module = FakeDenoiserModule()
     spec = LoraSpec(id="c", path="p", weight=0.5, adapter_name="c")
