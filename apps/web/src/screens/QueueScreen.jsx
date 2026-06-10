@@ -3,7 +3,6 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
-import { buildWorkersById } from "../workers.js";
 
 function formatJobType(type) {
   return String(type ?? "job").replaceAll("_", " ");
@@ -200,16 +199,11 @@ export function QueueScreen() {
     setPreviewAsset,
     setRequestedGpu,
     visibleWorkers,
-    workersById: workersByIdFromContext,
   } = useAppContext();
   const createJob = createPlaceholderJob;
   const workers = visibleWorkers;
   // Prefer the shared index from context (sc-2082); fall back for legacy
   // contexts that may not yet expose it (test harnesses, etc.).
-  const workersById = useMemo(
-    () => workersByIdFromContext ?? buildWorkersById(workers),
-    [workersByIdFromContext, workers],
-  );
   const gpuWorkers = useMemo(() => workers.filter(isGpuWorker), [workers]);
   return (
     <section className="main-surface queue-surface">

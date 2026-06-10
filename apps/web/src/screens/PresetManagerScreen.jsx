@@ -13,14 +13,6 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { qualityChoices } from "../jobTypes.js";
 
-const workflowOptions = [
-  ["text_to_image", "Text to Image"],
-  ["edit_image", "Image Edit"],
-  ["image_to_video", "Image to Video"],
-  ["text_to_video", "Text to Video"],
-  ["first_last_frame", "First/Last Frame"],
-];
-
 const workflowCards = [
   { id: "text_to_image", label: "Text → Image", desc: "Make stills from a description.", outputs: "Stills", icon: "Image" },
   { id: "edit_image", label: "Edit Image", desc: "Modify an existing still.", outputs: "Stills", icon: "Wand" },
@@ -225,10 +217,6 @@ export function PresetManagerScreen() {
       const weight = source?.defaultWeight ?? source?.weight ?? 0.8;
       return { ...current, loras: [...current.loras, { id, weight: String(weight) }] };
     });
-  }
-
-  function addSelectedLora() {
-    addLoraById(selectedLoraToAdd);
   }
 
   function removeLora(id) {

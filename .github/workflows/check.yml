@@ -19,6 +19,8 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - name: Install web dependencies
         run: npm ci --prefix apps/web
+      - name: Lint web sources
+        run: npm --prefix apps/web run lint
       - name: Run web test suite
         run: npm --prefix apps/web run test
       - name: Build web production bundle

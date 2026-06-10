@@ -72,7 +72,6 @@ import {
   serializeLora,
   clearPresetDefault,
   noPresetId,
-  rememberPresetDefault,
   slugifyPresetId,
 } from "../presetUtils.js";
 import {

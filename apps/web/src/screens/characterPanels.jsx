@@ -156,7 +156,6 @@ export function CharacterReferences({
 
 export function CharacterLooks({
   approvedReferences,
-  createCharacterLook,
   deleteCharacterLook,
   lookDraft,
   selectedCharacter,
@@ -325,7 +324,6 @@ export function CharacterLoras({
 
 export function CharacterTest({
   addCharacterReference,
-  createCharacterTestJob,
   deleteAsset,
   imageModels,
   latestAssets,

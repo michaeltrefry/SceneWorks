@@ -875,7 +875,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
     uploadTrainingDatasetItem,
     updateTrainingDataset,
     batchRenameTrainingDataset,
-    writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
     createTrainingJob,
     trainingPresets: trainingPresetsCatalog,
@@ -896,7 +895,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const createDataset = createTrainingDataset;
   const updateDataset = updateTrainingDataset;
   const batchRenameDataset = batchRenameTrainingDataset;
-  const writeCaptionSidecars = writeTrainingDatasetCaptionSidecars;
   const createCaptionJob = createTrainingDatasetCaptionJob;
   const trainingPresets = trainingPresetsCatalog?.presets ?? [];
   const trainingTargets = trainingTargetsCatalog?.targets ?? [];
@@ -1232,7 +1230,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     if (event.key === "End") {
       event.preventDefault();
-      focusTab(tabs.length - 1);
+      focusTab(workflowTabs.length - 1);
     }
   }
 
@@ -1287,15 +1285,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
       ...current,
       [selectionId]: { text, source: "manual" },
     }));
-  }
-
-  function updateCaptionTriggerWords(value) {
-    setDatasetMessage("");
-    if (configTriggerFollowsCaptions) {
-      setConfigMessage("");
-      setConfigError("");
-    }
-    setCaptionTriggerWords(value);
   }
 
   function updateConfigDraft(field, value) {

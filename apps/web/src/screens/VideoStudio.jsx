@@ -67,7 +67,6 @@ import {
   loraLooksLikeIcLora,
   noPresetId,
   presetNameTaken,
-  rememberPresetDefault,
   serializeLora,
   slugifyPresetId,
 } from "../presetUtils.js";
@@ -266,9 +265,7 @@ export function VideoStudio() {
     presetValidationResult,
     localJobs,
     selectedLoraIds,
-    setSelectedLoraIds,
     loraWeights,
-    setLoraWeights,
     showIncompatibleLoras,
     setShowIncompatibleLoras,
     compatibleLoras,
