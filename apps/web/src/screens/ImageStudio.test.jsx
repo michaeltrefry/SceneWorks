@@ -71,6 +71,12 @@ function setInput(element, value) {
   element.dispatchEvent(new window.Event("input", { bubbles: true }));
 }
 
+function setSelect(element, value) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
+  setter.call(element, value);
+  element.dispatchEvent(new window.Event("change", { bubbles: true }));
+}
+
 function setFileInput(element, files) {
   Object.defineProperty(element, "files", {
     configurable: true,
@@ -82,6 +88,12 @@ function setFileInput(element, files) {
 const saveButton = (container) =>
   [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
+const field = (container, labelText) => {
+  const label = [...container.querySelectorAll("label")].find((node) =>
+    node.textContent.trim().startsWith(labelText),
+  );
+  return label?.querySelector("input, select");
+};
 
 describe("ImageStudio Save as Preset", () => {
   let container;
@@ -156,6 +168,115 @@ describe("ImageStudio Save as Preset", () => {
 
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");
+  });
+});
+
+describe("ImageStudio advanced model defaults", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("resets advanced overrides to the newly selected model defaults", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [
+          {
+            ...Z_IMAGE,
+            defaults: {
+              resolution: "1024x1024",
+              sampler: "euler",
+              scheduler: "shift",
+              schedulerShift: 1.5,
+              steps: 12,
+              guidanceScale: 2.5,
+            },
+            limits: {
+              resolutions: ["1024x1024", "1536x1024"],
+              samplers: ["default", "euler", "unipc"],
+              schedulers: ["default", "shift", "karras"],
+            },
+          },
+          {
+            id: "qwen_image",
+            name: "Qwen Image",
+            type: "image",
+            family: "qwen-image",
+            capabilities: ["text_to_image"],
+            defaults: {
+              resolution: "1024x1024",
+              sampler: "unipc",
+              scheduler: "shift",
+              schedulerShift: 4.2,
+              steps: 28,
+              guidanceScale: 6.5,
+            },
+            limits: {
+              resolutions: ["1024x1024", "1536x1024"],
+              samplers: ["default", "euler", "unipc"],
+              schedulers: ["default", "shift", "karras"],
+            },
+            loraCompatibility: {},
+            ui: {},
+          },
+        ],
+      }),
+    );
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced"));
+    await act(async () => setSelect(field(container, "Sampler"), "euler"));
+    await act(async () => setSelect(field(container, "Scheduler"), "shift"));
+    await act(async () => setInput(field(container, "Schedule shift"), "7.7"));
+    await act(async () => setInput(field(container, "Steps"), "44"));
+    await act(async () => setInput(field(container, "Guidance"), "11"));
+
+    await act(async () => setSelect(field(container, "Model"), "qwen_image"));
+    await act(async () => {});
+
+    expect(field(container, "Sampler").value).toBe("unipc");
+    expect(field(container, "Scheduler").value).toBe("shift");
+    expect(field(container, "Schedule shift").value).toBe("4.2");
+    expect(field(container, "Steps").value).toBe("");
+    expect(field(container, "Steps").placeholder).toBe("28");
+    expect(field(container, "Guidance").value).toBe("");
+    expect(field(container, "Guidance").placeholder).toBe("6.5");
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe("qwen_image");
+    expect(payload.advanced).toMatchObject({
+      resolution: "1024x1024",
+      sampler: "unipc",
+      scheduler: "shift",
+      schedulerShift: 4.2,
+    });
+    expect(payload.advanced).not.toHaveProperty("steps");
+    expect(payload.advanced).not.toHaveProperty("guidanceScale");
   });
 });
 

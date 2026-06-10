@@ -110,6 +110,11 @@ const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x128
 // segmented control actually exposes. Edit lives in its own workflow; text and
 // character share the text_to_image workflow.
 const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
+
+function preferredOption(defaultValue, options) {
+  return options.includes(defaultValue) ? defaultValue : options[0] ?? "default";
+}
+
 const UPSCALE_ENGINES = [
   { id: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
   { id: "aura-sr", label: "AuraSR", factors: [4] },
@@ -290,7 +295,7 @@ export function ImageStudio() {
   const [selectedPoseIds, setSelectedPoseIds] = useState([]);
   // Configurable sampler / scheduler (epic 1753). Restored from per-workspace
   // settings; reset to the selected model's manifest defaults whenever the
-  // model changes and the saved value is no longer offered by limits.
+  // model changes.
   const [sampler, setSampler] = useState(saved.sampler ?? "default");
   const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
   const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
@@ -540,6 +545,23 @@ export function ImageStudio() {
   const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel), [selectedModel]);
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
+  const advancedDefaultsModel = useRef(model);
+  const skipAdvancedDefaultsReset = useRef(false);
+  useEffect(() => {
+    if (advancedDefaultsModel.current === model) {
+      return;
+    }
+    advancedDefaultsModel.current = model;
+    if (skipAdvancedDefaultsReset.current) {
+      skipAdvancedDefaultsReset.current = false;
+      return;
+    }
+    setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
+    setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
+    setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
+    setStepsOverride("");
+    setGuidanceOverride("");
+  }, [model, samplerOptions, schedulerOptions, selectedModel]);
   // Snap the sampler / scheduler back to the model's declared default when the
   // current value is no longer in the menu (e.g. user switched to a sealed
   // model whose only option is "default"). Mirrors the resolution-snap effect.
@@ -547,19 +569,13 @@ export function ImageStudio() {
     if (samplerOptions.includes(sampler)) {
       return;
     }
-    const preferred = samplerOptions.includes(samplerDefaultFromModel(selectedModel))
-      ? samplerDefaultFromModel(selectedModel)
-      : samplerOptions[0];
-    setSampler(preferred);
+    setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
   }, [samplerOptions, sampler, selectedModel]);
   useEffect(() => {
     if (schedulerOptions.includes(scheduler)) {
       return;
     }
-    const preferred = schedulerOptions.includes(schedulerDefaultFromModel(selectedModel))
-      ? schedulerDefaultFromModel(selectedModel)
-      : schedulerOptions[0];
-    setScheduler(preferred);
+    setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
   }, [schedulerOptions, scheduler, selectedModel]);
   // Keep the selected resolution valid for the current model's buckets. Switching
   // to a model whose options exclude the current value snaps to its default (or
@@ -624,6 +640,9 @@ export function ImageStudio() {
     setSelectedPresetId(noPresetId);
     setMode(nextMode);
     if (recipe.model) {
+      if (recipe.model !== advancedDefaultsModel.current) {
+        skipAdvancedDefaultsReset.current = true;
+      }
       setModel(recipe.model);
     }
     setPrompt(String(recipe.prompt ?? ""));
