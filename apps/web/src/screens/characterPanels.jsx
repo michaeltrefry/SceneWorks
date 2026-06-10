@@ -475,13 +475,18 @@ export function CharacterTest({
   );
 }
 
-// One-click multi-angle "turnaround": one reference -> all of the InstantID model's
-// view angles in a single batch job (advanced.angleSet). Only rendered when an
-// InstantID-style model (one that declares ui.viewAngles) is available.
-export function CharacterAngleSet({
+// sc-4195: CharacterAngleSet and CharacterPoseLibrary were ~260-line copy-paste
+// twins (backbone picker, reference row + upload, prompt seeding, submit scaffolding,
+// active-job stack, character-images strip — sc-3857 negative prompts and sc-2223
+// LoRA changes had to be applied to both). The shared backbone now lives in
+// CharacterGenerationPanel, parameterized by a `mode` describing the labels, the
+// reference role, the job predicate, the prompt seed, and a mode-controller hook that
+// owns the mode-specific controls + the advanced payload it contributes.
+function CharacterGenerationPanel({
+  mode,
   selectedCharacter,
-  angleModel,
-  angleModels,
+  model,
+  models,
   approvedReferences,
   assets = [],
   createImageJob,
@@ -497,86 +502,59 @@ export function CharacterAngleSet({
   onPreview,
   onRetry,
 }) {
-  // sc-2003: multi-backbone picker. angleModels is the full list of viewAngles-
-  // capable backbones (manifest order: InstantID first, then prompt-driven
-  // tiers). angleModel is the resolved default (kept for back-compat with the
-  // pre-picker callers); the local state below tracks the user's pick.
-  const availableModels = Array.isArray(angleModels) && angleModels.length > 0
-    ? angleModels
-    : (angleModel ? [angleModel] : []);
-  const [selectedAngleModelId, setSelectedAngleModelId] = React.useState(
-    angleModel?.id ?? availableModels[0]?.id ?? "",
+  // sc-2003: multi-backbone picker. `models` is the full list of capable backbones
+  // (manifest order); `model` is the resolved default (kept for back-compat with the
+  // pre-picker callers). The local state below tracks the user's pick.
+  const availableModels = Array.isArray(models) && models.length > 0
+    ? models
+    : (model ? [model] : []);
+  const [selectedModelId, setSelectedModelId] = React.useState(
+    model?.id ?? availableModels[0]?.id ?? "",
   );
-  const activeAngleModel = availableModels.find((item) => item.id === selectedAngleModelId)
+  const activeModel = availableModels.find((item) => item.id === selectedModelId)
     ?? availableModels[0]
     ?? null;
-  const angleCount = activeAngleModel?.ui?.viewAngles?.length ?? 0;
-  // Family-filtered LoRA picker (sc-2223): apply an existing LoRA of this character
-  // to its turnaround (the dataset-bootstrapping loop). Filtered to the backbone's family.
-  const loraSelection = useLoraSelection(loras, activeAngleModel);
+  // Family-filtered LoRA picker (sc-2223), filtered to the active backbone's family.
+  const loraSelection = useLoraSelection(loras, activeModel);
   // Advanced tuning (sc-3857): Guidance, Reference strength, Identity structure,
   // Steps, Sampler/Scheduler, editable Negative prompt, Seed. Defaults track the
   // active backbone; values fold into the job's `advanced` dict at submit.
-  const advanced = useCharacterAdvancedOptions(activeAngleModel, {
-    defaultNegativePrompt: ANGLE_SET_NEGATIVE_PROMPT,
+  const advanced = useCharacterAdvancedOptions(activeModel, {
+    defaultNegativePrompt: mode.defaultNegativePrompt,
   });
   const [referenceAssetId, setReferenceAssetId] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
-  // Key Point Library override (sc-4435/sc-4450): only InstantID consumes the angle
-  // kps collection (it's the landmark-ControlNet family — `identityStructure`); the
-  // prompt-driven tiers iterate the built-in angle prompts and ignore it. `""` = run
-  // the active default collection. `overrideCount` sizes the run to a chosen
-  // collection's variable angle count; null falls back to the backbone's nominal count.
-  const supportsKpsCollections = Boolean(activeAngleModel?.ui?.identityStructure);
-  const [keypointCollectionId, setKeypointCollectionId] = React.useState("");
-  const [overrideCount, setOverrideCount] = React.useState(null);
-  const onPickCollection = React.useCallback((id, collection) => {
-    setKeypointCollectionId(id);
-    setOverrideCount(id ? (collection?.orderedPresetIds?.length ?? null) : null);
-  }, []);
-  const effectiveAngleCount = overrideCount ?? angleCount;
   const [submitting, setSubmitting] = React.useState(false);
   const [status, setStatus] = React.useState("");
   const fileInputRef = React.useRef(null);
   const characterId = selectedCharacter?.id;
+  // Mode-specific controls (JSX) + advanced payload + readiness/labels.
+  const controller = mode.useController({ activeModel, loraSelection });
 
   React.useEffect(() => {
     setReferenceAssetId(approvedReferences[0]?.assetId ?? "");
   }, [characterId, approvedReferences]);
   React.useEffect(() => {
-    // Seed with the character's appearance notes (face-identity engines preserve
-    // face but not hair/wardrobe, so describe them here for a consistent
-    // turnaround) + tight framing.
-    const appearance = (selectedCharacter?.description ?? "").trim() || selectedCharacter?.name || "the character";
-    setPrompt(
-      `${appearance}, head and shoulders, neutral expression, consistent outfit, plain grey background, face clearly visible, sharp focus, photorealistic`,
-    );
+    setPrompt(mode.seedPrompt(selectedCharacter));
     setStatus("");
   }, [characterId, selectedCharacter?.name, selectedCharacter?.description]);
   // Reset the picker selection when the available models change (e.g. a new
   // manifest load) so a stale id doesn't lock the panel.
   React.useEffect(() => {
-    if (!availableModels.find((item) => item.id === selectedAngleModelId)) {
-      setSelectedAngleModelId(availableModels[0]?.id ?? "");
+    if (!availableModels.find((item) => item.id === selectedModelId)) {
+      setSelectedModelId(availableModels[0]?.id ?? "");
     }
-  }, [availableModels, selectedAngleModelId]);
-  // Clear a stale angle-set override when switching to a backbone that can't use it.
-  React.useEffect(() => {
-    if (!supportsKpsCollections) {
-      setKeypointCollectionId("");
-      setOverrideCount(null);
-    }
-  }, [supportsKpsCollections]);
+  }, [availableModels, selectedModelId]);
 
-  if (!activeAngleModel || !selectedCharacter) {
+  if (!activeModel || !selectedCharacter) {
     return null;
   }
 
-  // Active jobs for this character's angle-set form, derived from the
-  // App-level imageLocalJobs so they persist across navigation and stack
-  // when multiple runs are in flight (sc-2092 follow-up). The local jobId
-  // state is gone — there's nothing to remember per mount.
-  const activeJobs = characterFormJobs(imageLocalJobs, characterId, isAngleSetJob);
+  // Active jobs for this character's form, derived from the App-level imageLocalJobs
+  // so they persist across navigation and stack when multiple runs are in flight
+  // (sc-2092 follow-up). The mode predicate keeps the angle/pose cards from stealing
+  // each other's jobs when both are visible for the same character.
+  const activeJobs = characterFormJobs(imageLocalJobs, characterId, mode.jobPredicate);
   const characterImages = (latestAssets ?? []).filter(
     (asset) =>
       asset.recipe?.normalizedSettings?.characterId === characterId ||
@@ -593,7 +571,7 @@ export function CharacterAngleSet({
     const asset = await importAsset(file, { throwOnError: false });
     if (asset?.id) {
       setReferenceAssetId(asset.id);
-      await addCharacterReference(characterId, { assetId: asset.id, approved: true, role: "angle-set-reference" });
+      await addCharacterReference(characterId, { assetId: asset.id, approved: true, role: mode.referenceRole });
       setStatus("");
     } else {
       setStatus("Upload failed — try another image.");
@@ -601,7 +579,7 @@ export function CharacterAngleSet({
   }
 
   async function generate() {
-    if (!referenceAssetId || submitting || !activeAngleModel) {
+    if (!referenceAssetId || !controller.canSubmit || submitting || !activeModel) {
       return;
     }
     setSubmitting(true);
@@ -609,22 +587,19 @@ export function CharacterAngleSet({
     try {
       const job = await createImageJob({
         mode: "character_image",
-        model: activeAngleModel.id,
+        model: activeModel.id,
         characterId,
         referenceAssetId,
         prompt: prompt.trim(),
         negativePrompt: advanced.negativePrompt,
-        // angleSet makes the worker emit one image per pack angle regardless of count;
-        // count must satisfy the API's 1-8 guard, so send 1 (the worker overrides it).
+        // angleSet/poses make the worker emit one image per angle/pose regardless of
+        // count; count must satisfy the API's 1-8 guard, so send 1 (worker overrides).
         count: 1,
         seed: advanced.seedValue,
         width: 1024,
         height: 1024,
         loras: loraSelection.serializedLoras,
-        advanced: advanced.buildAdvanced({
-          angleSet: true,
-          ...(supportsKpsCollections && keypointCollectionId ? { keypointCollectionId } : {}),
-        }),
+        advanced: advanced.buildAdvanced(controller.advancedExtras),
       });
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
@@ -640,23 +615,20 @@ export function CharacterAngleSet({
   return (
     <section className="character-section">
       <div className="section-heading">
-        <p className="eyebrow">Angle set</p>
-        <h2>{activeAngleModel.name} turnaround</h2>
+        <p className="eyebrow">{mode.eyebrow}</p>
+        <h2>{mode.title(activeModel, selectedCharacter)}</h2>
       </div>
-      <p>
-        Generate {angleCount} consistent views of this character (front, three-quarters, profiles, up/down and the
-        diagonals) from one reference, in a single job. A good starting set for curating a character LoRA.
-      </p>
+      {mode.renderIntro(activeModel)}
       {availableModels.length > 1 ? (
         <label>
           Backbone
           <select
-            onChange={(event) => setSelectedAngleModelId(event.target.value)}
-            value={selectedAngleModelId}
+            onChange={(event) => setSelectedModelId(event.target.value)}
+            value={selectedModelId}
           >
-            {availableModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
+            {availableModels.map((backbone) => (
+              <option key={backbone.id} value={backbone.id}>
+                {backbone.name}
               </option>
             ))}
           </select>
@@ -666,7 +638,7 @@ export function CharacterAngleSet({
         <div className="reference-thumb-row">
           {approvedReferences.map((reference) => (
             <button
-              aria-label={`Use ${reference.asset?.displayName ?? reference.assetId} as the angle-set reference`}
+              aria-label={`Use ${reference.asset?.displayName ?? reference.assetId} as the ${mode.referenceNoun}`}
               aria-pressed={reference.assetId === referenceAssetId}
               className={reference.assetId === referenceAssetId ? "reference-thumb active" : "reference-thumb"}
               key={reference.assetId}
@@ -680,17 +652,14 @@ export function CharacterAngleSet({
       ) : (
         <p className="inline-warning">No approved reference yet — upload one below or approve a reference above.</p>
       )}
-      <LoraPickerField selection={loraSelection} />
-      {supportsKpsCollections ? (
-        <KeypointCollectionField value={keypointCollectionId} onChange={onPickCollection} />
-      ) : null}
+      {controller.controls}
       <div className="inline-create">
         <button onClick={() => fileInputRef.current?.click()} type="button">
           Upload reference
         </button>
         <input accept="image/*" hidden onChange={onUpload} ref={fileInputRef} type="file" />
-        <button disabled={!referenceAssetId || submitting} onClick={generate} type="button">
-          {submitting ? "Starting…" : `Generate angle set (${effectiveAngleCount} views)`}
+        <button disabled={!referenceAssetId || !controller.isReady || submitting} onClick={generate} type="button">
+          {submitting ? "Starting…" : controller.submitLabel}
         </button>
       </div>
       <label>
@@ -713,7 +682,7 @@ export function CharacterAngleSet({
               }}
               thumbnailsVariant="image-grid"
               thumbnailAssets={jobImageAssets(job, assets)}
-              expectedThumbnailCount={effectiveAngleCount}
+              expectedThumbnailCount={controller.expectedThumbnailCount(job)}
               onThumbnailClick={(previewed) => onPreview?.(previewed, jobImageAssets(job, assets))}
               onCancel={onCancel}
               onRetry={onRetry}
@@ -741,6 +710,81 @@ export function CharacterAngleSet({
       ) : null}
     </section>
   );
+}
+
+// Angle-set mode controller: KeypointCollection override (InstantID only) + the
+// angleSet flag. One reference -> all of the backbone's view angles in one batch job.
+function useAngleController({ activeModel, loraSelection }) {
+  const angleCount = activeModel?.ui?.viewAngles?.length ?? 0;
+  // Key Point Library override (sc-4435/sc-4450): only InstantID consumes the angle
+  // kps collection (the landmark-ControlNet family — `identityStructure`); the
+  // prompt-driven tiers iterate the built-in angle prompts and ignore it. `""` = run
+  // the active default collection. `overrideCount` sizes the run to a chosen
+  // collection's variable angle count; null falls back to the backbone's nominal count.
+  const supportsKpsCollections = Boolean(activeModel?.ui?.identityStructure);
+  const [keypointCollectionId, setKeypointCollectionId] = React.useState("");
+  const [overrideCount, setOverrideCount] = React.useState(null);
+  const onPickCollection = React.useCallback((id, collection) => {
+    setKeypointCollectionId(id);
+    setOverrideCount(id ? (collection?.orderedPresetIds?.length ?? null) : null);
+  }, []);
+  // Clear a stale angle-set override when switching to a backbone that can't use it.
+  React.useEffect(() => {
+    if (!supportsKpsCollections) {
+      setKeypointCollectionId("");
+      setOverrideCount(null);
+    }
+  }, [supportsKpsCollections]);
+  const effectiveAngleCount = overrideCount ?? angleCount;
+  return {
+    controls: (
+      <>
+        <LoraPickerField selection={loraSelection} />
+        {supportsKpsCollections ? (
+          <KeypointCollectionField value={keypointCollectionId} onChange={onPickCollection} />
+        ) : null}
+      </>
+    ),
+    advancedExtras: {
+      angleSet: true,
+      ...(supportsKpsCollections && keypointCollectionId ? { keypointCollectionId } : {}),
+    },
+    isReady: true,
+    canSubmit: true,
+    submitLabel: `Generate angle set (${effectiveAngleCount} views)`,
+    expectedThumbnailCount: () => effectiveAngleCount,
+  };
+}
+
+// One-click multi-angle "turnaround": one reference -> all of the InstantID model's
+// view angles in a single batch job (advanced.angleSet). Only rendered when an
+// InstantID-style model (one that declares ui.viewAngles) is available.
+const ANGLE_MODE = {
+  eyebrow: "Angle set",
+  title: (activeModel) => `${activeModel.name} turnaround`,
+  defaultNegativePrompt: ANGLE_SET_NEGATIVE_PROMPT,
+  referenceRole: "angle-set-reference",
+  referenceNoun: "angle-set reference",
+  jobPredicate: isAngleSetJob,
+  // Seed with the character's appearance notes (face-identity engines preserve face
+  // but not hair/wardrobe, so describe them here for a consistent turnaround) + tight
+  // framing.
+  seedPrompt: (character) => {
+    const appearance = (character?.description ?? "").trim() || character?.name || "the character";
+    return `${appearance}, head and shoulders, neutral expression, consistent outfit, plain grey background, face clearly visible, sharp focus, photorealistic`;
+  },
+  renderIntro: (activeModel) => (
+    <p>
+      Generate {activeModel?.ui?.viewAngles?.length ?? 0} consistent views of this character (front, three-quarters,
+      profiles, up/down and the diagonals) from one reference, in a single job. A good starting set for curating a
+      character LoRA.
+    </p>
+  ),
+  useController: useAngleController,
+};
+
+export function CharacterAngleSet({ angleModel, angleModels, ...props }) {
+  return <CharacterGenerationPanel mode={ANGLE_MODE} model={angleModel} models={angleModels} {...props} />;
 }
 
 // Persistent per-character asset gallery: every image generated in association with the
@@ -925,296 +969,109 @@ export function CharacterDatasets({
 // Pose library: pick one or more poses from the bundled OpenPose gallery and generate
 // the character in each, in a single batch job (advanced.poses) sharing one seed for
 // wardrobe/hair consistency. An OpenPose ControlNet drives the pose; a face-restoration
-// pass re-imposes identity at the small full-body face size. Only rendered for a model
-// that supports the pose library (ui.poseLibrary).
-export function CharacterPoseLibrary({
-  selectedCharacter,
-  poseModel,
-  poseModels,
-  approvedReferences,
-  assets = [],
-  createImageJob,
-  importAsset,
-  addCharacterReference,
-  latestAssets = [],
-  imageLocalJobs = [],
-  loras = [],
-  rememberLocalGenerationJob,
-  onCancel,
-  onDuplicate,
-  onOpenQueue,
-  onPreview,
-  onRetry,
-}) {
-  // sc-2003: multi-backbone picker. poseModels is the full list of poseLibrary-
-  // capable backbones (manifest order: InstantID strict tier first, then the
-  // multi-image best-effort tiers).
-  const availableModels = Array.isArray(poseModels) && poseModels.length > 0
-    ? poseModels
-    : (poseModel ? [poseModel] : []);
-  const [selectedPoseModelId, setSelectedPoseModelId] = React.useState(
-    poseModel?.id ?? availableModels[0]?.id ?? "",
-  );
-  const activePoseModel = availableModels.find((item) => item.id === selectedPoseModelId)
-    ?? availableModels[0]
-    ?? null;
+// pass re-imposes identity at the small full-body face size. Shares
+// CharacterGenerationPanel with the angle set (sc-4195).
+function usePoseController({ activeModel, loraSelection }) {
   // User-created poses join the built-in library in both the picker and the
   // id→keypoints resolver used to build the job, so saved poses can generate.
   const loadUserPoses = useUserPoseLoader();
   const { byId } = usePoseLibrary({ loadUserPoses });
-  // Family-filtered LoRA picker (sc-2223), filtered to the active pose backbone's family.
-  const loraSelection = useLoraSelection(loras, activePoseModel);
-  // Advanced tuning (sc-3857) — same panel as the angle set. The pose-specific
-  // Pose lock strength (controlScale) + Restore face stay in the main controls
-  // below; this adds Guidance / Reference strength / Identity structure / Steps /
-  // Sampler / editable Negative prompt / Seed.
-  const advanced = useCharacterAdvancedOptions(activePoseModel, {
-    defaultNegativePrompt: POSE_LIBRARY_NEGATIVE_PROMPT,
-  });
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
   const [faceRestore, setFaceRestore] = React.useState(false);
   // Strict ControlNet pose-lock strength (sc-2257). Only the strict tier
   // (ui.poseControlScale) honours advanced.controlScale; default 0.9 matches the
   // reference pipeline, 0.65–1.0 is the model-card range, >~1.2 degrades quality.
   const [controlScale, setControlScale] = React.useState(0.9);
-  const supportsControlScale = Boolean(activePoseModel?.ui?.poseControlScale);
-  const [referenceAssetId, setReferenceAssetId] = React.useState("");
-  const [prompt, setPrompt] = React.useState("");
-  const [submitting, setSubmitting] = React.useState(false);
-  const [status, setStatus] = React.useState("");
-  const fileInputRef = React.useRef(null);
-  const characterId = selectedCharacter?.id;
-
-  React.useEffect(() => {
-    setReferenceAssetId(approvedReferences[0]?.assetId ?? "");
-  }, [characterId, approvedReferences]);
-  React.useEffect(() => {
-    // Pose-neutral prompt: the skeleton sets the stance, so describe only appearance +
-    // outfit/shoes (face-identity engines preserve the face but NOT hair/wardrobe).
-    const appearance = (selectedCharacter?.description ?? "").trim() || selectedCharacter?.name || "the character";
-    setPrompt(`${appearance}, consistent outfit and shoes, plain grey background, soft even lighting, sharp focus, photorealistic`);
-    setStatus("");
-  }, [characterId, selectedCharacter?.name, selectedCharacter?.description]);
-  React.useEffect(() => {
-    if (!availableModels.find((item) => item.id === selectedPoseModelId)) {
-      setSelectedPoseModelId(availableModels[0]?.id ?? "");
-    }
-  }, [availableModels, selectedPoseModelId]);
-
-  if (!activePoseModel || !selectedCharacter) {
-    return null;
-  }
-
-  const activeJobs = characterFormJobs(imageLocalJobs, characterId, isPoseLibraryJob);
-  const characterImages = (latestAssets ?? []).filter(
-    (asset) =>
-      asset.recipe?.normalizedSettings?.characterId === characterId ||
-      (asset.metadata?.characterReferences ?? []).some((ref) => ref.characterId === characterId),
-  );
+  const supportsControlScale = Boolean(activeModel?.ui?.poseControlScale);
 
   function togglePose(id) {
     setSelectedPoseIds((ids) => (ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id]));
   }
 
-  async function onUpload(event) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) {
-      return;
-    }
-    setStatus("Uploading reference…");
-    const asset = await importAsset(file, { throwOnError: false });
-    if (asset?.id) {
-      setReferenceAssetId(asset.id);
-      await addCharacterReference(characterId, { assetId: asset.id, approved: true, role: "pose-set-reference" });
-      setStatus("");
-    } else {
-      setStatus("Upload failed — try another image.");
-    }
-  }
+  const poses = selectedPoseIds.map((id) => byId[id]).filter(Boolean).map((pose) => ({
+    id: pose.id,
+    keypoints: pose.keypoints,
+    // Forward DWPose hand/face keypoints when a pose carries them (sc-2257) — the
+    // strict Z-Image tier renders them for a firmer, more in-distribution lock.
+    ...(pose.hands ? { hands: pose.hands } : {}),
+    ...(pose.face ? { face: pose.face } : {}),
+  }));
 
-  async function generate() {
-    const poses = selectedPoseIds.map((id) => byId[id]).filter(Boolean).map((pose) => ({
-      id: pose.id,
-      keypoints: pose.keypoints,
-      // Forward DWPose hand/face keypoints when a pose carries them (sc-2257) — the
-      // strict Z-Image tier renders them for a firmer, more in-distribution lock.
-      ...(pose.hands ? { hands: pose.hands } : {}),
-      ...(pose.face ? { face: pose.face } : {}),
-    }));
-    if (!referenceAssetId || !poses.length || submitting || !activePoseModel) {
-      return;
-    }
-    setSubmitting(true);
-    setStatus("");
-    try {
-      const job = await createImageJob({
-        mode: "character_image",
-        model: activePoseModel.id,
-        characterId,
-        referenceAssetId,
-        prompt: prompt.trim(),
-        negativePrompt: advanced.negativePrompt,
-        // The worker emits one image per pose in `advanced.poses` regardless of count;
-        // count must satisfy the API's 1-8 guard, so send 1.
-        count: 1,
-        seed: advanced.seedValue,
-        width: 1024,
-        height: 1024,
-        loras: loraSelection.serializedLoras,
-        advanced: advanced.buildAdvanced({
-          poses,
-          faceRestore,
-          ...(supportsControlScale ? { controlScale } : {}),
-        }),
-      });
-      if (job?.id) {
-        rememberLocalGenerationJob?.("image", job);
-        setStatus("");
-      } else {
-        setStatus("Could not start the job — check the error banner.");
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <section className="character-section">
-      <div className="section-heading">
-        <p className="eyebrow">Pose library</p>
-        <h2>Generate {selectedCharacter.name} in a pose</h2>
-      </div>
-      <p>
-        Pick one or more poses and generate this character in each, in a single job. The strict tier (InstantID) uses an
-        OpenPose ControlNet to enforce the pose and a face-restoration pass to anchor identity; the best-effort tiers
-        (Qwen-Lightning, FLUX.2-klein) approximate the pose via multi-image reference.
-      </p>
-      {availableModels.length > 1 ? (
-        <label>
-          Backbone
-          <select
-            onChange={(event) => setSelectedPoseModelId(event.target.value)}
-            value={selectedPoseModelId}
-          >
-            {availableModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))}
-          </select>
+  return {
+    controls: (
+      <>
+        <PoseLibraryPicker
+          loadUserPoses={loadUserPoses}
+          onClear={() => setSelectedPoseIds([])}
+          onToggle={togglePose}
+          selectedIds={selectedPoseIds}
+        />
+        <label className="checkline">
+          <input checked={faceRestore} onChange={(event) => setFaceRestore(event.target.checked)} type="checkbox" />
+          Restore face (sharper identity; off keeps the raw render — fewer blend artifacts)
         </label>
-      ) : null}
-      {approvedReferences.length ? (
-        <div className="reference-thumb-row">
-          {approvedReferences.map((reference) => (
-            <button
-              aria-label={`Use ${reference.asset?.displayName ?? reference.assetId} as the pose reference`}
-              aria-pressed={reference.assetId === referenceAssetId}
-              className={reference.assetId === referenceAssetId ? "reference-thumb active" : "reference-thumb"}
-              key={reference.assetId}
-              onClick={() => setReferenceAssetId(reference.assetId)}
-              type="button"
-            >
-              {reference.asset ? <AssetMedia asset={reference.asset} controls={false} /> : <span>Missing asset</span>}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <p className="inline-warning">No approved reference yet — upload one below or approve a reference above.</p>
-      )}
-      <PoseLibraryPicker
-        loadUserPoses={loadUserPoses}
-        onClear={() => setSelectedPoseIds([])}
-        onToggle={togglePose}
-        selectedIds={selectedPoseIds}
-      />
-      <label className="checkline">
-        <input checked={faceRestore} onChange={(event) => setFaceRestore(event.target.checked)} type="checkbox" />
-        Restore face (sharper identity; off keeps the raw render — fewer blend artifacts)
-      </label>
-      {supportsControlScale ? (
-        <div className="control-scale-field">
-          <div className="lora-weight-row">
-            <span>Pose lock strength</span>
-            <input
-              aria-label="Pose lock strength"
-              max="1.5"
-              min="0.5"
-              onChange={(event) => setControlScale(Number(event.target.value))}
-              step="0.05"
-              type="range"
-              value={controlScale}
-            />
-            <span className="lora-weight-value">{controlScale.toFixed(2)}</span>
+        {supportsControlScale ? (
+          <div className="control-scale-field">
+            <div className="lora-weight-row">
+              <span>Pose lock strength</span>
+              <input
+                aria-label="Pose lock strength"
+                max="1.5"
+                min="0.5"
+                onChange={(event) => setControlScale(Number(event.target.value))}
+                step="0.05"
+                type="range"
+                value={controlScale}
+              />
+              <span className="lora-weight-value">{controlScale.toFixed(2)}</span>
+            </div>
+            <p className="field-hint">
+              How hard the ControlNet locks the pose. 0.9 (the reference default) is a clean lock; lower
+              (toward 0.65) loosens it for more natural variation, higher (&gt;1.2) over-constrains and can
+              degrade quality.
+            </p>
           </div>
-          <p className="field-hint">
-            How hard the ControlNet locks the pose. 0.9 (the reference default) is a clean lock; lower
-            (toward 0.65) loosens it for more natural variation, higher (&gt;1.2) over-constrains and can
-            degrade quality.
-          </p>
-        </div>
-      ) : null}
-      <LoraPickerField selection={loraSelection} />
-      <div className="inline-create">
-        <button onClick={() => fileInputRef.current?.click()} type="button">
-          Upload reference
-        </button>
-        <input accept="image/*" hidden onChange={onUpload} ref={fileInputRef} type="file" />
-        <button disabled={!referenceAssetId || !selectedPoseIds.length || submitting} onClick={generate} type="button">
-          {submitting
-            ? "Starting…"
-            : `Generate ${selectedPoseIds.length || ""} pose${selectedPoseIds.length === 1 ? "" : "s"}`.replace("  ", " ")}
-        </button>
-      </div>
-      <label>
-        Prompt
-        <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
-      </label>
-      <CharacterAdvancedOptions state={advanced} />
-      {activeJobs.length ? (
-        <div className="worker-progress-card-stack local-job-stack">
-          {activeJobs.map((job) => (
-            <WorkerProgressCard
-              key={job.id}
-              job={{
-                ...job,
-                payload: {
-                  ...job.payload,
-                  characterId: selectedCharacter?.id,
-                  characterName: selectedCharacter?.name,
-                },
-              }}
-              thumbnailsVariant="image-grid"
-              thumbnailAssets={jobImageAssets(job, assets)}
-              expectedThumbnailCount={
-                Array.isArray(job.payload?.advanced?.poses) ? job.payload.advanced.poses.length : selectedPoseIds.length
-              }
-              onThumbnailClick={(previewed) => onPreview?.(previewed, jobImageAssets(job, assets))}
-              onCancel={onCancel}
-              onRetry={onRetry}
-              onDuplicate={onDuplicate}
-              onOpenQueue={onOpenQueue}
-            />
-          ))}
-        </div>
-      ) : null}
-      {!activeJobs.length && status ? <p className="inline-warning">{status}</p> : null}
-      {characterImages.length ? (
-        <div className="reference-thumb-row">
-          {characterImages.map((asset) => (
-            <button
-              aria-label={`Preview ${asset.displayName ?? asset.id}`}
-              className="reference-thumb"
-              key={asset.id}
-              onClick={() => onPreview?.(asset, characterImages)}
-              type="button"
-            >
-              <AssetMedia asset={asset} controls={false} />
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </section>
-  );
+        ) : null}
+        <LoraPickerField selection={loraSelection} />
+      </>
+    ),
+    advancedExtras: {
+      poses,
+      faceRestore,
+      ...(supportsControlScale ? { controlScale } : {}),
+    },
+    isReady: selectedPoseIds.length > 0,
+    canSubmit: poses.length > 0,
+    submitLabel: `Generate ${selectedPoseIds.length || ""} pose${selectedPoseIds.length === 1 ? "" : "s"}`.replace("  ", " "),
+    expectedThumbnailCount: (job) =>
+      Array.isArray(job.payload?.advanced?.poses) ? job.payload.advanced.poses.length : selectedPoseIds.length,
+  };
+}
+
+// Only rendered for a model that supports the pose library (ui.poseLibrary).
+const POSE_MODE = {
+  eyebrow: "Pose library",
+  title: (activeModel, character) => `Generate ${character.name} in a pose`,
+  defaultNegativePrompt: POSE_LIBRARY_NEGATIVE_PROMPT,
+  referenceRole: "pose-set-reference",
+  referenceNoun: "pose reference",
+  jobPredicate: isPoseLibraryJob,
+  // Pose-neutral prompt: the skeleton sets the stance, so describe only appearance +
+  // outfit/shoes (face-identity engines preserve the face but NOT hair/wardrobe).
+  seedPrompt: (character) => {
+    const appearance = (character?.description ?? "").trim() || character?.name || "the character";
+    return `${appearance}, consistent outfit and shoes, plain grey background, soft even lighting, sharp focus, photorealistic`;
+  },
+  renderIntro: () => (
+    <p>
+      Pick one or more poses and generate this character in each, in a single job. The strict tier (InstantID) uses an
+      OpenPose ControlNet to enforce the pose and a face-restoration pass to anchor identity; the best-effort tiers
+      (Qwen-Lightning, FLUX.2-klein) approximate the pose via multi-image reference.
+    </p>
+  ),
+  useController: usePoseController,
+};
+
+export function CharacterPoseLibrary({ poseModel, poseModels, ...props }) {
+  return <CharacterGenerationPanel mode={POSE_MODE} model={poseModel} models={poseModels} {...props} />;
 }
