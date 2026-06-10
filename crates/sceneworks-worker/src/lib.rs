@@ -813,6 +813,9 @@ async fn check_cancel(api: &ApiClient, job_id: &str, message: &str) -> WorkerRes
 /// the GET, or a failed Canceled-status POST — is tolerated and retried on the
 /// next poll instead of being misread as a user cancel that aborts a
 /// multi-minute run and strands the job in Running (sc-4174).
+// In-band polling call sites are inside macOS-gated generation paths; the
+// helper itself stays unit-tested on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 async fn cancel_requested(api: &ApiClient, job_id: &str, message: &str) -> bool {
     match check_cancel(api, job_id, message).await {
         Ok(()) => false,
