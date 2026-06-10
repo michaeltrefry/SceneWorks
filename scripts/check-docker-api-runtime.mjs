@@ -61,7 +61,18 @@ async function waitForHealth() {
 }
 
 try {
-  await runDocker([...compose, "up", "--build", "-d", "api"]);
+  await runDocker([...compose, "up", "--build", "-d", "api"]).catch((error) => {
+    // The health check below is the real gate (it polls for 120s and fails if the
+    // container is not serving), so a spurious non-zero `up` is tolerated rather than
+    // aborting before we ever probe the container.
+    console.error(`compose up reported: ${error.message} (continuing to health check)`);
+  });
+  // Surface the container's boot logs AND keep an active handle across the detached
+  // up -> health-poll transition. Without this, `docker compose up -d` (stdio inherited,
+  // the container owned by the daemon) can momentarily drain Node's event loop and exit
+  // 13 ("unsettled top-level await") before waitForHealth's first request registers a
+  // socket — an intermittent CI flake unrelated to the API (the container is healthy).
+  await runDocker([...compose, "logs", "--no-color", "api"]).catch(() => {});
   await waitForHealth();
 } finally {
   // The api service runs as root in the container, so anything it seeds into the
