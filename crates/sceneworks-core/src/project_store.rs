@@ -1483,20 +1483,26 @@ impl ProjectStore {
         let created_at = utc_now();
         let dir = project_path.join("assets").join("keypoints");
         fs::create_dir_all(&dir)?;
-        let ext = canonical_source
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(str::to_ascii_lowercase)
-            .filter(|value| matches!(value.as_str(), "png" | "jpg" | "jpeg" | "webp"))
-            .unwrap_or_else(|| "png".to_owned());
+        // Determine the format from the file CONTENT, not the staged path's extension: uploads
+        // arrive as `upload-<uuid>.tmp` (the generic temp writer keeps no extension), so keying
+        // off the extension would mislabel every capture as PNG. Fall back to the extension, then
+        // PNG, when the magic bytes aren't recognized.
+        let (ext, mime) = sniff_image_format(&canonical_source)
+            .or_else(|| {
+                canonical_source
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .and_then(|value| match value.to_ascii_lowercase().as_str() {
+                        "jpg" | "jpeg" => Some(("jpg", "image/jpeg")),
+                        "webp" => Some(("webp", "image/webp")),
+                        "png" => Some(("png", "image/png")),
+                        _ => None,
+                    })
+            })
+            .unwrap_or(("png", "image/png"));
         let media_path = dir.join(format!("{asset_id}.{ext}"));
         fs::copy(&canonical_source, &media_path)?;
         let media_rel = relative_string(&project_path, &media_path)?;
-        let mime = match ext.as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "webp" => "image/webp",
-            _ => "image/png",
-        };
 
         let source_asset_id = spec
             .get("sourceAssetId")
@@ -3109,6 +3115,26 @@ fn build_document_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Va
 }
 
 /// Parse + validate the 5-point normalized kps from a spec into a JSON `[[x,y]×5]` array.
+/// Sniff a still-image format from its magic bytes → `(extension, mime)`, or `None` when the
+/// header isn't a format the library retains. Used to label a captured keypoint source correctly
+/// regardless of the staged temp file's (extension-less) name.
+fn sniff_image_format(path: &Path) -> Option<(&'static str, &'static str)> {
+    let mut header = [0u8; 12];
+    let mut file = fs::File::open(path).ok()?;
+    let read = std::io::Read::read(&mut file, &mut header).ok()?;
+    let header = &header[..read];
+    if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some(("jpg", "image/jpeg"));
+    }
+    if header.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some(("png", "image/png"));
+    }
+    if header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WEBP" {
+        return Some(("webp", "image/webp"));
+    }
+    None
+}
+
 fn parse_normalized_kps(value: Option<&Value>) -> ProjectStoreResult<Vec<Value>> {
     let points = value.and_then(Value::as_array).ok_or_else(|| {
         ProjectStoreError::BadRequest("keypoint spec missing kps array".to_owned())
@@ -3546,8 +3572,8 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 mod tests {
     use super::{
         apply_project_migrations, build_generated_asset_sidecar, guess_mime_from_filename,
-        is_safe_relative_path, normalize_asset_tags, AssetScope, CharacterCreateInput,
-        CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset,
+        is_safe_relative_path, normalize_asset_tags, sniff_image_format, AssetScope,
+        CharacterCreateInput, CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset,
         GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
         PROJECT_SCHEMA_VERSION,
     };
@@ -4304,6 +4330,52 @@ mod tests {
         assert_eq!(user["name"], "My Front");
         assert_eq!(user["builtin"], false);
         assert!(user["sourceImageRef"].as_str().is_some());
+    }
+
+    #[test]
+    fn create_keypoint_asset_labels_extensionless_upload_by_content() {
+        // Regression: uploads stage as `upload-<uuid>.tmp` (no real extension). The saved
+        // library asset must take its extension + mime from the file CONTENT, not the `.tmp`
+        // name, or a JPEG capture gets mislabeled image/png.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let dir = data_dir.join("cache").join("keypoint-uploads");
+        std::fs::create_dir_all(&dir).expect("uploads dir");
+        let upload = dir.join("upload-deadbeef.tmp");
+        // Minimal JPEG SOI + APP0 marker bytes — enough for the magic-byte sniff.
+        std::fs::write(&upload, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).expect("staged jpeg");
+
+        let asset = store
+            .create_keypoint_asset(&json!({
+                "name": "From Photo",
+                "kps": front_kps(),
+                "sourceUploadPath": upload.to_string_lossy(),
+            }))
+            .expect("preset persists");
+        let media_rel = asset["file"]["path"].as_str().expect("media path");
+        assert!(
+            media_rel.ends_with(".jpg"),
+            "expected .jpg, got {media_rel}"
+        );
+        assert_eq!(asset["file"]["mimeType"], "image/jpeg");
+    }
+
+    #[test]
+    fn sniff_image_format_reads_magic_bytes() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let png = temp_dir.path().join("a.bin");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n....").unwrap();
+        assert_eq!(sniff_image_format(&png), Some(("png", "image/png")));
+        let jpg = temp_dir.path().join("b.bin");
+        std::fs::write(&jpg, [0xFF, 0xD8, 0xFF, 0xE0]).unwrap();
+        assert_eq!(sniff_image_format(&jpg), Some(("jpg", "image/jpeg")));
+        let webp = temp_dir.path().join("c.bin");
+        std::fs::write(&webp, b"RIFF\x00\x00\x00\x00WEBPVP8 ").unwrap();
+        assert_eq!(sniff_image_format(&webp), Some(("webp", "image/webp")));
+        let other = temp_dir.path().join("d.bin");
+        std::fs::write(&other, b"not an image").unwrap();
+        assert_eq!(sniff_image_format(&other), None);
     }
 
     #[test]

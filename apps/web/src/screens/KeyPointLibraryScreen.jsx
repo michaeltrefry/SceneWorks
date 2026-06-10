@@ -3,6 +3,8 @@ import { apiFetch } from "../api.js";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { KpsOverlay } from "../components/KpsOverlay.jsx";
+import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
+import { assetUrl } from "../components/assetMedia.jsx";
 import {
   BUILTIN_DEFAULT_COLLECTION_ID,
   GLOBAL_KEYPOINTS_PROJECT_ID,
@@ -108,19 +110,22 @@ function KeypointLibraryPanel({ hidden, presets, loading, error, onDelete }) {
 
 // --- Capture tab ------------------------------------------------------------
 
-// Upload one photo → stage it → fire a kps_extract job → watch the live jobs list → preview the
-// detected landmarks → name + save. Mirrors the Pose Library Create tab's staged-source +
-// job-watch shape, but for a single face and the SCRFD detector.
+// Pick a source — a workspace asset, a character image, or a file upload (the shared
+// single-select DatasetAddDialog, same as the Image Editor) → stage it → fire a kps_extract
+// job → watch the live jobs list → preview the detected landmarks → name + save. Every source
+// is staged to the transient keypoint-uploads area so the extraction + save path is uniform
+// (asset picks are re-fetched and staged the same as an upload), and the saved preset retains
+// its own copy of the source image.
 function KeypointCapturePanel({ hidden, onSaved }) {
-  const { token, requestedGpu, jobs = [] } = useAppContext();
-  const [source, setSource] = useState(null); // { path, displayName, objectUrl }
+  const { token, requestedGpu, jobs = [], assets = [], characters = [] } = useAppContext();
+  const [source, setSource] = useState(null); // { path, displayName, previewUrl, sourceAssetId? }
   const [phase, setPhase] = useState("idle"); // idle | extracting | review
   const [jobId, setJobId] = useState(null);
   const [extraction, setExtraction] = useState(null); // { kps, lowConfidence, sourceWidth, sourceHeight }
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const fileInputRef = useRef(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const objectUrlRef = useRef(null);
   const clearSource = useCallback(() => {
@@ -140,26 +145,20 @@ function KeypointCapturePanel({ hidden, onSaved }) {
     setJobId(null);
   }, [clearSource]);
 
-  const onPick = useCallback(
-    async (event) => {
-      const file = event.target.files?.[0];
-      event.target.value = "";
-      if (!file || !file.type?.startsWith("image/")) {
-        return;
-      }
+  // Stage a source, seed the name, and fire the extraction. `previewUrl` backs the overlay
+  // preview; `sourceAssetId` records provenance when the source was an existing asset.
+  const beginExtraction = useCallback(
+    async ({ file, displayName, previewUrl, sourceAssetId }) => {
       setError("");
       setExtraction(null);
-      clearSource();
-      const objectUrl = URL.createObjectURL(file);
-      objectUrlRef.current = objectUrl;
       try {
         const staged = await stageKeypointSource(token, file);
         if (!staged?.path) {
           throw new Error("Upload did not return a staged path.");
         }
-        setSource({ path: staged.path, displayName: staged.displayName ?? file.name, objectUrl });
-        setName(stripExtension(staged.displayName ?? file.name));
-        // Fire the extraction immediately — the value is the landmarks, not the upload.
+        const label = displayName ?? staged.displayName ?? file.name ?? "image";
+        setSource({ path: staged.path, displayName: label, previewUrl, sourceAssetId });
+        setName(stripExtension(label));
         const job = await postExtractJob(token, requestedGpu, staged.path);
         setJobId(job.id);
         setPhase("extracting");
@@ -170,6 +169,54 @@ function KeypointCapturePanel({ hidden, onSaved }) {
       }
     },
     [token, requestedGpu, clearSource],
+  );
+
+  // File upload (DatasetAddDialog onImport): stage the File directly; preview from an objectUrl.
+  const onImport = useCallback(
+    async (files) => {
+      const file = files?.[0];
+      setPickerOpen(false);
+      if (!file || !file.type?.startsWith("image/")) {
+        return;
+      }
+      clearSource();
+      const objectUrl = URL.createObjectURL(file);
+      objectUrlRef.current = objectUrl;
+      await beginExtraction({ file, displayName: file.name, previewUrl: objectUrl });
+    },
+    [beginExtraction, clearSource],
+  );
+
+  // Asset / character pick (DatasetAddDialog onAdd): re-fetch the asset's bytes and stage them
+  // like an upload, so extraction + save are identical to the file path. Preview from its URL.
+  const onAddAsset = useCallback(
+    async (ids) => {
+      const asset = assets.find((item) => item.id === ids?.[0]);
+      setPickerOpen(false);
+      if (!asset) {
+        return;
+      }
+      clearSource();
+      setError("");
+      const url = assetUrl(asset);
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Could not load the selected image (${response.status}).`);
+        }
+        const blob = await response.blob();
+        const file = new File([blob], asset.displayName ?? "image", { type: blob.type || "image/png" });
+        await beginExtraction({
+          file,
+          displayName: asset.displayName ?? asset.id,
+          previewUrl: url,
+          sourceAssetId: asset.id,
+        });
+      } catch (err) {
+        setError(String(err?.message ?? err));
+      }
+    },
+    [assets, beginExtraction, clearSource],
   );
 
   // Watch the live (SSE-fed) jobs list for the extraction to finish.
@@ -211,6 +258,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
         sourceUploadPath: source.path,
         sourceWidth: extraction.sourceWidth,
         sourceHeight: extraction.sourceHeight,
+        ...(source.sourceAssetId ? { sourceAssetId: source.sourceAssetId } : {}),
       });
       reset();
       onSaved?.();
@@ -226,17 +274,16 @@ function KeypointCapturePanel({ hidden, onSaved }) {
       <div className="keypoint-capture">
         {error ? <p className="inline-warning">{error}</p> : null}
         <div className="toolbar">
-          <button onClick={() => fileInputRef.current?.click()} type="button">
-            {source ? "Choose another photo" : "Upload a photo"}
+          <button onClick={() => setPickerOpen(true)} type="button">
+            {source ? "Choose another image" : "Choose image"}
           </button>
-          <input accept="image/*" hidden onChange={onPick} ref={fileInputRef} type="file" />
           {phase === "extracting" ? <span className="muted">Detecting face landmarks…</span> : null}
         </div>
 
         {phase === "review" && extraction ? (
           <div className="keypoint-capture-review">
             <div className="keypoint-card-figure large">
-              <KpsOverlay kps={extraction.kps} imageUrl={source?.objectUrl} label="captured face landmarks" />
+              <KpsOverlay kps={extraction.kps} imageUrl={source?.previewUrl} label="captured face landmarks" />
             </div>
             <div className="keypoint-capture-form">
               {extraction.lowConfidence ? (
@@ -261,11 +308,27 @@ function KeypointCapturePanel({ hidden, onSaved }) {
           </div>
         ) : (
           <div className="empty-panel">
-            Upload a clear, front-facing photo. We detect the face and capture its 5-point framing as a reusable
-            angle preset.
+            Choose a clear, front-facing image — from your assets, a character, or a file upload. We detect the face
+            and capture its 5-point framing as a reusable angle preset.
           </div>
         )}
       </div>
+
+      {pickerOpen ? (
+        <DatasetAddDialog
+          assets={assets}
+          characters={characters}
+          confirmLabel="Use image"
+          eyebrow="Capture"
+          fileAccept="image/*"
+          fileHint="Drag an image here, or"
+          multiple={false}
+          onAdd={onAddAsset}
+          onClose={() => setPickerOpen(false)}
+          onImport={onImport}
+          title="Choose a face image"
+        />
+      ) : null}
     </div>
   );
 }

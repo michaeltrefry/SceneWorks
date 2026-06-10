@@ -190,7 +190,14 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
         .map(str::trim)
         .filter(|p| !p.is_empty())
     {
-        let decoded = image::open(path)
+        // Decode by CONTENT, not file extension: staged uploads land as `upload-<uuid>.tmp`
+        // (the API's generic temp-file writer keeps no extension), so `image::open` — which
+        // picks the codec from the extension — would reject a perfectly valid JPEG/PNG. Read
+        // the bytes and let `load_from_memory` sniff the format from the magic bytes.
+        let bytes = std::fs::read(path).map_err(|error| {
+            WorkerError::InvalidPayload(format!("kps extraction source {path}: {error}"))
+        })?;
+        let decoded = image::load_from_memory(&bytes)
             .map_err(|error| {
                 WorkerError::InvalidPayload(format!("kps extraction source {path}: {error}"))
             })?

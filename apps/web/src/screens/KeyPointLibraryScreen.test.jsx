@@ -144,6 +144,7 @@ describe("KeyPointLibraryScreen", () => {
     };
     await render(makeContext({ jobs: [job] }));
     await click(container.querySelector("#keypoint-tab-capture"));
+    await click(byText("Choose image")); // open the shared asset dialog (File tab default)
 
     const fileInput = container.querySelector('#keypoint-panel-capture input[type="file"]');
     const file = new File(["x"], "face.png", { type: "image/png" });
@@ -175,11 +176,55 @@ describe("KeyPointLibraryScreen", () => {
     expect(body.kps).toEqual(FRONT_KPS);
   });
 
+  it("captures from an existing asset via the shared dialog, recording provenance", async () => {
+    presets = [builtinPreset()];
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      blob: async () => new Blob(["img-bytes"], { type: "image/png" }),
+    }));
+    const asset = {
+      id: "asset_img_1",
+      type: "image",
+      displayName: "Studio Photo",
+      origin: "upload",
+      status: { trashed: false },
+      file: { path: "assets/images/p.png", mimeType: "image/png" },
+      url: "/api/v1/projects/project_1/files/assets/images/p.png",
+    };
+    const job = {
+      id: "job_kps_1",
+      type: "kps_extract",
+      status: "completed",
+      result: { detected: true, kps: FRONT_KPS, lowConfidence: false, sourceWidth: 640, sourceHeight: 640 },
+    };
+    await render(makeContext({ jobs: [job], assets: [asset] }));
+    await click(container.querySelector("#keypoint-tab-capture"));
+    await click(byText("Choose image"));
+    await click(byText("Asset Library")); // dialog tab
+    await click(byText("Studio Photo")); // candidate card
+    await click(byText("Use image")); // single-select commit
+    await act(async () => {}); // flush fetch -> stage -> job post -> job-watch
+
+    // The asset's bytes were re-staged like an upload, then a kps_extract job fired.
+    expect(global.fetch).toHaveBeenCalled();
+    expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/keypoints/sources")).toBe(true);
+    expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/jobs")).toBe(true);
+
+    const nameInput = container.querySelector('#keypoint-panel-capture input[type="text"], #keypoint-panel-capture input:not([type])');
+    await setInputValue(nameInput, "From asset");
+    await click(byText("Save preset"));
+
+    const save = apiCalls.find((c) => c.method === "POST" && c.path === "/api/v1/keypoints");
+    expect(JSON.parse(save.body)).toMatchObject({ name: "From asset", sourceAssetId: "asset_img_1" });
+  });
+
   it("explains an extraction failure instead of saving silently", async () => {
     presets = [builtinPreset()];
     const job = { id: "job_kps_1", type: "kps_extract", status: "completed", result: { detected: false, reason: "no_face" } };
     await render(makeContext({ jobs: [job] }));
     await click(container.querySelector("#keypoint-tab-capture"));
+    await click(byText("Choose image"));
 
     const fileInput = container.querySelector('#keypoint-panel-capture input[type="file"]');
     const file = new File(["x"], "face.png", { type: "image/png" });
