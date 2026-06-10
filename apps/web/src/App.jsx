@@ -84,12 +84,14 @@ function isInterleaveJob(job) {
   return job.type === "image_interleave";
 }
 
-function isLoraImportNotice(message) {
-  return String(message ?? "").startsWith("lora import: ");
-}
-
-function isLoraTrainingNotice(message) {
-  return String(message ?? "").startsWith("lora training: ");
+// sc-4198: notice kind for a job-failure banner. LoRA import/train failures get
+// their own kind so the matching job's later completion dismisses exactly that
+// banner (replacing the old "lora import:"/"lora training:" startsWith protocol);
+// everything else is a general error.
+function noticeKindForJob(job) {
+  if (job?.type === "lora_import") return "lora-import";
+  if (job?.type === "lora_train") return "lora-train";
+  return "general";
 }
 
 function jobFreshnessMs(job) {
@@ -486,7 +488,25 @@ export function App() {
     setPreviewAsset(null);
   };
   const [studioLaunch, setStudioLaunch] = useState(null);
-  const [error, setError] = useState("");
+  // sc-4198: a small notices store replaces the single `error` string that used to
+  // double as a message bus — the fragile "lora import:"/"lora training:" startsWith
+  // protocol. Each notice has a stable `kind`; pushing a kind replaces only that kind
+  // and dismissing clears only that kind, so an unrelated success (or a background SSE
+  // refresh) no longer wipes an unread, still-relevant notice of a different kind.
+  const [notices, setNotices] = useState([]);
+  const pushNotice = useCallback((kind, message) => {
+    const text = String(message ?? "");
+    setNotices((current) => {
+      const others = current.filter((notice) => notice.kind !== kind);
+      return text ? [...others, { kind, message: text }] : others;
+    });
+  }, []);
+  const dismissNoticeKind = useCallback((kind) => {
+    setNotices((current) => current.filter((notice) => notice.kind !== kind));
+  }, []);
+  // Back-compat: the existing setError(msg)/setError("") call sites map onto the
+  // "general" notice kind — a truthy message replaces it, "" dismisses only it.
+  const setError = useCallback((message) => pushNotice("general", message), [pushNotice]);
   const [theme, setTheme] = useState(readStoredTheme);
   // Apply a theme and persist it through the API. localStorage gives an instant
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
@@ -971,19 +991,19 @@ export function App() {
         refreshData();
       }
       if (job.status === "completed" && job.type === "lora_import") {
-        setError((current) => (isLoraImportNotice(current) ? "" : current));
+        dismissNoticeKind("lora-import");
         refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
         if (job.result?.loraRegistered === false) {
-          setError(`lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
+          pushNotice("lora-train", `lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
         } else {
-          setError((current) => (isLoraTrainingNotice(current) ? "" : current));
+          dismissNoticeKind("lora-train");
           refreshDataWithLoraOverlay(job.projectId ?? activeProjectRef.current?.id);
         }
       }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
-        setError(failedJobNotice(job));
+        pushNotice(noticeKindForJob(job), failedJobNotice(job));
       }
     }
 
@@ -1834,7 +1854,9 @@ export function App() {
           </button>
         </header>
 
-        {error ? <p className="notice error">{error}</p> : null}
+        {notices.map((notice) => (
+          <p className="notice error" key={notice.kind}>{notice.message}</p>
+        ))}
 
         {access.authRequired && !window.localStorage.getItem("sceneworks-token") ? (
           <section className="auth-band">

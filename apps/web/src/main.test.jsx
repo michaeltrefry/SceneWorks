@@ -4551,6 +4551,80 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("lora import: LoRA manifestPath must target");
   });
 
+  // sc-4198 regression: notices are kept per-kind, so a LoRA-import banner and a
+  // LoRA-train banner coexist, and clearing one (here, the LoRA import's later
+  // completion) leaves the unrelated, still-relevant notice untouched — unlike the
+  // old single `error` string where any clear wiped everything.
+  it("keeps an unrelated notice when a LoRA import notice clears", async () => {
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    // A LoRA import fails (kind "lora-import") and a LoRA training run completes but
+    // fails to register (kind "lora-train") — both banners show at once.
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-import-job-1",
+          type: "lora_import",
+          status: "failed",
+          createdAt: "2026-05-18T00:00:00Z",
+          error: "manifest write failed",
+          payload: { loraId: "detail_lora", family: "z-image" },
+        }),
+      });
+    });
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-train-job-1",
+          type: "lora_train",
+          status: "completed",
+          createdAt: "2026-05-18T00:00:01Z",
+          payload: { dryRun: false },
+          result: { loraRegistered: false, loraRegistrationError: "registry locked" },
+        }),
+      });
+    });
+    await settle();
+    expect(container.textContent).toContain("lora import: manifest write failed");
+    expect(container.textContent).toContain("lora training: registry locked");
+
+    // A later LoRA import completes — only the lora-import banner clears; the
+    // unrelated lora-train notice must survive.
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "lora-import-job-2",
+          type: "lora_import",
+          status: "completed",
+          createdAt: "2026-05-18T00:00:02Z",
+          payload: { loraId: "detail_lora", family: "z-image" },
+        }),
+      });
+    });
+    await settle();
+
+    expect(container.textContent).not.toContain("lora import: manifest write failed");
+    expect(container.textContent).toContain("lora training: registry locked");
+  });
+
   it("rejects oversized LoRA uploads before posting from the Models page", async () => {
     let importCalls = 0;
     global.fetch.mockImplementation((url, options = {}) => {
