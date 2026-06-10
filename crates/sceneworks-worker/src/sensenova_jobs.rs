@@ -25,6 +25,8 @@
 //! error loudly (the Python torch worker serves these modes on Windows/Linux).
 
 use super::*;
+// Only the macOS handlers parse an `ImageRequest`; the non-macOS stubs don't.
+#[cfg(target_os = "macos")]
 use sceneworks_core::image_request::ImageRequest;
 
 #[cfg(target_os = "macos")]
@@ -735,7 +737,9 @@ fn interleave_resolution_snap(width: i64, height: i64) -> (i32, i32) {
 
 /// Drop any `<think>…</think>` reasoning so only the answer is returned — removes complete think
 /// blocks and any dangling/unclosed one (reasoning truncated by `max_new_tokens`). Mirrors the
-/// Python `SenseNovaU1Adapter._strip_reasoning`.
+/// Python `SenseNovaU1Adapter._strip_reasoning`. Used by the macOS VQA handler; also unit-tested
+/// cross-platform (it is pure string logic), so it compiles under `test` off macOS too.
+#[cfg(any(target_os = "macos", test))]
 fn strip_reasoning(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -757,7 +761,8 @@ fn strip_reasoning(text: &str) -> String {
 }
 
 /// `safe_int` over a top-level payload field: parse (int / float / numeric string) else `default`,
-/// then clamp to `[lo, hi]`.
+/// then clamp to `[lo, hi]`. Used by the macOS handlers; also unit-tested cross-platform.
+#[cfg(any(target_os = "macos", test))]
 fn payload_int(payload: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
     payload
         .get(key)
@@ -786,6 +791,7 @@ fn advanced_float(advanced: &JsonObject, key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn json_to_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
