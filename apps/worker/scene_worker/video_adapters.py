@@ -1553,12 +1553,16 @@ def _ensure_ffmpeg_on_path() -> None:
             return
     if not exe or not Path(exe).exists():
         return
-    link_dir = Path(tempfile.gettempdir()) / "sceneworks-ffmpeg-shim"
-    link_dir.mkdir(parents=True, exist_ok=True)
-    link = link_dir / "ffmpeg"
+    # Create the shim under a private, per-process directory (mkdtemp → mode
+    # 0700, unpredictable name) rather than a fixed name in the shared temp root.
+    # A predictable, world-traversable dir lets another local user pre-plant a
+    # ``ffmpeg`` symlink pointing at an arbitrary binary, which the worker (and
+    # any library that later spawns ffmpeg from PATH) would execute. The fresh
+    # private dir means the symlink we create is the only one that can exist.
     try:
-        if not link.exists():
-            link.symlink_to(exe)
+        link_dir = Path(tempfile.mkdtemp(prefix="sceneworks-ffmpeg-shim-"))
+        link = link_dir / "ffmpeg"
+        link.symlink_to(exe)
     except OSError:
         return
     os.environ["PATH"] = f"{link_dir}{os.pathsep}{os.environ.get('PATH', '')}"
