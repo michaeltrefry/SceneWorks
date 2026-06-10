@@ -519,11 +519,22 @@ pub(crate) async fn create_training_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-/// Absolute path to the target's base model weights on the worker host. Prefers
-/// the Hugging Face hub cache for the target's repo, falling back to the local
-/// models directory. The path need not exist yet — model installation is a
-/// separate job; the dry-run plan only records where the kernel will read from.
+/// Absolute path to the target's base model weights on the worker host. Prefers a
+/// locally-converted MLX model dir (`requiresConversion` models like Wan), then the
+/// Hugging Face hub snapshot for the target's repo, falling back to the local models
+/// directory. The path need not exist yet — model installation is a separate job; the
+/// dry-run plan only records where the kernel will read from.
 pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath) -> String {
+    // Locally-converted MLX model: `requiresConversion` models (Wan TI2V-5B / A14B) keep
+    // their usable weights in the app-managed `<data>/models/mlx/<id>` tree, NOT the HF cache
+    // — which holds only the native *source* checkpoint the converter consumes. Inference reads
+    // the converted dir via `video_jobs::local_mlx_dir` (gated on `config.json`); training must
+    // read the same tree, so prefer it whenever it is populated. The converted dir is keyed by
+    // the manifest model id, which equals `target.base_model` for every conversion target.
+    let converted = data_dir.join("models").join("mlx").join(&target.base_model);
+    if converted.join("config.json").is_file() {
+        return converted.display().to_string();
+    }
     if let Some(repo) = target
         .base_model_repo
         .as_deref()
@@ -531,6 +542,15 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
         .filter(|repo| !repo.is_empty())
     {
         if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            // The diffusers component tree (tokenizer/ text_encoder/ transformer/ vae/) the
+            // trainer and pipeline read lives inside the resolved snapshot dir
+            // (snapshots/<rev>/), not at the repo cache root — which holds only blobs/ refs/
+            // snapshots/. Descend into the main snapshot so callers get a usable component
+            // root, exactly as inference does. Fall back to the cache root when no snapshot is
+            // materialized yet (the path need not exist at dry-run time).
+            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
+                return snapshot.display().to_string();
+            }
             return cache_path.display().to_string();
         }
     }

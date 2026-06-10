@@ -1,6 +1,6 @@
 use super::auth::requires_token;
 use super::events::{EventHub, EventMessage};
-use super::training::insufficient_disk_space;
+use super::training::{insufficient_disk_space, resolve_base_model_path};
 use super::workers::person_readiness_from_workers;
 use super::{
     create_app, huggingface_repo_cache_path, inject_converted_model_path, inprocess_worker_gpu_id,
@@ -7659,4 +7659,92 @@ mod recipe_presets_parity {
         assert!(preset["id"] != "cinematic", "new id is different");
         assert!(preset["name"] != "My Cinematic", "new name is different");
     }
+}
+
+#[test]
+fn resolve_base_model_path_descends_into_hf_snapshot() {
+    // Trainers read their weight tree (z-image/sdxl: tokenizer/ text_encoder/ unet|transformer/
+    // vae/; ltx: transformer.safetensors / vae_*.safetensors / connector.safetensors) from inside
+    // the HF snapshot dir, not the repo cache root. Resolving to the repo root made every
+    // HF-cache base model fail at trainer load — z-image "tokenizer: No such file or directory",
+    // sdxl "read vocab.json: No such file or directory", ltx "Path must point to a local file".
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "z_image_turbo")
+        .expect("z_image_turbo target");
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    // Materialize an HF hub cache: refs/main -> a snapshot holding the tokenizer.
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "abc123";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    std::fs::create_dir_all(snapshot.join("tokenizer")).expect("create snapshot tree");
+    std::fs::write(snapshot.join("tokenizer").join("tokenizer.json"), "{}")
+        .expect("write tokenizer.json");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    let resolved = resolve_base_model_path(&target, &data_dir);
+
+    assert_eq!(
+        resolved,
+        snapshot.display().to_string(),
+        "resolver must descend into the snapshot dir, not stop at the repo root"
+    );
+    assert!(
+        std::path::Path::new(&resolved)
+            .join("tokenizer")
+            .join("tokenizer.json")
+            .is_file(),
+        "the component tree must be reachable from the resolved path"
+    );
+}
+
+#[test]
+fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
+    // `requiresConversion` models (Wan) keep usable weights in <data>/models/mlx/<id>, while the
+    // HF cache holds only the native *source* checkpoint the converter consumes. Resolving Wan
+    // training to the HF source made the trainer fail ("wan umt5 tokenizer: No such file"); it
+    // must read the converted dir, mirroring inference's local_mlx_dir.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "wan_2_2")
+        .expect("wan_2_2 (TI2V-5B) target");
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    // Materialize BOTH: the HF source snapshot (native checkpoint) and the converted MLX dir.
+    // The converted dir must win.
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let snapshot = repo_root.join("snapshots").join("rev0");
+    std::fs::create_dir_all(&snapshot).expect("create snapshot");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), "rev0").expect("write refs/main");
+
+    let converted = data_dir.join("models").join("mlx").join("wan_2_2");
+    std::fs::create_dir_all(&converted).expect("create converted dir");
+    std::fs::write(converted.join("config.json"), "{}").expect("write config.json");
+
+    let resolved = resolve_base_model_path(&target, &data_dir);
+
+    assert_eq!(
+        resolved,
+        converted.display().to_string(),
+        "conversion models must resolve to the converted MLX dir, not the HF source snapshot"
+    );
+
+    // Without the converted dir (config.json gates it), it falls back to the HF snapshot.
+    std::fs::remove_file(converted.join("config.json")).expect("remove config.json");
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        snapshot.display().to_string(),
+        "with no converted dir, fall back to the HF snapshot"
+    );
 }
