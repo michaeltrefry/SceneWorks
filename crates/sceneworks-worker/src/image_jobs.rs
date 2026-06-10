@@ -1600,10 +1600,7 @@ async fn consume_gen_events(
                 mark_started(index);
                 if last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
-                    if check_cancel(api, &job.id, "Image generation canceled by user.")
-                        .await
-                        .is_err()
-                    {
+                    if cancel_requested(api, &job.id, "Image generation canceled by user.").await {
                         cancel.cancel();
                         canceled = true;
                         continue;
@@ -5635,10 +5632,7 @@ pub(crate) async fn run_image_detail_job(
     while let Some((done, total)) = rx.recv().await {
         if last_cancel_check.elapsed() >= Duration::from_secs(2) {
             last_cancel_check = Instant::now();
-            if check_cancel(api, &job.id, "Detail enhancement canceled by user.")
-                .await
-                .is_err()
-            {
+            if cancel_requested(api, &job.id, "Detail enhancement canceled by user.").await {
                 cancel.cancel();
             }
         }

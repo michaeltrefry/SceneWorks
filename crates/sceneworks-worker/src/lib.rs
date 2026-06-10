@@ -825,6 +825,26 @@ async fn check_cancel(api: &ApiClient, job_id: &str, message: &str) -> WorkerRes
     Ok(())
 }
 
+/// In-band cancel poll for long-running generation/training loops. Returns
+/// true only when the user actually requested cancellation (check_cancel's
+/// `WorkerError::Canceled`). Any other failure — a transient HTTP/API hiccup on
+/// the GET, or a failed Canceled-status POST — is tolerated and retried on the
+/// next poll instead of being misread as a user cancel that aborts a
+/// multi-minute run and strands the job in Running (sc-4174).
+// In-band polling call sites are inside macOS-gated generation paths; the
+// helper itself stays unit-tested on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+async fn cancel_requested(api: &ApiClient, job_id: &str, message: &str) -> bool {
+    match check_cancel(api, job_id, message).await {
+        Ok(()) => false,
+        Err(WorkerError::Canceled(_)) => true,
+        Err(error) => {
+            eprintln!("cancel_poll_failed jobId={job_id}: {error}; retrying on the next poll");
+            false
+        }
+    }
+}
+
 async fn update_job(
     api: &ApiClient,
     job_id: &str,

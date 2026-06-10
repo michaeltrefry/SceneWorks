@@ -1554,7 +1554,7 @@ async fn generate_video(
         }
         if last_cancel.elapsed() >= Duration::from_secs(2) {
             last_cancel = Instant::now();
-            if check_cancel(api, &job.id, CANCEL_MESSAGE).await.is_err() {
+            if cancel_requested(api, &job.id, CANCEL_MESSAGE).await {
                 cancel.cancel();
                 canceled = true;
                 continue;

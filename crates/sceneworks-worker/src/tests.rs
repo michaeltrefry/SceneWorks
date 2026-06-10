@@ -38,9 +38,9 @@ use super::supervisor::{
     utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
-    allow_pattern_matches, bounded_tail, cleanup_uploaded_import_source, copy_lora_source,
-    fresh_asset_id, import_lora_source_file_as, import_lora_source_path, now_rfc3339,
-    parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
+    allow_pattern_matches, bounded_tail, cancel_requested, cleanup_uploaded_import_source,
+    copy_lora_source, fresh_asset_id, import_lora_source_file_as, import_lora_source_path,
+    now_rfc3339, parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
     safe_download_dir, safe_project_path, value_f64, wan_moe_pair_filenames,
     write_model_install_marker, CredentialScheme, JsonObject, SafetensorsHeaderError, Settings,
     WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
@@ -1980,4 +1980,108 @@ fn spawn_sleep_child() -> tokio::process::Child {
         .stderr(StdStdio::null())
         .spawn()
         .expect("test child starts")
+}
+
+/// sc-4174 — the in-band cancel poll for long generations must only cancel on
+/// a confirmed user cancel. A transient API failure (on the GET, or on the
+/// Canceled-status POST inside check_cancel) is tolerated and retried on the
+/// next poll instead of aborting a multi-minute run.
+#[derive(Clone)]
+struct CancelPollStubState {
+    get_status: AxumStatusCode,
+    cancel_requested: bool,
+    post_status: AxumStatusCode,
+}
+
+async fn spawn_cancel_poll_stub(state: CancelPollStubState) -> String {
+    async fn job_route(
+        State(state): State<CancelPollStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        if state.get_status != AxumStatusCode::OK {
+            return (state.get_status, "stub GET failure").into_response();
+        }
+        Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
+    }
+    async fn progress_route(
+        State(state): State<CancelPollStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        if state.post_status != AxumStatusCode::OK {
+            return (state.post_status, "stub POST failure").into_response();
+        }
+        Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
+    }
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+async fn cancel_poll_with(state: CancelPollStubState) -> bool {
+    let base_url = spawn_cancel_poll_stub(state).await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    cancel_requested(&api, "job-1", "canceled by user").await
+}
+
+#[tokio::test]
+async fn cancel_poll_tolerates_transient_get_errors() {
+    let canceled = cancel_poll_with(CancelPollStubState {
+        get_status: AxumStatusCode::INTERNAL_SERVER_ERROR,
+        cancel_requested: false,
+        post_status: AxumStatusCode::OK,
+    })
+    .await;
+    assert!(
+        !canceled,
+        "a transient GET failure must not read as a user cancel"
+    );
+}
+
+#[tokio::test]
+async fn cancel_poll_cancels_on_confirmed_user_cancel() {
+    let canceled = cancel_poll_with(CancelPollStubState {
+        get_status: AxumStatusCode::OK,
+        cancel_requested: true,
+        post_status: AxumStatusCode::OK,
+    })
+    .await;
+    assert!(canceled, "a confirmed cancel request must cancel the run");
+}
+
+#[tokio::test]
+async fn cancel_poll_retries_when_cancel_ack_post_fails() {
+    // cancel_requested=true but the Canceled-status POST fails: don't treat it
+    // as canceled yet — the next 2s poll retries the acknowledgement.
+    let canceled = cancel_poll_with(CancelPollStubState {
+        get_status: AxumStatusCode::OK,
+        cancel_requested: true,
+        post_status: AxumStatusCode::INTERNAL_SERVER_ERROR,
+    })
+    .await;
+    assert!(
+        !canceled,
+        "a failed cancel acknowledgement must be retried, not assumed"
+    );
+}
+
+#[tokio::test]
+async fn cancel_poll_continues_when_no_cancel_requested() {
+    let canceled = cancel_poll_with(CancelPollStubState {
+        get_status: AxumStatusCode::OK,
+        cancel_requested: false,
+        post_status: AxumStatusCode::OK,
+    })
+    .await;
+    assert!(!canceled);
 }

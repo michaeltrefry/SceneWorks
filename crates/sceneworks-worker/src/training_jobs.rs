@@ -493,10 +493,7 @@ async fn consume_training_events(
                     && last_cancel_check.elapsed() >= Duration::from_secs(2)
                 {
                     last_cancel_check = Instant::now();
-                    if check_cancel(api, &job.id, "LoRA training canceled by user.")
-                        .await
-                        .is_err()
-                    {
+                    if cancel_requested(api, &job.id, "LoRA training canceled by user.").await {
                         cancel.cancel();
                         canceled = true;
                         continue;
