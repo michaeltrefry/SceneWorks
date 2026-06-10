@@ -43,6 +43,7 @@ from .image_adapters import (
     format_batch_running_message,
     huggingface_repo_cache_exists,
     load_reference_image,
+    release_inference_memory,
     require_inference_backend_for_gpu_worker,
     resolve_seed,
     safe_int,
@@ -209,18 +210,11 @@ class InstantIDAdapter:
         self._loaded_model = None
         self._loaded_controlnet_mode = None
         self._loaded_lora_state = LoraPipelineState()
-        self._empty_cache(importlib.import_module("torch"))
+        # release_inference_memory runs gc.collect() BEFORE empty_cache() — required
+        # so the dropped ~7 GB SDXL+ControlNet pipe's nn.Module reference cycles are
+        # actually freed, not left resident until an incidental cyclic GC (sc-4192).
+        release_inference_memory(importlib.import_module("torch"))
         return True
-
-    @staticmethod
-    def _empty_cache(torch: Any) -> None:
-        try:
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
-            elif torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
 
     # ---- face analysis -------------------------------------------------
     def _face_analysis(self) -> Any:

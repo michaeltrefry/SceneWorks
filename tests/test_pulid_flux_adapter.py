@@ -7,6 +7,7 @@ not here.
 """
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -108,6 +109,27 @@ def test_requires_reference_image(pulid_flux_model):
 
 def test_unload_when_empty_is_false():
     assert PuLIDFluxAdapter().unload() is False
+
+
+def test_unload_routes_through_gc_ordered_release(monkeypatch):
+    # sc-4192: a non-empty unload must free the ~37 GB stack via
+    # release_inference_memory (gc.collect() BEFORE empty_cache()), not a bare
+    # empty_cache() that leaves reference-cycled weights resident.
+    adapter = PuLIDFluxAdapter()
+    adapter._flow_model = SimpleNamespace(tag="fake")
+    fake_torch = object()
+    monkeypatch.setattr(
+        "scene_worker.pulid_flux_adapter.importlib.import_module",
+        lambda name: fake_torch if name == "torch" else importlib.import_module(name),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "scene_worker.pulid_flux_adapter.release_inference_memory",
+        lambda torch: calls.append(torch),
+    )
+    assert adapter.unload() is True
+    assert calls == [fake_torch]
+    assert adapter._flow_model is None
 
 
 def test_builtin_pulid_flux_target_is_wired():

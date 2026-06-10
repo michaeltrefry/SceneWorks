@@ -43,6 +43,7 @@ from .image_adapters import (
     image_batch_progress,
     format_batch_running_message,
     load_reference_image,
+    release_inference_memory,
     require_inference_backend_for_gpu_worker,
     resolve_seed,
     safe_int,
@@ -140,19 +141,11 @@ class PuLIDFluxAdapter:
         self._pulid = None
         self._loaded_repo = None
         self._loaded_model = None
-        torch = importlib.import_module("torch")
-        self._empty_cache(torch)
+        # gc.collect() BEFORE empty_cache() (release_inference_memory) is required so
+        # the dropped ~37 GB PuLID-FLUX stack's reference cycles are freed immediately
+        # rather than lingering beside the next model until a cyclic GC (sc-4192).
+        release_inference_memory(importlib.import_module("torch"))
         return True
-
-    @staticmethod
-    def _empty_cache(torch: Any) -> None:
-        try:
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
-            elif torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
 
     # ---- model load ---------------------------------------------------
     def _load_pipeline(

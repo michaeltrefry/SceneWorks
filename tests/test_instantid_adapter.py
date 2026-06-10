@@ -391,7 +391,9 @@ def test_unload_resets_lora_state(monkeypatch):
     adapter = InstantIDAdapter()
     adapter._pipe = SimpleNamespace(tag="fakepipe")
     adapter._loaded_lora_state = LoraPipelineState(key="applied", adapter_names=("sw_test",))
-    adapter._empty_cache = lambda *_a, **_k: None  # the cache-empty call itself is a no-op
+    # release_inference_memory runs gc.collect()+empty_cache against the fake torch;
+    # stub it so the test exercises unload()'s state reset, not the real free (sc-4192).
+    monkeypatch.setattr("scene_worker.instantid_adapter.release_inference_memory", lambda *_a, **_k: None)
     assert adapter.unload() is True
     # The merge belongs to the (now-discarded) pipe; the next pipe must start clean.
     assert adapter._loaded_lora_state == LoraPipelineState()
