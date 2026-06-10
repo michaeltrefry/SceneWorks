@@ -2161,10 +2161,10 @@ fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
         // `classify_image_gap`, not as a whole-model gap.
         "pulid_flux_dev" => Some("epic 3069"),
         "z_image_edit" => Some("epic 3529"),
-        m if m.starts_with("sensenova") => Some("epic 3180"),
         m if m.starts_with("lens") => Some("epic 3164"),
-        // Chroma (chroma1_*) was ported to MLX (epic 3531 / sc-3843) — it is now in
-        // `MLX_ROUTED_MODELS`, so it never reaches this torch-only gap classifier.
+        // Chroma (chroma1_*, epic 3531 / sc-3843) and SenseNova-U1 (sensenova_u1_8b[_fast],
+        // epic 3180 / sc-3900) were ported to MLX — they are now in `MLX_ROUTED_MODELS`, so
+        // neither reaches this torch-only gap classifier.
         _ => None,
     }
 }
@@ -2216,6 +2216,29 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             "the Qwen-Image-Edit model needs edit_image+sourceAssetId or character_image+referenceAssetId to route to MLX.",
             None,
         ),
+        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => {
+            let has_poses = payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .and_then(|advanced| advanced.get("poses"))
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty());
+            if has_poses {
+                UnsupportedReason::new(
+                    Some(model),
+                    "strict pose (ControlNet)",
+                    "SenseNova-U1 has no ControlNet/skeleton conditioning — the strict-pose tier is not an MLX path; it stays on the Python torch path (dropped on Mac).",
+                    Some("epic 3180"),
+                )
+            } else {
+                UnsupportedReason::new(
+                    Some(model),
+                    "edit/character without a reference",
+                    "SenseNova-U1 edit needs edit_image+sourceAssetId, and Character Studio needs character_image+referenceAssetId, to route to MLX.",
+                    None,
+                )
+            }
+        }
         // InstantID (sc-3345 identity + angle set; sc-3381 pose mode + face-restore): the full
         // surface runs on MLX for `character_image` + `referenceAssetId`. Only a non-character /
         // reference-less job has no InstantID path. Mirrors `instantid_mlx_eligible`.
@@ -2620,6 +2643,8 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "chroma1_hd",
     "chroma1_base",
     "chroma1_flash",
+    "sensenova_u1_8b",
+    "sensenova_u1_8b_fast",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -2674,6 +2699,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
+        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -2828,6 +2854,41 @@ fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// LoKr apply on the core MLX loader (epic 3641 / sc-3842), so a LoRA never forces torch.
 fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
+/// SenseNova-U1 (sc-3900, epic 3180) MLX-routing conditions. The unified NEO-Unify model serves
+/// three image modes on the single `sensenova_u1_8b` / `sensenova_u1_8b_fast` ids: plain T2I
+/// (base path), instruction edit (`edit_image` → `Conditioning::Reference`), and Character Studio
+/// (`character_image` → `Conditioning::MultiReference`, incl. the angle set) — all via the Rust
+/// worker. It has NO ControlNet, so the strict-pose tier (`advanced.poses`) is unsupported and
+/// drops to torch on non-Mac (it has no Mac path — epic 3482). Edit/character require the
+/// reference the it2i path needs; plain T2I is always eligible. User LoRAs are not supported
+/// (`supports_lora=false`) and the manifest surfaces no LoRA slot, so no LoRA gate is needed.
+fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    if has_poses {
+        // No skeleton/ControlNet conditioning — strict pose is not an MLX SenseNova path.
+        return false;
+    }
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_source = payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    match payload.get("mode").and_then(Value::as_str) {
+        Some("edit_image") => has_source || has_reference,
+        Some("character_image") => has_reference,
+        // Plain T2I (text_to_image / no mode) — eligible with or without an inert reference.
+        _ => true,
+    }
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
@@ -3077,7 +3138,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if worker.gpu_id.eq_ignore_ascii_case("mlx") {
         // Image: sc-3026 txt2img/LoRA + sc-3060 reference/edit/inpaint/outpaint +
         // image_detail + sc-3513 the `image_edit` job type (plain Image Edit). A
-        // torch-only edit model (z_image_edit/kolors/sensenova/lens/pulid/instantid)
+        // torch-only edit model (z_image_edit/kolors/lens/pulid/instantid)
         // is not MLX-eligible, so the mlx worker refuses it and it stays on torch.
         if matches!(
             job.job_type,

@@ -36,6 +36,8 @@ use mlx_gen_qwen_image as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_sdxl as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_sensenova as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
 // InstantID (sc-3345) is a bespoke provider, not an inventory-registered `Generator`, so it is
 // referenced by name (`InstantId::load`) rather than anchored with `as _;` — and the native face
@@ -292,6 +294,38 @@ const MLX_MODELS: &[MlxModel] = &[
         supports_negative_prompt: true,
         adapter_label: "mlx_chroma",
     },
+    // SenseNova-U1 (epic 3180, sc-3900) — NEO-Unify: a dense dual-path Qwen3-MoT AR LLM + a
+    // flow-matching image generator (no separate VAE / text encoder). Unlike every other family
+    // here it uses BOTH CFG knobs: `supports_guidance=true` carries the text CFG via `guidance`
+    // (defaults 4.0 base / 1.0 fast), and `supports_true_cfg` carries the it2i image-guidance via
+    // `true_cfg` (edit ≈ 1.0 / character ≈ 1.5) — so it is NOT a [`uses_true_cfg`] family (which is
+    // for engines that read the *single* CFG knob from `true_cfg`). `supports_negative_prompt=false`
+    // (the descriptor advertises no negative prompt). Plain T2I rides [`generate_mlx_stream`]; edit
+    // (`Reference`) + Character Studio (`MultiReference`) divert to [`generate_sensenova_edit_stream`]
+    // where the dual CFG + reference conditioning are built. `_fast` is the same base weights with
+    // the 8-step distill LoRA merged internally at load (`load_fast`); the worker only selects the
+    // engine id, the engine resolves + merges the curated distill LoRA itself (no user LoRA slot —
+    // `supports_lora=false`). Both ids map 1:1 to the engine registry id of the same name.
+    MlxModel {
+        sceneworks_id: "sensenova_u1_8b",
+        engine_id: "sensenova_u1_8b",
+        default_repo: "sensenova/SenseNova-U1-8B-MoT",
+        default_steps: 50,
+        supports_guidance: true,
+        default_guidance: 4.0,
+        supports_negative_prompt: false,
+        adapter_label: "mlx_sensenova",
+    },
+    MlxModel {
+        sceneworks_id: "sensenova_u1_8b_fast",
+        engine_id: "sensenova_u1_8b_fast",
+        default_repo: "sensenova/SenseNova-U1-8B-MoT",
+        default_steps: 8,
+        supports_guidance: true,
+        default_guidance: 1.0,
+        supports_negative_prompt: false,
+        adapter_label: "mlx_sensenova",
+    },
 ];
 
 /// The engine-backed family for a SceneWorks model id, if any.
@@ -438,6 +472,22 @@ pub(crate) async fn run_image_generate_job(
         // sc-3060) → the engine's advanced conditioning paths. Plain SDXL txt2img + LoRA
         // stays on the base `mlx_available` path below.
         generate_sdxl_advanced_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if sensenova_edit_available(&request, settings) {
+        // SenseNova-U1 instruction edit (edit_image → Reference) + Character Studio
+        // (character_image → MultiReference, incl. the angle set) on the unified
+        // `sensenova_u1_8b` / `_fast` ids (sc-3900). Plain SenseNova T2I (no reference)
+        // falls through to the base `mlx_available` path below.
+        generate_sensenova_edit_stream(
             api,
             settings,
             job,
@@ -1156,6 +1206,13 @@ const FLUX_IP_TRUE_CFG: f32 = 4.0;
 #[cfg(target_os = "macos")]
 fn is_flux_model(model: &str) -> bool {
     matches!(model, "flux_schnell" | "flux_dev")
+}
+
+/// The SenseNova-U1 SceneWorks ids (base + 8-step distill), both served by the unified
+/// `mlx-gen-sensenova` engine (sc-3900).
+#[cfg(target_os = "macos")]
+fn is_sensenova_model(model: &str) -> bool {
+    matches!(model, "sensenova_u1_8b" | "sensenova_u1_8b_fast")
 }
 
 /// Stage the engine's IP-Adapter dir contract from the two cached HF snapshots:
@@ -3146,6 +3203,13 @@ fn grouped_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
             Flux2Grouping::Poses(count) => count as u32,
             Flux2Grouping::Plain => request.count,
         }
+    } else if sensenova_edit_available(request, settings) {
+        match flux2_grouping(request) {
+            Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+            // SenseNova has no strict-pose (ControlNet) path — pose sets are excluded upstream by
+            // `sensenova_mlx_eligible`, so any residual grouping is the plain per-image count.
+            Flux2Grouping::Poses(_) | Flux2Grouping::Plain => request.count,
+        }
     } else {
         flux2_image_count(request, settings)
     }
@@ -3481,6 +3545,344 @@ async fn generate_qwen_edit_stream(
                         seed,
                         width: out_w,
                         height: out_h,
+                        pixels,
+                    })
+                    .is_err()
+                {
+                    break; // receiver gone — stop generating.
+                }
+            }
+            Ok(())
+        })
+    };
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        adapter_label,
+        &raw_settings,
+        total,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// SenseNova-U1 it2i (macOS, sc-3900 / epic 3180): instruction edit + Character Studio on the
+// unified `sensenova_u1_8b` / `sensenova_u1_8b_fast` ids. The same model does T2I (the base
+// `generate_mlx_stream` path) and it2i here; a `Conditioning::Reference` (single, edit_image) or
+// `Conditioning::MultiReference` (N, character_image incl. the angle set) drives the
+// understanding-path vision encoder. SenseNova uses BOTH CFG knobs: the text CFG via `guidance`
+// (`advanced.guidanceScale`, default 4.0 base / 1.0 fast) AND the image-guidance via `true_cfg`
+// (`advanced.imageGuidanceScale` → engine `img_cfg_scale`, default 1.0 edit / 1.5 character) — so
+// it is NOT a `uses_true_cfg` family. No negative prompt (`supports_negative_prompt=false`). The
+// fast variant merges its 8-step distill LoRA internally at load (`load_fast`) — the worker only
+// selects the engine id; there is no user-LoRA slot (`supports_lora=false`). SenseNova has no
+// ControlNet, so strict pose is excluded by `sensenova_mlx_eligible`. Mirrors
+// `generate_qwen_edit_stream`'s blocking-thread + streamed-events shape.
+// ---------------------------------------------------------------------------
+
+/// True when this is a SenseNova it2i job: a SenseNova model + ≥1 reference (the character
+/// `referenceAssetId`, or the Image-Edit `sourceAssetId` in `edit_image` mode) whose weights
+/// resolve. Plain T2I (no reference) is NOT routed here — it rides the base `mlx_available` path.
+/// Reuses [`qwen_edit_reference_ids`] (the generic `ref = referenceAssetId or sourceAssetId-if-edit`
+/// rule, not Qwen-specific).
+#[cfg(target_os = "macos")]
+fn sensenova_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
+    is_sensenova_model(&request.model)
+        && !qwen_edit_reference_ids(request).is_empty()
+        && resolve_weights_dir(request, settings).is_some()
+}
+
+/// Snap a dimension to SenseNova's 32-pixel cell (the engine rejects off-cell sizes), clamped to
+/// the descriptor's [256, 2048] range. SenseNova's trained buckets are already 32-aligned; this
+/// guards a hand-set advanced width/height.
+#[cfg(target_os = "macos")]
+fn sensenova_dim(value: u32) -> u32 {
+    let snapped = value.div_ceil(32) * 32;
+    snapped.clamp(256, 2048)
+}
+
+/// The SenseNova image-conditioning guidance (`true_cfg` → engine `img_cfg_scale`):
+/// `advanced.imageGuidanceScale` else the per-mode default — 1.5 for Character Studio
+/// (`character_image`, pulls harder toward the reference subject, sc-2015) / 1.0 for instruction
+/// edit (the upstream it2i default). Floored at 1.0. Mirrors the Python `_image_guidance_scale`.
+#[cfg(target_os = "macos")]
+fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
+    let default = if request.mode == "character_image" {
+        1.5
+    } else {
+        1.0
+    };
+    request
+        .advanced
+        .get("imageGuidanceScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(default)
+        .max(1.0)
+}
+
+/// The SenseNova flow-match timestep shift (`scheduler_shift` → engine `timestep_shift`):
+/// `advanced.schedulerShift` (or the legacy `timestepShift`) else 3.0; a non-positive value falls
+/// back to 3.0. The only sampling knob SenseNova exposes (mirrors the Python adapter).
+#[cfg(target_os = "macos")]
+fn resolve_sensenova_timestep_shift(request: &ImageRequest) -> f32 {
+    let raw = request
+        .advanced
+        .get("schedulerShift")
+        .or_else(|| request.advanced.get("timestepShift"))
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(3.0);
+    if raw > 0.0 {
+        raw
+    } else {
+        3.0
+    }
+}
+
+/// Flat telemetry for a SenseNova it2i generation (parity with `qwen_edit_raw_settings`).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn sensenova_edit_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: Option<f32>,
+    img_cfg: f32,
+    timestep_shift: f32,
+    reference_count: usize,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    if let Some(scale) = guidance {
+        raw.insert("guidanceScale".to_owned(), json!(scale));
+    }
+    raw.insert("imageGuidanceScale".to_owned(), json!(img_cfg));
+    raw.insert("schedulerShift".to_owned(), json!(timestep_shift));
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw.insert(
+        "editEngine".to_owned(),
+        Value::String("sensenova_u1".to_owned()),
+    );
+    raw.insert("referenceCount".to_owned(), json!(reference_count));
+    raw
+}
+
+/// Generate one SenseNova it2i image conditioned on `conditioning` (the reference set). Dual CFG:
+/// `guidance` carries the text CFG, `true_cfg` the image guidance; `scheduler_shift` the
+/// flow-match timestep shift. No negative prompt.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn sensenova_edit_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    img_cfg: f32,
+    timestep_shift: f32,
+    conditioning: Vec<Conditioning>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance,
+        true_cfg: Some(img_cfg),
+        scheduler_shift: Some(timestep_shift),
+        conditioning,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator.generate(&request, on_progress).map_err(|error| {
+        WorkerError::InvalidPayload(format!("SenseNova edit generation failed: {error}"))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::InvalidPayload("SenseNova edit produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::InvalidPayload(
+            "SenseNova edit returned non-image output".to_owned(),
+        )),
+    }
+}
+
+/// Real SenseNova-U1 it2i generation: load the unified model once (base or distilled `_fast`),
+/// then one output per grouped iteration each conditioned on the shared reference set. Mirrors
+/// [`generate_qwen_edit_stream`]'s blocking-thread + streamed-events shape; differs in the dual
+/// CFG (`guidance` text + `true_cfg` image), no negative prompt, no pose tier (SenseNova has no
+/// ControlNet), and no Lightning fetch (the `_fast` distill LoRA is merged inside the engine load).
+#[cfg(target_os = "macos")]
+async fn generate_sensenova_edit_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let model = mlx_model(&request.model)
+        .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
+    let engine_id = model.engine_id;
+    let weights_dir = resolve_weights_dir(request, settings)
+        .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let steps = resolve_steps(request, model);
+    // Dual CFG: the text CFG flows through `guidance` (Some — SenseNova `supports_guidance`); the
+    // image-conditioning guidance through `true_cfg`.
+    let guidance = resolve_guidance(request, model);
+    let img_cfg = resolve_sensenova_img_cfg(request);
+    let timestep_shift = resolve_sensenova_timestep_shift(request);
+    let repo = model_repo(request, model);
+    let adapter_label = model.adapter_label;
+    let (out_w, out_h) = (sensenova_dim(request.width), sensenova_dim(request.height));
+
+    // Resolve the reference image(s) on the async side (decode → Send Image moved in).
+    let reference_ids = qwen_edit_reference_ids(request);
+    let mut references = Vec::with_capacity(reference_ids.len());
+    for id in &reference_ids {
+        references.push(load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            id,
+            project_path,
+        )?);
+    }
+    if references.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "SenseNova-U1 it2i requires a reference image".to_owned(),
+        ));
+    }
+    // sc-3030 fit_image: pre-fit an off-aspect Image-Edit source to the output W×H (crop / pad /
+    // outpaint→pad). Character-Studio references stay native (`should_fit_edit_source` excludes them).
+    if should_fit_edit_source(request) {
+        references = references
+            .into_iter()
+            .map(|reference| fit_engine_image(reference, out_w, out_h, &request.fit_mode))
+            .collect::<WorkerResult<Vec<_>>>()?;
+    }
+    let conditioning = build_edit_conditioning(&references);
+
+    // Per-iteration grouping: a Character-Studio angle set (11 shared-seed, per-angle prompt) or the
+    // plain per-image reference path. SenseNova has no pose tier (excluded by `sensenova_mlx_eligible`).
+    let grouping = flux2_grouping(request);
+    let set_seed = resolve_seed(request, 0);
+    let (seeds, prompts): (Vec<i64>, Vec<String>) = match &grouping {
+        Flux2Grouping::Angles => {
+            // Shared seed so noise-derived attributes stay constant across angles.
+            let prompts = CHARACTER_ANGLE_SET_ORDER
+                .iter()
+                .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
+                .collect();
+            (vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()], prompts)
+        }
+        Flux2Grouping::Plain => {
+            let count = request.count as usize;
+            let seeds = (0..count)
+                .map(|index| resolve_seed(request, index))
+                .collect();
+            (seeds, vec![request.prompt.clone(); count])
+        }
+        Flux2Grouping::Poses(_) => {
+            // Unreachable: strict pose is excluded by `sensenova_mlx_eligible` (no ControlNet).
+            return Err(WorkerError::InvalidPayload(
+                "SenseNova-U1 has no strict-pose (ControlNet) path".to_owned(),
+            ));
+        }
+    };
+    let total = seeds.len();
+
+    let mut raw_settings = sensenova_edit_raw_settings(
+        request,
+        &repo,
+        steps,
+        quant_bits,
+        guidance,
+        img_cfg,
+        timestep_shift,
+        references.len(),
+    );
+    if matches!(grouping, Flux2Grouping::Angles) {
+        raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
+    }
+
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+
+    let blocking = {
+        let cancel = cancel.clone();
+        let job_id = job.id.clone();
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            emit_load_event("image_pipeline_load_start", &job_id, engine_id, 0);
+            let generator = mlx_load(engine_id, weights_dir, quant, Vec::new())?;
+            emit_load_event("image_pipeline_load_complete", &job_id, engine_id, 0);
+            for (index, (seed, prompt)) in seeds.into_iter().zip(prompts).enumerate() {
+                let mut on_progress = |progress: Progress| {
+                    let event = match progress {
+                        Progress::Step { current, total } => GenEvent::Step {
+                            index,
+                            current,
+                            total,
+                        },
+                        Progress::Decoding => GenEvent::Decoding { index },
+                    };
+                    let _ = tx.blocking_send(event);
+                };
+                let (w, h, pixels) = sensenova_edit_generate_one(
+                    generator.as_ref(),
+                    &prompt,
+                    out_w,
+                    out_h,
+                    seed,
+                    steps,
+                    guidance,
+                    img_cfg,
+                    timestep_shift,
+                    conditioning.clone(),
+                    &cancel,
+                    &mut on_progress,
+                )?;
+                if tx
+                    .blocking_send(GenEvent::Image {
+                        index,
+                        seed,
+                        width: w,
+                        height: h,
                         pixels,
                     })
                     .is_err()
@@ -5469,6 +5871,158 @@ mod tests {
             assert!(m.supports_guidance && m.supports_negative_prompt);
         }
         assert!(mlx_model("instantid_sdxl").is_none());
+
+        // SenseNova-U1 (sc-3900): base + 8-step distill `_fast`, each its own engine id. Uses
+        // text guidance (4.0 base / 1.0 fast) AND image guidance (true_cfg) but advertises NO
+        // negative prompt — so it is NOT a `uses_true_cfg` family (see `uses_true_cfg`).
+        let base = mlx_model("sensenova_u1_8b").unwrap();
+        assert_eq!(base.engine_id, "sensenova_u1_8b");
+        assert_eq!(base.default_repo, "sensenova/SenseNova-U1-8B-MoT");
+        assert_eq!(base.default_steps, 50);
+        assert_eq!(base.default_guidance, 4.0);
+        assert_eq!(base.adapter_label, "mlx_sensenova");
+        assert!(base.supports_guidance && !base.supports_negative_prompt);
+        assert!(!uses_true_cfg(base), "dual-CFG, not a true-CFG-only family");
+        let fast = mlx_model("sensenova_u1_8b_fast").unwrap();
+        assert_eq!(fast.engine_id, "sensenova_u1_8b_fast");
+        assert_eq!(fast.default_steps, 8);
+        assert_eq!(fast.default_guidance, 1.0);
+        assert_eq!(fast.adapter_label, "mlx_sensenova");
+        assert!(fast.supports_guidance && !fast.supports_negative_prompt);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
+        // Image guidance (true_cfg): edit default 1.0, character default 1.5, override via
+        // imageGuidanceScale, floored at 1.0.
+        assert_eq!(
+            resolve_sensenova_img_cfg(&request(json!({ "projectId": "p", "mode": "edit_image" }))),
+            1.0
+        );
+        assert_eq!(
+            resolve_sensenova_img_cfg(&request(
+                json!({ "projectId": "p", "mode": "character_image" })
+            )),
+            1.5
+        );
+        assert_eq!(
+            resolve_sensenova_img_cfg(&request(json!({
+                "projectId": "p", "mode": "character_image",
+                "advanced": { "imageGuidanceScale": 2.5 }
+            }))),
+            2.5
+        );
+        assert_eq!(
+            resolve_sensenova_img_cfg(&request(json!({
+                "projectId": "p", "mode": "edit_image",
+                "advanced": { "imageGuidanceScale": 0.2 }
+            }))),
+            1.0,
+            "img cfg is floored at 1.0"
+        );
+        // Timestep shift: default 3.0, schedulerShift (or legacy timestepShift) overrides,
+        // non-positive falls back to 3.0.
+        assert_eq!(
+            resolve_sensenova_timestep_shift(&request(json!({ "projectId": "p" }))),
+            3.0
+        );
+        assert_eq!(
+            resolve_sensenova_timestep_shift(&request(json!({
+                "projectId": "p", "advanced": { "schedulerShift": 4.5 }
+            }))),
+            4.5
+        );
+        assert_eq!(
+            resolve_sensenova_timestep_shift(&request(json!({
+                "projectId": "p", "advanced": { "timestepShift": 2.0 }
+            }))),
+            2.0
+        );
+        assert_eq!(
+            resolve_sensenova_timestep_shift(&request(json!({
+                "projectId": "p", "advanced": { "schedulerShift": 0.0 }
+            }))),
+            3.0
+        );
+        // 32-cell snap, clamped to [256, 2048].
+        assert_eq!(sensenova_dim(1536), 1536); // already 32-aligned
+        assert_eq!(sensenova_dim(1000), 1024); // rounds up to the next multiple of 32
+        assert_eq!(sensenova_dim(100), 256); // clamps to the minimum
+        assert_eq!(sensenova_dim(5000), 2048); // clamps to the maximum
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sensenova_edit_available_needs_a_reference() {
+        // Plain T2I (no reference) is NOT the edit path — it rides the base mlx path.
+        assert!(!sensenova_edit_available(
+            &request(json!({ "projectId": "p", "model": "sensenova_u1_8b", "prompt": "a fox" })),
+            &Settings::from_env()
+        ));
+        // edit_image needs a source; character_image needs a reference. (Weights may be
+        // absent in CI, so only assert the negative/structural cases here.)
+        assert!(qwen_edit_reference_ids(&request(json!({
+            "projectId": "p", "model": "sensenova_u1_8b", "mode": "edit_image", "sourceAssetId": "s"
+        })))
+        .contains(&"s".to_owned()));
+        assert!(qwen_edit_reference_ids(&request(json!({
+            "projectId": "p", "model": "sensenova_u1_8b", "mode": "character_image",
+            "referenceAssetId": "r"
+        })))
+        .contains(&"r".to_owned()));
+    }
+
+    /// Real-weights smoke: SenseNova-U1 it2i. Loads `sensenova_u1_8b` (the ~35GB
+    /// `sensenova/SenseNova-U1-8B-MoT` snapshot) and generates one image conditioned on a synthetic
+    /// reference via the worker's dual-CFG it2i path (text `guidance` + image `true_cfg` +
+    /// `scheduler_shift`). The worker-level entry for the sc-3900 parity gate (component +
+    /// early-step + coherence, not pixel bit-parity — the port runs f32 vs the bf16 reference).
+    /// Needs the HF cache + a Metal device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_it2i_real_weights`.
+    /// Uses 8 steps + 512² for speed (the production base default is 50 steps).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real SenseNova-U1-8B-MoT weights (~35GB) + Metal device"]
+    fn sensenova_it2i_real_weights_generates_one_image() {
+        let snapshot = hf_snapshot("models--sensenova--SenseNova-U1-8B-MoT");
+        let generator = mlx_load(
+            mlx_model("sensenova_u1_8b").unwrap().engine_id,
+            snapshot,
+            Some(mlx_gen::Quant::Q8),
+            Vec::new(),
+        )
+        .unwrap();
+        let reference = mlx_gen::Image {
+            width: 512,
+            height: 512,
+            pixels: stub_rgb8(512, 512, 7),
+        };
+        let cancel = mlx_gen::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = sensenova_edit_generate_one(
+            generator.as_ref(),
+            "make it a watercolor painting",
+            512,
+            512,
+            42,
+            8,
+            Some(4.0), // text CFG
+            1.0,       // image CFG (edit default)
+            3.0,       // timestep shift
+            build_edit_conditioning(std::slice::from_ref(&reference)),
+            &cancel,
+            &mut |p| {
+                if let mlx_gen::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(pixels.len(), 512 * 512 * 3);
+        assert!(steps_seen >= 1, "expected denoise step progress");
+        assert!(pixels.windows(2).any(|w| w[0] != w[1]));
     }
 
     #[cfg(target_os = "macos")]
@@ -5573,6 +6127,8 @@ mod tests {
             "chroma1_hd",
             "chroma1_base",
             "chroma1_flash",
+            "sensenova_u1_8b",
+            "sensenova_u1_8b_fast",
         ] {
             assert!(ids.contains(&id), "registry missing {id}");
         }
