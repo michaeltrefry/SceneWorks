@@ -2155,7 +2155,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
     match model {
         "kolors" => Some("epic 3532"),
-        "instantid_realvisxl" => Some("epic 3109"),
+        // InstantID (instantid_realvisxl) was ported to MLX (epic 3109 engine / sc-3345) — it is
+        // now in `MLX_ROUTED_MODELS`, so it never reaches this torch-only classifier. Its
+        // remaining gaps (pose-library mode, face-restore) are named per-feature in
+        // `classify_image_gap`, not as a whole-model gap.
         "pulid_flux_dev" => Some("epic 3069"),
         "z_image_edit" => Some("epic 3529"),
         m if m.starts_with("lens") => Some("epic 3164"),
@@ -2236,6 +2239,15 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
                 )
             }
         }
+        // InstantID (sc-3345 identity + angle set; sc-3381 pose mode + face-restore): the full
+        // surface runs on MLX for `character_image` + `referenceAssetId`. Only a non-character /
+        // reference-less job has no InstantID path. Mirrors `instantid_mlx_eligible`.
+        "instantid_realvisxl" => UnsupportedReason::new(
+            Some(model),
+            "InstantID without a character reference",
+            "InstantID runs on MLX for character_image with a referenceAssetId (single identity, the 11-view angle set, pose-library mode, and face-restore); a non-character / reference-less job has no InstantID path.",
+            None,
+        ),
         // flux2 / sdxl / realvisxl only fall out via LyCORIS (handled above) — defensive.
         _ => UnsupportedReason::new(
             Some(model),
@@ -2623,6 +2635,11 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "flux2_klein_9b_true_v2",
     "sdxl",
     "realvisxl",
+    // InstantID on RealVisXL (sc-3345): single-identity + the 11-view angle set route to the
+    // native `mlx-gen-instantid` provider. Pose-library + face-restore InstantID jobs are gated
+    // OUT by `instantid_mlx_eligible` and stay on the torch `InstantIDAdapter` (engine sc-3117 /
+    // sc-3380 not ported).
+    "instantid_realvisxl",
     "chroma1_hd",
     "chroma1_base",
     "chroma1_flash",
@@ -2680,6 +2697,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
             flux2_mlx_eligible(payload)
         }
         "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
+        "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
@@ -2722,6 +2740,22 @@ fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
 fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
+}
+
+/// InstantID (`instantid_realvisxl`) MLX-routing conditions. The native `mlx-gen-instantid`
+/// provider now serves the FULL surface on Mac: single-identity `character_image`, the 11-view
+/// Character-Studio angle set (sc-3345), AND pose-library mode + face-restore (sc-3381, on the
+/// #193 engine — `generate_pose` MultiControlNet IdentityNet+OpenPose / `restore_face`). So every
+/// `character_image` job with a reference face routes to MLX; only a non-character / reference-less
+/// job stays off. Mirrors the worker's `instantid_available` gate so the router and worker agree.
+fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
+        return false;
+    }
+    payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// FLUX.2-klein MLX-routing conditions. FLUX.2-klein is an **MLX-only** family (no torch backend),
@@ -3407,9 +3441,9 @@ fn sort_json_value(value: &mut Value) {
 #[cfg(test)]
 mod mlx_routing_tests {
     use super::{
-        flux2_mlx_eligible, flux_mlx_eligible, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-        sdxl_mlx_eligible, video_mode_is_mlx_eligible, z_image_mlx_eligible,
-        VIDEO_MLX_ROUTED_MODELS,
+        flux2_mlx_eligible, flux_mlx_eligible, image_request_mlx_eligible, instantid_mlx_eligible,
+        qwen_edit_mlx_eligible, qwen_mlx_eligible, sdxl_mlx_eligible, video_mode_is_mlx_eligible,
+        z_image_mlx_eligible, VIDEO_MLX_ROUTED_MODELS,
     };
     use serde_json::{json, Map, Value};
 
@@ -3640,6 +3674,40 @@ mod mlx_routing_tests {
         assert!(sdxl_mlx_eligible(&object(json!({
             "mode": "edit_image",
             "loras": [{ "networkType": "lycoris" }]
+        }))));
+    }
+
+    #[test]
+    fn instantid_routes_all_character_modes_to_mlx() {
+        // The full InstantID surface is native (sc-3345 identity + angle; sc-3381 pose + restore):
+        // every character_image + referenceAssetId shape routes to MLX.
+        for advanced in [
+            json!({}),
+            json!({ "angleSet": true }),
+            json!({ "poses": [{ "id": "a" }] }),
+            json!({ "faceRestore": true }),
+            json!({ "poses": [{ "id": "a" }], "faceRestore": true }),
+        ] {
+            let payload = object(json!({
+                "model": "instantid_realvisxl",
+                "mode": "character_image",
+                "referenceAssetId": "asset_1",
+                "advanced": advanced,
+            }));
+            assert!(instantid_mlx_eligible(&payload));
+            assert!(image_request_mlx_eligible("instantid_realvisxl", &payload));
+        }
+
+        // No reference face → not eligible.
+        assert!(!instantid_mlx_eligible(&object(json!({
+            "model": "instantid_realvisxl",
+            "mode": "character_image"
+        }))));
+
+        // Non-character mode → not eligible (InstantID is a character flow).
+        assert!(!instantid_mlx_eligible(&object(json!({
+            "model": "instantid_realvisxl",
+            "mode": "text_to_image"
         }))));
     }
 

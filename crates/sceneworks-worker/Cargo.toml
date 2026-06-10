@@ -73,13 +73,17 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # generator + NEO ViT; sc-3181..sc-3194). Two registered ids: `sensenova_u1_8b` (base, 50 NFE /
 # text-CFG 4 + image-CFG via true_cfg) and `sensenova_u1_8b_fast` (8-step distill-LoRA merged at
 # load, CFG 1). Public `T2iModel::{vqa, interleave_gen}` serve the VQA + Document-Studio paths the
-# `Generator` contract can't express (sc-3905). Q4/Q8 backbone quant (sc-3193). On top of rev
-# a67e8ed (PR #189, epic 3531): the native-MLX Chroma family crate `mlx-gen-chroma`
-# (chroma1_hd/base/flash — a FLUX.1-schnell-derived DiT + distilled-guidance Approximator, T5-only
-# true-CFG conditioning, MMDiT attention masking; sc-3834..sc-3842), all three variants at
-# real-weight e2e parity vs diffusers plus Q4/Q8 + LoRA/LoKr. The core `mlx-gen` crate API gained
-# only `LoadSpec::extra_controls` (MultiControlNet, sc-3378 — additive). The mlx-rs pin is unchanged
-# (e59ffd88), so MLX rebuilds nothing.
+# `Generator` contract can't express (sc-3905). Q4/Q8 backbone quant (sc-3193). The mlx-rs pin is
+# unchanged (e59ffd88) so MLX core rebuilds nothing.
+# On top of rev ed8e6a1 (mlx-gen main, merged PR #193, epic 3109 / sc-3117+sc-3380): adds InstantID
+# pose mode (MultiControlNet IdentityNet + xinsir OpenPose, `InstantId::with_openpose` +
+# `generate_pose`, native skeleton rasterizer + no-face-visible branch) and the face-restore
+# pass (`restore_face`, ADetailer-style crop→re-render→feathered paste-back, gender-neutral
+# prompt), consumed by the SceneWorks InstantID pose/face-restore wiring (sc-3381).
+# On top of rev a67e8ed (PR #189, epic 3531): the native-MLX Chroma family crate
+# `mlx-gen-chroma` (chroma1_hd/base/flash — a FLUX.1-schnell-derived DiT + distilled-guidance
+# Approximator, T5-only true-CFG conditioning, MMDiT attention masking; sc-3834..sc-3842), all
+# three variants at real-weight e2e parity vs diffusers plus Q4/Q8 + LoRA/LoKr.
 # On top of rev 0d17c72 (mlx-gen main, merged PRs #182 + #183): completes the native-MLX SAM2 video
 # layer — the memory bank (memory encoder + memory attention, sc-3713 #182) and the
 # `Sam2VideoPredictor` propagation predictor (init_state / propagate, sc-3714 #183), consumed
@@ -155,6 +159,20 @@ mlx-gen-joycaption = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "
 # masks in `run_person_track`. Same git rev + mlx-rs pin as the other mlx-gen crates so
 # MLX builds once.
 mlx-gen-sam2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "72214e309c6b08290885e8cebb32b86781cc5803" }
+# Native MLX face-analysis stack (epic 3079) — SCRFD 5-pt detector + glintr100 ArcFace
+# (iresnet100) 512-d embedder. A plain utility crate (NOT a self-registering generation
+# provider) consumed by the InstantID provider below to detect the reference face + produce
+# the ArcFace embedding with zero Python (replaces insightface/onnxruntime on the Mac path).
+mlx-gen-face = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "72214e309c6b08290885e8cebb32b86781cc5803" }
+# InstantID identity-preserving SDXL provider (epic 3109 engine / sc-3345 integration). A
+# bespoke API (`InstantId::load(InstantIdPaths{ sdxl_base, identitynet, ip_adapter })` →
+# `.with_face`/`.with_openpose` → `generate`/`generate_angle`/`generate_pose`/`restore_face`),
+# NOT an inventory-registered `Generator` — wired via a dedicated `generate_instantid_stream` in
+# image_jobs.rs (parallel to the sc-3060 SDXL-advanced path), not the MLX_MODELS table. Composes
+# mlx-gen-sdxl (UNet + IdentityNet ControlNet + IP-Adapter Resampler) with mlx-gen-face. The
+# pinned rev (ed8e6a1) carries the base port (#153), the sc-3329 quant fix (#155), AND pose mode
+# + face-restore (#193: with_openpose/generate_pose/restore_face — sc-3117/3380). Same mlx-rs pin.
+mlx-gen-instantid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "72214e309c6b08290885e8cebb32b86781cc5803" }
 
 [lints]
 workspace = true

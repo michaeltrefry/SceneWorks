@@ -54,7 +54,6 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 |---|---|---|---|
 | `kolors` | kolors (SDXL UNet + ChatGLM3) | 🔵 Port → drop-on-Mac until then | **epic 3532** |
 | `z_image_edit` | z-image (edit) | 🔵 Port → drop-on-Mac until then | **epic 3529** |
-| `instantid_realvisxl` | sdxl (InstantID) | 🔵 Port → drop-on-Mac until then | epic 3109 |
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
 | `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🔵 Port → drop-on-Mac until then | epic 3164 |
 
@@ -78,6 +77,7 @@ dropped — no silent drops.**
 | `edit_image` (img2img-edit) | `z_image_turbo` | 🔵 Port-pending | epic 3529 (folds into Z-Image-Edit port) |
 | reference-without-pose | `z_image_turbo` | 🟢 Ported (MLX) | sc-3536 (spike GO) → sc-3619 |
 | Third-party LyCORIS (LoHa / non-peft LoKr) | all families (`networkType=lycoris`) | 🟢 Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3642/3643/3671 engine + sc-3644 routing) |
+| InstantID (identity, 11-view angle set, pose-library mode, face-restore) | `instantid_realvisxl` (`character_image` + `referenceAssetId`) | 🟢 Ported (MLX) | epic 3109 (engine: #153 identity/angle, #193 pose+restore — sc-3117/3380) → sc-3345 (identity+angle integration) + sc-3381 (pose+restore integration). Torch path kept as off-Mac + Mac-fallback (Decision-A); venv strip is the final epic-3482 step. |
 
 > **FLUX.1 `edit_image` is not an eradication gap (sc-3535).** The torch `FluxDiffusersAdapter`
 > hard-rejects `edit_image` ("does not support image editing") — FLUX.1 has no edit path on *any*
@@ -91,16 +91,19 @@ dropped — no silent drops.**
 ## 3. Video
 
 `video_generate` `text_to_video`/`image_to_video` on `VIDEO_MLX_ROUTED_MODELS`
-(`ltx_2_3`, `ltx_2_3_eros`, `wan_2_2`, `wan_2_2_t2v_14b`, `wan_2_2_i2v_14b`) is ported. Gaps:
+(`ltx_2_3`, `ltx_2_3_eros`, `wan_2_2`, `wan_2_2_t2v_14b`, `wan_2_2_i2v_14b`) is ported — **and as of
+the epic-3040 / sc-3055 cutover, so are the advanced modes + SVD** (`video_job_is_mlx_eligible` +
+`video_mode_is_mlx_eligible` in `jobs_store.rs`). **No video gaps remain.** The rows below are kept
+for traceability (all ✅ Ported; see also §6):
 
-| Surface | Status | Closing work |
+| Surface | Status | Shipped by |
 |---|---|---|
-| `svd` model (Stable Video Diffusion, `svd_video` adapter — no MLX crate) | 🔵 Port-pending | epic 3040 |
-| Advanced `video_generate` modes (`first_last_frame`, `replace_person`) | 🔵 Port-pending | epic 3040 |
-| Advanced job types `video_extend`, `video_bridge` | 🔵 Port-pending | epic 3040 |
-| `person_replace` job type (replace_person) | 🔵 Port-pending | epic 3040 (+ sc-3488 person track) |
-| LoKr-on-Wan **inference** (Kronecker adapter on Wan generation) | 🟢 Ported (MLX) | sc-3644 (engine `merge_one_lokr` since sc-2393; routing gate flipped — never an engine limit). Wan LoKr *training* stays torch → epic 3039 |
-| Third-party LyCORIS on video | 🟢 Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3671 Wan/LTX engine + sc-3644 routing) |
+| `svd` model → `svd_xt` (Stable Video Diffusion, image-to-video) | ✅ Ported (MLX) | sc-3523 ([#493](https://github.com/michaeltrefry/SceneWorks/pull/493)) |
+| Advanced `video_generate` modes (`first_last_frame`, `replace_person`) | ✅ Ported (MLX) | sc-3520 ([#466](https://github.com/michaeltrefry/SceneWorks/pull/466)), sc-3521 ([#494](https://github.com/michaeltrefry/SceneWorks/pull/494)) |
+| Advanced job types `video_extend`, `video_bridge` | ✅ Ported (MLX) | sc-3522 ([#492](https://github.com/michaeltrefry/SceneWorks/pull/492)) |
+| `person_replace` job type (replace_person → native Wan-VACE) + user LoRA/LoKr | ✅ Ported (MLX) | sc-3521, sc-3893 ([#511](https://github.com/michaeltrefry/SceneWorks/pull/511)); real-Mac parity sc-3902 |
+| LoKr-on-Wan **inference** (Kronecker adapter on Wan generation) | ✅ Ported (MLX) | sc-3644 (engine `merge_one_lokr` since sc-2393; routing gate flipped — never an engine limit). Wan LoKr *training* stays torch → epic 3039 |
+| Third-party LyCORIS on video | ✅ Ported (MLX) | sc-3537 (spike) → epic 3641 (sc-3671 Wan/LTX engine + sc-3644 routing) |
 
 ## 4. Training (`lora_train`)
 
@@ -121,7 +124,7 @@ in-process Rust path. Per Michael's 2026-06-07 decision, all four spikes are **p
 | Surface | Job type(s) | Python backend | Status | Closing work |
 |---|---|---|---|---|
 | DWPose pose detection (photo→skeleton) | `pose_detect` | onnxruntime (RTMPose) | ✅ Ported (Rust `ort`/CoreML, macOS MLX worker) | sc-3487 |
-| Person detect / track | `person_detect`, `person_track` | YOLO / SAM2 | ✅ Ported (all **native MLX**, macOS MLX worker) | sc-3488 → YOLO detect sc-3633 (native mlx-rs forward, CoreML/ort hangs), ByteTrack track assembly sc-3634, **SAM2 segmenter = MLX engine epic 3704** (spike sc-3635 GO→MLX; CoreML net-negative for the Hiera ViT) + wiring sc-3709 (capability advertise + `mac_rust_supported` flip). maskState active/generated/degraded/missing. **replace_person end-to-end still needs the video-gen/inpaint half — epic 3040** (see row above) |
+| Person detect / track | `person_detect`, `person_track` | YOLO / SAM2 | ✅ Ported (all **native MLX**, macOS MLX worker) | sc-3488 → YOLO detect sc-3633 (native mlx-rs forward, CoreML/ort hangs), ByteTrack track assembly sc-3634, **SAM2 segmenter = MLX engine epic 3704** (spike sc-3635 GO→MLX; CoreML net-negative for the Hiera ViT) + wiring sc-3709 (capability advertise + `mac_rust_supported` flip). maskState active/generated/degraded/missing. **replace_person end-to-end is now complete** — the video-gen/inpaint half (native Wan-VACE) shipped in epic 3040 / sc-3521 (see §3) |
 | Image upscaler (standalone) | `image_upscale` | Real-ESRGAN / AuraSR (torch) | ✅ Ported (Real-ESRGAN via Rust `ort`/CoreML, macOS MLX worker; **AuraSR** engine stays on Python) | sc-3489 |
 | Dataset captioning | `training_caption` | JoyCaption MLX provider (Python torch fallback off-MLX) | ✅ Ported (macOS MLX worker) | sc-3556 |
 | Wan/LTX model conversion | `model_convert` (non-`flux2_klein_diffusers` converter) | `mlx_video.convert_*` (Python) | 🔵 Port-pending | sc-3491 (= sc-3224) |
@@ -145,6 +148,9 @@ Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
   tile-detail (`image_detail` on `sdxl`/`realvisxl`) — epic 3041 / sc-3060.
 - FLUX.2-klein single-file conversion in-process Rust (`flux2_klein_diffusers`, sc-3136).
 - Video `text_to_video`/`image_to_video` on Wan2.2 + LTX-2.3 (+ synchronized audio), epic 3018.
+- Advanced video — `first_last_frame`, `extend_clip`, `video_bridge`, `replace_person` (→ native
+  Wan-VACE, + user LoRA/LoKr), and `svd`→`svd_xt` image-to-video — all on the macOS MLX worker
+  (epic 3040 / cutover sc-3055; real-Mac parity sc-3902).
 - Training: `z_image_lora`, `sdxl_lora`, `wan_lora`, `wan_moe_lora`, `ltx_mlx_lora` (epic 3039).
 
 ---

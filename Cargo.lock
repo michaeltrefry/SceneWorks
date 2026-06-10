@@ -2531,6 +2531,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlx-gen-face"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=72214e309c6b08290885e8cebb32b86781cc5803#72214e309c6b08290885e8cebb32b86781cc5803"
+dependencies = [
+ "inventory",
+ "mlx-gen",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
 name = "mlx-gen-flux"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/mlx-gen?rev=72214e309c6b08290885e8cebb32b86781cc5803#72214e309c6b08290885e8cebb32b86781cc5803"
@@ -2551,6 +2561,17 @@ dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
  "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-instantid"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=72214e309c6b08290885e8cebb32b86781cc5803#72214e309c6b08290885e8cebb32b86781cc5803"
+dependencies = [
+ "mlx-gen",
+ "mlx-gen-face",
+ "mlx-gen-sdxl",
+ "pmetal-mlx-rs",
 ]
 
 [[package]]
@@ -2943,7 +2964,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.2",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4215,8 +4236,10 @@ dependencies = [
  "imageproc",
  "mlx-gen",
  "mlx-gen-chroma",
+ "mlx-gen-face",
  "mlx-gen-flux",
  "mlx-gen-flux2",
+ "mlx-gen-instantid",
  "mlx-gen-joycaption",
  "mlx-gen-ltx",
  "mlx-gen-qwen-image",
