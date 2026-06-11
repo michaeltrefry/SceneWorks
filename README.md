@@ -151,10 +151,16 @@ Event streams use a short-lived one-shot ticket instead of putting the access to
 
 This is for privacy and control over local media, model downloads, and long-running GPU work. It is not a content moderation system.
 
-Inside Docker, `SCENEWORKS_API_HOST=0.0.0.0` is expected so the published host
-port can reach the container. Use `SCENEWORKS_ACCESS_TOKEN` for access control
-and extend `SCENEWORKS_CORS_ORIGINS` with LAN hostnames or IP origins when the
-web app is opened from another machine.
+The API binds to `127.0.0.1` (loopback) by default, so a direct binary run is not
+reachable from the network until you opt in. To expose it (a server install, or
+access from another machine), set `SCENEWORKS_API_HOST=0.0.0.0` **and** set
+`SCENEWORKS_ACCESS_TOKEN` — without a token, every endpoint (project file reads,
+credential writes, job creation, large model uploads) is reachable unauthenticated,
+and the API logs a warning on startup. Inside Docker, `SCENEWORKS_API_HOST=0.0.0.0`
+is set by `docker-compose.yml` so the published host port can reach the container;
+control access with `SCENEWORKS_ACCESS_TOKEN` and the published-port boundary, and
+extend `SCENEWORKS_CORS_ORIGINS` with LAN hostnames or IP origins when the web app is
+opened from another machine.
 
 For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
 

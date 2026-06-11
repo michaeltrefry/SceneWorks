@@ -5,7 +5,11 @@ service with `docker/rust-api.Dockerfile`.
 
 The API uses these compose contracts:
 
-- `SCENEWORKS_API_HOST` and `SCENEWORKS_API_PORT` control the container bind address.
+- `SCENEWORKS_API_HOST` and `SCENEWORKS_API_PORT` control the bind address. The
+  binary defaults `SCENEWORKS_API_HOST` to `127.0.0.1` (loopback); compose sets it to
+  `0.0.0.0` so the published host port can reach the container. A non-loopback bind
+  with no `SCENEWORKS_ACCESS_TOKEN` serves every endpoint unauthenticated and logs a
+  startup warning.
 - `SCENEWORKS_DATA_DIR=/sceneworks/data` maps to `${SCENEWORKS_DATA_BIND:-./data}`.
 - `SCENEWORKS_CONFIG_DIR=/sceneworks/config` maps writable to `${SCENEWORKS_CONFIG_BIND:-./config}` for user manifests.
 - `SCENEWORKS_JOBS_DB_PATH=/sceneworks/data/cache/jobs.db` stores queue state on the existing data bind mount.

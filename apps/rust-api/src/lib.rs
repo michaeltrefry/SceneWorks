@@ -127,6 +127,11 @@ const EVENT_BUFFER_SIZE: usize = 100;
 const HEARTBEAT_SSE_DATA: &str = "{}";
 #[cfg(test)]
 const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
+// sc-4201 (F-API-1): default to loopback so a bare/server run that doesn't set
+// SCENEWORKS_API_HOST isn't exposed to the whole LAN with auth off. Docker and the
+// desktop wrapper set the host explicitly (0.0.0.0 / 127.0.0.1 respectively), so this
+// only changes the out-of-the-box default for a direct binary run.
+const DEFAULT_API_HOST: &str = "127.0.0.1";
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
@@ -180,7 +185,7 @@ impl Settings {
             .unwrap_or_else(|| data_dir.join("cache").join("jobs.db"));
         Self {
             app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
-            host: env_string("SCENEWORKS_API_HOST", "0.0.0.0"),
+            host: env_string("SCENEWORKS_API_HOST", DEFAULT_API_HOST),
             port: std::env::var("SCENEWORKS_API_PORT")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -251,6 +256,13 @@ where
     }
 }
 
+// sc-4201 (F-API-1): true when the API would serve every endpoint without auth to
+// the network — no access token AND a non-loopback bind address. Pure so the security
+// decision is unit-tested without spinning up a listener.
+fn should_warn_open_bind(access_token: &str, ip: std::net::IpAddr) -> bool {
+    access_token.trim().is_empty() && !ip.is_loopback()
+}
+
 fn json_rejection_response(rejection: JsonRejection) -> Response {
     let detail = match rejection {
         JsonRejection::JsonDataError(error) => error.body_text(),
@@ -284,6 +296,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let settings = Settings::from_env();
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
+    // sc-4201 (F-API-1): a non-loopback bind with no access token serves every
+    // endpoint — file reads, credential writes, job creation, large uploads — to the
+    // whole network without authentication. The default is now loopback; warn loudly
+    // when an operator opts into a wider bind (e.g. Docker's 0.0.0.0) without a token.
+    if should_warn_open_bind(&settings.access_token, address.ip()) {
+        eprintln!(
+            "WARNING: SceneWorks API is binding to {address} with no SCENEWORKS_ACCESS_TOKEN set — \
+             every endpoint is reachable without authentication from the network. Set \
+             SCENEWORKS_ACCESS_TOKEN, or bind to 127.0.0.1, before exposing this beyond a trusted host."
+        );
+    }
     let run_utility_inprocess = settings.run_utility_inprocess;
     let app = create_app(settings)?;
     let listener = tokio::net::TcpListener::bind(address).await?;

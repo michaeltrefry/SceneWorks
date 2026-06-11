@@ -5,9 +5,10 @@ use super::workers::person_readiness_from_workers;
 use super::{
     create_app, huggingface_repo_cache_path, inject_converted_model_path, inprocess_worker_gpu_id,
     lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status, safe_download_dir,
-    safe_repo_dir_name, serialize_job_lora, strip_jsonc_comments, sweep_stale_lora_uploads_before,
-    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
-    EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    safe_repo_dir_name, serialize_job_lora, should_warn_open_bind, strip_jsonc_comments,
+    sweep_stale_lora_uploads_before, Settings, WorkerCapability, WorkerSnapshot, WorkerStatus,
+    API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
+    HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -16,6 +17,28 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
+
+#[test]
+fn default_api_host_is_loopback() {
+    // sc-4201 (F-API-1): an out-of-the-box bind must not expose the API to the LAN.
+    let ip: std::net::IpAddr = DEFAULT_API_HOST.parse().expect("default host parses");
+    assert!(ip.is_loopback(), "default API host must be loopback");
+}
+
+#[test]
+fn warns_only_on_open_bind_without_token() {
+    use std::net::IpAddr;
+    let v4 = |s: &str| s.parse::<IpAddr>().unwrap();
+    // No token + a wider bind (0.0.0.0 / a concrete LAN IP) → warn.
+    assert!(should_warn_open_bind("", v4("0.0.0.0")));
+    assert!(should_warn_open_bind("   ", v4("0.0.0.0")));
+    assert!(should_warn_open_bind("", v4("192.168.1.5")));
+    assert!(should_warn_open_bind("", "::".parse().unwrap()));
+    // A token, or a loopback bind, is safe → no warning.
+    assert!(!should_warn_open_bind("secret", v4("0.0.0.0")));
+    assert!(!should_warn_open_bind("", v4("127.0.0.1")));
+    assert!(!should_warn_open_bind("", "::1".parse().unwrap()));
+}
 
 #[test]
 fn serialize_job_lora_carries_network_type_to_payload() {
