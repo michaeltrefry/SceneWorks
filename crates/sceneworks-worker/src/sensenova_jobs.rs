@@ -110,7 +110,7 @@ pub(crate) async fn run_vqa_job(
         2048 * 2048,
     );
 
-    let weights_dir = resolve_weights_dir(&request, settings)
+    let weights_dir = resolve_weights_dir(&request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
 
     let project =
@@ -302,7 +302,7 @@ pub(crate) async fn run_interleave_job(
         .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned());
     let seed = resolve_seed(&request, 0);
 
-    let weights_dir = resolve_weights_dir(&request, settings)
+    let weights_dir = resolve_weights_dir(&request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
 
     let project =

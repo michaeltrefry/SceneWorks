@@ -1194,6 +1194,123 @@ fn normalize_absolute_path(path: &Path) -> WorkerResult<PathBuf> {
     Ok(output)
 }
 
+fn normalized_data_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    normalize_absolute_path(&settings.data_dir)
+}
+
+fn ensure_path_under(path: PathBuf, roots: &[PathBuf], label: &str) -> WorkerResult<PathBuf> {
+    if roots.iter().any(|root| path.starts_with(root)) {
+        return Ok(path);
+    }
+    let allowed = roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(WorkerError::InvalidPayload(format!(
+        "{label} must be inside an app-managed directory ({allowed})."
+    )))
+}
+
+fn normalize_app_managed_path(
+    settings: &Settings,
+    raw_path: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let data_dir = normalized_data_dir(settings)?;
+    let path = normalize_absolute_path(Path::new(raw_path))?;
+    ensure_path_under(path, &[data_dir], label)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn looks_like_huggingface_repo(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.contains('\\') || Path::new(value).is_absolute() {
+        return false;
+    }
+    let mut parts = value.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(repo) = parts.next() else {
+        return false;
+    };
+    !owner.is_empty()
+        && !repo.is_empty()
+        && parts.next().is_none()
+        && ![owner, repo]
+            .iter()
+            .any(|part| *part == "." || *part == "..")
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn resolve_app_managed_model_dir(
+    settings: &Settings,
+    model_name_or_path: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let model_name_or_path = model_name_or_path.trim();
+    if model_name_or_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, model_name_or_path) {
+        return Ok(snapshot);
+    }
+    if looks_like_huggingface_repo(model_name_or_path) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} snapshot is not cached for {model_name_or_path}."
+        )));
+    }
+    let path = normalize_app_managed_path(settings, model_name_or_path, label)?;
+    if path.is_dir() {
+        return Ok(path);
+    }
+    if path.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} must be a snapshot directory, not a file: {}",
+            path.display()
+        )));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{label} is not installed at {}.",
+        path.display()
+    )))
+}
+
+fn resolve_training_output_dir(
+    settings: &Settings,
+    output_dir: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let path = normalize_app_managed_path(settings, output_dir, label)?;
+    let data_dir = normalized_data_dir(settings)?;
+    let allowed_roots = [data_dir.join("loras"), data_dir.join("models")];
+    ensure_path_under(path, &allowed_roots, label)
+}
+
+fn resolve_dataset_item_path(
+    settings: &Settings,
+    dataset_root: &str,
+    image_path: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let root = normalize_app_managed_path(settings, dataset_root, "Dataset root")?;
+    let raw_image = Path::new(image_path.trim());
+    if image_path.trim().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let path = if raw_image.is_absolute() {
+        normalize_absolute_path(raw_image)?
+    } else {
+        normalize_absolute_path(&root.join(raw_image))?
+    };
+    ensure_path_under(path, &[root], label)
+}
+
 fn project_path_for_payload(
     settings: &Settings,
     payload: &JsonObject,

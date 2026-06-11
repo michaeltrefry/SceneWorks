@@ -69,7 +69,7 @@ pub(crate) async fn run_training_caption_job(
         ));
     }
 
-    let items = caption_items(&job.payload)?;
+    let items = caption_items(settings, &job.payload)?;
     if items.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Training caption job has no items to caption.".to_owned(),
@@ -369,7 +369,17 @@ fn caption_result(
 }
 
 #[cfg(target_os = "macos")]
-fn caption_items(payload: &JsonObject) -> WorkerResult<Vec<CaptionItem>> {
+fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<CaptionItem>> {
+    let dataset_root = payload
+        .get("datasetRoot")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Caption payload.datasetRoot must be an app-managed dataset path.".to_owned(),
+            )
+        })?;
     let items = payload
         .get("items")
         .and_then(Value::as_array)
@@ -414,9 +424,15 @@ fn caption_items(payload: &JsonObject) -> WorkerResult<Vec<CaptionItem>> {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let image_path = resolve_dataset_item_path(
+                settings,
+                dataset_root,
+                image_path,
+                &format!("Caption item {item_id} imagePath"),
+            )?;
             Ok(CaptionItem {
                 item_id,
-                image_path: PathBuf::from(image_path),
+                image_path,
                 trigger_words,
             })
         })
@@ -481,22 +497,7 @@ fn resolve_caption_weights_dir(
     settings: &Settings,
     model_name_or_path: &str,
 ) -> WorkerResult<PathBuf> {
-    let direct = PathBuf::from(model_name_or_path);
-    if direct.is_dir() {
-        return Ok(direct);
-    }
-    if direct.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "JoyCaption model path must be a snapshot directory, not a file: {}",
-            direct.display()
-        )));
-    }
-    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, model_name_or_path) {
-        return Ok(snapshot);
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "JoyCaption model snapshot is not cached for {model_name_or_path}. Download/cache the model first or pass a local snapshot directory."
-    )))
+    resolve_app_managed_model_dir(settings, model_name_or_path, "JoyCaption model path")
 }
 
 #[cfg(target_os = "macos")]
@@ -528,6 +529,28 @@ fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usi
 mod tests {
     use super::*;
 
+    fn test_settings(data_dir: &Path) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1".to_owned(),
+            access_token: None,
+            data_dir: data_dir.to_path_buf(),
+            config_dir: data_dir.join("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+        }
+    }
+
     #[test]
     fn caption_job_options_preserve_training_surface() {
         let options = caption_job_options(&serde_json::Map::from_iter([(
@@ -557,17 +580,52 @@ mod tests {
 
     #[test]
     fn caption_items_require_ids_and_paths() {
-        let payload = serde_json::Map::from_iter([(
-            "items".to_owned(),
-            json!([{
-                "itemId": "item_1",
-                "imagePath": "/tmp/image.png",
-                "triggerWords": ["miraStyle", ""]
-            }]),
-        )]);
-        let items = caption_items(&payload).expect("items parse");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let image_path = dataset_root.join("image.png");
+        let payload = serde_json::Map::from_iter([
+            (
+                "datasetRoot".to_owned(),
+                json!(dataset_root.display().to_string()),
+            ),
+            (
+                "items".to_owned(),
+                json!([{
+                    "itemId": "item_1",
+                    "imagePath": image_path.display().to_string(),
+                    "triggerWords": ["miraStyle", ""]
+                }]),
+            ),
+        ]);
+        let items = caption_items(&settings, &payload).expect("items parse");
         assert_eq!(items[0].item_id, "item_1");
-        assert_eq!(items[0].image_path, PathBuf::from("/tmp/image.png"));
+        assert_eq!(items[0].image_path, image_path);
         assert_eq!(items[0].trigger_words, vec!["miraStyle"]);
+    }
+
+    #[test]
+    fn caption_items_reject_paths_outside_dataset_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let payload = serde_json::Map::from_iter([
+            (
+                "datasetRoot".to_owned(),
+                json!(dataset_root.display().to_string()),
+            ),
+            (
+                "items".to_owned(),
+                json!([{
+                    "itemId": "item_1",
+                    "imagePath": dir.path().join("other.png").display().to_string()
+                }]),
+            ),
+        ]);
+        let error = caption_items(&settings, &payload).expect_err("unsafe image path rejected");
+        assert!(
+            error.to_string().contains("Caption item item_1 imagePath"),
+            "{error}"
+        );
     }
 }

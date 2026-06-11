@@ -73,7 +73,7 @@ fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
 /// Validate a resolved plan the way the Python `validate_training_plan` does:
 /// reject an unknown plan version, an empty dataset, or missing dataset images.
 /// Shared by the dry-run validator and the real run so both reject the same inputs.
-fn validate_training_plan(plan: &TrainingPlan) -> WorkerResult<()> {
+fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -> WorkerResult<()> {
     if plan.plan_version != TRAINING_PLAN_VERSION {
         return Err(WorkerError::InvalidPayload(format!(
             "Unsupported training plan version {}; this worker understands version {}.",
@@ -85,18 +85,29 @@ fn validate_training_plan(plan: &TrainingPlan) -> WorkerResult<()> {
             "Training plan dataset has no items to train on.".to_owned(),
         ));
     }
-    let missing: Vec<&str> = plan
-        .dataset
-        .items
-        .iter()
-        .filter(|item| !Path::new(&item.image_path).exists())
-        .map(|item| item.image_path.as_str())
-        .collect();
+    normalize_app_managed_path(
+        settings,
+        &plan.target.base_model_path,
+        "Training baseModelPath",
+    )?;
+    resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
+    let mut missing = Vec::new();
+    for item in &plan.dataset.items {
+        let image_path = resolve_dataset_item_path(
+            settings,
+            &plan.dataset.root_path,
+            &item.image_path,
+            "Training dataset imagePath",
+        )?;
+        if !image_path.exists() {
+            missing.push(image_path.display().to_string());
+        }
+    }
     if !missing.is_empty() {
         let preview = missing
             .iter()
             .take(3)
-            .copied()
+            .map(String::as_str)
             .collect::<Vec<_>>()
             .join(", ");
         return Err(WorkerError::InvalidPayload(format!(
@@ -132,7 +143,7 @@ async fn run_training_dry_run(
         ),
     )
     .await?;
-    validate_training_plan(plan)?;
+    validate_training_plan(settings, plan)?;
     let item_count = plan.dataset.items.len();
     update_job(
         api,
@@ -155,7 +166,7 @@ async fn run_training_dry_run(
             ProgressStage::Completed,
             1.0,
             &format!("Dry run validated {item_count} dataset item(s); training plan is ready."),
-            Some(dry_run_summary(plan)),
+            Some(dry_run_summary(settings, plan)),
             backend,
         ),
     )
@@ -165,8 +176,13 @@ async fn run_training_dry_run(
 
 /// The dry-run completion summary (keys mirror the Python `dry_run_training_summary`
 /// so the Training Studio reads an identical shape regardless of which worker runs it).
-fn dry_run_summary(plan: &TrainingPlan) -> JsonObject {
-    let base_model_installed = Path::new(&plan.target.base_model_path).exists();
+fn dry_run_summary(settings: &Settings, plan: &TrainingPlan) -> JsonObject {
+    let base_model_installed = normalize_app_managed_path(
+        settings,
+        &plan.target.base_model_path,
+        "Training baseModelPath",
+    )
+    .is_ok_and(|path| path.exists());
     let mut summary = JsonObject::new();
     summary.insert("mode".to_owned(), json!("dry_run"));
     summary.insert("validated".to_owned(), json!(true));
@@ -377,7 +393,7 @@ async fn run_training_execution(
     )
     .await?;
 
-    validate_training_plan(plan)?;
+    validate_training_plan(settings, plan)?;
 
     let engine_id = engine_trainer_id(plan).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -386,26 +402,32 @@ async fn run_training_execution(
         ))
     })?;
 
-    let weights_dir = PathBuf::from(&plan.target.base_model_path);
-    if !weights_dir.is_dir() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Base model weights are not installed at {}.",
-            weights_dir.display()
-        )));
-    }
+    let weights_dir = resolve_app_managed_model_dir(
+        settings,
+        &plan.target.base_model_path,
+        "Training baseModelPath",
+    )?;
 
-    let output_dir = PathBuf::from(&plan.output.output_dir);
+    let output_dir =
+        resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
     tokio::fs::create_dir_all(&output_dir).await?;
 
     let items: Vec<TrainingItem> = plan
         .dataset
         .items
         .iter()
-        .map(|item| TrainingItem {
-            image_path: PathBuf::from(&item.image_path),
-            caption: item.caption.clone(),
+        .map(|item| {
+            Ok(TrainingItem {
+                image_path: resolve_dataset_item_path(
+                    settings,
+                    &plan.dataset.root_path,
+                    &item.image_path,
+                    "Training dataset imagePath",
+                )?,
+                caption: item.caption.clone(),
+            })
         })
-        .collect();
+        .collect::<WorkerResult<Vec<_>>>()?;
     let config = map_training_config(&plan.config);
     let total_steps = config.steps;
     let file_name = plan.output.file_name.clone();
@@ -673,15 +695,39 @@ async fn run_training_execution(
 mod tests {
     use super::*;
 
+    fn test_settings(data_dir: &Path) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1".to_owned(),
+            access_token: None,
+            data_dir: data_dir.to_path_buf(),
+            config_dir: data_dir.join("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+        }
+    }
+
     /// A complete resolved plan as the API serializes it, parameterized by the
     /// fields the worker glue reads. `baseModelPath` is a path that does not exist,
     /// so `baseModelInstalled` is false unless a test overrides it.
     fn plan_json(
+        data_dir: &Path,
         kernel: &str,
         base_model: &str,
         network_type: &str,
         image_paths: &[&str],
     ) -> Value {
+        let dataset_root = data_dir.join("datasets").join("ds-1");
         let items: Vec<Value> = image_paths
             .iter()
             .map(|path| json!({ "imagePath": path, "caption": "a photo of mychar" }))
@@ -697,12 +743,12 @@ mod tests {
                 "modality": "image",
                 "outputKind": "lora",
                 "baseModel": base_model,
-                "baseModelPath": "/tmp/sceneworks-test-base-does-not-exist"
+                "baseModelPath": data_dir.join("models").join("base-missing").display().to_string()
             },
             "dataset": {
                 "datasetId": "ds-1",
                 "datasetVersion": 1,
-                "rootPath": "/tmp/ds",
+                "rootPath": dataset_root.display().to_string(),
                 "items": items
             },
             "config": {
@@ -730,7 +776,7 @@ mod tests {
             },
             "output": {
                 "loraId": "lora-1",
-                "outputDir": "/tmp/out",
+                "outputDir": data_dir.join("loras").join("lora-1").display().to_string(),
                 "fileName": "lora.safetensors",
                 "format": "safetensors",
                 "triggerWords": ["mychar"]
@@ -754,9 +800,19 @@ mod tests {
 
     #[test]
     fn validate_rejects_unknown_plan_version() {
-        let mut value = plan_json("z_image_lora", "z_image_turbo", "lora", &["/tmp/x.png"]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        );
         value["planVersion"] = json!(999);
-        let error = validate_training_plan(&parse(value)).expect_err("version mismatch rejected");
+        let error = validate_training_plan(&settings, &parse(value))
+            .expect_err("version mismatch rejected");
         assert!(error
             .to_string()
             .contains("Unsupported training plan version"));
@@ -764,40 +820,123 @@ mod tests {
 
     #[test]
     fn validate_rejects_empty_dataset() {
-        let plan = parse(plan_json("z_image_lora", "z_image_turbo", "lora", &[]));
-        let error = validate_training_plan(&plan).expect_err("empty dataset rejected");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let plan = parse(plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[],
+        ));
+        let error = validate_training_plan(&settings, &plan).expect_err("empty dataset rejected");
         assert!(error.to_string().contains("no items"));
     }
 
     #[test]
     fn validate_rejects_missing_image() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("missing.png");
         let plan = parse(plan_json(
+            dir.path(),
             "z_image_lora",
             "z_image_turbo",
             "lora",
-            &["/tmp/sceneworks-missing-7f3a9c.png"],
+            &[&image.display().to_string()],
         ));
-        let error = validate_training_plan(&plan).expect_err("missing image rejected");
+        let error = validate_training_plan(&settings, &plan).expect_err("missing image rejected");
         assert!(error.to_string().contains("missing on the worker"));
     }
 
     #[test]
     fn validate_accepts_present_images() {
-        let file = tempfile::NamedTempFile::new().expect("temp file");
-        let path = file.path().to_string_lossy().into_owned();
-        let plan = parse(plan_json("z_image_lora", "z_image_turbo", "lora", &[&path]));
-        assert!(validate_training_plan(&plan).is_ok());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("image.png");
+        std::fs::write(&image, b"png").expect("image");
+        let plan = parse(plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        ));
+        assert!(validate_training_plan(&settings, &plan).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_image_outside_dataset_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("other").join("image.png");
+        let plan = parse(plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        ));
+        let error = validate_training_plan(&settings, &plan).expect_err("outside image rejected");
+        assert!(error.to_string().contains("Training dataset imagePath"));
+    }
+
+    #[test]
+    fn validate_rejects_base_model_outside_data_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("image.png");
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        );
+        value["target"]["baseModelPath"] = json!("/tmp/sceneworks-outside-base");
+        let error = validate_training_plan(&settings, &parse(value))
+            .expect_err("outside base model rejected");
+        assert!(error.to_string().contains("Training baseModelPath"));
+    }
+
+    #[test]
+    fn validate_rejects_output_dir_outside_app_lora_or_model_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("image.png");
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        );
+        value["output"]["outputDir"] =
+            json!(dir.path().join("tmp").join("lora-1").display().to_string());
+        let error = validate_training_plan(&settings, &parse(value))
+            .expect_err("outside output dir rejected");
+        assert!(error.to_string().contains("Training outputDir"));
     }
 
     #[test]
     fn dry_run_summary_carries_plan_facts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let image_a = dir.path().join("datasets").join("ds-1").join("a.png");
+        let image_b = dir.path().join("datasets").join("ds-1").join("b.png");
         let plan = parse(plan_json(
+            dir.path(),
             "sdxl_lora",
             "sdxl",
             "lora",
-            &["/tmp/a.png", "/tmp/b.png"],
+            &[
+                &image_a.display().to_string(),
+                &image_b.display().to_string(),
+            ],
         ));
-        let summary = dry_run_summary(&plan);
+        let summary = dry_run_summary(&settings, &plan);
         assert_eq!(summary.get("mode").unwrap(), "dry_run");
         assert_eq!(summary.get("kernel").unwrap(), "sdxl_lora");
         assert_eq!(summary.get("datasetItemCount").unwrap(), 2);
@@ -823,8 +962,16 @@ mod tests {
             // Unknown A14B base model variant.
             ("wan_moe_lora", "wan_2_2_mystery", None),
         ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
         for (kernel, base_model, expected) in cases {
-            let plan = parse(plan_json(kernel, base_model, "lora", &["/tmp/x.png"]));
+            let plan = parse(plan_json(
+                dir.path(),
+                kernel,
+                base_model,
+                "lora",
+                &[&image.display().to_string()],
+            ));
             assert_eq!(
                 engine_trainer_id(&plan),
                 *expected,
@@ -836,11 +983,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn map_training_config_reads_advanced_and_passes_optimizer_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
         let plan = parse(plan_json(
+            dir.path(),
             "z_image_lora",
             "z_image_turbo",
             "lokr",
-            &["/tmp/x.png"],
+            &[&image.display().to_string()],
         ));
         let cfg = map_training_config(&plan.config);
         assert_eq!(cfg.rank, 16);
@@ -867,7 +1017,15 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn map_training_config_defaults_when_advanced_is_empty() {
-        let mut value = plan_json("sdxl_lora", "sdxl", "lora", &["/tmp/x.png"]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let mut value = plan_json(
+            dir.path(),
+            "sdxl_lora",
+            "sdxl",
+            "lora",
+            &[&image.display().to_string()],
+        );
         value["config"]["advanced"] = json!({});
         let plan = parse(value);
         let cfg = map_training_config(&plan.config);

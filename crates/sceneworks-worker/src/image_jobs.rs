@@ -919,8 +919,10 @@ enum GenEvent {
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Option<String> {
     let model = mlx_model(&request.model)?;
-    if resolve_weights_dir(request, settings).is_some() {
-        return None;
+    match resolve_weights_dir(request, settings) {
+        Ok(Some(_)) => return None,
+        Err(error) => return Some(error.to_string()),
+        Ok(None) => {}
     }
     Some(format!(
         "{}: MLX weights not found or incomplete (Hugging Face repo {}). \
@@ -932,7 +934,8 @@ pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Op
 
 #[cfg(target_os = "macos")]
 fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
-    mlx_model(&request.model).is_some() && resolve_weights_dir(request, settings).is_some()
+    mlx_model(&request.model).is_some()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
 /// The HuggingFace repo for the model: the manifest entry's `repo` wins, else the
@@ -953,7 +956,10 @@ fn model_repo(request: &ImageRequest, model: &MlxModel) -> String {
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent.
 #[cfg(target_os = "macos")]
-pub(crate) fn resolve_weights_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+pub(crate) fn resolve_weights_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
         .advanced
         .get("modelPath")
@@ -961,14 +967,17 @@ pub(crate) fn resolve_weights_dir(request: &ImageRequest, settings: &Settings) -
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(str::to_owned)
     {
-        if path.is_dir() {
-            return Some(path);
-        }
+        return resolve_app_managed_model_dir(settings, &path, "Image modelPath").map(Some);
     }
-    let model = mlx_model(&request.model)?;
-    huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, model))
+    let Some(model) = mlx_model(&request.model) else {
+        return Ok(None);
+    };
+    Ok(huggingface_snapshot_dir(
+        &settings.data_dir,
+        &model_repo(request, model),
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -1413,7 +1422,7 @@ async fn generate_mlx_stream(
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
-    let weights_dir = resolve_weights_dir(request, settings)
+    let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, model);
@@ -1797,7 +1806,7 @@ fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
 fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == "z_image_turbo"
         && !pose_entries(request).is_empty()
-        && resolve_weights_dir(request, settings).is_some()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
 /// Resolve the Fun-Controlnet-Union checkpoint (`advanced.controlWeights.{repo,filename}`
@@ -2005,7 +2014,7 @@ async fn generate_zimage_control_stream(
     // skeleton changes). None → the pose-only tier (the validated sc-2257 default).
     let identity_init = resolve_zimage_identity_init(request, settings, project_path)?;
 
-    let weights_dir = resolve_weights_dir(request, settings)
+    let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
     let control_weights = resolve_control_weights(request, settings).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -2502,7 +2511,7 @@ fn flux2_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
 fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     flux2_edit_engine_id(&request.model).is_some()
         && !flux2_edit_reference_ids(request).is_empty()
-        && resolve_weights_dir(request, settings).is_some()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
 /// Resolve a reference/source asset id to an in-memory RGB8 image (the engine VAE-
@@ -2649,7 +2658,7 @@ async fn generate_flux2_edit_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let engine_id = flux2_edit_engine_id(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not a FLUX.2 edit model".to_owned()))?;
-    let weights_dir = resolve_weights_dir(request, settings)
+    let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2 weights not found".to_owned()))?;
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, model);
@@ -2879,7 +2888,7 @@ fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == "qwen_image"
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
-        && resolve_weights_dir(request, settings).is_some()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
 #[cfg(target_os = "macos")]
@@ -3005,7 +3014,7 @@ async fn generate_qwen_control_stream(
     let request = &plan.request;
     let qwen = mlx_model("qwen_image")
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen model row missing".to_owned()))?;
-    let weights_dir = resolve_weights_dir(request, settings)
+    let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen-Image weights not found".to_owned()))?;
     let control_weights = resolve_qwen_control_weights(request, settings).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -3294,7 +3303,7 @@ fn qwen_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
 fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     qwen_edit_engine_id(&request.model).is_some()
         && !qwen_edit_reference_ids(request).is_empty()
-        && resolve_weights_dir(request, settings).is_some()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
 /// The number of images this image_generate job produces, accounting for grouped edit
@@ -3448,7 +3457,7 @@ async fn generate_qwen_edit_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let engine_id = qwen_edit_engine_id(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not a Qwen edit model".to_owned()))?;
-    let weights_dir = resolve_weights_dir(request, settings).ok_or_else(|| {
+    let weights_dir = resolve_weights_dir(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("Qwen-Image-Edit weights not found".to_owned())
     })?;
     let (quant, quant_bits) = resolve_quant(request);
@@ -3707,7 +3716,7 @@ async fn generate_qwen_edit_stream(
 fn sensenova_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_sensenova_model(&request.model)
         && !qwen_edit_reference_ids(request).is_empty()
-        && resolve_weights_dir(request, settings).is_some()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
 /// Snap a dimension to SenseNova's 32-pixel cell (the engine rejects off-cell sizes), clamped to
@@ -3868,7 +3877,7 @@ async fn generate_sensenova_edit_stream(
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let engine_id = model.engine_id;
-    let weights_dir = resolve_weights_dir(request, settings)
+    let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, model);
@@ -4098,7 +4107,7 @@ fn sdxl_sub_mode(request: &ImageRequest) -> Option<SdxlSubMode> {
 fn sdxl_advanced_available(request: &ImageRequest, settings: &Settings) -> bool {
     sdxl_engine_model(&request.model).is_some()
         && sdxl_sub_mode(request).is_some()
-        && resolve_weights_dir(request, settings).is_some()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
 /// Resolve the IP-Adapter snapshot directory (`advanced.ipAdapterRepo` override, else the
@@ -4262,7 +4271,7 @@ async fn generate_sdxl_advanced_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not an SDXL engine model".to_owned()))?;
     let sub_mode = sdxl_sub_mode(request)
         .ok_or_else(|| WorkerError::InvalidPayload("not an SDXL advanced job".to_owned()))?;
-    let weights_dir = resolve_weights_dir(request, settings)
+    let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SDXL weights not found".to_owned()))?;
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, model);
@@ -4639,7 +4648,10 @@ fn pose_to_body_points(keypoints: &[crate::openpose_skeleton::Keypoint]) -> Vec<
 /// RealVisXL_V5.0). The big base is staged by the normal model-download flow; `None` here
 /// means it is not present, so the job is not MLX-runnable (falls through to torch).
 #[cfg(target_os = "macos")]
-fn resolve_instantid_sdxl_base(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+fn resolve_instantid_sdxl_base(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
         .advanced
         .get("modelPath")
@@ -4647,11 +4659,10 @@ fn resolve_instantid_sdxl_base(request: &ImageRequest, settings: &Settings) -> O
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(str::to_owned)
     {
-        if path.is_dir() {
-            return Some(path);
-        }
+        return resolve_app_managed_model_dir(settings, &path, "InstantID SDXL modelPath")
+            .map(Some);
     }
     let repo = request
         .model_manifest_entry
@@ -4660,7 +4671,7 @@ fn resolve_instantid_sdxl_base(request: &ImageRequest, settings: &Settings) -> O
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(INSTANTID_SDXL_REPO);
-    huggingface_snapshot_dir(&settings.data_dir, repo)
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
 }
 
 /// True when this is a native-MLX-eligible InstantID job: the production model in
@@ -4672,7 +4683,7 @@ fn instantid_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == INSTANTID_MODEL
         && request.mode == "character_image"
         && non_empty(&request.reference_asset_id)
-        && resolve_instantid_sdxl_base(request, settings).is_some()
+        && matches!(resolve_instantid_sdxl_base(request, settings), Ok(Some(_)))
 }
 
 /// The number of images an InstantID job produces: `n` for a pose set, the active angle
@@ -4983,7 +4994,7 @@ async fn generate_instantid_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let sdxl_base = resolve_instantid_sdxl_base(request, settings).ok_or_else(|| {
+    let sdxl_base = resolve_instantid_sdxl_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("InstantID base (RealVisXL) not found".to_owned())
     })?;
     let reference_id = request
@@ -5689,7 +5700,7 @@ pub(crate) async fn run_image_detail_job(
     let params = resolve_detail_params(&request);
     let (quant, _) = resolve_quant(&request);
     // Reuse the model's manifest/modelPath/cache resolution; engine_model gives the default repo.
-    let weights_dir = resolve_weights_dir(&request, settings)
+    let weights_dir = resolve_weights_dir(&request, settings)?
         .or_else(|| huggingface_snapshot_dir(&settings.data_dir, engine_model.default_repo));
     let weights_dir = weights_dir
         .ok_or_else(|| WorkerError::InvalidPayload("SDXL detail weights not found".to_owned()))?;
@@ -6892,7 +6903,9 @@ mod tests {
         let guidance = resolve_guidance(&req, model);
         let negative = resolve_negative_prompt(&req, model);
         let (quant, _bits) = resolve_quant(&req);
-        let weights = resolve_weights_dir(&req, &settings).expect("weights in HF cache");
+        let weights = resolve_weights_dir(&req, &settings)
+            .expect("weights resolve")
+            .expect("weights in HF cache");
         let adapters = resolve_adapters(&req).expect("adapters");
         let seed = resolve_seed(&req, 0);
         let generator = mlx_load(model.engine_id, weights, quant, adapters).expect("load");
@@ -6941,7 +6954,9 @@ mod tests {
         let req = request(payload);
         let settings = Settings::from_env();
 
-        let weights = resolve_weights_dir(&req, &settings).expect("z-image weights in HF cache");
+        let weights = resolve_weights_dir(&req, &settings)
+            .expect("z-image weights resolve")
+            .expect("z-image weights in HF cache");
         let control_weights =
             resolve_control_weights(&req, &settings).expect("Fun-Controlnet-Union weights");
         let (quant, _bits) = resolve_quant(&req);

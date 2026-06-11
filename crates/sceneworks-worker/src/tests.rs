@@ -2304,6 +2304,19 @@ mod stub_fallback_gate {
     }
 
     #[test]
+    fn image_explicit_model_path_outside_data_dir_is_rejected() {
+        let (_dir, settings) = settings_with_empty_data_dir();
+        let outside = tempdir().expect("outside tempdir");
+        let request = ImageRequest::from_payload(&object(json!({
+            "model": "z_image_turbo",
+            "advanced": { "modelPath": outside.path().to_string_lossy() },
+        })));
+        let gap = mlx_weights_gap(&request, &settings).expect("unsafe modelPath rejected");
+        assert!(gap.contains("Image modelPath"), "{gap}");
+        assert!(gap.contains("app-managed"), "{gap}");
+    }
+
+    #[test]
     fn video_engine_model_without_weights_is_a_precise_error_not_a_stub() {
         let (_dir, settings) = settings_with_empty_data_dir();
         let request = VideoRequest::from_payload(&object(json!({ "model": "wan_2_2_i2v_14b" })));
