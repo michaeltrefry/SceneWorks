@@ -1474,11 +1474,22 @@ async fn generate_mlx_stream(
             &reference_id,
             project_path,
         )?;
-        let scale = advanced_f32(request, "ipAdapterScale", FLUX_IP_SCALE, 0.0, 1.0);
+        let scale = advanced::f32_clamped(
+            &request.advanced,
+            "ipAdapterScale",
+            FLUX_IP_SCALE,
+            0.0..=1.0,
+        );
         let ip_dir = resolve_flux_ip_adapter_dir(settings)?;
         // Real CFG only on dev (schnell is distilled — no CFG).
-        let true_cfg = (request.model == "flux_dev")
-            .then(|| advanced_f32(request, "trueCfgScale", FLUX_IP_TRUE_CFG, 1.0, 10.0));
+        let true_cfg = (request.model == "flux_dev").then(|| {
+            advanced::f32_clamped(
+                &request.advanced,
+                "trueCfgScale",
+                FLUX_IP_TRUE_CFG,
+                1.0..=10.0,
+            )
+        });
         (Some((image, scale)), Some(ip_dir), true_cfg)
     } else {
         (None, None, None)
@@ -2210,7 +2221,7 @@ fn resolve_zimage_edit_init(
     } else {
         source
     };
-    let strength = advanced_f32(request, "strength", 0.6, 0.05, 1.0);
+    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0);
     Ok(Some((image, strength)))
 }
 
@@ -2313,19 +2324,6 @@ fn augment_prompt_for_pose(base: &str) -> String {
     }
 }
 
-/// Python's `bool(advanced.get(key))` for the JSON types the UI sends: bool as-is,
-/// non-zero number, non-empty string/array → true; absent/null/false → false.
-#[cfg(target_os = "macos")]
-fn advanced_flag(request: &ImageRequest, key: &str) -> bool {
-    match request.advanced.get(key) {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::Number(number)) => number.as_f64().map(|value| value != 0.0).unwrap_or(false),
-        Some(Value::String(value)) => !value.is_empty(),
-        Some(Value::Array(value)) => !value.is_empty(),
-        _ => false,
-    }
-}
-
 /// How a FLUX.2 edit job batches its iterations.
 #[cfg(target_os = "macos")]
 enum Flux2Grouping {
@@ -2350,7 +2348,7 @@ fn flux2_grouping(request: &ImageRequest) -> Flux2Grouping {
     if poses > 0 {
         return Flux2Grouping::Poses(poses);
     }
-    if advanced_flag(request, "angleSet") {
+    if advanced::flag(&request.advanced, "angleSet") {
         return Flux2Grouping::Angles;
     }
     Flux2Grouping::Plain
@@ -4128,22 +4126,6 @@ fn load_mask_asset_image(
     load_reference_image(&settings.data_dir, project_id, mask_asset_id, project_path)
 }
 
-/// Float field on `advanced` (number or numeric string), clamped to `[lo, hi]`.
-#[cfg(target_os = "macos")]
-fn advanced_f32(request: &ImageRequest, key: &str, default: f32, lo: f32, hi: f32) -> f32 {
-    request
-        .advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(default)
-        .clamp(lo, hi)
-}
-
 /// Composite `source` contained (long edge fits) + centered on a black `width`×`height`
 /// canvas, using the **engine's** `contain_box` so the padded source lines up pixel-for-pixel
 /// with [`mlx_gen::image::outpaint_border_mask`] (both derive the same kept rect).
@@ -4320,7 +4302,12 @@ async fn generate_sdxl_advanced_stream(
                     "SDXL IP-Adapter weights not found (download {SDXL_IP_ADAPTER_REPO})."
                 ))
             })?;
-            let scale = advanced_f32(request, "ipAdapterScale", SDXL_IP_SCALE, 0.0, 1.0);
+            let scale = advanced::f32_clamped(
+                &request.advanced,
+                "ipAdapterScale",
+                SDXL_IP_SCALE,
+                0.0..=1.0,
+            );
             (
                 vec![Conditioning::Reference {
                     image: reference,
@@ -4351,16 +4338,15 @@ async fn generate_sdxl_advanced_stream(
             // stretch — torch parity with `load_source_image` + `fit_image`.
             let source = fit_engine_image(source, width, height, &request.fit_mode)?;
             let is_inpaint = matches!(sub_mode, SdxlSubMode::Inpaint);
-            let strength = advanced_f32(
-                request,
+            let strength = advanced::f32_clamped(
+                &request.advanced,
                 "strength",
                 if is_inpaint {
                     SDXL_INPAINT_STRENGTH
                 } else {
                     SDXL_EDIT_STRENGTH
                 },
-                0.0,
-                1.0,
+                0.0..=1.0,
             );
             let mut conditioning = vec![Conditioning::Reference {
                 image: source,
@@ -4419,7 +4405,12 @@ async fn generate_sdxl_advanced_stream(
                     WorkerError::InvalidPayload(format!("outpaint mask union failed: {error}"))
                 })?;
             }
-            let strength = advanced_f32(request, "strength", SDXL_INPAINT_STRENGTH, 0.0, 1.0);
+            let strength = advanced::f32_clamped(
+                &request.advanced,
+                "strength",
+                SDXL_INPAINT_STRENGTH,
+                0.0..=1.0,
+            );
             (
                 vec![
                     Conditioning::Reference {
@@ -4601,7 +4592,7 @@ enum InstantIdMode {
 /// The 11-view Character-Studio angle set flag.
 #[cfg(target_os = "macos")]
 fn instantid_angle_set(request: &ImageRequest) -> bool {
-    advanced_flag(request, "angleSet")
+    advanced::flag(&request.advanced, "angleSet")
 }
 
 /// Classify the InstantID iteration mode (pose set > angle set > plain identity).
@@ -4707,7 +4698,7 @@ fn active_angle_collection(
     Vec<sceneworks_core::project_store::ResolvedAnglePreset>,
 ) {
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
-    let override_id = advanced_str(request, "keypointCollectionId", "");
+    let override_id = advanced::str(&request.advanced, "keypointCollectionId", "");
     let override_id = override_id.trim();
     let override_id = (!override_id.is_empty()).then_some(override_id);
     store
@@ -4768,7 +4759,12 @@ fn instantid_guidance(request: &ImageRequest) -> f32 {
         })
         .map(|value| value as f32)
         .unwrap_or(INSTANTID_DEFAULT_GUIDANCE);
-    advanced_f32(request, "guidanceScale", manifest_default, 0.0, 30.0)
+    advanced::f32_clamped(
+        &request.advanced,
+        "guidanceScale",
+        manifest_default,
+        0.0..=30.0,
+    )
 }
 
 /// Resolve InstantID quantization. **fp16 (dense) is the default** — the validated identity
@@ -5031,13 +5027,17 @@ async fn generate_instantid_stream(
     let steps = instantid_steps(request);
     let guidance = instantid_guidance(request);
     let (quant_bits, recipe_bits) = instantid_quant(request);
-    let ip_scale = advanced_f32(request, "ipAdapterScale", INSTANTID_IP_SCALE, 0.0, 1.0);
-    let controlnet_scale = advanced_f32(
-        request,
+    let ip_scale = advanced::f32_clamped(
+        &request.advanced,
+        "ipAdapterScale",
+        INSTANTID_IP_SCALE,
+        0.0..=1.0,
+    );
+    let controlnet_scale = advanced::f32_clamped(
+        &request.advanced,
         "controlnetConditioningScale",
         INSTANTID_CONTROLNET_SCALE,
-        0.0,
-        2.0,
+        0.0..=2.0,
     );
     let repo = request
         .model_manifest_entry
@@ -5053,8 +5053,13 @@ async fn generate_instantid_stream(
     // The active Key Point Library collection drives the angle set (sc-4450): per-generation
     // override > user default > built-in 11. Resolved once (and only for angle jobs).
     let angle_collection = angle_set.then(|| active_angle_collection(request, settings));
-    let openpose_scale = advanced_f32(request, "openPoseScale", INSTANTID_OPENPOSE_SCALE, 0.0, 2.0);
-    let face_restore = advanced_flag(request, "faceRestore");
+    let openpose_scale = advanced::f32_clamped(
+        &request.advanced,
+        "openPoseScale",
+        INSTANTID_OPENPOSE_SCALE,
+        0.0..=2.0,
+    );
+    let face_restore = advanced::flag(&request.advanced, "faceRestore");
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
     let openpose = if pose_set {
@@ -5359,45 +5364,17 @@ struct DetailParams {
     seed: i64,
 }
 
-/// Unsigned int field on `advanced` (number or numeric string), clamped to `[lo, hi]`.
-#[cfg(target_os = "macos")]
-fn advanced_u32(request: &ImageRequest, key: &str, default: u32, lo: u32, hi: u32) -> u32 {
-    request
-        .advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as u32)
-        .unwrap_or(default)
-        .clamp(lo, hi)
-}
-
-#[cfg(target_os = "macos")]
-fn advanced_str(request: &ImageRequest, key: &str, default: &str) -> String {
-    request
-        .advanced
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default)
-        .to_owned()
-}
-
 #[cfg(target_os = "macos")]
 fn resolve_detail_params(request: &ImageRequest) -> DetailParams {
     DetailParams {
-        strength: advanced_f32(request, "strength", 0.55, 0.2, 1.0),
-        cn_scale: advanced_f32(request, "cnScale", 0.7, 0.1, 1.5),
-        steps: advanced_u32(request, "steps", 24, 1, 60),
-        guidance: advanced_f32(request, "guidanceScale", 5.0, 1.0, 15.0),
-        tile: advanced_u32(request, "tile", 1024, 512, 1536),
-        overlap: advanced_u32(request, "overlap", 128, 0, 512),
-        prompt: advanced_str(request, "prompt", DETAIL_DEFAULT_PROMPT),
-        negative: advanced_str(request, "negativePrompt", DETAIL_DEFAULT_NEGATIVE),
+        strength: advanced::f32_clamped(&request.advanced, "strength", 0.55, 0.2..=1.0),
+        cn_scale: advanced::f32_clamped(&request.advanced, "cnScale", 0.7, 0.1..=1.5),
+        steps: advanced::u32_clamped(&request.advanced, "steps", 24, 1..=60),
+        guidance: advanced::f32_clamped(&request.advanced, "guidanceScale", 5.0, 1.0..=15.0),
+        tile: advanced::u32_clamped(&request.advanced, "tile", 1024, 512..=1536),
+        overlap: advanced::u32_clamped(&request.advanced, "overlap", 128, 0..=512),
+        prompt: advanced::str(&request.advanced, "prompt", DETAIL_DEFAULT_PROMPT),
+        negative: advanced::str(&request.advanced, "negativePrompt", DETAIL_DEFAULT_NEGATIVE),
         // Python defaults the detail seed to 7 when the payload omits one.
         seed: request.seed.unwrap_or(7),
     }
@@ -5736,7 +5713,11 @@ pub(crate) async fn run_image_detail_job(
         .or_else(|| huggingface_snapshot_dir(&settings.data_dir, engine_model.default_repo));
     let weights_dir = weights_dir
         .ok_or_else(|| WorkerError::InvalidPayload("SDXL detail weights not found".to_owned()))?;
-    let control_repo = advanced_str(&request, "tileControlNetRepo", TILE_CONTROLNET_REPO);
+    let control_repo = advanced::str(
+        &request.advanced,
+        "tileControlNetRepo",
+        TILE_CONTROLNET_REPO,
+    );
     let control_dir =
         huggingface_snapshot_dir(&settings.data_dir, &control_repo).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(

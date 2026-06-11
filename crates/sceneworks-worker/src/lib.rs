@@ -33,6 +33,11 @@ use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
+// Shared `advanced` knob accessors (sc-4281). Every caller (image/video MLX job
+// paths) is macOS-gated, so the module is too — otherwise its accessors would be
+// uncalled (dead_code) on the Linux/Windows builds.
+#[cfg(target_os = "macos")]
+mod advanced;
 mod api_client;
 use api_client::*;
 mod gpu;

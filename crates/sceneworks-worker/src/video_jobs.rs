@@ -1230,7 +1230,7 @@ fn build_wan_boundary_conditioning(
     let mut conditioning = vec![Conditioning::Keyframe {
         image: left_frame,
         frame_idx: 0,
-        strength: advanced_f32(request, "videoConditioningStrength", 1.0),
+        strength: advanced::f32(&request.advanced, "videoConditioningStrength", 1.0),
     }];
     if request.mode == "video_bridge" {
         let right = right_frame.ok_or_else(|| {
@@ -1242,7 +1242,11 @@ fn build_wan_boundary_conditioning(
         conditioning.push(Conditioning::Keyframe {
             image: right,
             frame_idx: -1,
-            strength: advanced_f32(request, "bridgeRightVideoConditioningStrength", 1.0),
+            strength: advanced::f32(
+                &request.advanced,
+                "bridgeRightVideoConditioningStrength",
+                1.0,
+            ),
         });
     }
     Ok(conditioning)
@@ -1853,46 +1857,6 @@ fn resolve_ltx_conditioning(
 }
 
 /// Read an `advanced` boolean flag (JSON bool), default `false` (Python `bool(.get(k))`).
-#[cfg(target_os = "macos")]
-fn advanced_bool(request: &VideoRequest, key: &str) -> bool {
-    request
-        .advanced
-        .get(key)
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-/// Read an `advanced` float (JSON number or numeric string), default `fallback` — mirrors the
-/// Python `_advanced_float`.
-#[cfg(target_os = "macos")]
-fn advanced_f32(request: &VideoRequest, key: &str, fallback: f32) -> f32 {
-    request
-        .advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(fallback)
-}
-
-/// Read an `advanced` integer (JSON int or numeric string), default `fallback`.
-#[cfg(target_os = "macos")]
-fn advanced_i32(request: &VideoRequest, key: &str, fallback: i32) -> i32 {
-    request
-        .advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as i32)
-        .unwrap_or(fallback)
-}
-
 /// First/last-frame conditioning (sc-3055 cutover): two [`Conditioning::Keyframe`]s — the source
 /// image pinned at latent frame 0 and the last-frame image at latent frame `-1` (the engine's
 /// Python-style negative-from-end index, so the worker needs no latent-frame math; the engine
@@ -1932,13 +1896,13 @@ fn resolve_keyframe_conditioning(
     Ok(vec![
         Conditioning::Keyframe {
             image: first,
-            frame_idx: advanced_i32(request, "imageFrameIndex", 0),
-            strength: advanced_f32(request, "imageConditioningStrength", 1.0),
+            frame_idx: advanced::i32(&request.advanced, "imageFrameIndex", 0),
+            strength: advanced::f32(&request.advanced, "imageConditioningStrength", 1.0),
         },
         Conditioning::Keyframe {
             image: last,
             frame_idx: -1,
-            strength: advanced_f32(request, "lastFrameConditioningStrength", 1.0),
+            strength: advanced::f32(&request.advanced, "lastFrameConditioningStrength", 1.0),
         },
     ])
 }
@@ -2041,7 +2005,7 @@ fn build_video_clip_conditioning(
     let mut conditioning = vec![Conditioning::VideoClip {
         frames: left_frames,
         frame_idx: 0,
-        strength: advanced_f32(request, "videoConditioningStrength", 1.0),
+        strength: advanced::f32(&request.advanced, "videoConditioningStrength", 1.0),
     }];
     if request.mode == "video_bridge" {
         let right = right_frames.ok_or_else(|| {
@@ -2053,7 +2017,11 @@ fn build_video_clip_conditioning(
         conditioning.push(Conditioning::VideoClip {
             frames: right,
             frame_idx: -1,
-            strength: advanced_f32(request, "bridgeRightVideoConditioningStrength", 1.0),
+            strength: advanced::f32(
+                &request.advanced,
+                "bridgeRightVideoConditioningStrength",
+                1.0,
+            ),
         });
     }
     Ok(conditioning)
@@ -2284,7 +2252,7 @@ async fn generate_ltx(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
-    let video_mode = advanced_bool(request, "noAudio").then(|| "no_audio".to_owned());
+    let video_mode = advanced::bool(&request.advanced, "noAudio").then(|| "no_audio".to_owned());
     let enhance_max_tokens = request
         .advanced
         .get("enhanceMaxTokens")
@@ -2321,8 +2289,8 @@ async fn generate_ltx(
         seed: resolve_video_seed(request) as u64,
         control_scale: None,
         video_mode,
-        enhance_prompt: advanced_bool(request, "enhancePrompt"),
-        use_uncensored_enhancer: advanced_bool(request, "useUncensoredEnhancer"),
+        enhance_prompt: advanced::bool(&request.advanced, "enhancePrompt"),
+        use_uncensored_enhancer: advanced::bool(&request.advanced, "useUncensoredEnhancer"),
         enhance_max_tokens,
         enhance_temperature,
         ..VideoGenInput::default()
@@ -3005,7 +2973,7 @@ async fn generate_wan_vace(
     let reference_count = references.len();
     let frame_total = frames.len();
 
-    let masking_strength = advanced_f32(request, "maskingStrength", 1.0);
+    let masking_strength = advanced::f32(&request.advanced, "maskingStrength", 1.0);
     let conditioning = build_vace_conditioning(
         frames,
         masks,
@@ -3045,7 +3013,7 @@ async fn generate_wan_vace(
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,
-        control_scale: Some(advanced_f32(request, "conditioningScale", 1.0)),
+        control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
     let decoded = generate_video(api, settings, job, backend, input).await?;
@@ -3415,7 +3383,7 @@ async fn generate_wan_vace_extend_bridge(
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,
-        control_scale: Some(advanced_f32(request, "conditioningScale", 1.0)),
+        control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
@@ -4328,9 +4296,9 @@ mod tests {
             "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
             "advanced": { "noAudio": true, "enhancePrompt": true }
         }));
-        assert!(advanced_bool(&req, "noAudio"));
-        assert!(advanced_bool(&req, "enhancePrompt"));
-        assert!(!advanced_bool(&req, "useUncensoredEnhancer"));
+        assert!(advanced::bool(&req.advanced, "noAudio"));
+        assert!(advanced::bool(&req.advanced, "enhancePrompt"));
+        assert!(!advanced::bool(&req.advanced, "useUncensoredEnhancer"));
         // LTX adapters: a plain user LoRA is uniform (no per-pass schedule, no moe tag).
         let none = resolve_ltx_adapters(&req).unwrap();
         assert!(none.is_empty());
@@ -4350,20 +4318,26 @@ mod tests {
                 "imageFrameIndex": 2
             }
         }));
-        assert_eq!(advanced_f32(&req, "imageConditioningStrength", 1.0), 0.8);
         assert_eq!(
-            advanced_f32(&req, "lastFrameConditioningStrength", 1.0),
+            advanced::f32(&req.advanced, "imageConditioningStrength", 1.0),
+            0.8
+        );
+        assert_eq!(
+            advanced::f32(&req.advanced, "lastFrameConditioningStrength", 1.0),
             0.65
         );
-        assert_eq!(advanced_i32(&req, "imageFrameIndex", 0), 2);
+        assert_eq!(advanced::i32(&req.advanced, "imageFrameIndex", 0), 2);
         // Absent keys → the fully-pinned defaults (strength 1.0, first index 0).
         let bare = request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "a fox" }));
-        assert_eq!(advanced_f32(&bare, "imageConditioningStrength", 1.0), 1.0);
         assert_eq!(
-            advanced_f32(&bare, "lastFrameConditioningStrength", 1.0),
+            advanced::f32(&bare.advanced, "imageConditioningStrength", 1.0),
             1.0
         );
-        assert_eq!(advanced_i32(&bare, "imageFrameIndex", 0), 0);
+        assert_eq!(
+            advanced::f32(&bare.advanced, "lastFrameConditioningStrength", 1.0),
+            1.0
+        );
+        assert_eq!(advanced::i32(&bare.advanced, "imageFrameIndex", 0), 0);
     }
 
     /// `resolve_keyframe_conditioning` fails clearly when an FLF source/last-frame asset id is
