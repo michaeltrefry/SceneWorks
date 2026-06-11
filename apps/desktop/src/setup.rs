@@ -412,6 +412,9 @@ fn resolved_data_dir() -> PathBuf {
 
 /// Directory containing the Python `scene_worker` package + requirements: the
 /// bundled resource in a packaged app, the repo copy during development.
+///
+/// Only used to launch the Python worker, which macOS no longer spawns (sc-3492).
+#[cfg(not(target_os = "macos"))]
 fn worker_src_dir(app: &AppHandle) -> PathBuf {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources.join("python-src");
@@ -428,6 +431,9 @@ fn worker_src_dir(app: &AppHandle) -> PathBuf {
 /// (scene_worker depends on it at startup). Bundled: it's staged into python-src
 /// alongside scene_worker. Development: it lives in the repo's packages/shared.
 /// Mirrors the Docker worker's `PYTHONPATH=...:/app/packages/shared`.
+///
+/// Only used to launch the Python worker, which macOS no longer spawns (sc-3492).
+#[cfg(not(target_os = "macos"))]
 fn shared_parent_dir(app: &AppHandle) -> PathBuf {
     if let Ok(resources) = app.path().resource_dir() {
         let bundled = resources.join("python-src");
@@ -886,13 +892,17 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         // The catalog's install-state detection resolves the HF cache from this;
         // it must match the worker's download root or every model reads "missing".
         .env("HF_HOME", huggingface_home().to_string_lossy().to_string());
-    // Epic 3482 (Python Eradication) — macOS "MLX-required" mode is wired through the API
-    // (`Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED`, sc-3483): the MPS worker never
-    // claims an MLX-eligible job and a job no live `mlx` worker takes fails `mlx_unavailable`
-    // instead of running on MPS. It ships default OFF (observe) so nothing is set here yet;
-    // the final cutover (sc-3492) flips it on for macOS at exactly this point —
-    //     #[cfg(target_os = "macos")] { command = command.env("SCENEWORKS_MLX_REQUIRED", "1"); }
-    // — once every Mac Python surface is ported or UI-gated.
+    // Epic 3482 (Python Eradication) final cutover (sc-3492) — macOS runs MLX-only.
+    // `Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED` (sc-3483): the MPS/torch worker
+    // never claims an MLX-eligible job, and an MLX-eligible job that no live `mlx` worker
+    // takes fails `mlx_unavailable` instead of falling back to MPS. Every Mac Python
+    // *inference* surface is now ported to the in-process Rust/MLX worker or UI-gated
+    // (sc-3486), and the Python torch worker is no longer spawned on macOS (see
+    // `gate_window`), so the flag is enforced here.
+    #[cfg(target_os = "macos")]
+    {
+        command = command.env("SCENEWORKS_MLX_REQUIRED", "1");
+    }
     // The in-process utility worker shells out to ffmpeg; point it at the bundled
     // static binary (sc-3767) since the desktop has no system ffmpeg on PATH.
     if let Some(ffmpeg) = resolve_bundled_ffmpeg(app) {
@@ -967,7 +977,9 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
 
 /// Health-gate the window on a background thread: wait for the API's
 /// OS-assigned port, confirm the responder is genuinely SceneWorks, then
-/// navigate and start the Python worker; show an error after the timeout.
+/// navigate and start the platform inference worker(s) — the MLX GPU worker on
+/// macOS (MLX-only, sc-3492), the Python torch worker elsewhere; show an error
+/// after the timeout.
 fn gate_window(app: AppHandle) {
     std::thread::spawn(move || {
         let deadline = Instant::now() + HEALTH_TIMEOUT;
@@ -986,10 +998,12 @@ fn gate_window(app: AppHandle) {
                     }
                     #[cfg(target_os = "macos")]
                     {
-                        supervise_worker(app.clone(), port);
-                        // Apple-Silicon MLX GPU worker (sc-3289): MLX-eligible
-                        // image/video jobs run here on the in-process Rust
-                        // mlx-gen engine instead of the Python torch/MPS path.
+                        // Epic 3482 final cutover (sc-3492): macOS is MLX-only — the
+                        // Python torch/MPS worker is no longer spawned. Only the
+                        // Apple-Silicon MLX GPU worker (sc-3289) runs, executing
+                        // MLX-eligible image/video jobs on the in-process Rust mlx-gen
+                        // engine. Any MLX-ineligible job fails `mlx_unsupported` /
+                        // `mlx_unavailable` (never MPS) per `Settings.mlx_required`.
                         supervise_mlx_worker(app, port);
                     }
                     #[cfg(not(target_os = "macos"))]
@@ -1009,6 +1023,11 @@ fn gate_window(app: AppHandle) {
 /// Spawn and supervise the Python inference worker on a background thread,
 /// restarting it with exponential backoff if it dies unexpectedly while the app
 /// is open. Output is appended to worker.log.
+///
+/// Not compiled on macOS: the MLX-only cutover (sc-3492) never spawns the Python
+/// torch/MPS worker there — only `supervise_mlx_worker` runs. (The venv strip is
+/// sc-3493.)
+#[cfg(not(target_os = "macos"))]
 fn supervise_worker(app: AppHandle, api_port: u16) {
     std::thread::spawn(move || {
         let log_path = logs_dir().join("worker.log");
@@ -1335,6 +1354,9 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
     write_sidecar_pidfile(&pids);
 }
 
+/// Only used by `supervise_worker`, which macOS no longer spawns (sc-3492); the
+/// `WorkerPids.worker` field it writes stays for Windows/Linux + crash recovery.
+#[cfg(not(target_os = "macos"))]
 fn record_worker_pid(app: &AppHandle, pid: Option<u32>) {
     let state = app.state::<Managed>();
     let mut pids = state.pids.lock().expect("pids lock");
