@@ -6553,6 +6553,30 @@ mod tests {
         );
     }
 
+    /// Real-weights smoke (sc-3875 + sc-4764): load + generate one Kolors T2I image through the
+    /// worker's own `kolors` engine path. Exercises the ChatGLM3-6B encoder + SDXL-family U-Net +
+    /// SDXL VAE load AND, critically, proves the snapshot's overlaid `tokenizer/tokenizer.json`
+    /// (sc-4764) lets `KolorsTokenizer::from_dir` construct — the engine errors here without it.
+    /// Needs the HF cache (`Kwai-Kolors/Kolors-diffusers`, with the tokenizer overlay) + a Metal
+    /// device; run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored kolors_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Kolors weights (+ tokenizer.json overlay) + Metal device"]
+    fn kolors_real_weights_generates_one_image() {
+        let snapshot = hf_snapshot("models--Kwai-Kolors--Kolors-diffusers");
+        assert!(
+            snapshot.join("tokenizer").join("tokenizer.json").exists(),
+            "kolors snapshot is missing the overlaid tokenizer.json (sc-4764)"
+        );
+        smoke_generate_one(
+            "kolors",
+            snapshot,
+            Some(5.0),
+            Some("blurry, low quality".to_owned()),
+        );
+    }
+
     /// L2-normalized cosine similarity between two ArcFace embeddings (test helper).
     #[cfg(target_os = "macos")]
     fn cosine(a: &[f32], b: &[f32]) -> f32 {

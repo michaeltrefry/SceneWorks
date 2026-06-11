@@ -1046,4 +1046,104 @@ mod tests {
         assert_eq!(cfg.timestep_type, "sigmoid");
         assert_eq!(cfg.loss_type, "mse");
     }
+
+    /// Real-weights smoke (sc-4732 + sc-4764): load the Kolors trainer from the installed
+    /// `Kwai-Kolors/Kolors-diffusers` snapshot and run two LoRA micro-steps on a one-image dataset.
+    /// Proves the worker links `mlx-gen-kolors` (the `load_trainer("kolors", …)` registration), the
+    /// snapshot's overlaid `tokenizer/tokenizer.json` (sc-4764) lets the trainer construct, and a
+    /// real step runs (finite loss) + writes an adapter on the Mac GPU. The trainer loads the base
+    /// at **f32** (engine choice for clean autograd), so this is memory-heavy. Run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored kolors_real_weights_trains --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Kolors weights (+ tokenizer.json overlay) + Metal device; f32 base is heavy"]
+    fn kolors_real_weights_trains_a_lora_step() {
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME set"));
+        let snapshot = std::fs::read_dir(
+            home.join(".cache/huggingface/hub/models--Kwai-Kolors--Kolors-diffusers/snapshots"),
+        )
+        .expect("kolors snapshots dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("a kolors snapshot dir");
+        assert!(
+            snapshot.join("tokenizer").join("tokenizer.json").exists(),
+            "kolors snapshot is missing the overlaid tokenizer.json (sc-4764)"
+        );
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let image_path = tmp.path().join("swatch.png");
+        image::RgbImage::from_fn(512, 512, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        })
+        .save(&image_path)
+        .expect("write test image");
+        let output_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = TrainingConfig {
+            rank: 4,
+            alpha: 4.0,
+            learning_rate: 1e-4,
+            steps: 2,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 512,
+            save_every: 0,
+            seed: 42,
+            optimizer: "adamw".to_owned(),
+            weight_decay: 0.0,
+            lr_scheduler: LrSchedule::parse("constant"),
+            lr_warmup_steps: 0,
+            network_type: NetworkType::parse("lora"),
+            decompose_factor: -1,
+            lora_target_modules: Vec::new(),
+            timestep_type: "sigmoid".to_owned(),
+            timestep_bias: "balanced".to_owned(),
+            loss_type: "mse".to_owned(),
+            trigger_word: None,
+        };
+        let request = TrainingRequest {
+            items: vec![TrainingItem {
+                image_path,
+                caption: "a colorful test swatch".to_owned(),
+            }],
+            config,
+            output_dir: output_dir.clone(),
+            file_name: "kolors_smoke.safetensors".to_owned(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        };
+
+        let mut trainer =
+            mlx_gen::load_trainer("kolors", &LoadSpec::new(WeightsSource::Dir(snapshot)))
+                .expect("kolors trainer loads (tokenizer.json present)");
+        trainer
+            .validate(&request)
+            .expect("trainer accepts the plan");
+        let mut last_loss = f32::NAN;
+        let output = trainer
+            .train(&request, &mut |progress| {
+                if let TrainingProgress::Training { loss, .. } = progress {
+                    last_loss = loss;
+                }
+            })
+            .expect("training runs a step");
+
+        eprintln!(
+            "[kolors-train-smoke] steps={} final_loss={} last_step_loss={} adapter={}",
+            output.steps,
+            output.final_loss,
+            last_loss,
+            output.adapter_path.display()
+        );
+        assert!(output.steps >= 1, "expected at least one micro-step");
+        assert!(output.final_loss.is_finite(), "final loss must be finite");
+        assert!(last_loss.is_finite(), "a training-step loss was observed");
+        assert!(
+            output_dir.join("kolors_smoke.safetensors").exists(),
+            "trained adapter was written"
+        );
+    }
 }
