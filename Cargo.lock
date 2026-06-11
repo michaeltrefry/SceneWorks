@@ -4167,6 +4167,7 @@ name = "sceneworks-core"
 version = "0.2.0"
 dependencies = [
  "directories",
+ "getrandom 0.3.4",
  "mime_guess",
  "parking_lot",
  "rusqlite",

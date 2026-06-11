@@ -5,7 +5,6 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
-use rusqlite::Connection;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -118,13 +117,24 @@ pub(crate) fn optional_f64(value: &Value, key: &str) -> Option<f64> {
     value.get(key).and_then(Value::as_f64)
 }
 
+/// Generate a random lowercase-hex id of `bytes` random bytes (so `2 * bytes`
+/// hex chars). Previously this ran `hex(randomblob(n))` through a fresh
+/// in-memory SQLite connection per call, so saving a timeline with N new items
+/// opened N connections and turned SQLite-init failures into id-generation
+/// failures (sc-4209 / F-CORE-5). Now it pulls from the OS CSPRNG via
+/// `getrandom` and hex-encodes in Rust — no connection, no SQLite failure
+/// surface.
 pub(crate) fn random_hex(bytes: usize) -> ProjectStoreResult<String> {
-    let connection = Connection::open_in_memory()?;
-    Ok(connection.query_row(
-        &format!("select lower(hex(randomblob({bytes})))"),
-        [],
-        |row| row.get(0),
-    )?)
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut buffer = vec![0u8; bytes];
+    getrandom::fill(&mut buffer)
+        .map_err(|error| ProjectStoreError::Io(std::io::Error::other(error.to_string())))?;
+    let mut hex = String::with_capacity(bytes * 2);
+    for byte in buffer {
+        hex.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        hex.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    Ok(hex)
 }
 
 pub(crate) fn parse_string_enum<T>(value: &str) -> T
@@ -137,7 +147,35 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{atomic_write, lock_project_files};
+    use super::{atomic_write, lock_project_files, random_hex};
+    use std::collections::HashSet;
+
+    /// sc-4209 / F-CORE-5: `random_hex(n)` returns `2n` lowercase-hex chars,
+    /// generated without a SQLite connection. Covers the length/charset contract
+    /// and that successive ids differ (i.e. it is actually random, not constant).
+    #[test]
+    fn random_hex_produces_lowercase_hex_of_expected_length() {
+        for bytes in [1usize, 4, 16] {
+            let id = random_hex(bytes).expect("id generates");
+            assert_eq!(
+                id.len(),
+                bytes * 2,
+                "{bytes} bytes -> {} hex chars",
+                bytes * 2
+            );
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "id {id:?} is lowercase hex"
+            );
+        }
+
+        // Distinct across many calls — a constant/low-entropy generator would collide.
+        let ids = (0..1000)
+            .map(|_| random_hex(16).expect("id generates"))
+            .collect::<HashSet<_>>();
+        assert_eq!(ids.len(), 1000, "16-byte ids are unique across 1000 draws");
+    }
 
     #[test]
     fn atomic_write_tolerates_concurrent_writers_to_same_path() {
