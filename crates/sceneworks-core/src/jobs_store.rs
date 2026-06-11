@@ -62,6 +62,23 @@ fn non_gpu_job_types_sql() -> &'static str {
             .join(", ")
     })
 }
+
+/// The active (non-terminal, non-queued) statuses as a quoted SQL list for
+/// `status in (...)` stale-sweep / claim-guard filters, derived once from
+/// [`ACTIVE_STATUSES`] — same anti-drift rationale as [`non_gpu_job_types_sql`]
+/// (sc-4207 / F-CORE-3): the list was copy-pasted into five SQL statements, so
+/// adding/renaming an active status risked missing one. Values are crate
+/// constants, never user input, so direct interpolation is safe.
+fn active_statuses_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        ACTIVE_STATUSES
+            .iter()
+            .map(|status| format!("'{status}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
 const DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB: f64 = 512.0;
 const DISPATCH_MEMORY_RELIEF_THRESHOLD_MB: f64 = 1024.0;
 const DISPATCH_LOW_MEMORY_THRESHOLD_MB: f64 = 2048.0;
@@ -327,7 +344,8 @@ impl JobsStore {
         let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
         let now = utc_now();
         transaction.execute(
-            "
+            &format!(
+                "
             update jobs
                set status = 'interrupted',
                    stage = 'interrupted',
@@ -336,8 +354,10 @@ impl JobsStore {
                    completed_at = ?1,
                    updated_at = ?1,
                    worker_id = null
-             where status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
+             where status in ({active})
             ",
+                active = active_statuses_sql()
+            ),
             params![now],
         )?;
         transaction.execute(
@@ -661,8 +681,9 @@ impl JobsStore {
                        updated_at = ?1,
                        worker_id = null
                  where worker_id in ({placeholders})
-                   and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-                "
+                   and status in ({active})
+                ",
+                active = active_statuses_sql()
             ),
             params_from_iter(job_params),
         )?;
@@ -1224,8 +1245,9 @@ impl JobsStore {
             "
             select * from jobs
              where worker_id in ({placeholders})
-               and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
-            "
+               and status in ({active})
+            ",
+            active = active_statuses_sql()
         ))?;
         let jobs = collect_jobs(statement.query_map(
             params_from_iter(worker_ids.iter().map(String::as_str)),
@@ -2681,11 +2703,12 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
                     "
             select id from jobs
              where lower(assigned_gpu) in ('mlx', 'mps')
-               and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
+               and status in ({active})
                and type not in ({})
              limit 1
             ",
-                    non_gpu_job_types_sql()
+                    non_gpu_job_types_sql(),
+                    active = active_statuses_sql()
                 ),
                 [],
                 |_row| Ok(()),
@@ -2699,11 +2722,12 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
                 "
             select id from jobs
              where assigned_gpu = ?1
-               and status in ('preparing', 'downloading', 'loading_model', 'running', 'saving')
+               and status in ({active})
                and type not in ({})
              limit 1
             ",
-                non_gpu_job_types_sql()
+                non_gpu_job_types_sql(),
+                active = active_statuses_sql()
             ),
             params![gpu_id],
             |_row| Ok(()),
@@ -3577,6 +3601,34 @@ fn sort_json_value(value: &mut Value) {
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod active_statuses_sql_tests {
+    use super::{active_statuses_sql, ACTIVE_STATUSES};
+
+    /// Anti-drift guard for sc-4207 / F-CORE-3: the five `status in (...)` SQL
+    /// statements now interpolate [`active_statuses_sql`] instead of a
+    /// copy-pasted literal, so the generated list must stay exactly in sync with
+    /// [`ACTIVE_STATUSES`] — every status quoted, comma-separated, none dropped.
+    #[test]
+    fn sql_list_matches_active_statuses_const() {
+        let expected = ACTIVE_STATUSES
+            .iter()
+            .map(|status| format!("'{status}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(active_statuses_sql(), expected);
+
+        // Each status appears as a quoted token, guarding against a future const
+        // edit that silently fails to reach the SQL filters.
+        for status in ACTIVE_STATUSES {
+            assert!(
+                active_statuses_sql().contains(&format!("'{status}'")),
+                "active status {status:?} missing from SQL list"
+            );
+        }
     }
 }
 
