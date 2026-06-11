@@ -11,7 +11,7 @@
 //! per-user cache, deduplicated with every other HF tool. The desktop and Docker
 //! Compose already inject `HF_HOME`, so this only changes the env-less case.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The OS Hugging Face home, `~/.cache/huggingface` (the literal `~/.cache`, not
 /// the platform cache dir — matching huggingface_hub and `Path.home()/.cache/
@@ -54,10 +54,94 @@ pub fn ensure_default_huggingface_home() -> Option<PathBuf> {
     Some(chosen)
 }
 
+/// The Hugging Face hub cache directory: `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE`
+/// if set, else `<HF_HOME>/hub`, else `<data_dir>/cache/huggingface/hub`. Shared
+/// by the rust-api and rust-worker so cache-path resolution can't drift between
+/// them (sc-4279 / F-MLXW-15).
+pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var("HF_HUB_CACHE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var("HUGGINGFACE_HUB_CACHE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var("HF_HOME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path).join("hub");
+    }
+    data_dir.join("cache").join("huggingface").join("hub")
+}
+
+/// The `<X>` in Hugging Face hub's `models--<X>` cache directory name: every
+/// character outside `[A-Za-z0-9._-]` becomes `--`, then surrounding `-` are
+/// trimmed. `None` when nothing survives. Kept byte-identical to the Python
+/// worker (`hf_cache.safe_repo_dir_name`), the rust-api and the rust-worker —
+/// pinned by the `repo_slugs.json` cross-language contract (story 1667).
+pub fn safe_repo_dir_name(repo: &str) -> Option<String> {
+    let safe_repo = repo
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character.to_string()
+            } else {
+                "--".to_owned()
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if safe_repo.is_empty() {
+        None
+    } else {
+        Some(safe_repo)
+    }
+}
+
+/// The `models--<safe_repo>` cache directory for `repo` under the hub cache.
+/// `None` when the repo slug sanitizes to nothing.
+pub fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBuf> {
+    let safe_repo = safe_repo_dir_name(repo)?;
+    Some(huggingface_hub_cache_dir(data_dir).join(format!("models--{safe_repo}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// sc-4279 / F-MLXW-15: canonical home for the `repo_slugs.json`
+    /// cross-language contract now that `safe_repo_dir_name` lives in core (it was
+    /// duplicated, with a per-crate test, in both the rust-api and the rust-worker).
+    /// The slug must match what the Python worker and HF hub produce for every case.
+    #[test]
+    fn safe_repo_dir_name_matches_repo_slugs_contract() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust_migration_contracts/repo_slugs.json");
+        let contract: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture).expect("read repo_slugs.json"))
+                .expect("parse repo_slugs.json");
+        let cases = contract["cases"].as_array().expect("cases array");
+        assert!(!cases.is_empty(), "repo_slugs fixture has no cases");
+        for case in cases {
+            let repo = case["repo"].as_str().expect("repo string");
+            assert_eq!(
+                safe_repo_dir_name(repo).as_deref(),
+                case["safeRepoDirName"].as_str(),
+                "safe_repo_dir_name drift for {repo:?}"
+            );
+        }
+    }
 
     #[test]
     fn defaults_to_os_home_when_no_hf_env_is_set() {

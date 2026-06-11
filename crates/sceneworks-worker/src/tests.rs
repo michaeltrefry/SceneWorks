@@ -236,9 +236,10 @@ fn huggingface_cache_paths_follow_hub_layout() {
 
 #[test]
 fn repo_slug_functions_match_cross_language_contract() {
-    // story 1667: these repo->dir slug ops are duplicated in the Python
-    // worker and the Rust API; repo_slugs.json is the shared contract that
-    // pins them byte-for-byte across languages.
+    // story 1667: safe_download_dir is the worker-only repo->dir slug op pinned
+    // by the shared repo_slugs.json contract. (safe_repo_dir_name moved to
+    // sceneworks-core in sc-4279 and is contract-tested there, so it is no longer
+    // re-asserted here.)
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/rust_migration_contracts/repo_slugs.json");
     let contract: serde_json::Value =
@@ -252,11 +253,6 @@ fn repo_slug_functions_match_cross_language_contract() {
             super::safe_download_dir(repo),
             case["safeDownloadDir"].as_str().expect("safeDownloadDir"),
             "safe_download_dir drift for {repo:?}"
-        );
-        assert_eq!(
-            super::safe_repo_dir_name(repo).as_deref(),
-            case["safeRepoDirName"].as_str(),
-            "safe_repo_dir_name drift for {repo:?}"
         );
     }
 }

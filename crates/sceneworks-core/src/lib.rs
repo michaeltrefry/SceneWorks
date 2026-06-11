@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod hf_home;
 pub mod image_request;
 pub mod jobs_store;
+pub mod jsonc;
 pub mod lora_family;
 pub mod lora_url;
 pub mod project_store;

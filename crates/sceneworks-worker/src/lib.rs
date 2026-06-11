@@ -12,6 +12,8 @@ use sceneworks_core::contracts::{
     ProgressRequest, ProgressStage, WorkerCapability, WorkerHeartbeatRequest,
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
+use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
+use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
     read_safetensors_header, reconcile_detected_family, FamilyMismatch, SafetensorsHeaderError,
@@ -1045,61 +1047,6 @@ pub fn safe_download_dir(value: &str) -> String {
     }
 }
 
-fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
-    if let Some(path) = std::env::var("HF_HUB_CACHE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = std::env::var("HUGGINGFACE_HUB_CACHE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = std::env::var("HF_HOME")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(path).join("hub");
-    }
-    data_dir.join("cache").join("huggingface").join("hub")
-}
-
-/// The `<X>` in Hugging Face hub's `models--<X>` cache directory name: every
-/// character outside `[A-Za-z0-9._-]` becomes `--`, then surrounding `-` are
-/// trimmed. `None` when nothing survives. Kept byte-identical to the Python
-/// worker (`hf_cache.safe_repo_dir_name`) and the Rust API — pinned by the
-/// `repo_slugs.json` cross-language contract (story 1667).
-fn safe_repo_dir_name(repo: &str) -> Option<String> {
-    let safe_repo = repo
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-                character.to_string()
-            } else {
-                "--".to_owned()
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_owned();
-    if safe_repo.is_empty() {
-        None
-    } else {
-        Some(safe_repo)
-    }
-}
-
-fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBuf> {
-    let safe_repo = safe_repo_dir_name(repo)?;
-    Some(huggingface_hub_cache_dir(data_dir).join(format!("models--{safe_repo}")))
-}
-
 async fn directory_size(path: &Path) -> u64 {
     let mut total = 0_u64;
     let mut stack = vec![path.to_path_buf()];
@@ -1420,88 +1367,50 @@ async fn read_json_value(path: &Path) -> WorkerResult<Value> {
     Ok(serde_json::from_slice(&tokio::fs::read(path).await?)?)
 }
 
-fn strip_jsonc_comments(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    let mut in_string = false;
-    let mut escaped = false;
-    while let Some(character) = chars.next() {
-        if in_string {
-            output.push(character);
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        if character == '"' {
-            in_string = true;
-            output.push(character);
-            continue;
-        }
-        if character == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\r' || next == '\n' {
-                    output.push(next);
-                    break;
-                }
-            }
-            continue;
-        }
-        if character == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            let mut previous = '\0';
-            for next in chars.by_ref() {
-                if previous == '*' && next == '/' {
-                    break;
-                }
-                previous = next;
-            }
-            continue;
-        }
-        output.push(character);
-    }
-    output
-}
-
-async fn upsert_lora_manifest_entry(
+/// Upsert `entry` (keyed by its `id`) into the `collection_key` array of a JSONC
+/// manifest at `path`, creating the manifest when absent. An existing entry with
+/// the same id is merged (incoming fields win) but keeps its original `createdAt`.
+/// Shared by the LoRA (`"loras"`) and model (`"models"`) manifests, which differed
+/// only by this array key (sc-4279 / F-MLXW-15).
+async fn upsert_manifest_entry(
     path: &Path,
+    collection_key: &str,
     entry: serde_json::Map<String, Value>,
 ) -> WorkerResult<()> {
     let mut manifest = match tokio::fs::read_to_string(path).await {
         Ok(payload) => serde_json::from_str(&strip_jsonc_comments(&payload))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            json!({ "schemaVersion": 1, "loras": [] })
+            let mut object = serde_json::Map::new();
+            object.insert("schemaVersion".to_owned(), json!(1));
+            object.insert(collection_key.to_owned(), Value::Array(Vec::new()));
+            Value::Object(object)
         }
         Err(error) => return Err(error.into()),
     };
-    let lora_id = entry
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkerError::InvalidPayload("LoRA manifest entry requires id".to_owned()))?;
-    let loras = manifest
+    let entry_id = entry.get("id").and_then(Value::as_str).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("{collection_key} manifest entry requires id"))
+    })?;
+    let collection = manifest
         .as_object_mut()
-        .ok_or_else(|| WorkerError::InvalidPayload("LoRA manifest must be an object".to_owned()))?
-        .entry("loras")
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("{collection_key} manifest must be an object"))
+        })?
+        .entry(collection_key.to_owned())
         .or_insert_with(|| Value::Array(Vec::new()));
-    let loras = loras.as_array_mut().ok_or_else(|| {
-        WorkerError::InvalidPayload("LoRA manifest loras must be an array".to_owned())
+    let collection = collection.as_array_mut().ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("{collection_key} manifest array must be an array"))
     })?;
     let mut found = false;
-    for item in loras.iter_mut() {
-        if item.get("id").and_then(Value::as_str) != Some(lora_id) {
+    for item in collection.iter_mut() {
+        if item.get("id").and_then(Value::as_str) != Some(entry_id) {
             continue;
         }
         found = true;
         let created_at = item.get("createdAt").cloned();
         let Some(object) = item.as_object_mut() else {
-            return Err(WorkerError::InvalidPayload(
-                "LoRA manifest entry must be an object".to_owned(),
-            ));
+            return Err(WorkerError::InvalidPayload(format!(
+                "{collection_key} manifest entry must be an object"
+            )));
         };
         for (key, value) in entry.clone() {
             object.insert(key, value);
@@ -1511,54 +1420,7 @@ async fn upsert_lora_manifest_entry(
         }
     }
     if !found {
-        loras.push(Value::Object(entry));
-    }
-    write_json_value(path, &manifest).await
-}
-
-async fn upsert_model_manifest_entry(
-    path: &Path,
-    entry: serde_json::Map<String, Value>,
-) -> WorkerResult<()> {
-    let mut manifest = match tokio::fs::read_to_string(path).await {
-        Ok(payload) => serde_json::from_str(&strip_jsonc_comments(&payload))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            json!({ "schemaVersion": 1, "models": [] })
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let model_id = entry.get("id").and_then(Value::as_str).ok_or_else(|| {
-        WorkerError::InvalidPayload("Model manifest entry requires id".to_owned())
-    })?;
-    let models = manifest
-        .as_object_mut()
-        .ok_or_else(|| WorkerError::InvalidPayload("Model manifest must be an object".to_owned()))?
-        .entry("models")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    let models = models.as_array_mut().ok_or_else(|| {
-        WorkerError::InvalidPayload("Model manifest models must be an array".to_owned())
-    })?;
-    let mut found = false;
-    for item in models.iter_mut() {
-        if item.get("id").and_then(Value::as_str) != Some(model_id) {
-            continue;
-        }
-        found = true;
-        let created_at = item.get("createdAt").cloned();
-        let Some(object) = item.as_object_mut() else {
-            return Err(WorkerError::InvalidPayload(
-                "Model manifest entry must be an object".to_owned(),
-            ));
-        };
-        for (key, value) in entry.clone() {
-            object.insert(key, value);
-        }
-        if let Some(created_at) = created_at {
-            object.insert("createdAt".to_owned(), created_at);
-        }
-    }
-    if !found {
-        models.push(Value::Object(entry));
+        collection.push(Value::Object(entry));
     }
     write_json_value(path, &manifest).await
 }

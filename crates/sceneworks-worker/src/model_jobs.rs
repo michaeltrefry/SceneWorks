@@ -1063,7 +1063,7 @@ pub(crate) async fn run_lora_import_job(
                 .or_insert(Value::String(family));
         }
         let manifest_path = lora_manifest_target(settings, &job.payload)?;
-        upsert_lora_manifest_entry(&manifest_path, manifest_entry).await?;
+        upsert_manifest_entry(&manifest_path, "loras", manifest_entry).await?;
     }
 
     let mut result = JsonObject::new();
@@ -1368,7 +1368,7 @@ pub(crate) async fn run_model_import_job(
             );
         }
         let manifest_path = model_manifest_target(settings, &job.payload)?;
-        upsert_model_manifest_entry(&manifest_path, manifest_entry).await?;
+        upsert_manifest_entry(&manifest_path, "models", manifest_entry).await?;
     }
 
     let mut result = JsonObject::new();

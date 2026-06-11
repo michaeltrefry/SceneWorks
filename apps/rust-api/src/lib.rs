@@ -25,6 +25,7 @@ use sceneworks_core::contracts::{
     RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
     WorkerSnapshot, WorkerStatus,
 };
+use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
 use sceneworks_core::jobs_store::{
     mac_capabilities, mac_rust_supported, model_mac_support, CreateJob, DuplicateJob, JobsStore,
     JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision,
@@ -1534,61 +1535,6 @@ fn slugify_lora_id(value: &str) -> String {
 
 fn now_rfc3339() -> String {
     format_unix_seconds(now_unix_seconds())
-}
-
-fn huggingface_hub_cache_dir(data_dir: &FsPath) -> PathBuf {
-    if let Some(path) = std::env::var("HF_HUB_CACHE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = std::env::var("HUGGINGFACE_HUB_CACHE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = std::env::var("HF_HOME")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(path).join("hub");
-    }
-    data_dir.join("cache").join("huggingface").join("hub")
-}
-
-/// The `<X>` in Hugging Face hub's `models--<X>` cache directory name: every
-/// character outside `[A-Za-z0-9._-]` becomes `--`, then surrounding `-` are
-/// trimmed. `None` when nothing survives. Kept byte-identical to the Python
-/// worker (`hf_cache.safe_repo_dir_name`) and the Rust CPU worker — pinned by
-/// the `repo_slugs.json` cross-language contract (story 1667).
-fn safe_repo_dir_name(repo: &str) -> Option<String> {
-    let safe_repo = repo
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-                character.to_string()
-            } else {
-                "--".to_owned()
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_owned();
-    if safe_repo.is_empty() {
-        None
-    } else {
-        Some(safe_repo)
-    }
-}
-
-fn huggingface_repo_cache_path(data_dir: &FsPath, repo: &str) -> Option<PathBuf> {
-    let safe_repo = safe_repo_dir_name(repo)?;
-    Some(huggingface_hub_cache_dir(data_dir).join(format!("models--{safe_repo}")))
 }
 
 fn huggingface_repo_cache_exists(path: &FsPath) -> bool {

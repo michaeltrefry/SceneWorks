@@ -5,11 +5,10 @@ use super::workers::person_readiness_from_workers;
 use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
     inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
-    safe_download_dir, safe_repo_dir_name, serialize_job_lora, should_warn_open_bind,
-    strip_jsonc_comments, sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before,
-    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
-    DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
-    TEST_MAX_LORA_UPLOAD_BYTES,
+    safe_download_dir, serialize_job_lora, should_warn_open_bind, strip_jsonc_comments,
+    sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before, Settings, WorkerCapability,
+    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE,
+    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -178,9 +177,10 @@ fn model_convert_request_parses_optional_mlx_quant_fields() {
 
 #[test]
 fn repo_slug_functions_match_cross_language_contract() {
-    // story 1667: these repo->dir slug ops are duplicated in the Python
-    // worker and the Rust CPU worker; repo_slugs.json is the shared contract
-    // pinning them byte-for-byte across languages.
+    // story 1667: safe_download_dir is the api-only repo->dir slug op pinned by
+    // the shared repo_slugs.json contract. (safe_repo_dir_name moved to
+    // sceneworks-core in sc-4279 and is contract-tested there, so it is no longer
+    // re-asserted here.)
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/rust_migration_contracts/repo_slugs.json");
     let contract: Value =
@@ -194,11 +194,6 @@ fn repo_slug_functions_match_cross_language_contract() {
             safe_download_dir(repo),
             case["safeDownloadDir"].as_str().expect("safeDownloadDir"),
             "safe_download_dir drift for {repo:?}"
-        );
-        assert_eq!(
-            safe_repo_dir_name(repo).as_deref(),
-            case["safeRepoDirName"].as_str(),
-            "safe_repo_dir_name drift for {repo:?}"
         );
     }
 }
