@@ -52,7 +52,7 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 
 | Model id | Family | Mac disposition | Porting epic |
 |---|---|---|---|
-| `kolors` | kolors (SDXL UNet + ChatGLM3) | 🔵 Port → drop-on-Mac until then | **epic 3532** |
+| `kolors` | kolors (SDXL UNet + ChatGLM3) | 🟡 Base **T2I** ported (sc-3875); img2img / ControlNet-pose / IP-Adapter-Plus stay torch (per-feature gaps) until later epic-3090 slices | epic 3090 |
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
 | `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🔵 Port → drop-on-Mac until then | epic 3164 |
 

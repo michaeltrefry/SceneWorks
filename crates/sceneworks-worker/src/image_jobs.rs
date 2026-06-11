@@ -32,6 +32,8 @@ use mlx_gen_flux as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_flux2 as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_kolors as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_qwen_image as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_sdxl as _;
@@ -268,6 +270,23 @@ const MLX_MODELS: &[MlxModel] = &[
         default_guidance: 7.0,
         supports_negative_prompt: true,
         adapter_label: "mlx_sdxl",
+    },
+    // Kolors (epic 3090, sc-3875) — Kwai-Kolors SDXL-architecture U-Net + ChatGLM3-6B text
+    // encoder + SDXL VAE, EulerDiscrete sampler. Real CFG (negative prompt + guidance 5.0).
+    // Python `MODEL_TARGETS` / `KolorsDiffusersAdapter` parity: 25 steps, guidance 5.0. The engine
+    // `kolors` model (sc-3874) supports the full surface — img2img / ControlNet-pose /
+    // IP-Adapter-Plus / Q8/Q4 / LoRA/LoKr — but this base row drives plain T2I (+ quant + LoRA)
+    // through `generate_mlx_stream`; the advanced conditioning modes are gated to torch by
+    // `kolors_mlx_eligible` until their dedicated streams land (subsequent epic-3090 slices).
+    MlxModel {
+        sceneworks_id: "kolors",
+        engine_id: "kolors",
+        default_repo: "Kwai-Kolors/Kolors-diffusers",
+        default_steps: 25,
+        supports_guidance: true,
+        default_guidance: 5.0,
+        supports_negative_prompt: true,
+        adapter_label: "mlx_kolors",
     },
     // Chroma (epic 3531, sc-3843) — FLUX.1-schnell-derived DiT, T5-only conditioning. The engine
     // is a TRUE-CFG family: its descriptor advertises `supports_guidance=false` +
@@ -6307,9 +6326,14 @@ mod tests {
             "mlx_flux"
         );
         assert_eq!(adapter_id(&request(json!({ "model": "sdxl" }))), "mlx_sdxl");
-        // A torch-only model with no mlx-gen engine records the procedural stub adapter.
+        // Kolors base T2I is MLX-routed now (sc-3875) → records the mlx_kolors adapter label.
         assert_eq!(
             adapter_id(&request(json!({ "model": "kolors" }))),
+            "mlx_kolors"
+        );
+        // A torch-only model with no mlx-gen engine records the procedural stub adapter.
+        assert_eq!(
+            adapter_id(&request(json!({ "model": "pulid_flux_dev" }))),
             "procedural_preview"
         );
     }
@@ -6336,6 +6360,7 @@ mod tests {
             "chroma1_flash",
             "sensenova_u1_8b",
             "sensenova_u1_8b_fast",
+            "kolors",
         ] {
             assert!(ids.contains(&id), "registry missing {id}");
         }

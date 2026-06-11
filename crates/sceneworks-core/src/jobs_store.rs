@@ -2281,7 +2281,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 /// Keep in sync with `docs/mac-rust-gaps.md` §1.
 fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
     match model {
-        "kolors" => Some("epic 3532"),
+        // Kolors base T2I was ported to MLX (epic 3090 / sc-3875) — it is now in
+        // `MLX_ROUTED_MODELS`, so it never reaches this whole-model torch-only classifier. Its
+        // not-yet-wired advanced modes (img2img / IP-Adapter / pose) are named per-feature in
+        // `classify_image_gap`, not as a whole-model gap.
         // InstantID (instantid_realvisxl) was ported to MLX (epic 3109 engine / sc-3345) — it is
         // now in `MLX_ROUTED_MODELS`, so it never reaches this torch-only classifier. Its
         // remaining gaps (pose-library mode, face-restore) are named per-feature in
@@ -2369,6 +2372,33 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             "InstantID runs on MLX for character_image with a referenceAssetId (single identity, the 11-view angle set, pose-library mode, and face-restore); a non-character / reference-less job has no InstantID path.",
             None,
         ),
+        // Kolors (sc-3875): plain T2I runs on MLX; the advanced conditioning modes — img2img
+        // (`edit_image`), the IP-Adapter-Plus reference, and the strict-pose ControlNet tier —
+        // are not yet wired in the Rust worker and stay on the torch `KolorsDiffusersAdapter`
+        // (dropped on Mac under the gating flag) until their epic-3090 cutover slices land.
+        "kolors" => {
+            let has_poses = payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .and_then(|advanced| advanced.get("poses"))
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty());
+            if has_poses {
+                UnsupportedReason::new(
+                    Some(model),
+                    "strict pose (ControlNet)",
+                    "Kolors ControlNet-pose is not yet wired in the Rust worker; it stays on the Python torch path until its cutover slice lands.",
+                    Some("epic 3090"),
+                )
+            } else {
+                UnsupportedReason::new(
+                    Some(model),
+                    "img2img / reference (IP-Adapter)",
+                    "Kolors img2img (edit_image) and the IP-Adapter-Plus reference are not yet wired in the Rust worker; they stay on the Python torch path until their cutover slices land.",
+                    Some("epic 3090"),
+                )
+            }
+        }
         // flux2 / sdxl / realvisxl only fall out via LyCORIS (handled above) — defensive.
         _ => UnsupportedReason::new(
             Some(model),
@@ -2800,6 +2830,9 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "chroma1_flash",
     "sensenova_u1_8b",
     "sensenova_u1_8b_fast",
+    // Kolors (sc-3875): plain T2I is wired to the Rust `kolors` engine model; the advanced
+    // conditioning modes stay torch via `kolors_mlx_eligible` until later epic-3090 slices.
+    "kolors",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -2855,6 +2888,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
+        "kolors" => kolors_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -3075,6 +3109,37 @@ fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
         // Plain T2I (text_to_image / no mode) — eligible with or without an inert reference.
         _ => true,
     }
+}
+
+/// Kolors (sc-3875, epic 3090) MLX-routing conditions. The engine `kolors` model (an SDXL-family
+/// U-Net under a ChatGLM3-6B encoder) supports the full surface — img2img / ControlNet-pose /
+/// IP-Adapter-Plus / Q8/Q4 / LoRA/LoKr — but the SceneWorks worker has wired only the **plain T2I**
+/// base path so far (the `kolors` row in `MlxModel`s + `generate_mlx_stream`). So this gate admits
+/// T2I only; the advanced conditioning modes (`edit_image` img2img, a reference IP-Adapter image,
+/// the strict-pose `advanced.poses` tier) stay on the torch `KolorsDiffusersAdapter` until their
+/// dedicated worker streams land (subsequent epic-3090 cutover slices — see [`classify_image_gap`]).
+/// Third-party LyCORIS / peft LoKr apply on the SDXL-family loader (epic 3641), so a LoRA never
+/// forces torch.
+fn kolors_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_source = payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_poses || has_reference || has_source {
+        return false;
+    }
+    // Only plain text-to-image (no edit_image conditioning) routes to MLX in this slice.
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,

@@ -1844,7 +1844,7 @@ fn mlx_required_still_lets_mps_claim_a_non_eligible_model() {
     register_gpu_worker(&store, "worker-mps", "mps", image_caps());
     let job = store
         .create_job(image_job_with(
-            json!({ "model": "kolors", "prompt": "p" }),
+            json!({ "model": "pulid_flux_dev", "prompt": "p" }),
             "auto",
         ))
         .expect("job creates");
@@ -1936,8 +1936,10 @@ fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
     // Each torch-only model points at its dedicated MLX-porting epic (epic 3482 policy),
     // not the generic done feasibility epic.
     // (z_image_edit was ported to MLX, epic 3529 / sc-3923 — no longer torch-only.)
+    // (Kolors base T2I was ported to MLX, epic 3090 / sc-3875 — no longer wholly torch-only; its
+    // not-yet-wired advanced modes are per-feature gaps, covered by `kolors_*` tests below.)
     let cases = [
-        ("kolors", "epic 3532"),
+        ("pulid_flux_dev", "epic 3069"),
         // instantid_realvisxl is NO LONGER wholly torch-only (sc-3345: identity + angle set run on
         // MLX); its remaining per-feature gaps are covered by
         // `mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped`.
@@ -2210,15 +2212,22 @@ fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
 fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
     // sc-3486: the picker-gating view of the same routing predicates. Torch-only image
     // models are unsupported (hidden/disabled on Mac) and carry their port epic.
-    let kolors = model_mac_support("kolors", "image");
-    assert!(!kolors.supported);
+    let torch_only = model_mac_support("pulid_flux_dev", "image");
+    assert!(!torch_only.supported);
     assert_eq!(
-        kolors
+        torch_only
             .reason
             .as_ref()
             .and_then(|r| r.suggested_epic.as_deref()),
-        Some("epic 3532")
+        Some("epic 3069")
     );
+    // Kolors base T2I is MLX-routed now (sc-3875), so it stays in the picker as a supported model
+    // whose advanced conditioning features are individually gated off.
+    let kolors = model_mac_support("kolors", "image");
+    assert!(kolors.supported);
+    assert!(!kolors.features.edit);
+    assert!(!kolors.features.pose);
+    assert!(!kolors.features.reference);
     // An MLX-routed base family stays in the picker.
     let z_image = model_mac_support("z_image_turbo", "image");
     assert!(z_image.supported);
@@ -2371,7 +2380,7 @@ fn fail_unsupported_mlx_jobs_enforce_fails_only_unsupported() {
     let unsupported = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "kolors", "prompt": "p" }),
+        json!({ "model": "pulid_flux_dev", "prompt": "p" }),
     );
     let eligible = job_of(
         &store,
@@ -2404,7 +2413,7 @@ fn fail_unsupported_mlx_jobs_noop_when_warn_or_off() {
     let job = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "kolors", "prompt": "p" }),
+        json!({ "model": "pulid_flux_dev", "prompt": "p" }),
     );
     // Warn-only (enforce=false): logged at claim time, never failed by the sweep.
     assert!(store
@@ -2616,8 +2625,9 @@ fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
     assert_eq!(claimed_mlx.id, mlx_job.id);
     assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
 
-    // A torch-only edit model (kolors) is the MPS job — it stays on the torch worker, so it
-    // exercises the shared-GPU exclusion without being soft-deferred to the idle mlx worker.
+    // A kolors edit_image job is the MPS job: kolors base T2I is MLX-routed (sc-3875) but its
+    // img2img/edit path is not yet wired to MLX (`kolors_mlx_eligible` rejects edit_image), so it
+    // stays on the torch worker, exercising the shared-GPU exclusion without being soft-deferred.
     let mps_job = store
         .create_job(image_edit_job_with(
             json!({
@@ -2653,7 +2663,8 @@ fn active_mps_image_edit_blocks_mlx_image_edit_claim() {
     register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // A torch-only edit model (kolors) is the MPS job (it isn't soft-deferred to the mlx worker).
+    // A kolors edit_image job is the MPS job (kolors img2img isn't wired to MLX yet, so it isn't
+    // soft-deferred to the mlx worker).
     let mps_job = store
         .create_job(image_edit_job_with(
             json!({
@@ -2733,8 +2744,9 @@ fn torch_only_image_edit_model_stays_on_torch() {
     let store = store("mlx-routing-image-edit-torch-only");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // kolors is NOT in MLX_ROUTED_MODELS, so its edit stays on the Python torch path. The
-    // mlx worker must refuse it. (z_image_edit was ported to MLX — epic 3529 / sc-3923 — so
+    // kolors base T2I is MLX-routed (sc-3875), but its edit/img2img path is not yet wired to MLX
+    // (`kolors_mlx_eligible` rejects edit_image), so a kolors edit stays on the Python torch path
+    // and the mlx worker must refuse it. (z_image_edit WAS ported to MLX — epic 3529 / sc-3923 — so
     // it is no longer a valid torch-only example; see `z_image_edit_routes_to_mlx`.)
     let job = store
         .create_job(image_edit_job_with(
@@ -3523,6 +3535,31 @@ fn flux_schnell_txt2img_routes_to_mlx_worker() {
 }
 
 #[test]
+fn kolors_txt2img_routes_to_mlx_worker() {
+    let store = store("mlx-routing-kolors");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    // Kolors plain T2I (sc-3875) is MLX-eligible → defers to the idle mlx worker.
+    let job = store
+        .create_job(image_job_with(
+            json!({ "model": "kolors", "prompt": "a red fox" }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims kolors txt2img");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
 fn flux_reference_job_routes_to_mlx() {
     let store = store("mlx-routing-flux-reference");
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
@@ -3885,12 +3922,12 @@ fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     register_gpu_worker(&store, "worker-torch", "mps", image_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // A torch-only image model with no mlx-gen engine (e.g. kolors — Kolors/PuLID have no MLX
-    // crate; InstantID is ported via sc-3345 and SenseNova-U1 via sc-3900) stays on the Python
-    // path: the torch worker claims it without deferral, and the mlx worker would refuse it.
+    // A torch-only image model with no mlx-gen engine (pulid_flux_dev — PuLID has no MLX crate;
+    // Kolors base T2I is ported via sc-3875, InstantID via sc-3345, SenseNova-U1 via sc-3900) stays
+    // on the Python path: the torch worker claims it without deferral, and the mlx worker refuses it.
     let job = store
         .create_job(image_job_with(
-            json!({ "model": "kolors", "prompt": "p" }),
+            json!({ "model": "pulid_flux_dev", "prompt": "p" }),
             "auto",
         ))
         .expect("job creates");
