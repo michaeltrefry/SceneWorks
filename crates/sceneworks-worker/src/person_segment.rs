@@ -21,6 +21,7 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use crate::downloads::ensure_cached_file;
 use mlx_gen::weights::Weights;
 use mlx_gen_sam2::{Sam2ModelSize, Sam2VideoPredictor};
 
@@ -79,20 +80,12 @@ pub(crate) async fn ensure_segmenter_weights(
     if let Some(path) = resolve_segmenter_weights(settings) {
         return Ok(path);
     }
-    let cache = settings.data_dir.join("cache").join("person-segment");
-    tokio::fs::create_dir_all(&cache).await?;
-    let target = cache.join(SEG_FILE);
-    let bytes = http_client
-        .get(SEG_URL)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    let tmp = target.with_extension("safetensors.tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, &target).await?;
-    Ok(target)
+    let target = settings
+        .data_dir
+        .join("cache")
+        .join("person-segment")
+        .join(SEG_FILE);
+    ensure_cached_file(http_client, SEG_URL, &target).await
 }
 
 /// Scale a normalized `(x, y, width, height)` box to a pixel-space `[x1, y1, x2, y2]`

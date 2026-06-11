@@ -1,5 +1,48 @@
 use super::*;
 
+/// GET `url` into memory via the shared HTTP client, with a clear error on a
+/// non-success status. The common fetch behind the worker's download-on-first-use
+/// weight fetchers (sc-4283 / F-MLXW-22) — one place to later add streaming /
+/// size-limits / integrity verification (F-MLXW-21) instead of the former four
+/// hand-rolled copies.
+#[cfg(target_os = "macos")]
+pub(crate) async fn fetch_bytes(http_client: &reqwest::Client, url: &str) -> WorkerResult<Vec<u8>> {
+    Ok(http_client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("weight download failed ({url}): {error}"))
+        })?
+        .bytes()
+        .await?
+        .to_vec())
+}
+
+/// Download `url` to `target` on first use: return it if already present, else GET
+/// into a sibling `.download.tmp` then atomically rename into place, so a partial
+/// download is never mistaken for a complete file. Creates `target`'s parent dir.
+/// Replaces the four bespoke GET→tmp→rename copies (sc-4283 / F-MLXW-22).
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_cached_file(
+    http_client: &reqwest::Client,
+    url: &str,
+    target: &Path,
+) -> WorkerResult<PathBuf> {
+    if target.exists() {
+        return Ok(target.to_path_buf());
+    }
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let bytes = fetch_bytes(http_client, url).await?;
+    let tmp = target.with_extension("download.tmp");
+    tokio::fs::write(&tmp, &bytes).await?;
+    tokio::fs::rename(&tmp, target).await?;
+    Ok(target.to_path_buf())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SnapshotFile {
     pub(crate) path: String,
@@ -860,4 +903,37 @@ pub fn download_progress_payload(
         None,
         eta_seconds,
     )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod ensure_cached_file_tests {
+    use super::ensure_cached_file;
+
+    /// sc-4283 / F-MLXW-22: when the target already exists, `ensure_cached_file`
+    /// returns it without any network access (the cache-hit short-circuit shared
+    /// by all the download-on-first-use weight fetchers). A bogus URL proves no
+    /// request is made.
+    #[tokio::test]
+    async fn returns_existing_target_without_downloading() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("weights").join("model.safetensors");
+        tokio::fs::create_dir_all(target.parent().unwrap())
+            .await
+            .expect("parent dir");
+        tokio::fs::write(&target, b"already here")
+            .await
+            .expect("seed target");
+
+        let client = reqwest::Client::new();
+        let resolved =
+            ensure_cached_file(&client, "http://invalid.invalid/should-not-fetch", &target)
+                .await
+                .expect("cache hit returns without downloading");
+        assert_eq!(resolved, target);
+        // Content untouched (no overwrite).
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read"),
+            b"already here"
+        );
+    }
 }

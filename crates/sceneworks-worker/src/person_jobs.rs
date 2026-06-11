@@ -34,6 +34,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::downloads::ensure_cached_file;
 use image::RgbImage;
 use serde_json::{json, Value};
 
@@ -764,20 +765,12 @@ pub(crate) async fn ensure_detector_weights(
     if let Some(path) = resolve_detector_weights(settings) {
         return Ok(path);
     }
-    let cache = settings.data_dir.join("cache").join("person-detect");
-    tokio::fs::create_dir_all(&cache).await?;
-    let target = cache.join(DET_FILE);
-    let bytes = http_client
-        .get(DET_URL)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    let tmp = target.with_extension("safetensors.tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, &target).await?;
-    Ok(target)
+    let target = settings
+        .data_dir
+        .join("cache")
+        .join("person-detect")
+        .join(DET_FILE);
+    ensure_cached_file(http_client, DET_URL, &target).await
 }
 
 #[cfg(test)]

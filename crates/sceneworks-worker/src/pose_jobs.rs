@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::downloads::fetch_bytes;
 use image::RgbImage;
 use ort::execution_providers::CoreMLExecutionProvider;
 use ort::session::Session;
@@ -577,13 +578,7 @@ async fn ensure_one(
         }
     }
     tokio::fs::create_dir_all(cache).await?;
-    let bytes = http_client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let bytes = fetch_bytes(http_client, url).await?;
     // The openmmlab bundle is a .zip containing a single .onnx; extract it.
     let target_clone = target.clone();
     let file_owned = file.to_owned();

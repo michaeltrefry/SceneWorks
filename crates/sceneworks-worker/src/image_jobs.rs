@@ -4840,27 +4840,7 @@ async fn ensure_instantid_file(
     name: &str,
     url: &str,
 ) -> WorkerResult<PathBuf> {
-    let target = dir.join(name);
-    if target.exists() {
-        return Ok(target);
-    }
-    tokio::fs::create_dir_all(dir).await?;
-    let bytes = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "InstantID weight download failed ({url}): {error}"
-            ))
-        })?
-        .bytes()
-        .await?;
-    let tmp = target.with_extension("download.tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, &target).await?;
-    Ok(target)
+    ensure_cached_file(client, url, &dir.join(name)).await
 }
 
 /// Resolve only the SCRFD detector weights (`scrfd_10g.safetensors`) from the same converted
