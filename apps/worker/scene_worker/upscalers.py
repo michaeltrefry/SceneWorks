@@ -191,10 +191,19 @@ def _load_state_dict(torch: Any, weights_path: Path) -> dict[str, Any]:
         safetensors_torch = importlib.import_module("safetensors.torch")
         checkpoint = safetensors_torch.load_file(str(weights_path), device="cpu")
     else:
+        # weights_only=True refuses to execute pickle while loading these .pth
+        # weights, which come from third-party HF repos or a user-supplied
+        # advanced.upscaleModelPath/env path — an unrestricted torch.load there is
+        # arbitrary-code-execution. torch >= 2.8 (our pin) always supports the flag,
+        # so never silently fall back to an unsafe load on an ancient torch: fail
+        # loudly instead (sc-4230 / F-WORKER-6).
         try:
             checkpoint = torch.load(str(weights_path), map_location="cpu", weights_only=True)
-        except TypeError:
-            checkpoint = torch.load(str(weights_path), map_location="cpu")
+        except TypeError as error:
+            raise RuntimeError(
+                "Installed torch is too old to load upscaler weights safely "
+                "(torch.load lacks weights_only); upgrade to torch >= 2.8."
+            ) from error
 
     state = checkpoint
     if isinstance(checkpoint, dict):
