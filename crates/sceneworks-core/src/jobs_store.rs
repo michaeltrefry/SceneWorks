@@ -2119,6 +2119,11 @@ pub struct MacFeatureSupport {
 }
 
 impl MacFeatureSupport {
+    // Declares a Mac feature gap with the reason + suggested port epic. Currently no
+    // feature is gated (poseFromPhoto was the last, ported in sc-3487/flipped in
+    // sc-4206) — kept as the gating vocabulary for the next torch-only surface that
+    // appears before its Rust port lands, so a gap is declared the same way every time.
+    #[allow(dead_code)]
     fn unsupported(feature: &str, detail: &str, suggested_epic: &str) -> Self {
         Self {
             supported: false,
@@ -2177,12 +2182,16 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
+        // DWPose pose detection is ported to the Rust worker (sc-3487): RTMW whole-body
+        // via `ort`/CoreML on the macOS MLX worker, so the Pose Library "create from
+        // photo" flow runs Python-free. This must agree with the PoseDetect arm of
+        // `mac_rust_supported` — what the UI hides can never drift from what routing
+        // refuses (sc-4206 / F-CORE-2).
         "poseFromPhoto".to_owned(),
-        MacFeatureSupport::unsupported(
-            "DWPose pose detection",
-            "photo→skeleton pose detection runs on Python onnxruntime (DWPose).",
-            "sc-3487",
-        ),
+        MacFeatureSupport {
+            supported: true,
+            reason: None,
+        },
     );
     features.insert(
         // Person detection + tracking are ported to the Rust worker (sc-3488 /

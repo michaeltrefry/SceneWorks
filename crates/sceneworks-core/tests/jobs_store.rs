@@ -1858,6 +1858,31 @@ fn mac_rust_supported_accepts_eligible_and_mlx_agnostic_jobs() {
 }
 
 #[test]
+fn mac_capabilities_features_agree_with_the_rust_oracle() {
+    // sc-4206 (F-CORE-2): a feature the Mac UI gates must agree with what
+    // mac_rust_supported refuses for the corresponding job type — "what the UI hides
+    // can never drift from what routing refuses". poseFromPhoto/PoseDetect was the
+    // drift this guards (DWPose is ported to Rust, sc-3487).
+    let store = store("capabilities-oracle-agreement");
+    let features = mac_capabilities("darwin", true).features;
+    for (feature, job_type) in [
+        ("poseFromPhoto", JobType::PoseDetect),
+        ("personDetect", JobType::PersonDetect),
+    ] {
+        let supported = features
+            .get(feature)
+            .unwrap_or_else(|| panic!("{feature} capability is present"))
+            .supported;
+        let job = job_of(&store, job_type, json!({}));
+        assert_eq!(
+            supported,
+            mac_rust_supported(&job).is_ok(),
+            "{feature} capability must agree with its mac_rust_supported job-type arm"
+        );
+    }
+}
+
+#[test]
 fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
     let store = store("oracle-torch-model");
     // Each torch-only model points at its dedicated MLX-porting epic (epic 3482 policy),
@@ -2246,7 +2271,9 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Real-ESRGAN upscaling is ported (sc-3489) → supported, no reason/epic.
     assert_eq!(epic("imageUpscale"), None);
     assert!(mac.features["imageUpscale"].supported);
-    assert_eq!(epic("poseFromPhoto").as_deref(), Some("sc-3487"));
+    // DWPose pose detection is ported (sc-3487) → supported, no reason/epic (sc-4206).
+    assert_eq!(epic("poseFromPhoto"), None);
+    assert!(mac.features["poseFromPhoto"].supported);
     // Person detect/track is ported (sc-3488 / sc-3633/3634/3709) → supported, no epic.
     assert_eq!(epic("personDetect"), None);
     assert!(mac.features["personDetect"].supported);
@@ -2257,15 +2284,16 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // via each video model's macSupport.features.videoModes instead.
     assert!(!mac.features.contains_key("advancedVideoModes"));
     assert!(mac.features["datasetCaptioning"].supported);
-    // datasetCaptioning + imageUpscale + personDetect are the ported (supported) infra
-    // features; the rest stay gated until their port lands.
+    // datasetCaptioning + imageUpscale + personDetect + poseFromPhoto are the ported
+    // (supported) infra features; the rest stay gated until their port lands.
+    // poseFromPhoto joined the supported set in sc-4206 (DWPose ported, sc-3487).
     assert!(mac
         .features
         .iter()
         .filter(|(key, _)| {
             !matches!(
                 key.as_str(),
-                "datasetCaptioning" | "imageUpscale" | "personDetect"
+                "datasetCaptioning" | "imageUpscale" | "personDetect" | "poseFromPhoto"
             )
         })
         .all(|(_, f)| !f.supported));

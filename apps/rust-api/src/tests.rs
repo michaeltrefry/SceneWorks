@@ -2778,10 +2778,9 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
     // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489) → supported, no reason.
     assert_eq!(caps["features"]["imageUpscale"]["supported"], true);
     assert_eq!(caps["features"]["imageUpscale"]["reason"], Value::Null);
-    assert_eq!(
-        caps["features"]["poseFromPhoto"]["reason"]["suggestedEpic"],
-        "sc-3487"
-    );
+    // DWPose pose detection is ported to the Rust worker (sc-3487) → supported (sc-4206).
+    assert_eq!(caps["features"]["poseFromPhoto"]["supported"], true);
+    assert_eq!(caps["features"]["poseFromPhoto"]["reason"], Value::Null);
     assert!(caps["training"]["supportedKernels"]
         .as_array()
         .unwrap()
