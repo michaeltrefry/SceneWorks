@@ -32,8 +32,9 @@ use super::media_jobs::{
 };
 use super::model_jobs::{
     check_downloaded_model_family, downloaded_model_detection_io_error_is_inconclusive,
-    finalize_converted_dir, hf_cli_encoding_failure, validate_hf_cli_download_inputs,
-    DownloadFamilyCheck, HF_CLI_UTF8_ENV,
+    finalize_converted_dir, hf_cli_encoding_failure, kolors_tokenizer_overlay_dest,
+    overlay_kolors_tokenizer, validate_hf_cli_download_inputs, DownloadFamilyCheck,
+    HF_CLI_UTF8_ENV,
 };
 use super::supervisor::{
     auto_worker_specs, child_environment, restart_exited_children_with_spawner,
@@ -1042,6 +1043,146 @@ async fn download_snapshot_fresh_retry_discards_partial_blob() {
     .expect("fresh retry redownloads from the beginning");
 
     assert_eq!(tokio::fs::read(&blob_path).await.unwrap(), b"weights!!");
+}
+
+// --- Kolors tokenizer overlay (sc-4764) -----------------------------------------------------
+
+#[test]
+fn kolors_tokenizer_overlay_dest_targets_only_the_kolors_base_repo() {
+    let snap = std::path::Path::new("/snap");
+    let want = PathBuf::from("/snap/tokenizer/tokenizer.json");
+    assert_eq!(
+        kolors_tokenizer_overlay_dest("Kwai-Kolors/Kolors-diffusers", snap),
+        Some(want.clone())
+    );
+    // Whitespace from a manifest field is tolerated.
+    assert_eq!(
+        kolors_tokenizer_overlay_dest("  Kwai-Kolors/Kolors-diffusers  ", snap),
+        Some(want)
+    );
+    // Every other model is a no-op.
+    assert_eq!(kolors_tokenizer_overlay_dest("owner/model", snap), None);
+    assert_eq!(
+        kolors_tokenizer_overlay_dest("Kwai-Kolors/Kolors-IP-Adapter-Plus", snap),
+        None
+    );
+}
+
+/// A single stub that serves both the HF tree resolve (for the SceneWorks tokenizer repo) and the
+/// file bytes (the catch-all), plus the job/progress routes `check_cancel`/progress need. The tree
+/// advertises one `tokenizer.json` file sized to `bytes`.
+async fn spawn_kolors_overlay_stub(bytes: Vec<u8>) -> String {
+    let state = BinaryStubState {
+        bytes,
+        status: AxumStatusCode::OK,
+        cancel_requested: false,
+    };
+    let app = Router::new()
+        .route(
+            "/api/models/:owner/:repo/tree/:revision",
+            get(overlay_tree_stub),
+        )
+        .route("/api/v1/jobs/:job_id", get(job_stub))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_stub))
+        .route("/*path", get(binary_stub).head(binary_head_stub))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+async fn overlay_tree_stub(State(state): State<BinaryStubState>) -> Response {
+    Json(json!([
+        { "type": "file", "path": "tokenizer.json", "size": state.bytes.len() }
+    ]))
+    .into_response()
+}
+
+#[tokio::test]
+async fn overlay_kolors_tokenizer_fetches_and_places_the_json() {
+    let temp = tempdir().expect("tempdir creates");
+    let bytes = br#"{"version":"1.0","model":{"type":"BPE"}}"#.to_vec();
+    let base_url = spawn_kolors_overlay_stub(bytes.clone()).await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    // A real snapshot already has a `tokenizer/` dir (with the slow SP files); the overlay adds the
+    // fast json next to them.
+    let snapshot_dir = temp.path().join("snapshots").join("abc123");
+    tokio::fs::create_dir_all(snapshot_dir.join("tokenizer"))
+        .await
+        .unwrap();
+
+    overlay_kolors_tokenizer(
+        &api,
+        &settings,
+        &client,
+        "job-1",
+        "Kwai-Kolors/Kolors-diffusers",
+        &snapshot_dir,
+    )
+    .await
+    .expect("overlay fetches and places the tokenizer");
+
+    let placed = tokio::fs::read(snapshot_dir.join("tokenizer").join("tokenizer.json"))
+        .await
+        .expect("tokenizer.json was written");
+    assert_eq!(placed, bytes);
+}
+
+#[tokio::test]
+async fn overlay_kolors_tokenizer_is_noop_for_other_repos() {
+    // An unreachable base URL: if the guard failed to short-circuit, the resolve would error.
+    let temp = tempdir().expect("tempdir creates");
+    let settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    overlay_kolors_tokenizer(
+        &api,
+        &settings,
+        &client,
+        "job-1",
+        "owner/model",
+        temp.path(),
+    )
+    .await
+    .expect("non-kolors repo is a no-op");
+}
+
+#[tokio::test]
+async fn overlay_kolors_tokenizer_skips_when_already_present() {
+    // dest exists → return Ok before any network (unreachable URL proves no download is attempted).
+    let temp = tempdir().expect("tempdir creates");
+    let tokenizer_dir = temp.path().join("tokenizer");
+    tokio::fs::create_dir_all(&tokenizer_dir).await.unwrap();
+    tokio::fs::write(tokenizer_dir.join("tokenizer.json"), b"existing")
+        .await
+        .unwrap();
+    let settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    overlay_kolors_tokenizer(
+        &api,
+        &settings,
+        &client,
+        "job-1",
+        "Kwai-Kolors/Kolors-diffusers",
+        temp.path(),
+    )
+    .await
+    .expect("present tokenizer is left untouched");
+    assert_eq!(
+        tokio::fs::read(tokenizer_dir.join("tokenizer.json"))
+            .await
+            .unwrap(),
+        b"existing"
+    );
 }
 
 #[tokio::test]

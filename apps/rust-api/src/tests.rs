@@ -2725,8 +2725,8 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
             { "id": "z_image_turbo", "name": "Z-Image-Turbo", "family": "z-image", "type": "image",
               "adapter": "z_image_diffusers", "capabilities": ["text_to_image"], "downloads": [],
               "paths": {}, "defaults": {}, "limits": {}, "loraCompatibility": { "families": [], "types": [] }, "ui": {} },
-            { "id": "kolors", "name": "Kolors", "family": "kolors", "type": "image",
-              "adapter": "kolors_diffusers", "capabilities": ["text_to_image"], "downloads": [],
+            { "id": "pulid_flux_dev", "name": "PuLID-FLUX", "family": "flux", "type": "image",
+              "adapter": "pulid_flux", "capabilities": ["text_to_image"], "downloads": [],
               "paths": {}, "defaults": {}, "limits": {}, "loraCompatibility": { "families": [], "types": [] }, "ui": {} },
             { "id": "svd", "name": "SVD", "family": "svd", "type": "video",
               "adapter": "svd_video", "capabilities": ["image_to_video"], "downloads": [],
@@ -2752,10 +2752,14 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
             .cloned()
             .unwrap_or(Value::Null)
     };
-    // Torch-only image model → unsupported on Mac, names its port epic.
-    let kolors = by_id("kolors");
-    assert_eq!(kolors["macSupport"]["supported"], false);
-    assert_eq!(kolors["macSupport"]["reason"]["suggestedEpic"], "epic 3532");
+    // Torch-only image model → unsupported on Mac, names its port epic. (Kolors base T2I is now
+    // MLX-routed — sc-3875 — so it is no longer a torch-only example; pulid_flux_dev still is.)
+    let torch_only = by_id("pulid_flux_dev");
+    assert_eq!(torch_only["macSupport"]["supported"], false);
+    assert_eq!(
+        torch_only["macSupport"]["reason"]["suggestedEpic"],
+        "epic 3069"
+    );
     // MLX-routed family → supported, stays in the picker.
     assert_eq!(by_id("z_image_turbo")["macSupport"]["supported"], true);
     // SVD is now MLX-routed (sc-3523: `svd`→`svd_xt`, image→video only) → supported.
@@ -2780,6 +2784,12 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         .unwrap()
         .iter()
         .any(|k| k == "z_image_lora"));
+    // Kolors training cut over to the native Rust trainer (sc-4732).
+    assert!(caps["training"]["supportedKernels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k == "kolors_lora"));
 }
 
 #[tokio::test]

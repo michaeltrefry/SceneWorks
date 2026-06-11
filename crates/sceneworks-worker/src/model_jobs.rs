@@ -59,6 +59,7 @@ pub(crate) async fn run_model_download_job(
     if let Some(cache_path) =
         download_model_with_hf_cli(api, settings, job, repo, revision, &files, &target_dir).await?
     {
+        overlay_kolors_tokenizer(api, settings, http_client, &job.id, repo, &cache_path).await?;
         if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
             return Ok(());
         }
@@ -143,6 +144,9 @@ pub(crate) async fn run_model_download_job(
     )
     .await?;
     let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir);
+    // Kolors ships no fast `tokenizer.json`; overlay the derived one (sc-4764) so the in-process
+    // Rust Kolors generator + trainer can construct. No-op for every other repo.
+    overlay_kolors_tokenizer(api, settings, http_client, &job.id, repo, &cache_path).await?;
     // A lightweight install marker stays in the app store (parity with the CLI
     // path's marker_dir) so the catalog's data/models pointer and bookkeeping
     // remain intact; the weights themselves live only in the shared HF cache.
@@ -182,6 +186,79 @@ pub(crate) async fn run_model_download_job(
     )
     .await?;
     Ok(())
+}
+
+/// Canonical upstream Kolors repo. Its snapshot ships only the ChatGLM3 **slow** SentencePiece
+/// tokenizer (`tokenizer.model`), NOT the fast `tokenizer.json` that the in-process Rust Kolors
+/// generator (sc-3875) and LoRA/LoKr trainer (sc-4732) require — both construct via
+/// `KolorsTokenizer::from_dir`, which reads only `tokenizer/tokenizer.json`.
+const KOLORS_BASE_REPO: &str = "Kwai-Kolors/Kolors-diffusers";
+/// SceneWorks-hosted derived fast tokenizer (sc-4764): a small public repo holding the
+/// `tokenizer.json` materialized from the ChatGLM3 SP model (mlx-gen `tools/build_kolors_tokenizer.py`,
+/// content-id-parity validated). Overlaid onto the upstream snapshot at install so a Python-free Mac
+/// never runs the SP→fast conversion locally.
+const KOLORS_TOKENIZER_REPO: &str = "SceneWorks/kolors-chatglm3-tokenizer";
+const KOLORS_TOKENIZER_FILE: &str = "tokenizer.json";
+
+/// Where the derived `tokenizer.json` overlay belongs for a just-downloaded model, or `None` when
+/// `repo` is not the Kolors base repo (the overlay is a no-op for every other model). Pure so the
+/// repo guard + target path are unit-testable without a download.
+pub(crate) fn kolors_tokenizer_overlay_dest(repo: &str, snapshot_dir: &Path) -> Option<PathBuf> {
+    (repo.trim() == KOLORS_BASE_REPO)
+        .then(|| snapshot_dir.join("tokenizer").join(KOLORS_TOKENIZER_FILE))
+}
+
+/// After a Kolors base-model download, overlay the derived `tokenizer.json` (sc-4764) from the
+/// SceneWorks tokenizer repo into the snapshot's `tokenizer/` dir, so `mlx_gen::load("kolors", …)`
+/// and `load_trainer("kolors", …)` can construct (they read only `tokenizer/tokenizer.json`, which
+/// upstream omits). No-op for any other repo; idempotent — skips when the file is already present
+/// (a re-install, or a snapshot that already shipped it). Reuses the standard HF resolve + download
+/// path, so the SceneWorks repo's auth/size/resume handling matches every other download.
+pub(crate) async fn overlay_kolors_tokenizer(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job_id: &str,
+    repo: &str,
+    snapshot_dir: &Path,
+) -> WorkerResult<()> {
+    let Some(dest) = kolors_tokenizer_overlay_dest(repo, snapshot_dir) else {
+        return Ok(());
+    };
+    if dest.exists() {
+        return Ok(());
+    }
+    let tokenizer_dir = dest
+        .parent()
+        .expect("overlay dest always has a tokenizer/ parent");
+    let snapshot = HuggingFaceSnapshot::resolve(
+        http_client,
+        settings,
+        KOLORS_TOKENIZER_REPO,
+        "main",
+        &[KOLORS_TOKENIZER_FILE.to_owned()],
+    )
+    .await?;
+    let mut progress = DownloadProgress::new(
+        KOLORS_TOKENIZER_REPO,
+        0,
+        snapshot.total_bytes(),
+        progress_report_interval(settings),
+    );
+    download_snapshot(
+        &DownloadContext {
+            api,
+            client: http_client,
+            settings,
+            job_id,
+            cancel_message: "Kolors tokenizer overlay canceled by user.",
+            fresh_download: false,
+        },
+        tokenizer_dir,
+        &snapshot,
+        &mut progress,
+    )
+    .await
 }
 
 /// Native Rust/MLX FLUX.2-klein single-file → diffusers convert (sc-3136), replacing the

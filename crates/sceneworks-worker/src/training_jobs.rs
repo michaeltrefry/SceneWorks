@@ -10,10 +10,12 @@
 //! `register_trained_lora`), so the streamed `result` here is informational/UI only.
 //!
 //! Routing (sc-3049): the API only sends MLX-native families
-//! (`z_image_lora`/`sdxl_lora`/`wan_lora`/`wan_moe_lora`/`ltx_mlx_lora`) here
-//! (`jobs_store::training_job_is_mlx_eligible`). `kolors`/`lens` and LoKr-on-Wan stay
-//! on the Python torch worker, which also remains the Windows/Linux path + the Mac
-//! fallback. The dry-run validator is cross-platform; the real run is macOS-only
+//! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`wan_lora`/`wan_moe_lora`/`ltx_mlx_lora`)
+//! here (`jobs_store::training_job_is_mlx_eligible`). `kolors_lora` joined the native
+//! trainers in sc-4732 (engine trainer sc-4568). `lens` and LoKr-on-Wan stay on the
+//! Python torch worker, which also remains the Windows/Linux path + the Mac fallback
+//! (the torch Kolors trainer is kept for those paths too). The dry-run validator is
+//! cross-platform; the real run is macOS-only
 //! (mlx-gen builds Apple MLX) and unreachable elsewhere (the capability is never
 //! advertised off macOS).
 
@@ -29,6 +31,8 @@ use mlx_gen::{
     CancelFlag, LoadSpec, LrSchedule, NetworkType, TrainingConfig, TrainingItem, TrainingOutput,
     TrainingProgress, TrainingRequest, WeightsSource,
 };
+#[cfg(target_os = "macos")]
+use mlx_gen_kolors as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
 #[cfg(target_os = "macos")]
@@ -258,6 +262,9 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
     match plan.target.kernel.as_str() {
         "z_image_lora" => Some("z_image_turbo"),
         "sdxl_lora" => Some("sdxl"),
+        // Kolors is an SDXL U-Net under a ChatGLM3-6B encoder; the engine registers its
+        // LoRA/LoKr trainer under the same id as its generator (`"kolors"`), sc-4568.
+        "kolors_lora" => Some("kolors"),
         "ltx_mlx_lora" => Some("ltx_2_3"),
         // Dense Wan2.2-TI2V-5B.
         "wan_lora" => Some("wan2_2_ti2v_5b"),
@@ -956,8 +963,10 @@ mod tests {
             ("wan_lora", "wan_2_2", Some("wan2_2_ti2v_5b")),
             ("wan_moe_lora", "wan_2_2_t2v_14b", Some("wan2_2_t2v_14b")),
             ("wan_moe_lora", "wan_2_2_i2v_14b", Some("wan2_2_i2v_14b")),
-            // No mlx-gen trainer crate — these never route here, but map to None.
-            ("kolors_lora", "kolors", None),
+            // Kolors gained a native mlx-gen trainer (sc-4568) and now routes here (sc-4732);
+            // the trainer registers under the generator id `"kolors"`.
+            ("kolors_lora", "kolors", Some("kolors")),
+            // Lens (sidecar) has no mlx-gen trainer crate — never routes here, maps to None.
             ("lens_lora", "lens", None),
             // Unknown A14B base model variant.
             ("wan_moe_lora", "wan_2_2_mystery", None),

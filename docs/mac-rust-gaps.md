@@ -52,7 +52,7 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 
 | Model id | Family | Mac disposition | Porting epic |
 |---|---|---|---|
-| `kolors` | kolors (SDXL UNet + ChatGLM3) | 🔵 Port → drop-on-Mac until then | **epic 3532** |
+| `kolors` | kolors (SDXL UNet + ChatGLM3) | 🟡 Base **T2I** ported (sc-3875); img2img / ControlNet-pose / IP-Adapter-Plus stay torch (per-feature gaps) until later epic-3090 slices | epic 3090 |
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
 | `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🔵 Port → drop-on-Mac until then | epic 3164 |
 
@@ -106,12 +106,12 @@ for traceability (all ✅ Ported; see also §6):
 
 ## 4. Training (`lora_train`)
 
-`MLX_ROUTED_TRAINING_KERNELS` = `z_image_lora`, `sdxl_lora`, `wan_lora`, `wan_moe_lora`,
-`ltx_mlx_lora` (the last is MLX-only). Gaps:
+`MLX_ROUTED_TRAINING_KERNELS` = `z_image_lora`, `sdxl_lora`, `kolors_lora`, `wan_lora`,
+`wan_moe_lora`, `ltx_mlx_lora` (the last is MLX-only). Gaps:
 
 | Kernel | Status | Closing work |
 |---|---|---|
-| `kolors_lora` (SDXL + ChatGLM3, no mlx-gen trainer) | 🔵 Port-pending | epic 3039 |
+| `kolors_lora` (SDXL U-Net + ChatGLM3) | ✅ Ported (native mlx-gen `KolorsTrainer`, LoRA + LoKr) | engine sc-4568, SceneWorks cutover sc-4732 |
 | `lens_lora` (Python sidecar trainer) | 🔵 Port-pending | epic 3039 (follows Lens model port, epic 3164) |
 | LoKr-on-Wan (`wan_lora` / `wan_moe_lora` + `networkType=lokr`) | 🔵 Port-pending | epic 3039 |
 
@@ -157,7 +157,7 @@ Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
 - Advanced video — `first_last_frame`, `extend_clip`, `video_bridge`, `replace_person` (→ native
   Wan-VACE, + user LoRA/LoKr), and `svd`→`svd_xt` image-to-video — all on the macOS MLX worker
   (epic 3040 / cutover sc-3055; real-Mac parity sc-3902).
-- Training: `z_image_lora`, `sdxl_lora`, `wan_lora`, `wan_moe_lora`, `ltx_mlx_lora` (epic 3039).
+- Training: `z_image_lora`, `sdxl_lora`, `kolors_lora`, `wan_lora`, `wan_moe_lora`, `ltx_mlx_lora` (epic 3039; kolors sc-4732).
 
 ---
 

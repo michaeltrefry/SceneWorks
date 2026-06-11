@@ -2281,7 +2281,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 /// Keep in sync with `docs/mac-rust-gaps.md` §1.
 fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
     match model {
-        "kolors" => Some("epic 3532"),
+        // Kolors base T2I was ported to MLX (epic 3090 / sc-3875) — it is now in
+        // `MLX_ROUTED_MODELS`, so it never reaches this whole-model torch-only classifier. Its
+        // not-yet-wired advanced modes (img2img / IP-Adapter / pose) are named per-feature in
+        // `classify_image_gap`, not as a whole-model gap.
         // InstantID (instantid_realvisxl) was ported to MLX (epic 3109 engine / sc-3345) — it is
         // now in `MLX_ROUTED_MODELS`, so it never reaches this torch-only classifier. Its
         // remaining gaps (pose-library mode, face-restore) are named per-feature in
@@ -2369,6 +2372,33 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
             "InstantID runs on MLX for character_image with a referenceAssetId (single identity, the 11-view angle set, pose-library mode, and face-restore); a non-character / reference-less job has no InstantID path.",
             None,
         ),
+        // Kolors (sc-3875): plain T2I runs on MLX; the advanced conditioning modes — img2img
+        // (`edit_image`), the IP-Adapter-Plus reference, and the strict-pose ControlNet tier —
+        // are not yet wired in the Rust worker and stay on the torch `KolorsDiffusersAdapter`
+        // (dropped on Mac under the gating flag) until their epic-3090 cutover slices land.
+        "kolors" => {
+            let has_poses = payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .and_then(|advanced| advanced.get("poses"))
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty());
+            if has_poses {
+                UnsupportedReason::new(
+                    Some(model),
+                    "strict pose (ControlNet)",
+                    "Kolors ControlNet-pose is not yet wired in the Rust worker; it stays on the Python torch path until its cutover slice lands.",
+                    Some("epic 3090"),
+                )
+            } else {
+                UnsupportedReason::new(
+                    Some(model),
+                    "img2img / reference (IP-Adapter)",
+                    "Kolors img2img (edit_image) and the IP-Adapter-Plus reference are not yet wired in the Rust worker; they stay on the Python torch path until their cutover slices land.",
+                    Some("epic 3090"),
+                )
+            }
+        }
         // flux2 / sdxl / realvisxl only fall out via LyCORIS (handled above) — defensive.
         _ => UnsupportedReason::new(
             Some(model),
@@ -2427,12 +2457,8 @@ fn classify_training_gap(payload: &Map<String, Value>) -> UnsupportedReason {
         .and_then(|target| target.get("kernel"))
         .and_then(Value::as_str);
     match kernel {
-        Some("kolors_lora") => UnsupportedReason::new(
-            None,
-            "Kolors LoRA training",
-            "the Kolors trainer (SDXL + ChatGLM3) has no mlx-gen Rust trainer.",
-            Some("epic 3039"),
-        ),
+        // `kolors_lora` is no longer a gap — it has a native mlx-gen Rust trainer (sc-4568)
+        // and routes to the mlx worker (sc-4732); it never reaches this classifier.
         Some("lens_lora") => UnsupportedReason::new(
             None,
             "Lens LoRA training",
@@ -2804,6 +2830,9 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "chroma1_flash",
     "sensenova_u1_8b",
     "sensenova_u1_8b_fast",
+    // Kolors (sc-3875): plain T2I is wired to the Rust `kolors` engine model; the advanced
+    // conditioning modes stay torch via `kolors_mlx_eligible` until later epic-3090 slices.
+    "kolors",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -2859,6 +2888,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
+        "kolors" => kolors_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -3081,6 +3111,37 @@ fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
     }
 }
 
+/// Kolors (sc-3875, epic 3090) MLX-routing conditions. The engine `kolors` model (an SDXL-family
+/// U-Net under a ChatGLM3-6B encoder) supports the full surface — img2img / ControlNet-pose /
+/// IP-Adapter-Plus / Q8/Q4 / LoRA/LoKr — but the SceneWorks worker has wired only the **plain T2I**
+/// base path so far (the `kolors` row in `MlxModel`s + `generate_mlx_stream`). So this gate admits
+/// T2I only; the advanced conditioning modes (`edit_image` img2img, a reference IP-Adapter image,
+/// the strict-pose `advanced.poses` tier) stay on the torch `KolorsDiffusersAdapter` until their
+/// dedicated worker streams land (subsequent epic-3090 cutover slices — see [`classify_image_gap`]).
+/// Third-party LyCORIS / peft LoKr apply on the SDXL-family loader (epic 3641), so a LoRA never
+/// forces torch.
+fn kolors_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_source = payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_poses || has_reference || has_source {
+        return false;
+    }
+    // Only plain text-to-image (no edit_image conditioning) routes to MLX in this slice.
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
 /// sc-3035 LTX-2.3 + audio, sc-3523 SVD-XT image→video). Mirrors
 /// `MlxVideoAdapter._supported_models`. A model id absent here is never routed to the
@@ -3192,14 +3253,16 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
 }
 
 /// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
-/// the engine registers `z_image_turbo`/`sdxl`/`ltx_2_3`/`wan2_2_*` trainers, which
-/// the worker reaches via these SceneWorks kernel ids (the mlx worker maps kernel +
-/// base model → engine trainer id). `kolors_lora` (SDXL + ChatGLM3) and `lens_lora`
-/// (sidecar) have no mlx-gen crate, so they stay on the Python torch worker. A
-/// kernel absent here is never routed to the mlx worker.
+/// the engine registers `z_image_turbo`/`sdxl`/`kolors`/`ltx_2_3`/`wan2_2_*` trainers,
+/// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
+/// kernel and base model onto an engine trainer id). `kolors_lora` (SDXL U-Net plus
+/// ChatGLM3) gained a native trainer in sc-4568, cut over here in sc-4732. `lens_lora`
+/// (sidecar) has no mlx-gen crate, so it stays on the Python torch worker. A kernel
+/// absent here is never routed to the mlx worker.
 const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "z_image_lora",
     "sdxl_lora",
+    "kolors_lora",
     "wan_lora",
     "wan_moe_lora",
     "ltx_mlx_lora",
@@ -3357,9 +3420,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             return false;
         }
         // Training (epic 3039): the mlx worker trains only the MLX-native families
-        // (z_image / sdxl / wan / ltx) via `mlx_gen::load_trainer`. `kolors_lora` +
-        // `lens_lora` (no mlx-gen crate) and LoKr-on-Wan stay on the Python torch
-        // worker. Applies to both dry-run and real runs.
+        // (z_image / sdxl / kolors / wan / ltx) via `mlx_gen::load_trainer`. `lens_lora`
+        // (sidecar, no mlx-gen crate) and LoKr-on-Wan stay on the Python torch worker.
+        // Applies to both dry-run and real runs.
         if matches!(job.job_type, JobType::LoraTrain) && !training_job_is_mlx_eligible(job) {
             return false;
         }
