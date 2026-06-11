@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::asset_index::{
-    asset_origin, asset_sidecars, normalize_asset, normalize_asset_cached, row_to_asset_record,
-    upsert_asset_row, AssetRecord, GenerationSetCache,
+    asset_origin, asset_sidecars, find_asset_sidecar_path_on_connection, index_asset_on_connection,
+    normalize_asset, normalize_asset_cached, GenerationSetCache,
 };
 use crate::character_store::{
     apply_character_migrations, clear_character_tables, reindex_characters_on_connection,
@@ -2268,8 +2268,7 @@ fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts
         if asset.get("id").is_none() || asset.pointer("/file/path").is_none() {
             continue;
         }
-        let sidecar_rel = relative_string(project_path, &sidecar_path)?;
-        index_asset_on_connection(&transaction, &asset, Some(&sidecar_rel))?;
+        index_asset_on_connection(&transaction, project_path, &asset, Some(&sidecar_path))?;
         counts.assets += 1;
     }
 
@@ -3262,70 +3261,24 @@ fn index_asset(
             )?)
             .with_extension("sceneworks.json"),
     };
-    let sidecar_rel = relative_string(project_path, &sidecar_path)?;
     let mut connection = connect_project_db(project_path)?;
     let transaction = connection.transaction()?;
     apply_project_migrations(&transaction)?;
-    index_asset_on_connection(&transaction, asset, Some(&sidecar_rel))?;
+    index_asset_on_connection(&transaction, project_path, asset, Some(&sidecar_path))?;
     transaction.commit()?;
     Ok(())
 }
 
-fn index_asset_on_connection(
-    connection: &Connection,
-    asset: &Value,
-    sidecar_rel: Option<&str>,
-) -> ProjectStoreResult<()> {
-    upsert_asset_row(connection, asset, sidecar_rel)
-}
-
-fn find_asset_record(
-    project_path: &Path,
-    asset_id: &str,
-) -> ProjectStoreResult<Option<AssetRecord>> {
-    ensure_project_db_ready(project_path)?;
-    let connection = connect_project_db(project_path)?;
-    connection
-        .query_row(
-            "select file_path, sidecar_path from assets where id = ?1",
-            params![asset_id],
-            row_to_asset_record,
-        )
-        .optional()
-        .map_err(Into::into)
-}
-
+/// Thin DB-prep wrapper over the shared resolver in `asset_index` (sc-4272).
+/// `ensure_project_db_ready` backfills derived columns after a schema bump
+/// before the lookup, unlike the character-store wrapper's lighter migrate.
 fn find_asset_sidecar_path(
     project_path: &Path,
     asset_id: &str,
 ) -> ProjectStoreResult<Option<PathBuf>> {
-    if let Some(record) = find_asset_record(project_path, asset_id)? {
-        let mut candidates = Vec::new();
-        if let Some(sidecar_path) = record.sidecar_path {
-            candidates.push(project_path.join(sidecar_path));
-        }
-        if let Some(file_path) = record.file_path {
-            candidates.push(
-                project_path
-                    .join(file_path)
-                    .with_extension("sceneworks.json"),
-            );
-        }
-        for candidate in candidates {
-            if candidate.exists() {
-                return Ok(Some(candidate));
-            }
-        }
-    }
-    for sidecar_path in asset_sidecars(project_path)? {
-        let Ok(asset) = read_json(&sidecar_path) else {
-            continue;
-        };
-        if asset.get("id").and_then(Value::as_str) == Some(asset_id) {
-            return Ok(Some(sidecar_path));
-        }
-    }
-    Ok(None)
+    ensure_project_db_ready(project_path)?;
+    let connection = connect_project_db(project_path)?;
+    find_asset_sidecar_path_on_connection(&connection, project_path, asset_id)
 }
 
 fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult<()> {

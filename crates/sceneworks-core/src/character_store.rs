@@ -6,7 +6,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::asset_index::{asset_sidecars, normalize_asset, row_to_asset_record, upsert_asset_row};
+use crate::asset_index::{
+    find_asset_sidecar_path_on_connection, index_asset_on_connection, normalize_asset,
+};
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     atomic_write, is_safe_id, optional_bool, optional_f64, optional_str, random_hex, read_json,
@@ -1155,6 +1157,7 @@ fn update_asset_character_link(
     index_asset_on_connection(connection, project_path, &asset, Some(&sidecar_path))
 }
 
+/// Thin DB-prep wrapper over the shared resolver in `asset_index` (sc-4272).
 fn find_asset_sidecar_path(
     project_path: &Path,
     asset_id: &str,
@@ -1162,60 +1165,6 @@ fn find_asset_sidecar_path(
     let connection = connect_project_db(project_path)?;
     apply_project_migrations(&connection)?;
     find_asset_sidecar_path_on_connection(&connection, project_path, asset_id)
-}
-
-fn find_asset_sidecar_path_on_connection(
-    connection: &Connection,
-    project_path: &Path,
-    asset_id: &str,
-) -> ProjectStoreResult<Option<PathBuf>> {
-    if let Some(record) = connection
-        .query_row(
-            "select file_path, sidecar_path from assets where id = ?1",
-            params![asset_id],
-            row_to_asset_record,
-        )
-        .optional()?
-    {
-        let mut candidates = Vec::new();
-        if let Some(sidecar_path) = record.sidecar_path {
-            candidates.push(project_path.join(sidecar_path));
-        }
-        if let Some(file_path) = record.file_path {
-            candidates.push(
-                project_path
-                    .join(file_path)
-                    .with_extension("sceneworks.json"),
-            );
-        }
-        for candidate in candidates {
-            if candidate.exists() {
-                return Ok(Some(candidate));
-            }
-        }
-    }
-    for sidecar_path in asset_sidecars(project_path)? {
-        let Ok(asset) = read_json(&sidecar_path) else {
-            continue;
-        };
-        if asset.get("id").and_then(Value::as_str) == Some(asset_id) {
-            return Ok(Some(sidecar_path));
-        }
-    }
-    Ok(None)
-}
-
-fn index_asset_on_connection(
-    connection: &Connection,
-    project_path: &Path,
-    asset: &Value,
-    sidecar_path: Option<&Path>,
-) -> ProjectStoreResult<()> {
-    let sidecar_rel = match sidecar_path {
-        Some(path) => Some(relative_string(project_path, path)?),
-        None => None,
-    };
-    upsert_asset_row(connection, asset, sidecar_rel.as_deref())
 }
 
 fn copy_lora_into_project(

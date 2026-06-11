@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 
 use crate::project_store::{ProjectStoreError, ProjectStoreResult};
@@ -25,6 +25,68 @@ pub(crate) const ASSET_FOLDERS: &[&str] = &[
 pub(crate) struct AssetRecord {
     pub(crate) file_path: Option<String>,
     pub(crate) sidecar_path: Option<String>,
+}
+
+/// Resolve an asset id to its on-disk sidecar path: prefer the indexed
+/// `assets` row's recorded sidecar/file paths, falling back to a scan of all
+/// sidecars matching by `id`. Shared by `project_store` and `character_store`,
+/// which previously kept byte-identical copies that could drift (sc-4272 /
+/// F-CORE-12). Takes a ready `Connection` so each store keeps its own DB-prep
+/// (ensure-ready vs migrate) in its thin wrapper.
+pub(crate) fn find_asset_sidecar_path_on_connection(
+    connection: &Connection,
+    project_path: &Path,
+    asset_id: &str,
+) -> ProjectStoreResult<Option<PathBuf>> {
+    if let Some(record) = connection
+        .query_row(
+            "select file_path, sidecar_path from assets where id = ?1",
+            params![asset_id],
+            row_to_asset_record,
+        )
+        .optional()?
+    {
+        let mut candidates = Vec::new();
+        if let Some(sidecar_path) = record.sidecar_path {
+            candidates.push(project_path.join(sidecar_path));
+        }
+        if let Some(file_path) = record.file_path {
+            candidates.push(
+                project_path
+                    .join(file_path)
+                    .with_extension("sceneworks.json"),
+            );
+        }
+        for candidate in candidates {
+            if candidate.exists() {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    for sidecar_path in asset_sidecars(project_path)? {
+        let Ok(asset) = read_json(&sidecar_path) else {
+            continue;
+        };
+        if asset.get("id").and_then(Value::as_str) == Some(asset_id) {
+            return Ok(Some(sidecar_path));
+        }
+    }
+    Ok(None)
+}
+
+/// Upsert an asset's index row, deriving the stored relative sidecar path from
+/// its absolute path. Shared by both stores (sc-4272 / F-CORE-12).
+pub(crate) fn index_asset_on_connection(
+    connection: &Connection,
+    project_path: &Path,
+    asset: &Value,
+    sidecar_path: Option<&Path>,
+) -> ProjectStoreResult<()> {
+    let sidecar_rel = match sidecar_path {
+        Some(path) => Some(relative_string(project_path, path)?),
+        None => None,
+    };
+    upsert_asset_row(connection, asset, sidecar_rel.as_deref())
 }
 
 pub(crate) fn row_to_asset_record(row: &Row<'_>) -> rusqlite::Result<AssetRecord> {
