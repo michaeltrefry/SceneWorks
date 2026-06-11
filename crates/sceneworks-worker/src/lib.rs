@@ -1234,15 +1234,16 @@ fn normalize_app_managed_path(
     ensure_path_under(path, &[data_dir], label)
 }
 
-/// The training base model is a read-only weights source the rust-api resolves
-/// (`resolve_base_model_path`) from either the app data dir *or* the shared
+/// A model's weights are a read-only source the rust-api resolves (e.g.
+/// `resolve_base_model_path`) from either the app data dir *or* the shared
 /// Hugging Face hub cache — the default `HF_HOME` the desktop injects points the
 /// cache at `~/.cache/huggingface`, outside `data_dir`. Unlike output dirs and
-/// dataset roots (write targets, confined to `data_dir`), the base model may
-/// legitimately live in that cache, so it is allowed under either root. Without
-/// this, training an HF-cache-resident base model (e.g. z_image_turbo) fails the
-/// data-dir-only check even though the install/resolve gates accepted it.
-fn normalize_base_model_path(
+/// dataset roots (write targets, confined to `data_dir`), model weights may
+/// legitimately live in that cache, so they are allowed under either root. Used
+/// for the training base model and every other read-only model dir (captioner,
+/// image/InstantID). Without this, an HF-cache-resident model (e.g. z_image_turbo)
+/// fails the data-dir-only check even though the install/resolve gates accepted it.
+fn normalize_app_managed_model_path(
     settings: &Settings,
     raw_path: &str,
     label: &str,
@@ -1296,7 +1297,7 @@ fn resolve_app_managed_model_dir(
             "{label} snapshot is not cached for {model_name_or_path}."
         )));
     }
-    let path = normalize_app_managed_path(settings, model_name_or_path, label)?;
+    let path = normalize_app_managed_model_path(settings, model_name_or_path, label)?;
     if path.is_dir() {
         return Ok(path);
     }

@@ -89,7 +89,7 @@ fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -> WorkerRes
             "Training plan dataset has no items to train on.".to_owned(),
         ));
     }
-    normalize_base_model_path(
+    normalize_app_managed_model_path(
         settings,
         &plan.target.base_model_path,
         "Training baseModelPath",
@@ -181,7 +181,7 @@ async fn run_training_dry_run(
 /// The dry-run completion summary (keys mirror the Python `dry_run_training_summary`
 /// so the Training Studio reads an identical shape regardless of which worker runs it).
 fn dry_run_summary(settings: &Settings, plan: &TrainingPlan) -> JsonObject {
-    let base_model_installed = normalize_base_model_path(
+    let base_model_installed = normalize_app_managed_model_path(
         settings,
         &plan.target.base_model_path,
         "Training baseModelPath",
@@ -954,6 +954,48 @@ mod tests {
         assert!(
             result.is_ok(),
             "HF-cache base model should validate: {result:?}"
+        );
+    }
+
+    /// The REAL training run (`run_training_execution`) resolves the base model
+    /// weights via `resolve_app_managed_model_dir`, a path separate from the
+    /// dry-run validator. It must also accept an HF-cache-resident model dir, or
+    /// the dry run passes while the real run fails with "must be inside an
+    /// app-managed directory" (the z_image_turbo regression: dry run completed,
+    /// real run rejected the same `~/.cache/huggingface` snapshot).
+    #[test]
+    fn resolve_app_managed_model_dir_accepts_hf_cache_snapshot() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+        let settings = test_settings(dir.path());
+
+        // A real, existing snapshot dir under the HF hub cache (outside data_dir),
+        // exactly what `resolve_base_model_path` hands the worker.
+        let snapshot = hf_cache
+            .path()
+            .join("models--Tongyi-MAI--Z-Image-Turbo")
+            .join("snapshots")
+            .join("abc123");
+        std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+
+        let prior = std::env::var("HF_HUB_CACHE").ok();
+        std::env::set_var("HF_HUB_CACHE", hf_cache.path());
+        let resolved = resolve_app_managed_model_dir(
+            &settings,
+            &snapshot.display().to_string(),
+            "Training baseModelPath",
+        );
+        match prior {
+            Some(value) => std::env::set_var("HF_HUB_CACHE", value),
+            None => std::env::remove_var("HF_HUB_CACHE"),
+        }
+
+        assert!(
+            resolved.is_ok(),
+            "HF-cache model dir should resolve for the real run: {resolved:?}"
         );
     }
 
