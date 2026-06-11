@@ -707,7 +707,15 @@ pub(crate) fn detect_people_blocking(
     let (width, height) = (img.width(), img.height());
 
     let cell = DETECTOR.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().expect("person detector mutex poisoned");
+    // Recover from a poisoned lock instead of panicking every subsequent job: if a
+    // prior detection panicked mid-run holding this lock, take the inner guard and
+    // drop the possibly-corrupt cached model so the block below reloads a fresh one
+    // (sc-4277 / F-MLXW-13).
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
     if guard.is_none() {
         *guard = Some(Yolo::load(&weights_path)?);
     }

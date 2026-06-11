@@ -205,7 +205,15 @@ impl Upscaler {
 fn upscale_blocking(onnx_path: PathBuf, factor: u8, img: RgbImage) -> WorkerResult<RgbImage> {
     use std::collections::hash_map::Entry;
     let cell = UPSCALERS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cell.lock().expect("upscaler mutex poisoned");
+    // Recover from a poisoned lock rather than panicking every subsequent job: if a
+    // prior upscale panicked mid-run holding this lock, take the inner guard and
+    // clear the possibly-corrupt cached sessions so the match below reloads a fresh
+    // one for this factor (sc-4277 / F-MLXW-13).
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        guard.clear();
+        guard
+    });
     let upscaler = match guard.entry(factor) {
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => e.insert(Upscaler::load(&onnx_path)?),

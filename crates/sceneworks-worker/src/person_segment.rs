@@ -200,7 +200,15 @@ pub(crate) fn propagate_track_blocking(
     let frame_refs: Vec<&[u8]> = rgb.iter().map(|f| f.as_slice()).collect();
 
     let cell = PREDICTOR.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().expect("person predictor mutex poisoned");
+    // Recover from a poisoned lock rather than panicking every subsequent job: a
+    // prior propagation that panicked mid-run leaves the lock poisoned, so take the
+    // inner guard and drop the possibly-corrupt cached predictor to force a clean
+    // reload below (sc-4277 / F-MLXW-13).
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
     if guard.is_none() {
         let weights = Weights::from_file(&weights_path)
             .map_err(|e| WorkerError::InvalidPayload(format!("sam2 weights load: {e}")))?;
@@ -265,6 +273,38 @@ pub(crate) fn propagate_track_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// sc-4277 / F-MLXW-13: the model-cache locks recover from poison instead of
+    /// `.expect()`-panicking. A prior job panicking while holding the lock must
+    /// leave a recoverable lock whose cached model is reset (None) so the next job
+    /// reloads cleanly rather than panicking forever. This pins the recovery idiom
+    /// used at the three call sites.
+    #[test]
+    fn poisoned_model_cache_lock_recovers_and_resets() {
+        let cache: Mutex<Option<i32>> = Mutex::new(Some(7));
+        // Poison the lock: panic in another thread while holding it.
+        let poisoner = &cache;
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let _guard = poisoner.lock().unwrap();
+                panic!("simulated mid-job panic while holding the model lock");
+            });
+            assert!(handle.join().is_err(), "the poisoning thread panicked");
+        });
+        assert!(cache.lock().is_err(), "precondition: lock is now poisoned");
+
+        // The recovery idiom used at the call sites: take the inner guard and reset
+        // the cached model so the reload path runs.
+        let mut guard = cache.lock().unwrap_or_else(|poisoned| {
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            guard
+        });
+        assert_eq!(*guard, None, "cached model is dropped on poison recovery");
+        *guard = Some(42); // reload
+        assert_eq!(*guard, Some(42));
+    }
 
     #[test]
     fn box_norm_scales_and_clamps_to_the_frame() {
