@@ -50,6 +50,12 @@ jobs:
         run: npm ci --prefix apps/web
       - name: Install desktop dependencies
         run: npm ci --prefix apps/desktop
+      - name: Stage desktop test sidecar placeholders
+        run: node apps/desktop/scripts/stage-test-sidecars.mjs
+      - name: Run desktop Rust tests
+        run: cargo test -p sceneworks-desktop
+      - name: Check desktop Rust lint
+        run: npm run desktop:check
       # `tauri build` runs the beforeBuildCommand (build-sidecar/fetch-uv/
       # stage-python), then compiles the Tauri shell and packages the NSIS
       # installer. --bundles nsis pins the release pipeline to NSIS (the .exe
