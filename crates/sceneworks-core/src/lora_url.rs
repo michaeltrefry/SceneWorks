@@ -99,7 +99,19 @@ pub fn validate_lora_url_host(url: &Url) -> Result<(), LoraUrlError> {
 pub fn validate_public_ip(address: IpAddr) -> Result<(), LoraUrlError> {
     let blocked = match address {
         IpAddr::V4(address) => blocked_ipv4(address),
-        IpAddr::V6(address) => blocked_ipv6(address),
+        IpAddr::V6(address) => {
+            // An IPv4-mapped (`::ffff:a.b.c.d`) or IPv4-compatible (`::a.b.c.d`)
+            // IPv6 address reaches the very same IPv4 endpoint, so re-run the v4
+            // blocklist on the embedded address before the v6 checks. Without
+            // this, `http://[::ffff:127.0.0.1]/x.safetensors` (or a DNS AAAA of
+            // `::ffff:10.0.0.1`) slips past both the URL-time host check and the
+            // connect-time re-validation (sc-4210 / F-CORE-6 SSRF bypass).
+            address
+                .to_ipv4_mapped()
+                .or_else(|| address.to_ipv4())
+                .is_some_and(blocked_ipv4)
+                || blocked_ipv6(address)
+        }
     };
     if blocked {
         Err(LoraUrlError::BlockedHost)
@@ -130,7 +142,50 @@ fn blocked_ipv6(address: Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{lora_source_url_file_name, parse_lora_source_url, LoraUrlError};
+    use super::{
+        lora_source_url_file_name, parse_lora_source_url, validate_public_ip, LoraUrlError,
+    };
+    use std::net::{IpAddr, Ipv6Addr};
+
+    fn v6(literal: &str) -> IpAddr {
+        IpAddr::V6(literal.parse::<Ipv6Addr>().expect("valid IPv6 literal"))
+    }
+
+    /// sc-4210 / F-CORE-6: an IPv4-mapped/compatible IPv6 address reaches the
+    /// embedded IPv4 endpoint, so the SSRF guard must unmap and re-run the v4
+    /// blocklist. Before the fix these slipped past `validate_public_ip` and the
+    /// connect-time re-validation, letting a crafted URL reach loopback/RFC1918.
+    #[test]
+    fn validate_public_ip_blocks_ipv4_mapped_private_targets() {
+        // IPv4-mapped (`::ffff:a.b.c.d`) loopback / RFC1918 / link-local.
+        for blocked in ["::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.0.1"] {
+            assert_eq!(
+                validate_public_ip(v6(blocked)),
+                Err(LoraUrlError::BlockedHost),
+                "{blocked} must be blocked"
+            );
+        }
+        // IPv4-compatible (`::a.b.c.d`) loopback.
+        assert_eq!(
+            validate_public_ip(v6("::127.0.0.1")),
+            Err(LoraUrlError::BlockedHost)
+        );
+
+        // A mapped *public* IPv4 and a genuine public IPv6 must still pass — the
+        // fix blocks the bypass, not all v4-mapped traffic.
+        assert!(validate_public_ip(v6("::ffff:1.1.1.1")).is_ok());
+        assert!(validate_public_ip(v6("2606:4700:4700::1111")).is_ok());
+    }
+
+    /// End-to-end: the bracketed IPv4-mapped literal is rejected by URL parsing,
+    /// mirroring the existing literal-`127.0.0.1` case.
+    #[test]
+    fn parse_lora_source_url_blocks_ipv4_mapped_loopback_host() {
+        assert_eq!(
+            parse_lora_source_url("http://[::ffff:127.0.0.1]/style.safetensors").unwrap_err(),
+            LoraUrlError::BlockedHost
+        );
+    }
 
     #[test]
     fn lora_source_urls_validate_scheme_host_and_filename() {
