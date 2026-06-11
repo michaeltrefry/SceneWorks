@@ -2,6 +2,34 @@ from __future__ import annotations
 
 from worker_runtime_shared import *
 
+def _write_asset_sidecar(project_path, folder, asset_id, media_path):
+    sidecar_path = project_path / folder / f"{asset_id}.sceneworks.json"
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text(
+        json.dumps({"id": asset_id, "file": {"path": media_path}}),
+        encoding="utf-8",
+    )
+    return sidecar_path
+
+def test_find_asset_media_path_rejects_sidecar_paths_outside_project(tmp_path):
+    from scene_worker.image_adapters import find_asset_media_path
+
+    in_project_media = tmp_path / "assets" / "images" / "source.png"
+    in_project_media.parent.mkdir(parents=True, exist_ok=True)
+    in_project_media.write_bytes(b"not-a-real-png")
+    _write_asset_sidecar(tmp_path, "assets/images", "asset_inside", "assets/images/source.png")
+
+    assert find_asset_media_path(tmp_path, "asset_inside") == in_project_media.resolve()
+
+    outside_media = tmp_path.parent / f"{tmp_path.name}-outside.png"
+    outside_media.write_bytes(b"outside")
+    _write_asset_sidecar(tmp_path, "assets/images", "asset_absolute_escape", str(outside_media))
+    _write_asset_sidecar(tmp_path, "assets/images", "asset_relative_escape", f"../{outside_media.name}")
+
+    for asset_id in ("asset_absolute_escape", "asset_relative_escape"):
+        with pytest.raises(RuntimeError, match="outside the project"):
+            find_asset_media_path(tmp_path, asset_id)
+
 def test_run_image_upscale_writes_single_child_asset(tmp_path, monkeypatch):
     # sc-2431: standalone upscale of an existing asset. Mock the engine so the
     # orchestration (source resolve → one child asset + lineage) is exercised
@@ -4021,4 +4049,3 @@ def test_load_state_dict_requires_weights_only(tmp_path):
 
     with pytest.raises(RuntimeError, match="weights_only"):
         _load_state_dict(_AncientTorch(), weights)
-

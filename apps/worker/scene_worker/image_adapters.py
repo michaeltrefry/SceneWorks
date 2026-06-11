@@ -25,6 +25,7 @@ from sceneworks_shared import (
     find_project_path as shared_find_project_path,
     index_asset,
     read_json,
+    resolve_project_relative_path,
     safe_int,
     slugify,
     utc_now,
@@ -5585,7 +5586,10 @@ def find_asset_media_path(project_path: Path, asset_id: str) -> Path:
     sidecar_path = find_asset_sidecar_path(project_path, asset_id)
     if sidecar_path is not None:
         asset = read_json(sidecar_path)
-        media_path = project_path / asset.get("file", {}).get("path", "")
+        media_path_ref = str(asset.get("file", {}).get("path", "") or "")
+        media_path = resolve_project_relative_path(project_path, media_path_ref)
+        if media_path is None:
+            raise RuntimeError(f"Source image file path is outside the project for asset {asset_id}.")
         if media_path.exists():
             return media_path
         raise RuntimeError(f"Source image file is missing for asset {asset_id}.")

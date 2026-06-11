@@ -7,6 +7,7 @@ from .project_db import (
     index_asset,
     purge_asset,
     reindex_project,
+    resolve_project_relative_path,
 )
 from .utils import (
     ProjectNotFound,
@@ -35,6 +36,7 @@ __all__ = [
     "purge_asset",
     "read_json",
     "reindex_project",
+    "resolve_project_relative_path",
     "safe_float",
     "safe_int",
     "slugify",

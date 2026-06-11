@@ -23,6 +23,7 @@ from sceneworks_shared import (
     find_project_path,
     index_asset,
     read_json,
+    resolve_project_relative_path,
     safe_float,
     safe_int,
     slugify,
@@ -2352,7 +2353,9 @@ def source_asset_media_path(project_path: Path, asset_id: str | None) -> Path | 
         return None
     payload = read_json(sidecar_path)
     media_rel = payload.get("file", {}).get("path", "")
-    media_path = project_path / media_rel
+    media_path = resolve_project_relative_path(project_path, str(media_rel or ""))
+    if media_path is None:
+        return None
     return media_path if media_path.exists() else None
 
 
@@ -2379,8 +2382,8 @@ def load_source_frame(project_path: Path, asset_id: str | None, timestamp: float
     if sidecar_path is None:
         return None
     payload = read_json(sidecar_path)
-    media_path = project_path / payload.get("file", {}).get("path", "")
-    if not media_path.exists():
+    media_path = resolve_project_relative_path(project_path, str(payload.get("file", {}).get("path", "") or ""))
+    if media_path is None or not media_path.exists():
         return None
 
     image = load_seekable_image_frame(media_path, timestamp, payload.get("file", {}).get("duration"))
@@ -2400,7 +2403,9 @@ def load_source_video_frames(project_path: Path, asset_id: str | None, width: in
     if sidecar_path is None:
         raise RuntimeError(f"Source clip asset not found: {asset_id}.")
     payload = read_json(sidecar_path)
-    media_path = project_path / payload.get("file", {}).get("path", "")
+    media_path = resolve_project_relative_path(project_path, str(payload.get("file", {}).get("path", "") or ""))
+    if media_path is None:
+        raise RuntimeError(f"Source clip file path is outside the project for asset {asset_id}.")
     if not media_path.exists():
         raise RuntimeError(f"Source clip file is missing for asset {asset_id}.")
 

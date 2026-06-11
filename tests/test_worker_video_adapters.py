@@ -2,6 +2,35 @@ from __future__ import annotations
 
 from worker_runtime_shared import *
 
+def _write_video_asset_sidecar(project_path, asset_id, media_path):
+    sidecar_path = project_path / "assets" / "videos" / f"{asset_id}.sceneworks.json"
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text(
+        json.dumps({"id": asset_id, "file": {"path": media_path}}),
+        encoding="utf-8",
+    )
+    return sidecar_path
+
+def test_video_source_asset_media_path_rejects_sidecar_paths_outside_project(tmp_path):
+    from scene_worker.video_adapters import load_source_video_frames, source_asset_media_path
+
+    in_project_media = tmp_path / "assets" / "videos" / "clip.mp4"
+    in_project_media.parent.mkdir(parents=True, exist_ok=True)
+    in_project_media.write_bytes(b"not-a-real-video")
+    _write_video_asset_sidecar(tmp_path, "asset_inside", "assets/videos/clip.mp4")
+
+    assert source_asset_media_path(tmp_path, "asset_inside") == in_project_media.resolve()
+
+    outside_media = tmp_path.parent / f"{tmp_path.name}-outside.mp4"
+    outside_media.write_bytes(b"outside")
+    _write_video_asset_sidecar(tmp_path, "asset_absolute_escape", str(outside_media))
+    _write_video_asset_sidecar(tmp_path, "asset_relative_escape", f"../{outside_media.name}")
+
+    assert source_asset_media_path(tmp_path, "asset_absolute_escape") is None
+    assert source_asset_media_path(tmp_path, "asset_relative_escape") is None
+    with pytest.raises(RuntimeError, match="outside the project"):
+        load_source_video_frames(tmp_path, "asset_absolute_escape", 64, 64, 1)
+
 def test_ltx_mps_gating_leaves_cuda_path_untouched():
     gating = ltx_mps_gating(cuda_available=True, device_str="cuda")
     assert gating == {
@@ -1894,4 +1923,3 @@ def test_replace_person_video_result_carries_lineage_facts():
     # No real masked-control path ran here, so the worker reports no
     # replacementStatus; the Rust builder fills the honest false defaults.
     assert "replacementStatus" not in fact
-

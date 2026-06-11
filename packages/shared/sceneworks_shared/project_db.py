@@ -199,6 +199,18 @@ def find_asset_sidecar_path(project_path: Path, asset_id: str) -> Path | None:
     return _find_asset_sidecar_by_glob(project_path, asset_id)
 
 
+def resolve_project_relative_path(project_path: Path, relative_path: str) -> Path | None:
+    if not relative_path:
+        return None
+    try:
+        project_root = project_path.resolve()
+        resolved = (project_root / relative_path).resolve()
+        resolved.relative_to(project_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved
+
+
 def _find_asset_sidecar_by_glob(project_path: Path, asset_id: str) -> Path | None:
     for folder in ASSET_FOLDERS:
         for sidecar_path in (project_path / folder).rglob(ASSET_SIDECAR_PATTERN):
