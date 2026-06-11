@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio as StdStdio;
 use std::time::Duration;
@@ -15,9 +16,9 @@ use tempfile::tempdir;
 
 use super::api_client::ApiClient;
 use super::downloads::{
-    credential_for_host, download_lora_source_url, download_progress_payload,
-    download_snapshot_into_cache, DownloadContext, DownloadProgress, HuggingFaceSnapshot,
-    SnapshotFile,
+    build_source_url_client, credential_for_host, download_lora_source_url,
+    download_progress_payload, download_snapshot_into_cache, DownloadContext, DownloadProgress,
+    HuggingFaceSnapshot, SnapshotFile,
 };
 #[cfg(target_os = "macos")]
 use super::gpu::mlx_gpu;
@@ -1385,6 +1386,49 @@ async fn source_url_follows_redirect_and_strips_auth_across_hosts() {
             .unwrap(),
         b"civitai-lora"
     );
+}
+
+#[tokio::test]
+async fn source_url_client_pins_dns_to_validated_address() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    let state = BinaryStubState {
+        bytes: b"weights!!".to_vec(),
+        status: AxumStatusCode::OK,
+        cancel_requested: false,
+    };
+    let app = Router::new()
+        .route("/file/style.safetensors", get(binary_stub))
+        .with_state(state);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+
+    let url = reqwest::Url::parse(&format!(
+        "http://rebind.test:{}/file/style.safetensors",
+        address.port()
+    ))
+    .expect("test URL parses");
+    let validated = [SocketAddr::new(
+        "127.0.0.1".parse().unwrap(),
+        address.port(),
+    )];
+    let client = build_source_url_client(&url, Some(&validated)).expect("client builds");
+
+    let bytes = client
+        .get(url)
+        .send()
+        .await
+        .expect("request uses pinned address")
+        .error_for_status()
+        .expect("stub response is successful")
+        .bytes()
+        .await
+        .expect("response body reads");
+
+    assert_eq!(bytes.as_ref(), b"weights!!");
 }
 
 #[tokio::test]
