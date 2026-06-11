@@ -2082,7 +2082,10 @@ fn resolve_clip_media_path(
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!("source clip asset {asset_id} has no media path"))
         })?;
-    let path = project_path.join(rel);
+    // file.path is sidecar-sourced (user-editable on disk), so guard it through
+    // safe_project_path instead of a bare join so a poisoned sidecar can't escape
+    // the project to read an arbitrary file as the source clip (sc-4278 / F-MLXW-14).
+    let path = crate::safe_project_path(project_path, rel)?;
     if !path.exists() {
         return Err(WorkerError::InvalidPayload(format!(
             "source clip file is missing for asset {asset_id}: {}",

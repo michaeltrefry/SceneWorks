@@ -2529,7 +2529,11 @@ pub(crate) fn load_reference_image(
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!("reference asset {asset_id} has no media path"))
         })?;
-    let path = project_path.join(rel);
+    // The asset's file.path comes from an on-disk sidecar the user can edit, so
+    // route it through safe_project_path (rejects `..`/absolute components) rather
+    // than a bare join — matching the media-jobs reads and keeping a poisoned
+    // sidecar from reading an arbitrary file as the reference (sc-4278 / F-MLXW-14).
+    let path = crate::safe_project_path(project_path, rel)?;
     let decoded = image::open(&path)
         .map_err(|error| {
             WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))

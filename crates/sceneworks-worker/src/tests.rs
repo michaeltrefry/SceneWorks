@@ -1557,6 +1557,23 @@ fn path_and_error_helpers_are_bounded_and_defensive() {
         .to_string()
         .contains("Project-relative path is required"));
 
+    // sc-4278 / F-MLXW-14: load_reference_image and resolve_clip_media_path route
+    // sidecar-sourced media paths through safe_project_path, so a traversal or
+    // absolute path (from a poisoned, user-editable sidecar) must be rejected
+    // rather than escaping the project.
+    for unsafe_rel in ["../../etc/passwd", "assets/../../secret.png", "/etc/passwd"] {
+        let error = safe_project_path(temp.path(), unsafe_rel)
+            .expect_err("traversal/absolute path rejects");
+        assert!(
+            error.to_string().contains("Unsafe project-relative path"),
+            "{unsafe_rel} should be rejected as unsafe, got {error}"
+        );
+    }
+    // A normal project-relative media path still resolves under the project root.
+    let safe = safe_project_path(temp.path(), "assets/images/x.png").expect("safe path resolves");
+    assert!(safe.starts_with(temp.path()));
+    assert!(safe.ends_with("assets/images/x.png"));
+
     let noisy = (0..100)
         .map(|index| format!("line {index} caf\u{e9}"))
         .collect::<Vec<_>>()
