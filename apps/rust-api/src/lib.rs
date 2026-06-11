@@ -138,9 +138,14 @@ const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
 const STALE_LORA_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
+// Thread-local (not a process-global atomic) so a test overriding the cap to
+// exercise the size limit can't leak that value into other LoRA-upload tests
+// running concurrently on sibling threads. `#[tokio::test]` uses a current-thread
+// runtime, so the upload handler runs on the same thread that sets the override.
 #[cfg(test)]
-static TEST_MAX_LORA_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static TEST_MAX_LORA_UPLOAD_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 #[cfg(test)]
 static TEST_MAX_MODEL_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);

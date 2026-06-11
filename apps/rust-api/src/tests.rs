@@ -13,7 +13,6 @@ use super::{
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
@@ -3871,7 +3870,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         Some("detail.safetensors")
     );
 
-    TEST_MAX_LORA_UPLOAD_BYTES.store(4, Ordering::SeqCst);
+    TEST_MAX_LORA_UPLOAD_BYTES.with(|cap| cap.set(4));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     let (bad_status, bad_error) = request_multipart_lora_upload(
         app,
@@ -3880,7 +3879,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         b"12345",
     )
     .await;
-    TEST_MAX_LORA_UPLOAD_BYTES.store(0, Ordering::SeqCst);
+    TEST_MAX_LORA_UPLOAD_BYTES.with(|cap| cap.set(0));
     assert_eq!(bad_status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(
         bad_error["detail"],

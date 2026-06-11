@@ -635,7 +635,7 @@ pub(crate) async fn cleanup_staged_lora_upload(path: &FsPath) {
 pub(crate) fn max_lora_upload_bytes() -> usize {
     #[cfg(test)]
     {
-        let limit = TEST_MAX_LORA_UPLOAD_BYTES.load(std::sync::atomic::Ordering::SeqCst);
+        let limit = TEST_MAX_LORA_UPLOAD_BYTES.with(std::cell::Cell::get);
         if limit > 0 {
             return limit;
         }
