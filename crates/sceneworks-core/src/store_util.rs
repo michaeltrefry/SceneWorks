@@ -5,9 +5,10 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::contracts::StringEnum;
 
 use crate::project_store::{ProjectStoreError, ProjectStoreResult};
 
@@ -137,9 +138,17 @@ pub(crate) fn random_hex(bytes: usize) -> ProjectStoreResult<String> {
     Ok(hex)
 }
 
+/// Deserialize a single string into one of the crate's [`StringEnum`] types.
+///
+/// The [`StringEnum`] bound (not a bare `DeserializeOwned`) is what makes the
+/// `expect` sound: every `string_enum!`-generated type maps an unrecognized
+/// string to its `Unknown(String)` variant, so deserializing a `String` value
+/// can't fail. The bound stops this helper from being reused with a stricter
+/// enum whose `Deserialize` could error and panic the whole store call on one
+/// bad DB row (sc-4269 / F-CORE-9).
 pub(crate) fn parse_string_enum<T>(value: &str) -> T
 where
-    T: DeserializeOwned,
+    T: StringEnum,
 {
     serde_json::from_value(Value::String(value.to_owned()))
         .expect("string enum deserialization is infallible")
@@ -147,8 +156,25 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{atomic_write, lock_project_files, random_hex};
+    use super::{atomic_write, lock_project_files, parse_string_enum, random_hex};
+    use crate::contracts::JobStatus;
     use std::collections::HashSet;
+
+    /// sc-4269 / F-CORE-9: the `StringEnum` bound makes `parse_string_enum`
+    /// infallible — a value never written by the app (or a hand-edited DB row)
+    /// maps to the enum's `Unknown` variant instead of panicking, and known
+    /// values still map to their variant.
+    #[test]
+    fn parse_string_enum_maps_unknown_without_panicking() {
+        assert_eq!(
+            parse_string_enum::<JobStatus>("totally-bogus-status"),
+            JobStatus::Unknown("totally-bogus-status".to_owned())
+        );
+        assert_eq!(
+            parse_string_enum::<JobStatus>("running"),
+            JobStatus::Running
+        );
+    }
 
     /// sc-4209 / F-CORE-5: `random_hex(n)` returns `2n` lowercase-hex chars,
     /// generated without a SQLite connection. Covers the length/charset contract
