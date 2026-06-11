@@ -2549,10 +2549,23 @@ fn should_defer_auto_gpu_claim(
         ",
     )?;
     let candidates = collect_workers(statement.query_map(params![worker.id], row_to_worker)?)?;
+    // Cache the active-GPU-job fact per gpu_id so two idle workers sharing a GPU
+    // don't each re-run the same `active_gpu_job_exists` query (sc-4273).
+    let mut active_by_gpu: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
     for candidate in candidates {
-        if !worker_supports_job(&candidate, job)
-            || active_gpu_job_exists(connection, &candidate.gpu_id)?
-        {
+        if !worker_supports_job(&candidate, job) {
+            continue;
+        }
+        let gpu_busy = match active_by_gpu.get(&candidate.gpu_id) {
+            Some(&busy) => busy,
+            None => {
+                let busy = active_gpu_job_exists(connection, &candidate.gpu_id)?;
+                active_by_gpu.insert(candidate.gpu_id.clone(), busy);
+                busy
+            }
+        };
+        if gpu_busy {
             continue;
         }
         let candidate_score = dispatch_score(job, &candidate);
@@ -2707,14 +2720,13 @@ fn idle_mlx_worker_can_claim(
         ",
     )?;
     let candidates = collect_workers(statement.query_map(params![worker.id], row_to_worker)?)?;
-    for candidate in candidates {
-        if worker_supports_job(&candidate, job)
-            && !active_gpu_job_exists(connection, &candidate.gpu_id)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    // Every candidate here has `gpu_id = 'mlx'`, so the active-GPU-job fact is
+    // identical for all of them — resolve a supporting candidate first, then run
+    // `active_gpu_job_exists` once instead of once per candidate (sc-4273).
+    let Some(candidate) = candidates.iter().find(|c| worker_supports_job(c, job)) else {
+        return Ok(false);
+    };
+    Ok(!active_gpu_job_exists(connection, &candidate.gpu_id)?)
 }
 
 fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResult<bool> {
