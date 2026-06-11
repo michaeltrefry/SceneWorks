@@ -157,10 +157,12 @@ access from another machine), set `SCENEWORKS_API_HOST=0.0.0.0` **and** set
 `SCENEWORKS_ACCESS_TOKEN` — without a token, every endpoint (project file reads,
 credential writes, job creation, large model uploads) is reachable unauthenticated,
 and the API logs a warning on startup. Inside Docker, `SCENEWORKS_API_HOST=0.0.0.0`
-is set by `docker-compose.yml` so the published host port can reach the container;
-control access with `SCENEWORKS_ACCESS_TOKEN` and the published-port boundary, and
-extend `SCENEWORKS_CORS_ORIGINS` with LAN hostnames or IP origins when the web app is
-opened from another machine.
+is set by `docker-compose.yml` so the published host port can reach the container,
+but the host-side publish defaults to `SCENEWORKS_API_PUBLISH_HOST=127.0.0.1`.
+Set `SCENEWORKS_API_PUBLISH_HOST=0.0.0.0` only when intentionally exposing Docker
+Compose to the LAN; control access with `SCENEWORKS_ACCESS_TOKEN` and extend
+`SCENEWORKS_CORS_ORIGINS` with LAN hostnames or IP origins when the web app is opened
+from another machine.
 
 For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
 

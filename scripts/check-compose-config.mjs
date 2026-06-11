@@ -46,19 +46,32 @@ function assertWritableMount(service, target, label) {
   }
 }
 
+function assertPublishedPort(service, target, expectedHostIp, expectedPublished, label) {
+  const ports = service?.ports ?? [];
+  const port = ports.find((item) => Number(item?.target) === target);
+  if (!port) {
+    throw new Error(`${label}: expected published port for target ${target}`);
+  }
+  assertEqual(port.host_ip, expectedHostIp, `${label} API host publish IP`);
+  assertEqual(String(port.published), String(expectedPublished), `${label} API published port`);
+}
+
 function assertMissing(object, key, label) {
   if (Object.prototype.hasOwnProperty.call(object ?? {}, key)) {
     throw new Error(`${label}: expected ${key} to be absent`);
   }
 }
 
-function assertRuntimeDefaults(config, label) {
+function assertRuntimeDefaults(config, label, options = {}) {
+  const apiPublishHost = options.apiPublishHost ?? "127.0.0.1";
+  const apiPort = options.apiPort ?? "8010";
   const api = config.services?.api;
   const worker = config.services?.worker;
   const rustWorker = config.services?.["rust-worker"];
   // Split the removed key so the story's cleanup grep does not report this assertion as a live reference.
   const removedRuntimeKey = ["SCENEWORKS_API", "RUNTIME"].join("_");
   assertEqual(api?.build?.dockerfile, "docker/rust.Dockerfile", `${label} api dockerfile`);
+  assertPublishedPort(api, Number(apiPort), apiPublishHost, apiPort, `${label} api`);
   assertMissing(api?.environment, removedRuntimeKey, `${label} api runtime switch`);
   assertWritableMount(api, "/sceneworks/config", `${label} api config mount`);
   assertMissing(worker?.environment, "SCENEWORKS_UTILITY_JOBS", `${label} python utility jobs`);
@@ -76,11 +89,21 @@ function assertRuntimeDefaults(config, label) {
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "sceneworks-compose-config-"));
 const emptyEnv = path.join(tempRoot, "empty.env");
+const lanEnv = path.join(tempRoot, "lan.env");
 
 try {
   await writeFile(emptyEnv, "", "utf8");
+  await writeFile(
+    lanEnv,
+    "SCENEWORKS_API_PUBLISH_HOST=0.0.0.0\nSCENEWORKS_API_PORT=18010\n",
+    "utf8",
+  );
   assertRuntimeDefaults(await composeConfig(emptyEnv), "compose defaults");
   assertRuntimeDefaults(await composeConfig(".env.example"), ".env.example");
+  assertRuntimeDefaults(await composeConfig(lanEnv), "compose LAN override", {
+    apiPublishHost: "0.0.0.0",
+    apiPort: "18010",
+  });
   console.log("SceneWorks compose config check passed.");
 } finally {
   await rm(tempRoot, { recursive: true, force: true });
