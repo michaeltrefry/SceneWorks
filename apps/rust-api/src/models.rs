@@ -800,211 +800,226 @@ async fn model_catalog_inner(
     }))
     .await;
 
-    for (model, (download_context, download_size_bytes)) in models
-        .iter_mut()
-        .zip(download_contexts.into_iter().zip(download_size_bytes))
-    {
-        let fallback_size_bytes = download_context
-            .as_ref()
-            .and_then(|context| context.fallback_size_bytes);
-        let effective_download_size_bytes = download_size_bytes.or(fallback_size_bytes);
-        let download_size_estimated =
-            download_size_bytes.is_none() && fallback_size_bytes.is_some();
-        let (downloadable, installed_path, installed, cache_incomplete, missing_required_files) =
-            if let Some(download_context) = download_context {
-                let managed_path = state
-                    .settings
-                    .data_dir
-                    .join("models")
-                    .join(safe_download_dir(&download_context.repo));
-                let cache_path =
-                    huggingface_repo_cache_path(&state.settings.data_dir, &download_context.repo);
-                let cache_health = cache_path
+    let data_dir = state.settings.data_dir.clone();
+    // sc-4202 (F-API-3): the per-model install-state probes below hit the filesystem
+    // (huggingface_cache_health snapshot walks, model_is_installed, mlx_catalog_status)
+    // for every model. Assemble the catalog on the blocking pool so these synchronous
+    // walks don't stall a tokio worker thread under load or on a slow/network volume.
+    let models =
+        tokio::task::spawn_blocking(move || -> Result<Vec<Value>, ApiError> {
+            for (model, (download_context, download_size_bytes)) in models
+                .iter_mut()
+                .zip(download_contexts.into_iter().zip(download_size_bytes))
+            {
+                let fallback_size_bytes = download_context
                     .as_ref()
-                    .map(|path| huggingface_cache_health(path, &download_context.files));
-                let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
-                let cache_incomplete = cache_health
-                    .as_ref()
-                    .is_some_and(|health| health.incomplete);
-                let missing_required_files = cache_health
-                    .as_ref()
-                    .map(|health| health.missing_files.clone())
-                    .unwrap_or_default();
-                let managed_installed = model_is_installed(&managed_path);
-                let installed_path = if cache_installed || cache_incomplete {
-                    cache_path.clone()
-                } else {
-                    Some(managed_path)
-                };
-                (
-                    true,
-                    installed_path.map(|path| path.display().to_string()),
-                    managed_installed || cache_installed,
+                    .and_then(|context| context.fallback_size_bytes);
+                let effective_download_size_bytes = download_size_bytes.or(fallback_size_bytes);
+                let download_size_estimated =
+                    download_size_bytes.is_none() && fallback_size_bytes.is_some();
+                let (
+                    downloadable,
+                    installed_path,
+                    installed,
                     cache_incomplete,
                     missing_required_files,
-                )
-            } else if let Some(installed_path) =
-                model_manifest_installed_path(model, &state.settings.data_dir)
-            {
-                let installed = model_is_installed(&installed_path);
-                (
-                    false,
-                    Some(installed_path.display().to_string()),
-                    installed,
-                    false,
-                    Vec::new(),
-                )
-            } else {
-                (false, None, false, false, Vec::new())
-            };
-        let object = model
-            .as_object_mut()
-            .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
-        let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
-        let user_managed = user_model_ids.contains(model_id);
-        object.insert(
-            "catalogScope".to_owned(),
-            Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
-        );
-        object.insert("downloadable".to_owned(), Value::Bool(downloadable));
-        object.insert(
-            "downloadSizeBytes".to_owned(),
-            effective_download_size_bytes
-                .map(|value| json!(value))
-                .unwrap_or(Value::Null),
-        );
-        object.insert(
-            "downloadSizeLabel".to_owned(),
-            effective_download_size_bytes
-                .map(format_bytes)
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-        );
-        object.insert(
-            "downloadSizeEstimated".to_owned(),
-            Value::Bool(download_size_estimated),
-        );
-        object.insert(
-            "installState".to_owned(),
-            Value::String(if installed { "installed" } else { "missing" }.to_owned()),
-        );
-        object.insert(
-            "cacheState".to_owned(),
-            Value::String(
-                if cache_incomplete {
-                    "incomplete"
-                } else if installed {
-                    "complete"
+                ) = if let Some(download_context) = download_context {
+                    let managed_path = data_dir
+                        .join("models")
+                        .join(safe_download_dir(&download_context.repo));
+                    let cache_path = huggingface_repo_cache_path(&data_dir, &download_context.repo);
+                    let cache_health = cache_path
+                        .as_ref()
+                        .map(|path| huggingface_cache_health(path, &download_context.files));
+                    let cache_installed =
+                        cache_health.as_ref().is_some_and(|health| health.installed);
+                    let cache_incomplete = cache_health
+                        .as_ref()
+                        .is_some_and(|health| health.incomplete);
+                    let missing_required_files = cache_health
+                        .as_ref()
+                        .map(|health| health.missing_files.clone())
+                        .unwrap_or_default();
+                    let managed_installed = model_is_installed(&managed_path);
+                    let installed_path = if cache_installed || cache_incomplete {
+                        cache_path.clone()
+                    } else {
+                        Some(managed_path)
+                    };
+                    (
+                        true,
+                        installed_path.map(|path| path.display().to_string()),
+                        managed_installed || cache_installed,
+                        cache_incomplete,
+                        missing_required_files,
+                    )
+                } else if let Some(installed_path) = model_manifest_installed_path(model, &data_dir)
+                {
+                    let installed = model_is_installed(&installed_path);
+                    (
+                        false,
+                        Some(installed_path.display().to_string()),
+                        installed,
+                        false,
+                        Vec::new(),
+                    )
                 } else {
-                    "missing"
+                    (false, None, false, false, Vec::new())
+                };
+                let object = model
+                    .as_object_mut()
+                    .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+                let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+                let user_managed = user_model_ids.contains(model_id);
+                object.insert(
+                    "catalogScope".to_owned(),
+                    Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
+                );
+                object.insert("downloadable".to_owned(), Value::Bool(downloadable));
+                object.insert(
+                    "downloadSizeBytes".to_owned(),
+                    effective_download_size_bytes
+                        .map(|value| json!(value))
+                        .unwrap_or(Value::Null),
+                );
+                object.insert(
+                    "downloadSizeLabel".to_owned(),
+                    effective_download_size_bytes
+                        .map(format_bytes)
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                );
+                object.insert(
+                    "downloadSizeEstimated".to_owned(),
+                    Value::Bool(download_size_estimated),
+                );
+                object.insert(
+                    "installState".to_owned(),
+                    Value::String(if installed { "installed" } else { "missing" }.to_owned()),
+                );
+                object.insert(
+                    "cacheState".to_owned(),
+                    Value::String(
+                        if cache_incomplete {
+                            "incomplete"
+                        } else if installed {
+                            "complete"
+                        } else {
+                            "missing"
+                        }
+                        .to_owned(),
+                    ),
+                );
+                object.insert(
+                    "missingRequiredFiles".to_owned(),
+                    Value::Array(
+                        missing_required_files
+                            .into_iter()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                );
+                object.insert(
+                    "repairAvailable".to_owned(),
+                    Value::Bool(downloadable && cache_incomplete),
+                );
+                object.insert(
+                    "installedPath".to_owned(),
+                    installed_path.map(Value::String).unwrap_or(Value::Null),
+                );
+                object.insert(
+                    "removable".to_owned(),
+                    Value::Bool(user_managed || installed),
+                );
+                // Gated-model signal (sc-1898): a machine-readable `gated` flag plus the
+                // credential host the download requires, so the Models screen can route the
+                // user to the credential screen before a download will succeed. The host
+                // honors an explicit manifest `credentialHost` and otherwise derives from
+                // the download provider/source URL; `licenseUrl` passes through untouched.
+                let gated = object
+                    .get("gated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                object.insert("gated".to_owned(), Value::Bool(gated));
+                if gated {
+                    let credential_host = object
+                        .get("credentialHost")
+                        .and_then(Value::as_str)
+                        .map(normalize_host)
+                        .filter(|host| !host.is_empty())
+                        .or_else(|| derive_credential_host(object));
+                    object.insert(
+                        "credentialHost".to_owned(),
+                        credential_host.map(Value::String).unwrap_or(Value::Null),
+                    );
                 }
-                .to_owned(),
-            ),
-        );
-        object.insert(
-            "missingRequiredFiles".to_owned(),
-            Value::Array(
-                missing_required_files
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-        object.insert(
-            "repairAvailable".to_owned(),
-            Value::Bool(downloadable && cache_incomplete),
-        );
-        object.insert(
-            "installedPath".to_owned(),
-            installed_path.map(Value::String).unwrap_or(Value::Null),
-        );
-        object.insert(
-            "removable".to_owned(),
-            Value::Bool(user_managed || installed),
-        );
-        // Gated-model signal (sc-1898): a machine-readable `gated` flag plus the
-        // credential host the download requires, so the Models screen can route the
-        // user to the credential screen before a download will succeed. The host
-        // honors an explicit manifest `credentialHost` and otherwise derives from
-        // the download provider/source URL; `licenseUrl` passes through untouched.
-        let gated = object
-            .get("gated")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        object.insert("gated".to_owned(), Value::Bool(gated));
-        if gated {
-            let credential_host = object
-                .get("credentialHost")
-                .and_then(Value::as_str)
-                .map(normalize_host)
-                .filter(|host| !host.is_empty())
-                .or_else(|| derive_credential_host(object));
-            object.insert(
-                "credentialHost".to_owned(),
-                credential_host.map(Value::String).unwrap_or(Value::Null),
-            );
-        }
-        // Mac UI gating (sc-3486): per-model Rust/MLX support so the web client can
-        // hide/disable a torch-only model in the pickers and disable the feature
-        // controls a supported model can't run on MLX. Computed from the same routing
-        // predicates as the `mac_rust_supported` oracle, and platform-independent (a
-        // fact about the Rust flow) — the client only acts on it when the capabilities
-        // endpoint reports `macGatingActive`, so non-Mac pickers are untouched.
-        let mac_support = {
-            let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
-            let model_type = object
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            model_mac_support(id, model_type)
-        };
-        if let Ok(mac_support) = serde_json::to_value(mac_support) {
-            object.insert("macSupport".to_owned(), mac_support);
-        }
-        // macOS Model Manager: MLX availability + conversion status for models that
-        // declare an `mlx` variant. Additive fields the web/Docker build ignores; the
-        // probes are cheap and portable, so a const `cfg!` check gates them rather
-        // than per-OS compilation. minMemoryGb passes through from the raw manifest.
-        let mlx_status = if cfg!(target_os = "macos") {
-            mlx_catalog_status(object, &state.settings.data_dir)
-        } else {
-            None
-        };
-        if let Some(status) = mlx_status {
-            object.insert(
-                "mlxInstallState".to_owned(),
-                Value::String(status.install_state.to_owned()),
-            );
-            object.insert(
-                "mlxConversionState".to_owned(),
-                Value::String(status.conversion_state.to_owned()),
-            );
-            object.insert(
-                "mlxConvertedPath".to_owned(),
-                status
-                    .converted_path
-                    .map(|path| Value::String(path.display().to_string()))
-                    .unwrap_or(Value::Null),
-            );
-        }
-    }
-    models.sort_by(|left, right| {
-        let left_key = (
-            left.get("type").and_then(Value::as_str).unwrap_or_default(),
-            left.get("name").and_then(Value::as_str).unwrap_or_default(),
-        );
-        let right_key = (
-            right
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            right
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        );
-        left_key.cmp(&right_key)
-    });
+                // Mac UI gating (sc-3486): per-model Rust/MLX support so the web client can
+                // hide/disable a torch-only model in the pickers and disable the feature
+                // controls a supported model can't run on MLX. Computed from the same routing
+                // predicates as the `mac_rust_supported` oracle, and platform-independent (a
+                // fact about the Rust flow) — the client only acts on it when the capabilities
+                // endpoint reports `macGatingActive`, so non-Mac pickers are untouched.
+                let mac_support = {
+                    let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+                    let model_type = object
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    model_mac_support(id, model_type)
+                };
+                if let Ok(mac_support) = serde_json::to_value(mac_support) {
+                    object.insert("macSupport".to_owned(), mac_support);
+                }
+                // macOS Model Manager: MLX availability + conversion status for models that
+                // declare an `mlx` variant. Additive fields the web/Docker build ignores; the
+                // probes are cheap and portable, so a const `cfg!` check gates them rather
+                // than per-OS compilation. minMemoryGb passes through from the raw manifest.
+                let mlx_status = if cfg!(target_os = "macos") {
+                    mlx_catalog_status(object, &data_dir)
+                } else {
+                    None
+                };
+                if let Some(status) = mlx_status {
+                    object.insert(
+                        "mlxInstallState".to_owned(),
+                        Value::String(status.install_state.to_owned()),
+                    );
+                    object.insert(
+                        "mlxConversionState".to_owned(),
+                        Value::String(status.conversion_state.to_owned()),
+                    );
+                    object.insert(
+                        "mlxConvertedPath".to_owned(),
+                        status
+                            .converted_path
+                            .map(|path| Value::String(path.display().to_string()))
+                            .unwrap_or(Value::Null),
+                    );
+                }
+            }
+            models.sort_by(|left, right| {
+                let left_key = (
+                    left.get("type").and_then(Value::as_str).unwrap_or_default(),
+                    left.get("name").and_then(Value::as_str).unwrap_or_default(),
+                );
+                let right_key = (
+                    right
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    right
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                );
+                left_key.cmp(&right_key)
+            });
+            Ok(models)
+        })
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!("model catalog assembly task failed: {err}"))
+        })??;
     Ok(models)
 }
 

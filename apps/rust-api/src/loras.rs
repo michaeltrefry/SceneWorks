@@ -124,45 +124,58 @@ pub(crate) async fn lora_catalog(
         load_manifest_entries(state, &manifest_dir.join("builtin.loras.jsonc"), "loras").await?;
     let user =
         load_manifest_entries(state, &manifest_dir.join("user.loras.jsonc"), "loras").await?;
-    let mut loras = Vec::new();
-    for lora in builtin {
-        loras.push(normalize_lora_entry(
-            lora,
-            "builtin",
-            &manifest_dir.join("builtin.loras.jsonc"),
-            &state.settings.data_dir,
-            &state.settings.data_dir,
-        )?);
-    }
-    let user = user
-        .into_iter()
-        .map(|lora| {
-            normalize_lora_entry(
-                lora,
-                "global",
-                &manifest_dir.join("user.loras.jsonc"),
-                &state.settings.data_dir,
-                &state.settings.data_dir,
-            )
+    let data_dir = state.settings.data_dir.clone();
+    let builtin_manifest = manifest_dir.join("builtin.loras.jsonc");
+    let user_manifest = manifest_dir.join("user.loras.jsonc");
+    // sc-4202 (F-API-3): normalize_lora_entry probes the filesystem for installed
+    // artifact paths; run the builtin+user normalize off the async executor.
+    let mut loras = {
+        let data_dir = data_dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Value>, ApiError> {
+            let mut loras = Vec::new();
+            for lora in builtin {
+                loras.push(normalize_lora_entry(
+                    lora,
+                    "builtin",
+                    &builtin_manifest,
+                    &data_dir,
+                    &data_dir,
+                )?);
+            }
+            let user = user
+                .into_iter()
+                .map(|lora| {
+                    normalize_lora_entry(lora, "global", &user_manifest, &data_dir, &data_dir)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(merge_entries_by_id(loras, user))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    loras = merge_entries_by_id(loras, user);
+        .await
+        .map_err(|err| ApiError::internal(format!("LoRA catalog normalize task failed: {err}")))??
+    };
     if let Some(project_id) = project_id {
         let project_path = project_path_for_id(state.clone(), project_id).await?;
         let project_manifest = project_path.join("loras").join("manifest.jsonc");
-        let project_loras = load_manifest_entries(state, &project_manifest, "loras")
-            .await?
-            .into_iter()
-            .map(|lora| {
-                normalize_lora_entry(
-                    lora,
-                    "project",
-                    &project_manifest,
-                    &project_path,
-                    &state.settings.data_dir,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let entries = load_manifest_entries(state, &project_manifest, "loras").await?;
+        let data_dir = data_dir.clone();
+        let project_loras = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, ApiError> {
+            entries
+                .into_iter()
+                .map(|lora| {
+                    normalize_lora_entry(
+                        lora,
+                        "project",
+                        &project_manifest,
+                        &project_path,
+                        &data_dir,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!("LoRA catalog project normalize task failed: {err}"))
+        })??;
         loras = merge_entries_by_id(loras, project_loras);
     }
     for lora in &mut loras {
@@ -648,16 +661,26 @@ pub(crate) async fn validate_job_lora_compatibility(
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("Model is required for LoRA compatibility"))?;
+    let model_id = model_id.to_owned();
     let models = model_catalog(state).await?;
     let catalog_loras = lora_catalog(state, project_id).await?;
-    let normalized = validate_lora_specs_for_model(
-        &models,
-        &catalog_loras,
-        model_id,
-        &loras,
-        allow_inline_loras,
-        "LoRA",
-    )?;
+    // sc-4202 (F-API-3): validate_lora_specs_for_model reads safetensors headers off
+    // disk (validate_lora_safetensors_header) inline. Run it on the blocking pool so a
+    // slow/network volume can't stall a tokio worker thread on the job-creation path.
+    let normalized = tokio::task::spawn_blocking(move || {
+        validate_lora_specs_for_model(
+            &models,
+            &catalog_loras,
+            &model_id,
+            &loras,
+            allow_inline_loras,
+            "LoRA",
+        )
+    })
+    .await
+    .map_err(|err| {
+        ApiError::internal(format!("LoRA compatibility validation task failed: {err}"))
+    })??;
     job_payload.insert("loras".to_owned(), Value::Array(normalized));
     Ok(())
 }

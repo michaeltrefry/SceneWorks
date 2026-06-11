@@ -33,15 +33,14 @@ fn preferences_path(state: &AppState) -> PathBuf {
     state.settings.config_dir.join(PREFERENCES_FILENAME)
 }
 
-fn load_preferences(state: &AppState) -> UiPreferences {
-    std::fs::read_to_string(preferences_path(state))
+fn load_preferences(path: &std::path::Path) -> UiPreferences {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|body| serde_json::from_str(&body).ok())
         .unwrap_or_default()
 }
 
-fn save_preferences(state: &AppState, prefs: &UiPreferences) -> std::io::Result<()> {
-    let path = preferences_path(state);
+fn save_preferences(path: &std::path::Path, prefs: &UiPreferences) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -71,7 +70,12 @@ fn normalize_accent(input: Option<&str>) -> Option<String> {
 pub(crate) async fn get_ui_preferences(
     State(state): State<AppState>,
 ) -> Result<Json<UiPreferences>, ApiError> {
-    Ok(Json(load_preferences(&state)))
+    // sc-4202 (F-API-3): keep the preferences-file read off the async executor.
+    let path = preferences_path(&state);
+    let prefs = tokio::task::spawn_blocking(move || load_preferences(&path))
+        .await
+        .map_err(|err| ApiError::internal(format!("UI preferences load task failed: {err}")))?;
+    Ok(Json(prefs))
 }
 
 /// Merge the supplied preferences in and persist. Only recognized fields/values
@@ -80,15 +84,23 @@ pub(crate) async fn set_ui_preferences(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<UiPreferences>,
 ) -> Result<Json<UiPreferences>, ApiError> {
-    let mut prefs = load_preferences(&state);
-    if let Some(theme) = normalize_theme(payload.theme.as_deref()) {
-        prefs.theme = Some(theme);
-    }
-    if let Some(accent) = normalize_accent(payload.accent.as_deref()) {
-        prefs.accent = Some(accent);
-    }
-    save_preferences(&state, &prefs)
-        .map_err(|error| ApiError::internal(format!("Failed to save UI preferences: {error}")))?;
+    // sc-4202 (F-API-3): the read-modify-write of the preferences file runs on the
+    // blocking pool so it can't stall a tokio worker thread.
+    let path = preferences_path(&state);
+    let prefs = tokio::task::spawn_blocking(move || -> std::io::Result<UiPreferences> {
+        let mut prefs = load_preferences(&path);
+        if let Some(theme) = normalize_theme(payload.theme.as_deref()) {
+            prefs.theme = Some(theme);
+        }
+        if let Some(accent) = normalize_accent(payload.accent.as_deref()) {
+            prefs.accent = Some(accent);
+        }
+        save_preferences(&path, &prefs)?;
+        Ok(prefs)
+    })
+    .await
+    .map_err(|err| ApiError::internal(format!("UI preferences save task failed: {err}")))?
+    .map_err(|error| ApiError::internal(format!("Failed to save UI preferences: {error}")))?;
     Ok(Json(prefs))
 }
 
