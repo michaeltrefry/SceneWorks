@@ -68,6 +68,7 @@ from scene_worker.upscalers import (
     RealESRGANUpscaler,
     TileSlice,
     UpscaleJob,
+    _load_state_dict,
     create_upscaler_engine,
     tile_slices,
 )
@@ -10413,3 +10414,31 @@ def test_qwen_image_adapter_pose_loop_renders_skeleton_and_passes_multi_image(mo
     for entry in captured:
         assert entry["pose_skeleton"] is not None
         assert POSE_SKELETON_PROMPT in (entry["prompt_override"] or "")
+
+
+def test_load_state_dict_requires_weights_only(tmp_path):
+    """sc-4230 / F-WORKER-6: .pth upscaler weights load with weights_only=True
+    (no pickle execution), and there is NO silent fallback to an unrestricted
+    torch.load — an ancient torch without the flag fails loudly instead."""
+    weights = tmp_path / "model.pth"
+    weights.write_bytes(b"not really a checkpoint")
+
+    class _SafeTorch:
+        def load(self, path, map_location=None, weights_only=False):
+            assert weights_only is True, "must load with weights_only=True"
+            return {"module.body.weight": 1, "other": 2}
+
+    state = _load_state_dict(_SafeTorch(), weights)
+    # `module.` prefix stripped; the safe load result is returned.
+    assert state == {"body.weight": 1, "other": 2}
+
+    class _AncientTorch:
+        """torch.load that predates weights_only — it must NOT be retried unsafely."""
+
+        def load(self, path, map_location=None, **kwargs):
+            if "weights_only" in kwargs:
+                raise TypeError("load() got an unexpected keyword argument 'weights_only'")
+            raise AssertionError("must not fall back to an unrestricted torch.load")
+
+    with pytest.raises(RuntimeError, match="weights_only"):
+        _load_state_dict(_AncientTorch(), weights)
