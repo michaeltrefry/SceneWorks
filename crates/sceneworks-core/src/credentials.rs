@@ -109,10 +109,41 @@ impl CredentialFileStore {
             std::fs::create_dir_all(parent)?;
         }
         let body = serde_json::to_string_pretty(map)?;
-        std::fs::write(&self.path, body)?;
+        // Stage into a sibling temp file then atomically rename into place, so a
+        // crash never leaves a half-written or default-mode secrets file. On Unix
+        // the temp is created 0600 up front, closing the window where the token
+        // was briefly world/group-readable between a plain write and the chmod
+        // (sc-4268 / F-CORE-8).
+        let tmp_path = self.path.with_extension("json.tmp");
+        write_secret_file(&tmp_path, body.as_bytes())?;
+        std::fs::rename(&tmp_path, &self.path)?;
+        // Backstop: re-assert 0600 on the final path in case it already existed
+        // with looser permissions on a platform without atomic-mode creation.
         restrict_permissions(&self.path)?;
         Ok(())
     }
+}
+
+/// Write `contents` to `path`, creating the file with `0600` from the start on
+/// Unix so a secret is never momentarily readable by other local users. On other
+/// platforms this is a plain write (the desktop build keeps secrets in the OS
+/// keychain, not this file).
+#[cfg(unix)]
+fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents)
+}
+
+#[cfg(not(unix))]
+fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    std::fs::write(path, contents)
 }
 
 /// Normalize a user-entered host or URL to a bare lower-cased host (strip scheme
@@ -188,6 +219,36 @@ mod tests {
         let store = CredentialFileStore::new(dir.path());
         store.set("huggingface.co", "", "weird", "hf").expect("set");
         assert_eq!(store.list()[0].scheme, "bearer");
+    }
+
+    /// sc-4268 / F-CORE-8: the secrets file is written via a 0600 staging temp +
+    /// atomic rename. Verify the final file is 0600 even when it pre-existed with
+    /// loose perms (the backstop chmod), and that no staging temp is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn save_is_atomic_and_0600_over_loose_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialFileStore::new(dir.path());
+        // Pre-create the credentials file with loose 0644 perms.
+        std::fs::write(store.path(), "{}").expect("seed");
+        std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o644))
+            .expect("loosen");
+
+        store.set("example.com", "", "bearer", "tok").expect("set");
+
+        let mode = std::fs::metadata(store.path())
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "final file must be 0600");
+        let tmp = store.path().with_extension("json.tmp");
+        assert!(
+            !tmp.exists(),
+            "staging temp must be renamed away, not left behind"
+        );
+        // Content round-trips through the atomic write.
+        assert_eq!(store.load()["example.com"].token, "tok");
     }
 
     #[cfg(unix)]
