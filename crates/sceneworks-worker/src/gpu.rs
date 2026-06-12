@@ -22,12 +22,46 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
         return gpu;
     }
     let gpus = discover_gpus().await;
-    if requested_gpu_id.is_empty() || requested_gpu_id == "auto" {
-        return gpus.into_iter().next().unwrap_or_else(cpu_gpu);
+    let gpu = if requested_gpu_id.is_empty() || requested_gpu_id == "auto" {
+        gpus.into_iter().next().unwrap_or_else(cpu_gpu)
+    } else {
+        gpus.into_iter()
+            .find(|gpu| gpu.id == requested_gpu_id)
+            .unwrap_or_else(|| fallback_gpu(requested_gpu_id))
+    };
+    with_candle_capabilities(gpu, settings)
+}
+
+/// Light up the Windows/CUDA candle SDXL lane on the discovered nvidia GPU (epic 3672, sc-3678).
+/// When the candle backend is enabled, extend the GPU's advertised capabilities with the
+/// registry-DERIVED core (`engines::registry_capabilities` → `image_generate`, from the linked
+/// candle SDXL descriptor) plus a `candle` marker capability. The marker lets the API routing gate
+/// (`jobs_store::worker_supports_job`) recognize this worker and confine it to the SDXL/RealVisXL
+/// txt2img lane — every other shape falls back to the Python torch worker. Mirrors the macOS
+/// `mlx_gpu` derivation, but bolted onto the real nvidia GPU descriptor rather than a sentinel id.
+///
+/// All-targets signature so `discover_gpu` is uniform; a no-op everywhere except the Windows candle
+/// build with `backend_candle_enabled`, so production routing is unchanged until the lane is on.
+#[cfg_attr(
+    not(all(target_os = "windows", feature = "backend-candle")),
+    allow(unused_mut, unused_variables)
+)]
+fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> DiscoveredGpu {
+    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    if settings.backend_candle_enabled && gpu.capabilities.contains(&WorkerCapability::Gpu) {
+        let derived = crate::engines::registry_capabilities(settings);
+        if !derived.is_empty() {
+            for capability in derived {
+                if !gpu.capabilities.contains(&capability) {
+                    gpu.capabilities.push(capability);
+                }
+            }
+            // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
+            gpu.capabilities
+                .push(WorkerCapability::Unknown("candle".to_owned()));
+        }
     }
-    gpus.into_iter()
-        .find(|gpu| gpu.id == requested_gpu_id)
-        .unwrap_or_else(|| fallback_gpu(requested_gpu_id))
+    gpu
 }
 
 pub(crate) async fn discover_gpus() -> Vec<DiscoveredGpu> {

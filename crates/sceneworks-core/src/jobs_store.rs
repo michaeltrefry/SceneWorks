@@ -3058,6 +3058,87 @@ fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
 }
 
+/// The models the candle (Windows/CUDA) SDXL lane can serve (epic 3672, sc-3678). Mirrors the
+/// worker's `image_jobs::is_candle_engine`: the SDXL family only — `realvisxl` shares the candle
+/// `"sdxl"` engine via a weights swap. Deliberately narrow: candle is a gated txt2img-only lane,
+/// and everything outside it falls back to the Python torch worker.
+const CANDLE_ROUTED_MODELS: &[&str] = &["sdxl", "realvisxl"];
+
+/// Whether `worker` is the candle (Windows/CUDA) SDXL worker — identified by the `candle` marker
+/// capability it self-advertises (`gpu::with_candle_capabilities`), mirroring the `nvidia` marker
+/// the Rust GPU worker already emits. The candle worker runs on a real CUDA gpu index, not the
+/// `mlx` sentinel, so it can't be recognized by `gpu_id`; the marker is the seam. When candle is
+/// disabled the worker never advertises the marker, so this is always `false` and routing is
+/// unchanged.
+fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
+    worker
+        .capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "candle")
+}
+
+/// Does this image job belong on the candle SDXL **txt2img-only** lane (epic 3672, sc-3678)? The
+/// candle generator (`image_jobs::generate_candle_stream`) drives plain text-to-image only — no
+/// img2img/edit (`mode == "edit_image"` + `sourceAssetId`), no reference/IP-Adapter
+/// (`referenceAssetId`), no masked inpaint/outpaint (`maskAssetId`), no strict-pose ControlNet
+/// (`advanced.poses`), and no LoRAs. Every one of those shapes must fall back to the Python torch
+/// worker, so the candle worker refuses them here. The conditioning signals mirror the worker's
+/// `sdxl_sub_mode` / `pose_entries` exactly, so the router and worker agree on the lane boundary.
+fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::ImageGenerate) {
+        return false;
+    }
+    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+        return false;
+    };
+    image_request_candle_eligible(model, &job.payload)
+}
+
+/// Per-model candle txt2img-eligibility, factored out of [`image_job_is_candle_eligible`] so the
+/// routing tests can probe it with synthetic payloads (parity with `image_request_mlx_eligible`).
+fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    if !CANDLE_ROUTED_MODELS.contains(&model) {
+        return false;
+    }
+    // img2img / inpaint / outpaint all arrive as `mode == "edit_image"` (+ a source); reject the
+    // whole edit family up front (the worker's `sdxl_sub_mode` keys off the same mode).
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let has_nonempty_id = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    // Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) → torch.
+    if has_nonempty_id("sourceAssetId")
+        || has_nonempty_id("referenceAssetId")
+        || has_nonempty_id("maskAssetId")
+    {
+        return false;
+    }
+    // LoRAs are not in the candle lane (the descriptor advertises none).
+    if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty())
+    {
+        return false;
+    }
+    // Strict-pose ControlNet (`advanced.poses`, object-shaped entries) → torch.
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    if has_poses {
+        return false;
+    }
+    true
+}
+
 /// InstantID (`instantid_realvisxl`) MLX-routing conditions. The native `mlx-gen-instantid`
 /// provider now serves the FULL surface on Mac: single-identity `character_image`, the 11-view
 /// Character-Studio angle set (sc-3345), AND pose-library mode + face-restore (sc-3381, on the
@@ -3554,6 +3635,19 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             return false;
         }
     }
+    // Candle (Windows/CUDA) SDXL lane (epic 3672, sc-3678): the candle worker advertises only
+    // `image_generate` and serves a gated, narrow SDXL/RealVisXL **txt2img-only** lane. It must
+    // refuse every other `image_generate` shape — a non-SDXL family, or an SDXL img2img / inpaint /
+    // outpaint / reference / strict-pose / LoRA request — so those transparently fall back to the
+    // Python torch worker that co-resides on the box. Identified by the `candle` marker capability
+    // (not `gpu_id`, which is a real CUDA index here). When candle is disabled the marker is absent
+    // and this is inert, so production routing is unchanged until the lane is turned on.
+    if worker_is_candle(worker)
+        && matches!(job.job_type, JobType::ImageGenerate)
+        && !image_job_is_candle_eligible(job)
+    {
+        return false;
+    }
     let advertises = |capability: &str| {
         worker
             .capabilities
@@ -3832,6 +3926,161 @@ mod active_statuses_sql_tests {
                 "active status {status:?} missing from SQL list"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod candle_routing_tests {
+    //! Candle (Windows/CUDA) SDXL lane routing (epic 3672, sc-3678): the candle worker serves a
+    //! gated, narrow SDXL/RealVisXL **txt2img-only** lane and must defer every other shape to the
+    //! Python torch worker. These tests pin the lane boundary (`image_request_candle_eligible`) and
+    //! the full claim gate (`worker_supports_job` via the `candle` marker capability).
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn object(value: Value) -> Map<String, Value> {
+        value.as_object().expect("test value is an object").clone()
+    }
+
+    /// A queued `image_generate` job carrying `payload`, built via serde so the test never has to
+    /// spell out the full `JobSnapshot` field set.
+    fn image_generate_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_1",
+            "type": "image_generate",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-12T00:00:00Z",
+            "updatedAt": "2026-06-12T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// A worker on a real CUDA gpu index advertising `capabilities` (string ids). The candle worker
+    /// carries the `candle` marker; the torch worker on the same box does not.
+    fn gpu_worker(capabilities: &[&str]) -> WorkerSnapshot {
+        serde_json::from_value(json!({
+            "id": "worker_1",
+            "gpuId": "0",
+            "status": "idle",
+            "capabilities": capabilities,
+            "loadedModels": [],
+            "registeredAt": "2026-06-12T00:00:00Z",
+            "lastSeenAt": "2026-06-12T00:00:00Z",
+        }))
+        .expect("valid WorkerSnapshot")
+    }
+
+    const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "candle"];
+    // The Python torch worker advertises the broad image surface but no `candle` marker.
+    const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
+
+    #[test]
+    fn sdxl_and_realvisxl_plain_txt2img_are_candle_eligible() {
+        for model in CANDLE_ROUTED_MODELS {
+            assert!(
+                image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
+                "{model} plain txt2img should be candle-eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn non_sdxl_families_are_never_candle_eligible() {
+        for model in [
+            "flux_dev",
+            "qwen_image",
+            "z_image_turbo",
+            "chroma1_hd",
+            "kolors",
+        ] {
+            assert!(
+                !image_request_candle_eligible(model, &object(json!({ "prompt": "p" }))),
+                "{model} must fall back to the Python worker"
+            );
+        }
+    }
+
+    #[test]
+    fn sdxl_advanced_shapes_fall_back_to_torch() {
+        // Every conditioning shape the txt2img candle lane can't honor must be ineligible.
+        let cases = [
+            json!({ "mode": "edit_image", "sourceAssetId": "asset_1" }), // img2img / inpaint / outpaint
+            json!({ "referenceAssetId": "asset_1" }),                    // IP-Adapter reference
+            json!({ "mode": "edit_image", "sourceAssetId": "a", "maskAssetId": "m" }), // inpaint
+            json!({ "loras": [{ "name": "x" }] }),                       // LoRA
+            json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),    // strict-pose ControlNet
+        ];
+        for case in cases {
+            assert!(
+                !image_request_candle_eligible("sdxl", &object(case.clone())),
+                "sdxl shape must fall back to torch: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn blank_conditioning_ids_are_treated_as_absent() {
+        // Whitespace/empty ids are not real conditioning → still plain txt2img → eligible.
+        assert!(image_request_candle_eligible(
+            "sdxl",
+            &object(
+                json!({ "referenceAssetId": "  ", "sourceAssetId": "", "advanced": { "poses": [] } })
+            )
+        ));
+    }
+
+    #[test]
+    fn candle_worker_claims_sdxl_txt2img_but_refuses_unsupported_shapes() {
+        let candle = gpu_worker(CANDLE_CAPS);
+        // Claims the lane.
+        assert!(worker_supports_job(
+            &candle,
+            &image_generate_job(json!({ "model": "sdxl", "prompt": "a red fox" }))
+        ));
+        assert!(worker_supports_job(
+            &candle,
+            &image_generate_job(json!({ "model": "realvisxl", "prompt": "p" }))
+        ));
+        // Refuses a non-SDXL family and an SDXL img2img — both defer to torch.
+        assert!(!worker_supports_job(
+            &candle,
+            &image_generate_job(json!({ "model": "flux_dev", "prompt": "p" }))
+        ));
+        assert!(!worker_supports_job(
+            &candle,
+            &image_generate_job(json!({
+                "model": "sdxl",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1"
+            }))
+        ));
+    }
+
+    #[test]
+    fn torch_worker_claims_everything_the_candle_worker_defers() {
+        // The co-resident Python torch worker (no `candle` marker) is ungated here: it claims the
+        // shapes the candle worker refused, so nothing is stranded.
+        let torch = gpu_worker(TORCH_CAPS);
+        assert!(worker_supports_job(
+            &torch,
+            &image_generate_job(json!({ "model": "flux_dev", "prompt": "p" }))
+        ));
+        assert!(worker_supports_job(
+            &torch,
+            &image_generate_job(json!({
+                "model": "sdxl",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1"
+            }))
+        ));
     }
 }
 

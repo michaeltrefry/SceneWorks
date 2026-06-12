@@ -88,6 +88,11 @@ use mlx_gen_instantid::{
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
 const STUB_ADAPTER: &str = "procedural_preview";
+/// The adapter id recorded on assets produced by the candle (Windows/CUDA) SDXL lane (sc-3678).
+/// Used both per-asset (`generate_candle_stream`) and at the generation-set level (`adapter_id`)
+/// so the sidecar + result agree on which backend produced the image.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_ADAPTER: &str = "candle_sdxl";
 #[cfg(target_os = "macos")]
 const MAX_JOB_LORAS: usize = 3;
 
@@ -575,6 +580,15 @@ fn adapter_id(request: &ImageRequest) -> &'static str {
     #[cfg(target_os = "macos")]
     if let Some(model) = mlx_model(&request.model) {
         return model.adapter_label();
+    }
+    // Windows/CUDA candle lane (sc-3678): report the candle adapter for the SDXL family so the
+    // generation-set fact matches the per-asset `adapter` the candle path already writes, instead
+    // of falling through to the procedural-stub label. Routing (`worker_supports_job`) only lets
+    // candle-eligible SDXL txt2img jobs reach this worker, so `is_candle_engine` here implies the
+    // candle path ran.
+    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    if is_candle_engine(&request.model) {
+        return CANDLE_ADAPTER;
     }
     let _ = request;
     STUB_ADAPTER

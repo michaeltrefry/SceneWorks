@@ -737,11 +737,16 @@ async fn generate_candle_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     project_path: &Path,
-    backend: &str,
+    _device_backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let adapter_label = "candle_sdxl";
+    let adapter_label = CANDLE_ADAPTER;
+    // Report the tensor backend ("candle"), not the gpu-id device label (`_device_backend`), on the
+    // streamed progress + inference events (sc-3678) — parity with the macOS path's
+    // `model.backend()` override, so the worker log + the UI architecture pill clearly attribute the
+    // run to Candle.
+    let backend = "candle";
     // realvisxl shares the candle "sdxl" engine + a weights swap (sc-3677 verifies its layout).
     let repo = match request.model.as_str() {
         "realvisxl" => "SG161222/RealVisXL_V5.0",

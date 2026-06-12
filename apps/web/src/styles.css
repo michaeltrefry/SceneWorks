@@ -7571,6 +7571,14 @@ label {
   border-color: transparent;
 }
 
+/* Candle (Windows/CUDA Rust SDXL lane, sc-3678): a warm tone distinct from the generic
+   cuda/torch pill so a Candle-backed run is visually unmistakable. */
+.worker-progress-card__pill.arch.arch-candle {
+  background: color-mix(in oklch, #d97706 18%, var(--surface));
+  color: color-mix(in oklch, #b45309 85%, var(--text));
+  border-color: transparent;
+}
+
 .worker-progress-card__meters {
   display: grid;
   grid-template-columns: 1fr;
