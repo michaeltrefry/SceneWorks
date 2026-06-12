@@ -702,6 +702,14 @@ async fn run_training_execution(
 mod tests {
     use super::*;
 
+    /// Serializes every test that mutates the process-global `HF_HUB_CACHE` env
+    /// var. Must be a SINGLE module-level mutex: per-function `static`s are
+    /// distinct locks and do not serialize against each other, so under parallel
+    /// test execution one test's `set_var`/`remove_var` races another's
+    /// validation read (the intermittent "must be inside an app-managed
+    /// directory" flake on the macOS nax-worker CI lane).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn test_settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
@@ -916,8 +924,10 @@ mod tests {
     /// mutation can't race other env-reading tests.
     #[test]
     fn validate_accepts_base_model_in_hf_cache_outside_data_dir() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        // Recover from poisoning: a panic in another env-mutating test must not
+        // cascade into a spurious failure here — we only need the mutual
+        // exclusion, not the guarded data.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let dir = tempfile::tempdir().expect("tempdir");
         let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
@@ -965,8 +975,7 @@ mod tests {
     /// real run rejected the same `~/.cache/huggingface` snapshot).
     #[test]
     fn resolve_app_managed_model_dir_accepts_hf_cache_snapshot() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let dir = tempfile::tempdir().expect("tempdir");
         let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
