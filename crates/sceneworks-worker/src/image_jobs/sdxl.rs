@@ -27,8 +27,8 @@ fn non_empty(value: &Option<String>) -> bool {
 }
 
 /// The engine-backed SDXL family row for a model id (`sdxl` / `realvisxl`), if any.
-fn sdxl_engine_model(model: &str) -> Option<&'static MlxModel> {
-    mlx_model(model).filter(|entry| entry.engine_id == "sdxl")
+fn sdxl_engine_model(model: &str) -> Option<ResolvedModel> {
+    mlx_model(model).filter(|entry| entry.engine_id() == "sdxl")
 }
 
 /// Classify an SDXL job into an advanced sub-mode. `None` = plain txt2img (no reference,
@@ -215,12 +215,12 @@ async fn generate_sdxl_advanced_stream(
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SDXL weights not found".to_owned()))?;
     let (quant, quant_bits) = resolve_quant(request);
-    let steps = resolve_steps(request, model);
-    let guidance = resolve_guidance(request, model);
-    let negative_prompt = resolve_negative_prompt(request, model);
+    let steps = resolve_steps(request, &model);
+    let guidance = resolve_guidance(request, &model);
+    let negative_prompt = resolve_negative_prompt(request, &model);
     let adapters = resolve_adapters(request)?;
-    let repo = model_repo(request, model);
-    let adapter_label = model.adapter_label;
+    let repo = model_repo(request, &model);
+    let adapter_label = model.adapter_label();
     let (width, height) = (request.width, request.height);
 
     // Build the (seed-independent) conditioning + decide whether IP weights load. Images are

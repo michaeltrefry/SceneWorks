@@ -489,7 +489,7 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_gpu_advertises_generation_capabilities_only() {
-    let mlx = mlx_gpu();
+    let mlx = mlx_gpu(&crate::Settings::from_env());
     assert_eq!(mlx.id, "mlx");
     let capabilities = worker_capabilities_with_utility(&mlx, true);
     assert!(capabilities
@@ -532,6 +532,104 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
                 .any(|capability| capability.as_str() == utility),
             "MLX GPU worker should not advertise utility capability {utility}"
         );
+    }
+}
+
+/// sc-3723 acceptance gate: with default settings (mlx enabled) and ALL provider crates
+/// linked on macOS, the registry-DERIVED advertisement must equal exactly today's hardcoded
+/// MLX capability set (order-independent). This is the invariant that lets the dispatch table
+/// move + the flags become descriptor-derived without changing what the worker advertises.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_gpu_capability_set_matches_expected_full_set() {
+    use sceneworks_core::contracts::WorkerCapability;
+    use std::collections::BTreeSet;
+    let mlx = mlx_gpu(&crate::Settings::from_env());
+    let actual: BTreeSet<_> = mlx.capabilities.iter().cloned().collect();
+    let expected: BTreeSet<_> = [
+        // seed
+        WorkerCapability::Gpu,
+        // 5 registry-derived
+        WorkerCapability::ImageGenerate,
+        WorkerCapability::VideoGenerate,
+        WorkerCapability::LoraTrain,
+        WorkerCapability::LoraTrainExecute,
+        WorkerCapability::TrainingCaption,
+        // carve-outs
+        WorkerCapability::ImageEdit,
+        WorkerCapability::ImageDetail,
+        WorkerCapability::ImageVqa,
+        WorkerCapability::ImageInterleave,
+        WorkerCapability::VideoExtend,
+        WorkerCapability::VideoBridge,
+        WorkerCapability::PersonReplace,
+        WorkerCapability::PoseDetect,
+        WorkerCapability::KpsExtract,
+        WorkerCapability::ImageUpscale,
+        WorkerCapability::PersonDetect,
+        WorkerCapability::PersonTrack,
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        actual, expected,
+        "registry-derived MLX capability set drifted from the expected full set"
+    );
+}
+
+/// sc-3723: every MODEL_TABLE row resolves through the registry-joined `mlx_model` lookup
+/// (its engine id is registered by a linked provider crate), and the descriptor-derived
+/// guidance/negative-prompt flags match the pre-deletion hardcoded values — proving the two
+/// removed row flags were faithfully replaced by the engine's own advertised surface.
+#[cfg(target_os = "macos")]
+#[test]
+fn model_table_rows_resolve_and_flags_match_descriptor() {
+    use crate::engines::{mlx_model, MODEL_TABLE};
+    // (sceneworks_id, supports_guidance, supports_negative_prompt) — the exact pre-sc-3723
+    // values that used to live on each MlxModel row.
+    let expected: &[(&str, bool, bool)] = &[
+        ("z_image_turbo", false, false),
+        ("z_image_edit", false, false),
+        ("flux_schnell", false, false),
+        ("flux_dev", true, false),
+        ("qwen_image", true, true),
+        ("qwen_image_edit", true, true),
+        ("qwen_image_edit_2509", true, true),
+        ("qwen_image_edit_2511", true, true),
+        // sc-3723 finding: the lightning variant shares the `qwen_image_edit` engine id, whose
+        // descriptor advertises supports_negative_prompt=true. The old row hardcoded `false`
+        // (the CFG-off recipe), but the engine itself drops the negative branch under the
+        // `lightning` sampler (model_edit.rs `neg = None` when is_lightning), so the
+        // descriptor-derived `true` is behavior-equivalent — the CFG-off recipe is
+        // engine-enforced, not a model capability the worker has to suppress.
+        ("qwen_image_edit_2511_lightning", true, true),
+        ("flux2_klein_9b", true, false),
+        ("flux2_klein_9b_kv", true, false),
+        ("flux2_klein_9b_true_v2", true, false),
+        ("sdxl", true, true),
+        ("realvisxl", true, true),
+        ("kolors", true, true),
+        ("chroma1_hd", false, true),
+        ("chroma1_base", false, true),
+        ("chroma1_flash", false, true),
+        ("sensenova_u1_8b", true, false),
+        ("sensenova_u1_8b_fast", true, false),
+    ];
+    // Every row is covered by the expectation table (no row added without a flag pair here).
+    assert_eq!(MODEL_TABLE.len(), expected.len());
+    for (id, guidance, negative) in expected {
+        let m = mlx_model(id).unwrap_or_else(|| panic!("{id} resolves through the registry"));
+        assert_eq!(
+            m.supports_guidance(),
+            *guidance,
+            "{id} supports_guidance descriptor drift"
+        );
+        assert_eq!(
+            m.supports_negative_prompt(),
+            *negative,
+            "{id} supports_negative_prompt descriptor drift"
+        );
+        assert_eq!(m.backend(), "mlx", "{id} backend");
     }
 }
 
@@ -2254,6 +2352,8 @@ fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) 
         max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
         allow_private_lora_urls: true,
         utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
     }
 }
 

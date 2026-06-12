@@ -144,29 +144,29 @@ fn steps_default_is_family_default_and_clamps() {
     let dev = mlx_model("flux_dev").unwrap();
     // Family defaults (Python MODEL_TARGETS parity): z-image 8, schnell 4, dev 28.
     assert_eq!(
-        resolve_steps(&request(json!({ "projectId": "p" })), zimage),
+        resolve_steps(&request(json!({ "projectId": "p" })), &zimage),
         8
     );
     assert_eq!(
-        resolve_steps(&request(json!({ "projectId": "p" })), schnell),
+        resolve_steps(&request(json!({ "projectId": "p" })), &schnell),
         4
     );
     assert_eq!(
-        resolve_steps(&request(json!({ "projectId": "p" })), dev),
+        resolve_steps(&request(json!({ "projectId": "p" })), &dev),
         28
     );
     // advanced.steps overrides, clamped to 1..=80.
     assert_eq!(
         resolve_steps(
             &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
-            dev
+            &dev
         ),
         80
     );
     assert_eq!(
         resolve_steps(
             &request(json!({ "projectId": "p", "advanced": { "steps": 12 } })),
-            schnell
+            &schnell
         ),
         12
     );
@@ -176,20 +176,20 @@ fn steps_default_is_family_default_and_clamps() {
 #[test]
 fn mlx_model_table_maps_known_families() {
     assert_eq!(
-        mlx_model("z_image_turbo").unwrap().engine_id,
+        mlx_model("z_image_turbo").unwrap().engine_id(),
         "z_image_turbo"
     );
     assert_eq!(
-        mlx_model("flux_schnell").unwrap().engine_id,
+        mlx_model("flux_schnell").unwrap().engine_id(),
         "flux1_schnell"
     );
-    assert_eq!(mlx_model("flux_dev").unwrap().engine_id, "flux1_dev");
-    assert_eq!(mlx_model("flux_dev").unwrap().adapter_label, "mlx_flux");
+    assert_eq!(mlx_model("flux_dev").unwrap().engine_id(), "flux1_dev");
+    assert_eq!(mlx_model("flux_dev").unwrap().adapter_label(), "mlx_flux");
     let qwen = mlx_model("qwen_image").unwrap();
-    assert_eq!(qwen.engine_id, "qwen_image");
-    assert_eq!(qwen.adapter_label, "mlx_qwen");
-    assert_eq!(qwen.default_steps, 20);
-    assert!(qwen.supports_guidance && qwen.supports_negative_prompt);
+    assert_eq!(qwen.engine_id(), "qwen_image");
+    assert_eq!(qwen.adapter_label(), "mlx_qwen");
+    assert_eq!(qwen.default_steps(), 20);
+    assert!(qwen.supports_guidance() && qwen.supports_negative_prompt());
     // All three FLUX.2-klein variants share the engine's single txt2img model.
     for id in [
         "flux2_klein_9b",
@@ -197,24 +197,24 @@ fn mlx_model_table_maps_known_families() {
         "flux2_klein_9b_true_v2",
     ] {
         let m = mlx_model(id).unwrap();
-        assert_eq!(m.engine_id, "flux2_klein_9b");
-        assert_eq!(m.adapter_label, "mlx_flux2");
-        assert!(m.supports_guidance && !m.supports_negative_prompt);
+        assert_eq!(m.engine_id(), "flux2_klein_9b");
+        assert_eq!(m.adapter_label(), "mlx_flux2");
+        assert!(m.supports_guidance() && !m.supports_negative_prompt());
     }
     // Distilled variants are 4-step; the undistilled true_v2 is 24-step.
-    assert_eq!(mlx_model("flux2_klein_9b").unwrap().default_steps, 4);
-    assert_eq!(mlx_model("flux2_klein_9b_kv").unwrap().default_steps, 4);
+    assert_eq!(mlx_model("flux2_klein_9b").unwrap().default_steps(), 4);
+    assert_eq!(mlx_model("flux2_klein_9b_kv").unwrap().default_steps(), 4);
     assert_eq!(
-        mlx_model("flux2_klein_9b_true_v2").unwrap().default_steps,
+        mlx_model("flux2_klein_9b_true_v2").unwrap().default_steps(),
         24
     );
     // SDXL + the realvisxl finetune share the single `sdxl` engine model (real CFG).
     for id in ["sdxl", "realvisxl"] {
         let m = mlx_model(id).unwrap();
-        assert_eq!(m.engine_id, "sdxl");
-        assert_eq!(m.adapter_label, "mlx_sdxl");
-        assert_eq!(m.default_steps, 30);
-        assert!(m.supports_guidance && m.supports_negative_prompt);
+        assert_eq!(m.engine_id(), "sdxl");
+        assert_eq!(m.adapter_label(), "mlx_sdxl");
+        assert_eq!(m.default_steps(), 30);
+        assert!(m.supports_guidance() && m.supports_negative_prompt());
     }
     assert!(mlx_model("instantid_sdxl").is_none());
 
@@ -222,19 +222,22 @@ fn mlx_model_table_maps_known_families() {
     // text guidance (4.0 base / 1.0 fast) AND image guidance (true_cfg) but advertises NO
     // negative prompt — so it is NOT a `uses_true_cfg` family (see `uses_true_cfg`).
     let base = mlx_model("sensenova_u1_8b").unwrap();
-    assert_eq!(base.engine_id, "sensenova_u1_8b");
-    assert_eq!(base.default_repo, "sensenova/SenseNova-U1-8B-MoT");
-    assert_eq!(base.default_steps, 50);
-    assert_eq!(base.default_guidance, 4.0);
-    assert_eq!(base.adapter_label, "mlx_sensenova");
-    assert!(base.supports_guidance && !base.supports_negative_prompt);
-    assert!(!uses_true_cfg(base), "dual-CFG, not a true-CFG-only family");
+    assert_eq!(base.engine_id(), "sensenova_u1_8b");
+    assert_eq!(base.default_repo(), "sensenova/SenseNova-U1-8B-MoT");
+    assert_eq!(base.default_steps(), 50);
+    assert_eq!(base.default_guidance(), 4.0);
+    assert_eq!(base.adapter_label(), "mlx_sensenova");
+    assert!(base.supports_guidance() && !base.supports_negative_prompt());
+    assert!(
+        !uses_true_cfg(&base),
+        "dual-CFG, not a true-CFG-only family"
+    );
     let fast = mlx_model("sensenova_u1_8b_fast").unwrap();
-    assert_eq!(fast.engine_id, "sensenova_u1_8b_fast");
-    assert_eq!(fast.default_steps, 8);
-    assert_eq!(fast.default_guidance, 1.0);
-    assert_eq!(fast.adapter_label, "mlx_sensenova");
-    assert!(fast.supports_guidance && !fast.supports_negative_prompt);
+    assert_eq!(fast.engine_id(), "sensenova_u1_8b_fast");
+    assert_eq!(fast.default_steps(), 8);
+    assert_eq!(fast.default_guidance(), 1.0);
+    assert_eq!(fast.adapter_label(), "mlx_sensenova");
+    assert!(fast.supports_guidance() && !fast.supports_negative_prompt());
 }
 
 #[cfg(target_os = "macos")]
@@ -333,7 +336,7 @@ fn sensenova_edit_available_needs_a_reference() {
 fn sensenova_it2i_real_weights_generates_one_image() {
     let snapshot = hf_snapshot("models--sensenova--SenseNova-U1-8B-MoT");
     let generator = mlx_load(
-        mlx_model("sensenova_u1_8b").unwrap().engine_id,
+        mlx_model("sensenova_u1_8b").unwrap().engine_id(),
         snapshot,
         Some(mlx_gen::Quant::Q8),
         Vec::new(),
@@ -380,14 +383,14 @@ fn resolve_negative_prompt_only_for_true_cfg_families() {
     assert_eq!(
         resolve_negative_prompt(
             &request(json!({ "projectId": "p", "negativePrompt": "blurry" })),
-            qwen
+            &qwen
         ),
         Some("blurry".to_owned())
     );
     assert_eq!(
         resolve_negative_prompt(
             &request(json!({ "projectId": "p", "negativePrompt": "  " })),
-            qwen
+            &qwen
         ),
         None
     );
@@ -395,7 +398,7 @@ fn resolve_negative_prompt_only_for_true_cfg_families() {
     assert_eq!(
         resolve_negative_prompt(
             &request(json!({ "projectId": "p", "negativePrompt": "blurry" })),
-            flux
+            &flux
         ),
         None
     );
@@ -409,22 +412,22 @@ fn resolve_guidance_none_for_distilled_set_for_dev() {
     let zimage = mlx_model("z_image_turbo").unwrap();
     // Distilled variants take no guidance (the engine rejects Some on them).
     assert_eq!(
-        resolve_guidance(&request(json!({ "projectId": "p" })), schnell),
+        resolve_guidance(&request(json!({ "projectId": "p" })), &schnell),
         None
     );
     assert_eq!(
-        resolve_guidance(&request(json!({ "projectId": "p" })), zimage),
+        resolve_guidance(&request(json!({ "projectId": "p" })), &zimage),
         None
     );
     // flux dev defaults to 3.5, overridable via advanced.guidanceScale.
     assert_eq!(
-        resolve_guidance(&request(json!({ "projectId": "p" })), dev),
+        resolve_guidance(&request(json!({ "projectId": "p" })), &dev),
         Some(3.5)
     );
     assert_eq!(
         resolve_guidance(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 2.0 } })),
-            dev
+            &dev
         ),
         Some(2.0)
     );
@@ -509,7 +512,7 @@ fn smoke_generate_one(
 ) {
     let model = mlx_model(sceneworks_id).unwrap();
     let generator = mlx_load(
-        model.engine_id,
+        model.engine_id(),
         snapshot,
         Some(mlx_gen::Quant::Q8),
         Vec::new(),
@@ -517,7 +520,7 @@ fn smoke_generate_one(
     .unwrap();
     let cancel = mlx_gen::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let steps = model.default_steps;
+    let steps = model.default_steps();
     let (w, h, pixels) = mlx_generate_one(
         generator.as_ref(),
         "a serene mountain lake at dawn",
@@ -893,7 +896,7 @@ fn smoke_generate_one_true_cfg(
 ) {
     let model = mlx_model(sceneworks_id).unwrap();
     let generator = mlx_load(
-        model.engine_id,
+        model.engine_id(),
         snapshot,
         Some(mlx_gen::Quant::Q8),
         Vec::new(),
@@ -901,7 +904,7 @@ fn smoke_generate_one_true_cfg(
     .unwrap();
     let cancel = mlx_gen::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let steps = model.default_steps;
+    let steps = model.default_steps();
     let (w, h, pixels) = mlx_generate_one(
         generator.as_ref(),
         "a serene mountain lake at dawn",
@@ -1076,17 +1079,17 @@ fn sc3031_ab_dump_txt2img() {
     let settings = Settings::from_env(); // honors SCENEWORKS_DATA_DIR + HF_HOME
 
     let model = mlx_model(&req.model).expect("an MLX txt2img model id");
-    let _repo = model_repo(&req, model);
-    let steps = resolve_steps(&req, model);
-    let guidance = resolve_guidance(&req, model);
-    let negative = resolve_negative_prompt(&req, model);
+    let _repo = model_repo(&req, &model);
+    let steps = resolve_steps(&req, &model);
+    let guidance = resolve_guidance(&req, &model);
+    let negative = resolve_negative_prompt(&req, &model);
     let (quant, _bits) = resolve_quant(&req);
     let weights = resolve_weights_dir(&req, &settings)
         .expect("weights resolve")
         .expect("weights in HF cache");
     let adapters = resolve_adapters(&req).expect("adapters");
     let seed = resolve_seed(&req, 0);
-    let generator = mlx_load(model.engine_id, weights, quant, adapters).expect("load");
+    let generator = mlx_load(model.engine_id(), weights, quant, adapters).expect("load");
 
     let cancel = CancelFlag::new();
     let (w, h, pixels) = mlx_generate_one(
@@ -1139,7 +1142,7 @@ fn sc3031_ab_dump_pose() {
         resolve_control_weights(&req, &settings).expect("Fun-Controlnet-Union weights");
     let (quant, _bits) = resolve_quant(&req);
     let zimage = mlx_model("z_image_turbo").expect("z-image model row");
-    let steps = resolve_steps(&req, zimage);
+    let steps = resolve_steps(&req, &zimage);
     let control_scale = resolve_control_scale(&req);
     let adapters = resolve_adapters(&req).expect("adapters");
     let seed = resolve_seed(&req, 0);
@@ -1782,12 +1785,12 @@ fn qwen_edit_model_table_rows() {
         "qwen_image_edit_2511",
     ] {
         let m = mlx_model(id).unwrap();
-        assert_eq!(m.engine_id, "qwen_image_edit");
-        assert_eq!(m.default_repo, "Qwen/Qwen-Image-Edit-2511");
-        assert_eq!(m.default_steps, 40);
-        assert_eq!(m.default_guidance, 4.0);
-        assert_eq!(m.adapter_label, "mlx_qwen");
-        assert!(m.supports_guidance && m.supports_negative_prompt);
+        assert_eq!(m.engine_id(), "qwen_image_edit");
+        assert_eq!(m.default_repo(), "Qwen/Qwen-Image-Edit-2511");
+        assert_eq!(m.default_steps(), 40);
+        assert_eq!(m.default_guidance(), 4.0);
+        assert_eq!(m.adapter_label(), "mlx_qwen");
+        assert!(m.supports_guidance() && m.supports_negative_prompt());
     }
 }
 
@@ -1795,14 +1798,20 @@ fn qwen_edit_model_table_rows() {
 #[test]
 fn qwen_edit_lightning_model_row_is_cfg_off_4step_distill() {
     // sc-3398: shares the engine model + base weights with the production edit rows
-    // but runs the 4-step CFG-off recipe (no negative prompt) + the lightx2v distill.
+    // but runs the 4-step CFG-off recipe + the lightx2v distill.
     let m = mlx_model("qwen_image_edit_2511_lightning").unwrap();
-    assert_eq!(m.engine_id, "qwen_image_edit");
-    assert_eq!(m.default_repo, "Qwen/Qwen-Image-Edit-2511");
-    assert_eq!(m.default_steps, 4);
-    assert_eq!(m.default_guidance, 1.0);
-    assert_eq!(m.adapter_label, "mlx_qwen");
-    assert!(!m.supports_negative_prompt, "lightning runs CFG-off");
+    assert_eq!(m.engine_id(), "qwen_image_edit");
+    assert_eq!(m.default_repo(), "Qwen/Qwen-Image-Edit-2511");
+    assert_eq!(m.default_steps(), 4);
+    assert_eq!(m.default_guidance(), 1.0);
+    assert_eq!(m.adapter_label(), "mlx_qwen");
+    // sc-3723: `supports_negative_prompt` is now read from the shared `qwen_image_edit` engine
+    // descriptor (true — the model CAN do true CFG), NOT the old per-variant row flag. The
+    // lightning CFG-off behavior is enforced by the ENGINE under the `lightning` sampler
+    // (mlx-gen `model_edit.rs`: `neg = None` when `is_lightning`, regardless of any negative
+    // prompt the worker passes), so descriptor-derivation is behavior-equivalent — the
+    // lightning recipe identity below (sampler + distill LoRA) is the real CFG-off invariant.
+    assert!(m.supports_negative_prompt());
 
     // The lightning lookup carries the engine sampler + the lightx2v 4-step distill LoRA;
     // the production edit ids carry none.
@@ -1868,7 +1877,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({ "projectId": "p", "mode": "edit_image" })),
-            model
+            &model
         ),
         4.0
     );
@@ -1880,7 +1889,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "guidanceScale": 1.0 }
             })),
-            model
+            &model
         ),
         4.0
     );
@@ -1891,7 +1900,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "trueCfgScale": 6.0 }
             })),
-            model
+            &model
         ),
         6.0
     );
@@ -1902,7 +1911,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
                 "projectId": "p", "mode": "character_image",
                 "advanced": { "trueCfgScale": 50.0 }
             })),
-            model
+            &model
         ),
         10.0
     );
@@ -1912,7 +1921,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
                 "projectId": "p", "mode": "character_image",
                 "advanced": { "trueCfgScale": 0.5 }
             })),
-            model
+            &model
         ),
         1.0
     );
@@ -1923,7 +1932,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "trueCfgScale": 0.5 }
             })),
-            model
+            &model
         ),
         1.0
     );
@@ -2254,11 +2263,11 @@ fn flux_ip_reference_worker_e2e() {
     );
 
     // (2) Load FLUX.1-dev through the worker loader with the staged IP dir, resolving the
-    // engine id from the MLX_MODELS table exactly as the real dispatch does (model "flux_dev"
+    // engine id from the engines::MODEL_TABLE exactly as the real dispatch does (model "flux_dev"
     // → engine "flux1_dev").
     let engine_id = mlx_model("flux_dev")
-        .expect("flux_dev in MLX_MODELS")
-        .engine_id;
+        .expect("flux_dev in MODEL_TABLE")
+        .engine_id();
     let flux_dev = hf_snapshot("black-forest-labs/FLUX.1-dev", "transformer");
     let generator = mlx_load_with_ip(engine_id, flux_dev, None, vec![], Some(staged))
         .unwrap_or_else(|e| panic!("mlx_load_with_ip {engine_id} + ip: {e}"));

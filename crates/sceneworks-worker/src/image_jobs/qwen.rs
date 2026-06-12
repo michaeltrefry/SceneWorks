@@ -150,12 +150,12 @@ async fn generate_qwen_control_stream(
         ))
     })?;
     let (quant, quant_bits) = resolve_quant(request);
-    let steps = resolve_steps(request, qwen);
-    let guidance = resolve_guidance(request, qwen).unwrap_or(qwen.default_guidance);
-    let negative_prompt = resolve_negative_prompt(request, qwen);
+    let steps = resolve_steps(request, &qwen);
+    let guidance = resolve_guidance(request, &qwen).unwrap_or(qwen.default_guidance());
+    let negative_prompt = resolve_negative_prompt(request, &qwen);
     let control_scale = resolve_control_scale(request);
     let adapters = resolve_adapters(request)?;
-    let repo = model_repo(request, qwen);
+    let repo = model_repo(request, &qwen);
     let poses = parse_poses(request);
     let count = poses.len();
     let raw_settings = qwen_control_raw_settings(
@@ -399,7 +399,7 @@ fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
 /// 1.0) else the family default (4.0). The Character-Studio reference path clamps to
 /// [1, 10] (Python `_reference_true_cfg_scale`); `edit_image` floors at 1.0 (the engine
 /// needs CFG > 1 to engage).
-fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &MlxModel) -> f32 {
+fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> f32 {
     let raw = request
         .advanced
         .get("trueCfgScale")
@@ -409,7 +409,7 @@ fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &MlxModel) -> f32 {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .map(|value| value as f32)
-        .unwrap_or(model.default_guidance);
+        .unwrap_or(model.default_guidance());
     if request.mode == "character_image" {
         raw.clamp(1.0, 10.0)
     } else {
@@ -517,9 +517,9 @@ async fn generate_qwen_edit_stream(
         WorkerError::InvalidPayload("Qwen-Image-Edit weights not found".to_owned())
     })?;
     let (quant, quant_bits) = resolve_quant(request);
-    let steps = resolve_steps(request, model);
-    let guidance = resolve_qwen_edit_guidance(request, model);
-    let negative_prompt = resolve_negative_prompt(request, model);
+    let steps = resolve_steps(request, &model);
+    let guidance = resolve_qwen_edit_guidance(request, &model);
+    let negative_prompt = resolve_negative_prompt(request, &model);
     // Lightning few-step distill (sc-3398): the `lightning` sampler engages the engine's
     // CFG-off static-shift recipe, and the matching lightx2v distill LoRA is stacked AHEAD
     // of any user LoRAs (the user's own `loras` still occupy their slots — mirrors the
@@ -534,8 +534,8 @@ async fn generate_qwen_edit_stream(
         adapters.push(AdapterSpec::new(path, 1.0, AdapterKind::Lora));
     }
     adapters.extend(resolve_adapters(request)?);
-    let repo = model_repo(request, model);
-    let adapter_label = model.adapter_label;
+    let repo = model_repo(request, &model);
+    let adapter_label = model.adapter_label();
 
     // Resolve the reference image(s) on the async side (decode → Send Image moved in).
     let reference_ids = qwen_edit_reference_ids(request);

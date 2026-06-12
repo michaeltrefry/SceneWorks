@@ -295,11 +295,11 @@ async fn generate_flux2_edit_stream(
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2 weights not found".to_owned()))?;
     let (quant, quant_bits) = resolve_quant(request);
-    let steps = resolve_steps(request, model);
-    let guidance = resolve_guidance(request, model);
+    let steps = resolve_steps(request, &model);
+    let guidance = resolve_guidance(request, &model);
     let adapters = resolve_adapters(request)?;
-    let repo = model_repo(request, model);
-    let adapter_label = model.adapter_label;
+    let repo = model_repo(request, &model);
+    let adapter_label = model.adapter_label();
 
     // Resolve the reference image(s) on the async side (decode → Send Image moved in).
     let reference_ids = flux2_edit_reference_ids(request);

@@ -22,6 +22,15 @@ imageproc = { version = "0.25", default-features = false }
 nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sceneworks-core = { path = "../sceneworks-core" }
+# Backend-neutral contract layer (package `sceneworks-gen-core`, lib `gen_core`): tensor-free
+# (thiserror/inventory/tokenizers/safetensors), so it links on ALL targets — used directly by the
+# registry-derived capability advertisement + the all-targets stub test (sc-3723, epic 3720 Phase 0).
+# Kept in the all-targets section (NOT the macOS block below) precisely so the derivation + stub test
+# compile on the Linux/Windows lanes, where no provider crate is linked and the registry is empty.
+# The rev MUST stay identical to the `mlx-gen` pin in the macOS block: two gen-core revs would mean
+# two distinct `inventory` registries (one for the worker's derivation, one the provider crates
+# register into) and the runtime would see "engine not found". Bump both together.
+sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -32,6 +41,11 @@ uuid = { version = "1.11", features = ["v4"] }
 [dev-dependencies]
 axum = "0.7"
 tower = { version = "0.5", features = ["util"] }
+# Only the all-targets registry-derivation test stub (engines.rs) calls `inventory::submit!`;
+# the production code reaches the registry through `gen_core::registry::*`. Must be the SAME
+# inventory version gen_core's `collect!` uses (0.3.x) so the stub registers into the registry
+# the derivation reads.
+inventory = "0.3"
 
 # Native MLX image+video inference engine (epic 2337), linked in-process so the
 # Rust GPU worker dispatches generation with no Python adapter/sidecar (epic 3018).

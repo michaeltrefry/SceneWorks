@@ -170,6 +170,6 @@ pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Op
         "{}: MLX weights not found or incomplete (Hugging Face repo {}). \
          Re-download the model in Model Manager, then retry.",
         request.model,
-        model_repo(request, model),
+        model_repo(request, &model),
     ))
 }

@@ -66,14 +66,14 @@ fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
 
 /// The HuggingFace repo for the model: the manifest entry's `repo` wins, else the
 /// family default.
-fn model_repo(request: &ImageRequest, model: &MlxModel) -> String {
+fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
     request
         .model_manifest_entry
         .get("repo")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(model.default_repo)
+        .unwrap_or(model.default_repo())
         .to_owned()
 }
 
@@ -100,7 +100,7 @@ pub(crate) fn resolve_weights_dir(
     };
     Ok(huggingface_snapshot_dir(
         &settings.data_dir,
-        &model_repo(request, model),
+        &model_repo(request, &model),
     ))
 }
 
@@ -137,7 +137,7 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
-fn resolve_steps(request: &ImageRequest, model: &MlxModel) -> u32 {
+fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     request
         .advanced
         .get("steps")
@@ -147,14 +147,14 @@ fn resolve_steps(request: &ImageRequest, model: &MlxModel) -> u32 {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .map(|steps| (steps as u32).clamp(1, 80))
-        .unwrap_or(model.default_steps)
+        .unwrap_or(model.default_steps())
 }
 
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
 /// no guidance — the engine rejects `Some(_)` on them — so this returns `None`. For a
 /// guided variant (flux dev) it is `advanced.guidanceScale` else the family default.
-fn resolve_guidance(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
-    if !model.supports_guidance {
+fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
+    if !model.supports_guidance() {
         return None;
     }
     let scale = request
@@ -166,7 +166,7 @@ fn resolve_guidance(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .map(|value| value as f32)
-        .unwrap_or(model.default_guidance);
+        .unwrap_or(model.default_guidance());
     Some(scale)
 }
 
@@ -176,14 +176,14 @@ fn resolve_guidance(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
 /// guidance-distilled families (`z_image_turbo`, `flux_schnell`) are `false`/`false` (no CFG at
 /// all), and the `guidance`-scalar families (qwen / sdxl / flux2 …) are `true`/*. For a true-CFG
 /// family the worker forwards `advanced.guidanceScale` as `true_cfg`, not `guidance`.
-fn uses_true_cfg(model: &MlxModel) -> bool {
-    !model.supports_guidance && model.supports_negative_prompt
+fn uses_true_cfg(model: &ResolvedModel) -> bool {
+    !model.supports_guidance() && model.supports_negative_prompt()
 }
 
 /// Resolve the true-CFG scale for a true-CFG family (Chroma). `None` for every other family
 /// (their CFG, if any, flows through [`resolve_guidance`]). The scale is `advanced.guidanceScale`
 /// (the same user knob) else the family default — forwarded to the engine as `GenerationRequest.true_cfg`.
-fn resolve_true_cfg(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
+fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !uses_true_cfg(model) {
         return None;
     }
@@ -196,15 +196,15 @@ fn resolve_true_cfg(request: &ImageRequest, model: &MlxModel) -> Option<f32> {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .map(|value| value as f32)
-        .unwrap_or(model.default_guidance);
+        .unwrap_or(model.default_guidance());
     Some(scale)
 }
 
 /// The negative prompt to pass to the engine. `None` for variants without true CFG
 /// (the engine rejects `negative_prompt` on the distilled families) and for an empty
 /// prompt (the true-CFG engines fall back to their own neutral negative).
-fn resolve_negative_prompt(request: &ImageRequest, model: &MlxModel) -> Option<String> {
-    if !model.supports_negative_prompt {
+fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Option<String> {
+    if !model.supports_negative_prompt() {
         return None;
     }
     let trimmed = request.negative_prompt.trim();
@@ -536,15 +536,23 @@ async fn generate_mlx_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
+    // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
+    // future candle row would self-describe) over the gpu-id-derived label. Falls back to the
+    // passed-in label only if a descriptor ever advertised an empty backend (never today).
+    let backend = if model.backend().is_empty() {
+        backend
+    } else {
+        model.backend()
+    };
     let (quant, quant_bits) = resolve_quant(request);
-    let steps = resolve_steps(request, model);
-    let guidance = resolve_guidance(request, model);
+    let steps = resolve_steps(request, &model);
+    let guidance = resolve_guidance(request, &model);
     // True-CFG families (Chroma) carry the CFG scale in `true_cfg`, not `guidance` (which their
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
-    let model_true_cfg = resolve_true_cfg(request, model);
-    let negative_prompt = resolve_negative_prompt(request, model);
+    let model_true_cfg = resolve_true_cfg(request, &model);
+    let negative_prompt = resolve_negative_prompt(request, &model);
     let adapters = resolve_adapters(request)?;
-    let repo = model_repo(request, model);
+    let repo = model_repo(request, &model);
     let raw_settings = mlx_raw_settings(
         request,
         &repo,
@@ -552,8 +560,8 @@ async fn generate_mlx_stream(
         quant_bits,
         guidance.or(model_true_cfg),
     );
-    let engine_id = model.engine_id;
-    let adapter_label = model.adapter_label;
+    let engine_id = model.engine_id();
+    let adapter_label = model.adapter_label();
     let count = request.count as usize;
     let seeds: Vec<i64> = (0..count)
         .map(|index| resolve_seed(request, index))

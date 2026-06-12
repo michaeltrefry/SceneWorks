@@ -1020,6 +1020,8 @@ mod ensure_cached_file_tests {
             max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
             allow_private_lora_urls: false,
             utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
         };
         let api = ApiClient::new(&settings);
         let context = DownloadContext {

@@ -42,6 +42,14 @@ mod api_client;
 #[cfg(target_os = "macos")]
 mod generator_cache;
 use api_client::*;
+// Backend-neutral engine dispatch table + registry-derived capability advertisement
+// (sc-3723). All-targets: the table is pure data and the derivation runs off-macOS off an
+// (empty) registry, so a future candle backend lights up with zero worker changes. Off
+// macOS the only consumers are the (all-targets) registry-derivation tests — the production
+// caller (`mlx_gpu`) is macOS-gated — so allow dead_code on the non-macOS lib build (the
+// person_replace pattern); the stub test still exercises it on every target.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod engines;
 mod gpu;
 use gpu::*;
 mod supervisor;
@@ -236,6 +244,13 @@ pub struct Settings {
     /// worker, so a small pool lets e.g. a quick upload run alongside a long
     /// download instead of queueing behind it.
     pub utility_workers: usize,
+    /// Whether the MLX (Apple Silicon) tensor backend is enabled when deriving the worker's
+    /// advertised capabilities from the linked engine registry (sc-3723). Default `true`.
+    pub backend_mlx_enabled: bool,
+    /// Whether the candle (Windows/CUDA) tensor backend is enabled for capability derivation
+    /// (sc-3723). Default `false` — no candle provider crate ships yet; flipping this on once
+    /// one is linked lights up its descriptors with no further worker change.
+    pub backend_candle_enabled: bool,
 }
 
 impl Settings {
@@ -289,6 +304,8 @@ impl Settings {
             allow_private_lora_urls: std::env::var("SCENEWORKS_ALLOW_PRIVATE_LORA_URLS")
                 .is_ok_and(|value| value.trim() == "1"),
             utility_workers: env_u64_any(&["SCENEWORKS_UTILITY_WORKERS"], 4).max(1) as usize,
+            backend_mlx_enabled: env_bool("SCENEWORKS_BACKEND_MLX_ENABLED", true),
+            backend_candle_enabled: env_bool("SCENEWORKS_BACKEND_CANDLE_ENABLED", false),
         }
     }
 }
@@ -424,7 +441,7 @@ pub async fn run() -> WorkerResult<()> {
 }
 
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
-    let gpu = discover_gpu(&settings.gpu_id).await;
+    let gpu = discover_gpu(&settings).await;
     let api = ApiClient::new(&settings);
     let http_client = reqwest::Client::new();
     register_worker_with_retry(&api, &settings, &gpu).await?;
@@ -1726,6 +1743,21 @@ fn env_u64_any(keys: &[&str], default: u64) -> u64 {
     keys.iter()
         .find_map(|key| std::env::var(key).ok().and_then(|value| value.parse().ok()))
         .unwrap_or(default)
+}
+
+/// Parse a boolean env toggle: `1`/`true`/`yes`/`on` → true, `0`/`false`/`no`/`off` → false,
+/// empty or unrecognized → `default` (and an unset var → `default`). Used by the per-backend
+/// capability toggles (sc-3723).
+fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            "" => default,
+            _ => default,
+        },
+        Err(_) => default,
+    }
 }
 
 #[cfg(test)]

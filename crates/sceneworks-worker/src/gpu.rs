@@ -1,6 +1,7 @@
 use super::*;
 
-pub(crate) async fn discover_gpu(requested_gpu_id: &str) -> DiscoveredGpu {
+pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
+    let requested_gpu_id = settings.gpu_id.as_str();
     if requested_gpu_id == "cpu" {
         return cpu_gpu();
     }
@@ -10,7 +11,9 @@ pub(crate) async fn discover_gpu(requested_gpu_id: &str) -> DiscoveredGpu {
     // routing wiring that selects `mlx` lands in sc-3021/sc-3032.
     #[cfg(target_os = "macos")]
     if requested_gpu_id == "mlx" {
-        let mut gpu = mlx_gpu();
+        // The worker's advertised capabilities are derived from the linked engine
+        // registry + the enabled tensor backends in `settings` (sc-3723).
+        let mut gpu = mlx_gpu(settings);
         // Seed the registration with a live snapshot so the worker shows
         // memory/load immediately, mirroring the nvidia path (heartbeats refresh
         // it). `query_mlx_utilization` reads Apple-Silicon unified-memory + GPU
@@ -382,81 +385,85 @@ pub(crate) fn cpu_gpu() -> DiscoveredGpu {
 /// registry and runs in-process on this worker; the Python captioner remains the
 /// Windows/Linux and explicit non-MLX fallback.
 #[cfg(target_os = "macos")]
-pub(crate) fn mlx_gpu() -> DiscoveredGpu {
+pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
+    let mut capabilities = vec![WorkerCapability::Gpu];
+    // Registry-DERIVED core (sc-3723): exactly the capabilities backed by a linked engine
+    // descriptor whose tensor backend is enabled in `settings` — `image_generate`,
+    // `video_generate`, `lora_train`, `lora_train_execute`, `training_caption`. Adding a
+    // family (or a whole new candle backend) lights these up with no change here; see
+    // `engines::registry_capabilities`.
+    capabilities.extend(crate::engines::registry_capabilities(settings));
+    // Hardcoded CARVE-OUTS: capabilities the worker serves that are NOT expressible as a
+    // single registered generator descriptor (bespoke understanding/edit modes, advanced
+    // video modes on the LTX IC-LoRA path, and the onnx / native-MLX side stacks). These stay
+    // explicit until each grows its own registry surface.
+    capabilities.extend([
+        // Plain Image Edit (sc-3513): the `image_edit` job type
+        // (`mode=edit_image` + `sourceAssetId`, epic 2427) runs the same engine
+        // edit paths as the `character_image` reference flow — qwen/flux2/sdxl
+        // edit dispatched by payload model+mode in `run_image_generate_job`. The
+        // API only routes MLX-eligible edit models here (`image_job_is_mlx_eligible`);
+        // torch-only edit models stay on the Python worker.
+        WorkerCapability::ImageEdit,
+        // Tile-ControlNet detail refine (epic 3041, sc-3060) — the SDXL-family
+        // `image_detail` job runs in-process on the engine here too.
+        WorkerCapability::ImageDetail,
+        // SenseNova-U1 understanding + Document Studio (epic 3180, sc-3905): visual
+        // question answering (`image_vqa`) and interleaved text-image generation
+        // (`image_interleave`) run in-process via the concrete `T2iModel` (the modes the
+        // `Generator` contract can't express). The API routes these here only for the
+        // SenseNova-U1 ids (`jobs_store::understanding_job_is_mlx_eligible`); off macOS the
+        // capabilities are never advertised, so the Python torch worker serves them on
+        // Windows/Linux.
+        WorkerCapability::ImageVqa,
+        WorkerCapability::ImageInterleave,
+        // Clip-conditioning advanced video modes (epic 3040, sc-3522): extend_clip /
+        // video_bridge run the LTX IC-LoRA keyframe-append path in-process. The API gates
+        // these `video_extend` / `video_bridge` jobs to the LTX engines
+        // (`jobs_store::video_job_is_mlx_eligible`); a Wan extend/bridge has no IC-LoRA
+        // path and stays on the Python torch worker.
+        WorkerCapability::VideoExtend,
+        WorkerCapability::VideoBridge,
+        // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace`
+        // job builds the masked control inputs (source clip + onnx-track mask + character
+        // refs) and runs the engine `wan_vace` provider in-process — the native
+        // equivalent of the torch `WanVACEPipeline` path. The API routes only
+        // MLX-eligible replace_person jobs here; non-VACE replacement + Windows/Linux
+        // keep the Python torch path.
+        WorkerCapability::PersonReplace,
+        // DWPose whole-body pose detection (epic 3482, sc-3487): RTMW via
+        // onnxruntime/CoreML, served in-process by `pose_jobs::run_pose_detect_job`.
+        // Replaces the Python rtmlib `pose_detect` path so the Pose Library
+        // "create from photo" flow + InstantID pose conditioning keep working on a
+        // Python-free Mac. The detector auto-provisions its onnx weights on first
+        // use (download-on-first-use parity with rtmlib).
+        WorkerCapability::PoseDetect,
+        // SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX
+        // SCRFD in-process (`kps_jobs::run_kps_extract_job`, the InstantID face-stack
+        // detector) for the Key Point Library "extract kps from this image" flow,
+        // Python-free on Mac. Reuses the InstantID `scrfd_10g` bundle (cached on
+        // first InstantID/extraction use).
+        WorkerCapability::KpsExtract,
+        // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
+        // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
+        // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool
+        // works on a Python-free Mac. Only `engine=real-esrgan` (the default) is
+        // served here; `aura-sr` stays on the Python worker (routing oracle).
+        WorkerCapability::ImageUpscale,
+        // Real, model-backed person detection + tracking (epic 3482, sc-3488 /
+        // sc-3633/3634/3709): the native-MLX YOLO11 detector + SORT/ByteTrack tracker +
+        // SAM2 segmenter run in-process (`person_jobs` / `person_track` /
+        // `person_segment`), replacing the Python onnxruntime/torch path so the
+        // Replace-Person detect → track → mask flow works on a Python-free Mac. A
+        // `preview: true` job still routes to the CPU placeholder's procedural preview
+        // capability (`required_capability` in jobs_store).
+        WorkerCapability::PersonDetect,
+        WorkerCapability::PersonTrack,
+    ]);
     DiscoveredGpu {
         id: "mlx".to_owned(),
         name: "Apple Silicon (MLX)".to_owned(),
-        capabilities: vec![
-            WorkerCapability::Gpu,
-            WorkerCapability::ImageGenerate,
-            // Plain Image Edit (sc-3513): the `image_edit` job type
-            // (`mode=edit_image` + `sourceAssetId`, epic 2427) runs the same engine
-            // edit paths as the `character_image` reference flow — qwen/flux2/sdxl
-            // edit dispatched by payload model+mode in `run_image_generate_job`. The
-            // API only routes MLX-eligible edit models here (`image_job_is_mlx_eligible`);
-            // torch-only edit models stay on the Python worker.
-            WorkerCapability::ImageEdit,
-            // Tile-ControlNet detail refine (epic 3041, sc-3060) — the SDXL-family
-            // `image_detail` job runs in-process on the engine here too.
-            WorkerCapability::ImageDetail,
-            // SenseNova-U1 understanding + Document Studio (epic 3180, sc-3905): visual
-            // question answering (`image_vqa`) and interleaved text-image generation
-            // (`image_interleave`) run in-process via the concrete `T2iModel` (the modes the
-            // `Generator` contract can't express). The API routes these here only for the
-            // SenseNova-U1 ids (`jobs_store::understanding_job_is_mlx_eligible`); off macOS the
-            // capabilities are never advertised, so the Python torch worker serves them on
-            // Windows/Linux.
-            WorkerCapability::ImageVqa,
-            WorkerCapability::ImageInterleave,
-            WorkerCapability::VideoGenerate,
-            // Clip-conditioning advanced video modes (epic 3040, sc-3522): extend_clip /
-            // video_bridge run the LTX IC-LoRA keyframe-append path in-process. The API gates
-            // these `video_extend` / `video_bridge` jobs to the LTX engines
-            // (`jobs_store::video_job_is_mlx_eligible`); a Wan extend/bridge has no IC-LoRA
-            // path and stays on the Python torch worker.
-            WorkerCapability::VideoExtend,
-            WorkerCapability::VideoBridge,
-            // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace`
-            // job builds the masked control inputs (source clip + onnx-track mask + character
-            // refs) and runs the engine `wan_vace` provider in-process — the native
-            // equivalent of the torch `WanVACEPipeline` path. The API routes only
-            // MLX-eligible replace_person jobs here; non-VACE replacement + Windows/Linux
-            // keep the Python torch path.
-            WorkerCapability::PersonReplace,
-            // Native Rust LoRA/LoKr training (epic 3039): plan validation +
-            // real execution, both served in-process by `mlx_gen::load_trainer`.
-            WorkerCapability::LoraTrain,
-            WorkerCapability::LoraTrainExecute,
-            WorkerCapability::TrainingCaption,
-            // DWPose whole-body pose detection (epic 3482, sc-3487): RTMW via
-            // onnxruntime/CoreML, served in-process by `pose_jobs::run_pose_detect_job`.
-            // Replaces the Python rtmlib `pose_detect` path so the Pose Library
-            // "create from photo" flow + InstantID pose conditioning keep working on a
-            // Python-free Mac. The detector auto-provisions its onnx weights on first
-            // use (download-on-first-use parity with rtmlib).
-            WorkerCapability::PoseDetect,
-            // SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX
-            // SCRFD in-process (`kps_jobs::run_kps_extract_job`, the InstantID face-stack
-            // detector) for the Key Point Library "extract kps from this image" flow,
-            // Python-free on Mac. Reuses the InstantID `scrfd_10g` bundle (cached on
-            // first InstantID/extraction use).
-            WorkerCapability::KpsExtract,
-            // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
-            // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
-            // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool
-            // works on a Python-free Mac. Only `engine=real-esrgan` (the default) is
-            // served here; `aura-sr` stays on the Python worker (routing oracle).
-            WorkerCapability::ImageUpscale,
-            // Real, model-backed person detection + tracking (epic 3482, sc-3488 /
-            // sc-3633/3634/3709): the native-MLX YOLO11 detector + SORT/ByteTrack tracker +
-            // SAM2 segmenter run in-process (`person_jobs` / `person_track` /
-            // `person_segment`), replacing the Python onnxruntime/torch path so the
-            // Replace-Person detect → track → mask flow works on a Python-free Mac. A
-            // `preview: true` job still routes to the CPU placeholder's procedural preview
-            // capability (`required_capability` in jobs_store).
-            WorkerCapability::PersonDetect,
-            WorkerCapability::PersonTrack,
-        ],
+        capabilities,
         utilization: None,
     }
 }

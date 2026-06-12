@@ -350,7 +350,7 @@ pub(crate) async fn run_image_detail_job(
     let (quant, _) = resolve_quant(&request);
     // Reuse the model's manifest/modelPath/cache resolution; engine_model gives the default repo.
     let weights_dir = resolve_weights_dir(&request, settings)?
-        .or_else(|| huggingface_snapshot_dir(&settings.data_dir, engine_model.default_repo));
+        .or_else(|| huggingface_snapshot_dir(&settings.data_dir, engine_model.default_repo()));
     let weights_dir = weights_dir
         .ok_or_else(|| WorkerError::InvalidPayload("SDXL detail weights not found".to_owned()))?;
     let control_repo = advanced::str(

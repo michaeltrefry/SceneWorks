@@ -12,7 +12,7 @@
 //! in-process inference via the linked mlx-gen
 //! engine; other models (and non-macOS) fall back to a procedural stub (sc-3020), so
 //! the pipeline stays cross-platform-testable and each new family just adds a row to
-//! the [`MLX_MODELS`] table + links its provider crate.
+//! the [`crate::engines::MODEL_TABLE`] dispatch table + links its provider crate.
 
 use super::*;
 use sceneworks_core::image_request::ImageRequest;
@@ -60,316 +60,12 @@ const STUB_ADAPTER: &str = "procedural_preview";
 #[cfg(target_os = "macos")]
 const MAX_JOB_LORAS: usize = 3;
 
-/// One engine-backed image family: how a SceneWorks model id maps onto the linked
-/// mlx-gen registry, and the per-variant defaults (all chosen for parity with the
-/// Python `MODEL_TARGETS` + the per-family MLX adapter). Adding a family = one row
-/// here + its provider crate dep + a `use mlx_gen_<x> as _;` above.
+// The engine dispatch table + its `ModelRow`/`mlx_model` join moved to the all-targets
+// `engines` module (sc-3723); the two descriptor-duplicating flags it used to carry
+// (`supports_guidance`/`supports_negative_prompt`) are now read from the linked gen_core
+// descriptor via `ResolvedModel`. The lookup stays macOS-gated (every caller is).
 #[cfg(target_os = "macos")]
-struct MlxModel {
-    /// SceneWorks model id (the job payload `model`).
-    sceneworks_id: &'static str,
-    /// mlx-gen registry id passed to `mlx_gen::load`.
-    engine_id: &'static str,
-    /// Default HuggingFace repo when the manifest entry omits `repo`.
-    default_repo: &'static str,
-    /// Default denoise steps (Python `MODEL_TARGETS[...]["steps"]`).
-    default_steps: u32,
-    /// Whether the variant accepts a guidance scale. Distilled variants
-    /// (z-image-turbo, flux schnell) do not — the engine rejects `guidance` on them.
-    supports_guidance: bool,
-    /// Default guidance when supported and the request omits it.
-    default_guidance: f32,
-    /// Whether the variant accepts a negative prompt (true CFG). The guidance-distilled
-    /// variants do not — the engine rejects `negative_prompt` on them.
-    supports_negative_prompt: bool,
-    /// The `adapter` id recorded on generated assets (the Python MLX adapter id).
-    adapter_label: &'static str,
-}
-
-#[cfg(target_os = "macos")]
-const MLX_MODELS: &[MlxModel] = &[
-    MlxModel {
-        sceneworks_id: "z_image_turbo",
-        engine_id: "z_image_turbo",
-        default_repo: "Tongyi-MAI/Z-Image-Turbo",
-        default_steps: 8,
-        supports_guidance: false,
-        default_guidance: 0.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_z_image",
-    },
-    // Z-Image-Edit (epic 3529) — img2img/edit. No dedicated Edit checkpoint exists yet, so
-    // (like the Python `MODEL_TARGETS` row) it runs the **Turbo weights** through the engine's
-    // img2img path (`Conditioning::Reference` — VAE-encode the source + denoise from
-    // `init_time_step(steps, strength)`), so it shares the `z_image_turbo` engine model. The
-    // `z_image_turbo` `edit_image` mode resolves to the same img2img call (`resolve_zimage_edit_init`).
-    MlxModel {
-        sceneworks_id: "z_image_edit",
-        engine_id: "z_image_turbo",
-        default_repo: "Tongyi-MAI/Z-Image-Turbo",
-        default_steps: 8,
-        supports_guidance: false,
-        default_guidance: 0.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_z_image",
-    },
-    MlxModel {
-        sceneworks_id: "flux_schnell",
-        engine_id: "flux1_schnell",
-        default_repo: "black-forest-labs/FLUX.1-schnell",
-        default_steps: 4,
-        supports_guidance: false,
-        default_guidance: 0.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_flux",
-    },
-    MlxModel {
-        sceneworks_id: "flux_dev",
-        engine_id: "flux1_dev",
-        default_repo: "black-forest-labs/FLUX.1-dev",
-        default_steps: 28,
-        supports_guidance: true,
-        default_guidance: 3.5,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_flux",
-    },
-    MlxModel {
-        // Non-distilled true-CFG base: 20 steps + guidance 4.0 + negative prompt
-        // (Python MODEL_TARGETS / MlxQwenAdapter). mlx-gen's own default is 4 steps,
-        // so steps are passed explicitly. Edit moves to MLX (sc-3397, the `qwen_image_edit`
-        // engine model below); base-Qwen strict-pose ControlNet routes to the
-        // `qwen_image_control` engine variant when `advanced.poses` is present
-        // (epic 3401 / sc-3575).
-        sceneworks_id: "qwen_image",
-        engine_id: "qwen_image",
-        default_repo: "Qwen/Qwen-Image",
-        default_steps: 20,
-        supports_guidance: true,
-        default_guidance: 4.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_qwen",
-    },
-    // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
-    // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
-    // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
-    // 40 steps (engine's own default is 4 — passed explicitly, like the txt2img row). The
-    // edit path resolves guidance from `trueCfgScale` (4.0), NOT `guidanceScale`; see
-    // `resolve_qwen_edit_guidance`. The `_2511_lightning` distill (4-step, CFG-off) shares
-    // these weights but adds the `lightning` sampler + the lightx2v distill LoRA — see the
-    // row below and [`qwen_edit_lightning`] (sc-3398).
-    MlxModel {
-        sceneworks_id: "qwen_image_edit",
-        engine_id: "qwen_image_edit",
-        default_repo: "Qwen/Qwen-Image-Edit-2511",
-        default_steps: 40,
-        supports_guidance: true,
-        default_guidance: 4.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_qwen",
-    },
-    MlxModel {
-        sceneworks_id: "qwen_image_edit_2509",
-        engine_id: "qwen_image_edit",
-        default_repo: "Qwen/Qwen-Image-Edit-2511",
-        default_steps: 40,
-        supports_guidance: true,
-        default_guidance: 4.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_qwen",
-    },
-    MlxModel {
-        sceneworks_id: "qwen_image_edit_2511",
-        engine_id: "qwen_image_edit",
-        default_repo: "Qwen/Qwen-Image-Edit-2511",
-        default_steps: 40,
-        supports_guidance: true,
-        default_guidance: 4.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_qwen",
-    },
-    // Lightning 4-step distill (sc-3398): same `qwen_image_edit` engine model + base
-    // Qwen-Image-Edit-2511 weights as the rows above, but the generate path passes the
-    // `lightning` sampler (static-shift schedule + CFG-off single forward) and stacks the
-    // lightx2v distill LoRA ahead of any user LoRAs (see [`qwen_edit_lightning`] +
-    // [`generate_qwen_edit_stream`]). Python parity (MODEL_TARGETS): 4 steps, guidance 1.0,
-    // CFG off — so no negative prompt. The distill LoRA is a CFG-distilled adapter, so the
-    // engine runs a single forward/step regardless of `default_guidance`.
-    MlxModel {
-        sceneworks_id: "qwen_image_edit_2511_lightning",
-        engine_id: "qwen_image_edit",
-        default_repo: "Qwen/Qwen-Image-Edit-2511",
-        default_steps: 4,
-        supports_guidance: true,
-        default_guidance: 1.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_qwen",
-    },
-    // FLUX.2-klein (sc-3025) — MLX-only family (no torch fallback). All three SceneWorks
-    // variants share the engine's single txt2img model `flux2_klein_9b` (edit + KV-cache
-    // are the separate `*_edit`/`*_kv_edit` engine models, story sc-3029); the variants
-    // differ only in their weights. Distilled klein runs guidance 1.0 (CFG-free) with no
-    // negative prompt; the engine accepts guidance but rejects a negative prompt.
-    MlxModel {
-        sceneworks_id: "flux2_klein_9b",
-        engine_id: "flux2_klein_9b",
-        default_repo: "black-forest-labs/FLUX.2-klein-9B",
-        default_steps: 4,
-        supports_guidance: true,
-        default_guidance: 1.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_flux2",
-    },
-    MlxModel {
-        // Separately-distilled checkpoint, same architecture — its snapshot carries the
-        // full diffusers tree, so txt2img loads through the base `flux2_klein_9b` loader.
-        sceneworks_id: "flux2_klein_9b_kv",
-        engine_id: "flux2_klein_9b",
-        default_repo: "black-forest-labs/FLUX.2-klein-9b-kv",
-        default_steps: 4,
-        supports_guidance: true,
-        default_guidance: 1.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_flux2",
-    },
-    MlxModel {
-        // wikeeyang community fine-tune (sc-2220/2235): UNDISTILLED, so 24 steps. Its raw
-        // repo is single-file (GGUF/safetensors) with no diffusers tree, so it loads from a
-        // locally-assembled converted dir via the `modelPath` seam (manifest `modelPath`),
-        // NOT the source repo below. The convert step is now native Rust/MLX
-        // (mlx_gen_flux2::convert_and_assemble, sc-3136; run by the model_convert job).
-        sceneworks_id: "flux2_klein_9b_true_v2",
-        engine_id: "flux2_klein_9b",
-        default_repo: "wikeeyang/Flux2-Klein-9B-True-V2",
-        default_steps: 24,
-        supports_guidance: true,
-        default_guidance: 1.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_flux2",
-    },
-    // SDXL (sc-3026) — U-Net, real CFG (negative prompt + guidance 7.0), 30 steps.
-    // `sdxl` and the `realvisxl` finetune share the engine's single `sdxl` model
-    // (identical arch), differing only in weights. Replaces the in-process
-    // _vendor/mlx_sd path. The engine supports Q4/Q8 (the Python vendored path had
-    // none); Q8 is the default here (engine-validated; saves ~half the U-Net memory).
-    MlxModel {
-        sceneworks_id: "sdxl",
-        engine_id: "sdxl",
-        default_repo: "stabilityai/stable-diffusion-xl-base-1.0",
-        default_steps: 30,
-        supports_guidance: true,
-        default_guidance: 7.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_sdxl",
-    },
-    MlxModel {
-        sceneworks_id: "realvisxl",
-        engine_id: "sdxl",
-        default_repo: "SG161222/RealVisXL_V5.0",
-        default_steps: 30,
-        supports_guidance: true,
-        default_guidance: 7.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_sdxl",
-    },
-    // Kolors (epic 3090, sc-3875) — Kwai-Kolors SDXL-architecture U-Net + ChatGLM3-6B text
-    // encoder + SDXL VAE, EulerDiscrete sampler. Real CFG (negative prompt + guidance 5.0).
-    // Python `MODEL_TARGETS` / `KolorsDiffusersAdapter` parity: 25 steps, guidance 5.0. The engine
-    // `kolors` model (sc-3874) supports the full surface — img2img / ControlNet-pose /
-    // IP-Adapter-Plus / Q8/Q4 / LoRA/LoKr — but this base row drives plain T2I (+ quant + LoRA)
-    // through `generate_mlx_stream`; the advanced conditioning modes are gated to torch by
-    // `kolors_mlx_eligible` until their dedicated streams land (subsequent epic-3090 slices).
-    MlxModel {
-        sceneworks_id: "kolors",
-        engine_id: "kolors",
-        default_repo: "Kwai-Kolors/Kolors-diffusers",
-        default_steps: 25,
-        supports_guidance: true,
-        default_guidance: 5.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_kolors",
-    },
-    // Chroma (epic 3531, sc-3843) — FLUX.1-schnell-derived DiT, T5-only conditioning. The engine
-    // is a TRUE-CFG family: its descriptor advertises `supports_guidance=false` +
-    // `supports_negative_prompt=true`, so the CFG scale is forwarded as `true_cfg` (NOT the
-    // distilled `guidance` scalar, which the engine rejects) — see [`uses_true_cfg`] /
-    // [`resolve_true_cfg`]. HD/Base are full true-CFG (the manifest pre-fills 40 steps + guidance
-    // 3.0; the engine's own defaults are 28 steps + 4.0 — the request carries the manifest values).
-    // Each SceneWorks id maps 1:1 to the engine registry id of the same name.
-    MlxModel {
-        sceneworks_id: "chroma1_hd",
-        engine_id: "chroma1_hd",
-        default_repo: "lodestones/Chroma1-HD",
-        default_steps: 40,
-        supports_guidance: false,
-        default_guidance: 3.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_chroma",
-    },
-    MlxModel {
-        sceneworks_id: "chroma1_base",
-        engine_id: "chroma1_base",
-        default_repo: "lodestones/Chroma1-Base",
-        default_steps: 40,
-        supports_guidance: false,
-        default_guidance: 3.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_chroma",
-    },
-    // Flash is the few-step distilled checkpoint: ~8 steps, CFG baked toward 1.0 (single forward —
-    // the negative prompt is effectively inert at true_cfg≈1). It shares the true-CFG descriptor,
-    // so `true_cfg` still carries the scale (default 1.0).
-    MlxModel {
-        sceneworks_id: "chroma1_flash",
-        engine_id: "chroma1_flash",
-        default_repo: "lodestones/Chroma1-Flash",
-        default_steps: 8,
-        supports_guidance: false,
-        default_guidance: 1.0,
-        supports_negative_prompt: true,
-        adapter_label: "mlx_chroma",
-    },
-    // SenseNova-U1 (epic 3180, sc-3900) — NEO-Unify: a dense dual-path Qwen3-MoT AR LLM + a
-    // flow-matching image generator (no separate VAE / text encoder). Unlike every other family
-    // here it uses BOTH CFG knobs: `supports_guidance=true` carries the text CFG via `guidance`
-    // (defaults 4.0 base / 1.0 fast), and `supports_true_cfg` carries the it2i image-guidance via
-    // `true_cfg` (edit ≈ 1.0 / character ≈ 1.5) — so it is NOT a [`uses_true_cfg`] family (which is
-    // for engines that read the *single* CFG knob from `true_cfg`). `supports_negative_prompt=false`
-    // (the descriptor advertises no negative prompt). Plain T2I rides [`generate_mlx_stream`]; edit
-    // (`Reference`) + Character Studio (`MultiReference`) divert to [`generate_sensenova_edit_stream`]
-    // where the dual CFG + reference conditioning are built. `_fast` is the same base weights with
-    // the 8-step distill LoRA merged internally at load (`load_fast`); the worker only selects the
-    // engine id, the engine resolves + merges the curated distill LoRA itself (no user LoRA slot —
-    // `supports_lora=false`). Both ids map 1:1 to the engine registry id of the same name.
-    MlxModel {
-        sceneworks_id: "sensenova_u1_8b",
-        engine_id: "sensenova_u1_8b",
-        default_repo: "sensenova/SenseNova-U1-8B-MoT",
-        default_steps: 50,
-        supports_guidance: true,
-        default_guidance: 4.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_sensenova",
-    },
-    MlxModel {
-        sceneworks_id: "sensenova_u1_8b_fast",
-        engine_id: "sensenova_u1_8b_fast",
-        default_repo: "sensenova/SenseNova-U1-8B-MoT",
-        default_steps: 8,
-        supports_guidance: true,
-        default_guidance: 1.0,
-        supports_negative_prompt: false,
-        adapter_label: "mlx_sensenova",
-    },
-];
-
-/// The engine-backed family for a SceneWorks model id, if any.
-#[cfg(target_os = "macos")]
-fn mlx_model(sceneworks_id: &str) -> Option<&'static MlxModel> {
-    MLX_MODELS
-        .iter()
-        .find(|model| model.sceneworks_id == sceneworks_id)
-}
-
+use crate::engines::{mlx_model, ResolvedModel};
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
 /// assets through the Rust GPU worker.
 pub(crate) async fn run_image_generate_job(
@@ -795,7 +491,7 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
 fn adapter_id(request: &ImageRequest) -> &'static str {
     #[cfg(target_os = "macos")]
     if let Some(model) = mlx_model(&request.model) {
-        return model.adapter_label;
+        return model.adapter_label();
     }
     let _ = request;
     STUB_ADAPTER
@@ -908,7 +604,7 @@ fn lerp(a: u8, t: f32) -> u8 {
 
 // ---------------------------------------------------------------------------
 // Real in-process MLX inference (macOS, via mlx-gen): Z-Image (sc-3022) +
-// FLUX.1 schnell/dev (sc-3023), driven by the MLX_MODELS table.
+// FLUX.1 schnell/dev (sc-3023), driven by the engines::MODEL_TABLE dispatch table.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]

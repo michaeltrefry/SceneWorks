@@ -160,18 +160,18 @@ async fn generate_sensenova_edit_stream(
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
-    let engine_id = model.engine_id;
+    let engine_id = model.engine_id();
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
     let (quant, quant_bits) = resolve_quant(request);
-    let steps = resolve_steps(request, model);
+    let steps = resolve_steps(request, &model);
     // Dual CFG: the text CFG flows through `guidance` (Some — SenseNova `supports_guidance`); the
     // image-conditioning guidance through `true_cfg`.
-    let guidance = resolve_guidance(request, model);
+    let guidance = resolve_guidance(request, &model);
     let img_cfg = resolve_sensenova_img_cfg(request);
     let timestep_shift = resolve_sensenova_timestep_shift(request);
-    let repo = model_repo(request, model);
-    let adapter_label = model.adapter_label;
+    let repo = model_repo(request, &model);
+    let adapter_label = model.adapter_label();
     let (out_w, out_h) = (sensenova_dim(request.width), sensenova_dim(request.height));
 
     // Resolve the reference image(s) on the async side (decode → Send Image moved in).
