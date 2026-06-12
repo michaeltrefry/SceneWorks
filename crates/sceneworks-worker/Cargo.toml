@@ -276,15 +276,16 @@ mlx-gen-kolors = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "8355
 
 # candle (Windows/CUDA) generative backend (epic 3672, sc-3675) — the Windows sibling of the macOS
 # mlx provider crates above. `candle-gen-sdxl` self-registers `sdxl` into the SAME gen_core inventory
-# registry, so the worker drives it through the registry with NO candle-specific code (just like the
-# mlx providers). OPTIONAL + behind the `backend-candle` feature: its `cuda` feature compiles
-# candle-kernels for the target arch via nvcc, which must NOT run on the plain Desktop (Windows)
-# installer build — only the dedicated candle CI lane (sc-3676) opts in. Pinned to candle-gen
-# `5d7071a` (PR #2), whose `sceneworks-gen-core` pin is `8355152…` — the SAME rev this worker pins —
-# so the inventory registry is single. A drift here trips the skew gate (two gen-core builds split
-# the registry → "no generator registered" at runtime). Bump in lockstep with the mlx-gen pin above.
+# registry; the worker's Windows candle execution path (`generate_candle_stream`, image_jobs) drives
+# it through the neutral streaming harness. `flash-attn` compiles the fused CUTLASS attention kernels
+# (sc-3674), toggled per-payload at runtime via `candle_gen_sdxl::set_flash_attn`. OPTIONAL + behind
+# the worker `backend-candle` feature: its `cuda`/`flash-attn` features compile kernels via nvcc,
+# which must NOT run on the plain Desktop (Windows) installer build — only the dedicated candle CI
+# lane (sc-3676) opts in. Pinned to candle-gen `910f417` (PR #4), whose `sceneworks-gen-core` pin is
+# `8355152…` — the SAME rev this worker pins — so the inventory registry is single. A drift trips the
+# skew gate (two gen-core builds → "no generator registered" at runtime). Bump with the mlx-gen pin.
 [target.'cfg(target_os = "windows")'.dependencies]
-candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5d7071ab152a759f4cdcb1cef020226f03ddb2c3", features = ["cuda"], optional = true }
+candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "910f417c6ce5ee6cdd03a6a28d027da39dfb7c9b", features = ["cuda", "flash-attn"], optional = true }
 
 [lints]
 workspace = true

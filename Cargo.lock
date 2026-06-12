@@ -434,9 +434,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-flash-attn"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12512cf8e706744642e9a8579305a6ed1e44a0c636ce20c416cd5c519de19b7d"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "cudaforge",
+ "half",
+]
+
+[[package]]
 name = "candle-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=5d7071ab152a759f4cdcb1cef020226f03ddb2c3#5d7071ab152a759f4cdcb1cef020226f03ddb2c3"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=910f417c6ce5ee6cdd03a6a28d027da39dfb7c9b#910f417c6ce5ee6cdd03a6a28d027da39dfb7c9b"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -447,12 +459,14 @@ dependencies = [
 [[package]]
 name = "candle-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=5d7071ab152a759f4cdcb1cef020226f03ddb2c3#5d7071ab152a759f4cdcb1cef020226f03ddb2c3"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=910f417c6ce5ee6cdd03a6a28d027da39dfb7c9b#910f417c6ce5ee6cdd03a6a28d027da39dfb7c9b"
 dependencies = [
  "candle-gen",
  "candle-transformers",
  "hf-hub",
  "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
  "tokenizers 0.22.2",
 ]
 
@@ -489,6 +503,7 @@ checksum = "f59d08c89e9f4af9c464e2f3a8e16199e7cc601e6f34538c2cfbb42b623b1783"
 dependencies = [
  "byteorder",
  "candle-core",
+ "candle-flash-attn",
  "candle-nn",
  "fancy-regex",
  "num-traits",

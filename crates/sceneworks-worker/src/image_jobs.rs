@@ -24,11 +24,20 @@ use sceneworks_core::image_request::ImageRequest;
 // contract layer mlx-gen re-exports). The `as _;` provider links below stay mlx-gen-specific —
 // `cfg(target_os)` decides which backend crates register into the registry, not which contract
 // types the worker names.
-#[cfg(target_os = "macos")]
+// Contract types for the generation harness — shared by the macOS MLX path AND the Windows candle
+// lane (sc-3675), so broadened from macOS-only. `gen_core` is a direct worker dep on every platform.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use gen_core::{
-    AdapterKind, AdapterSpec, CancelFlag, Conditioning, ControlKind, GenerationOutput,
-    GenerationRequest, Generator, Image, LoadSpec, Progress, Quant, WeightsSource,
+    AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator, Image,
+    LoadSpec, Progress, Quant, WeightsSource,
 };
+// MLX-only contract types (LoRA classification + ControlNet conditioning) — the candle txt2img lane
+// uses neither.
+#[cfg(target_os = "macos")]
+use gen_core::{AdapterKind, ControlKind};
 #[cfg(target_os = "macos")]
 use mlx_gen_chroma as _;
 #[cfg(target_os = "macos")]
@@ -261,7 +270,31 @@ pub(crate) async fn run_image_generate_job(
     } else {
         false
     };
-    #[cfg(not(target_os = "macos"))]
+    // Windows/CUDA candle execution path (sc-3675, epic 3672). The macOS dispatch above is MLX-bound;
+    // candle is a narrow txt2img-only lane, so for a candle-engine model (sdxl/realvisxl) with the
+    // backend enabled we run `generate_candle_stream` (same neutral assetWrites/progress/cancellation
+    // harness). Gated on `backend_candle_enabled` (default off) so production routing is unchanged
+    // until parity is accepted — otherwise it stubs exactly like before.
+    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    let handled = if settings.backend_candle_enabled && is_candle_engine(&request.model) {
+        generate_candle_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else {
+        false
+    };
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "windows", feature = "backend-candle")
+    )))]
     let handled = false;
 
     // An MLX-routed model id whose weights/snapshot didn't resolve must fail
@@ -622,12 +655,23 @@ fn lerp(a: u8, t: f32) -> u8 {
 // FLUX.1 schnell/dev (sc-3023), driven by the engines::MODEL_TABLE dispatch table.
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
-// macOS MLX generator stream helpers.
+// Neutral generation harness + MLX routing. The streaming helpers (`start_cached_gen_stream` /
+// `consume_gen_events` / `generate_one`) and a few resolvers are backend-neutral and shared by the
+// Windows candle lane (sc-3675); the MLX-coupled fns inside (`generate_stream`, the `ResolvedModel`
+// resolvers) carry their own `#[cfg(target_os = "macos")]`. So these two includes compile on macOS
+// AND on the Windows candle build.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+// MLX/candle generator stream helpers.
 include!("image_jobs/stream.rs");
 
-#[cfg(target_os = "macos")]
-// base MLX image routing and txt2img generation.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+// base image routing (MLX) + neutral txt2img generation harness + the candle execution path.
 include!("image_jobs/base.rs");
 #[cfg(target_os = "macos")]
 // Z-Image strict-pose and prompt augmentation helpers.

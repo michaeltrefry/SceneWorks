@@ -1,8 +1,10 @@
+#[cfg(target_os = "macos")]
 fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
     mlx_model(&request.model).is_some()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageRoute {
     ZImageControl,
@@ -15,6 +17,7 @@ enum ImageRoute {
     Mlx,
 }
 
+#[cfg(target_os = "macos")]
 fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
     if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
@@ -37,6 +40,7 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
     }
 }
 
+#[cfg(target_os = "macos")]
 impl ImageRoute {
     fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
         match self {
@@ -56,6 +60,7 @@ impl ImageRoute {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
     match flux2_grouping(request) {
         Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
@@ -66,6 +71,7 @@ fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
 
 /// The HuggingFace repo for the model: the manifest entry's `repo` wins, else the
 /// family default.
+#[cfg(target_os = "macos")]
 fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
     request
         .model_manifest_entry
@@ -80,6 +86,7 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent.
+#[cfg(target_os = "macos")]
 pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
@@ -104,6 +111,7 @@ pub(crate) fn resolve_weights_dir(
     ))
 }
 
+#[cfg(target_os = "macos")]
 fn quant_int(value: &Value) -> Option<i64> {
     if value.is_boolean() {
         return None;
@@ -116,6 +124,7 @@ fn quant_int(value: &Value) -> Option<i64> {
 /// Resolve quantization: `advanced.mlxQuantize` → `manifest.mlx.quantize` → Q8
 /// default. mlx-gen supports Q4/Q8; map (<=0 → dense, <=4 → Q4, else Q8). Returns the
 /// mlx-gen quant + the effective bit count for the recipe (None = dense bf16).
+#[cfg(target_os = "macos")]
 fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     let raw = request
         .advanced
@@ -137,6 +146,7 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
+#[cfg(target_os = "macos")]
 fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     request
         .advanced
@@ -153,6 +163,7 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
 /// no guidance — the engine rejects `Some(_)` on them — so this returns `None`. For a
 /// guided variant (flux dev) it is `advanced.guidanceScale` else the family default.
+#[cfg(target_os = "macos")]
 fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !model.supports_guidance() {
         return None;
@@ -176,6 +187,7 @@ fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
 /// guidance-distilled families (`z_image_turbo`, `flux_schnell`) are `false`/`false` (no CFG at
 /// all), and the `guidance`-scalar families (qwen / sdxl / flux2 …) are `true`/*. For a true-CFG
 /// family the worker forwards `advanced.guidanceScale` as `true_cfg`, not `guidance`.
+#[cfg(target_os = "macos")]
 fn uses_true_cfg(model: &ResolvedModel) -> bool {
     !model.supports_guidance() && model.supports_negative_prompt()
 }
@@ -183,6 +195,7 @@ fn uses_true_cfg(model: &ResolvedModel) -> bool {
 /// Resolve the true-CFG scale for a true-CFG family (Chroma). `None` for every other family
 /// (their CFG, if any, flows through [`resolve_guidance`]). The scale is `advanced.guidanceScale`
 /// (the same user knob) else the family default — forwarded to the engine as `GenerationRequest.true_cfg`.
+#[cfg(target_os = "macos")]
 fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !uses_true_cfg(model) {
         return None;
@@ -203,6 +216,7 @@ fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
 /// The negative prompt to pass to the engine. `None` for variants without true CFG
 /// (the engine rejects `negative_prompt` on the distilled families) and for an empty
 /// prompt (the true-CFG engines fall back to their own neutral negative).
+#[cfg(target_os = "macos")]
 fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Option<String> {
     if !model.supports_negative_prompt() {
         return None;
@@ -216,6 +230,7 @@ fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Opt
 }
 
 /// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
+#[cfg(target_os = "macos")]
 pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
     for key in ["installedPath", "sourcePath", "path"] {
         if let Some(value) = lora
@@ -243,6 +258,7 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
 /// so `Lora` is the correct hint and the worker no longer rejects them. (A LyCORIS algo the engine
 /// doesn't implement — e.g. (IA)³/OFT — has no `lokr_*`/`hada_*` keys, so the engine's LoRA loader
 /// finds nothing and surfaces a loud "matched nothing" error rather than mis-applying.)
+#[cfg(target_os = "macos")]
 pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     let header = read_safetensors_header(file)
         .map_err(|error| WorkerError::InvalidPayload(format!("LoRA header: {error}")))?;
@@ -258,6 +274,7 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
 }
 
 /// Resolve up to 3 request LoRAs into mlx-gen adapter specs (path + scale + kind).
+#[cfg(target_os = "macos")]
 fn resolve_adapters(request: &ImageRequest) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
@@ -363,22 +380,28 @@ fn load_engine(
 /// XLabs FLUX IP-Adapter repos (epic 3621). The torch `flux_dev` path already declares +
 /// downloads these (the `ipAdapter` block in `image_adapters`); the MLX path reuses the same
 /// HF-cache snapshots — there is no new weight to ship.
+#[cfg(target_os = "macos")]
 const FLUX_IP_ADAPTER_REPO: &str = "XLabs-AI/flux-ip-adapter";
+#[cfg(target_os = "macos")]
 const FLUX_IP_IMAGE_ENCODER_REPO: &str = "openai/clip-vit-large-patch14";
 /// IP-Adapter scale when the request omits `ipAdapterScale` (XLabs resemblance tier 0.7, matching
 /// the torch `FluxDiffusersAdapter`).
+#[cfg(target_os = "macos")]
 const FLUX_IP_SCALE: f32 = 0.7;
 /// `trueCfgScale` default for the FLUX.1-dev IP-Adapter path (real CFG; torch default ~4.0).
+#[cfg(target_os = "macos")]
 const FLUX_IP_TRUE_CFG: f32 = 4.0;
 
 /// The FLUX.1 engine families that carry the XLabs IP-Adapter (both variants — the Rust engine has
 /// no diffusers `load_ip_adapter` schnell limitation).
+#[cfg(target_os = "macos")]
 fn is_flux_model(model: &str) -> bool {
     matches!(model, "flux_schnell" | "flux_dev")
 }
 
 /// The SenseNova-U1 SceneWorks ids (base + 8-step distill), both served by the unified
 /// `mlx-gen-sensenova` engine (sc-3900).
+#[cfg(target_os = "macos")]
 fn is_sensenova_model(model: &str) -> bool {
     matches!(model, "sensenova_u1_8b" | "sensenova_u1_8b_fast")
 }
@@ -388,6 +411,7 @@ fn is_sensenova_model(model: &str) -> bool {
 /// (openai CLIP-ViT-L). Errors loudly if either snapshot is missing — mirrors the SDXL IP path
 /// (`resolve_ip_adapter_dir`); the repos reach the cache via the model-download flow / the torch
 /// `flux_dev` path, not a new provisioning step.
+#[cfg(target_os = "macos")]
 fn resolve_flux_ip_adapter_dir(settings: &Settings) -> WorkerResult<PathBuf> {
     let missing = || {
         WorkerError::InvalidPayload(format!(
@@ -514,6 +538,7 @@ fn step_fraction(index: usize, current: u32, total: u32, count: u32) -> f64 {
 /// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the
 /// `Box<dyn Generator>` is `!Send` and the MLX device is single-thread).
 #[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "macos")]
 async fn generate_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -643,6 +668,123 @@ async fn generate_stream(
                     negative_prompt.clone(),
                     identity_init.as_ref(),
                     true_cfg,
+                    &cancel,
+                    on_progress,
+                )?;
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        adapter_label,
+        &raw_settings,
+        count,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+/// Whether `model` is served by the candle (Windows/CUDA) backend (sc-3675): the SDXL family only
+/// (`realvisxl` shares the candle `"sdxl"` engine). A tiny routing match — candle registers one engine.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn is_candle_engine(model: &str) -> bool {
+    matches!(model, "sdxl" | "realvisxl")
+}
+
+/// Windows/CUDA candle execution path (sc-3675, epic 3672). The macOS dispatch is MLX-bound; candle
+/// is a narrow **txt2img-only** lane, so this is a trimmed sibling of [`generate_stream`] that drives
+/// the SAME neutral streaming harness (`start_cached_gen_stream` → `generate_one` →
+/// `consume_gen_events`) against the registry-resolved candle generator (`gen_core::load("sdxl", …)`).
+/// No reference/img2img/LoRA — the descriptor advertises none, so those never route here. Reached
+/// only when `backend_candle_enabled` (default off → production routing unchanged until parity).
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+async fn generate_candle_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let adapter_label = "candle_sdxl";
+    // realvisxl shares the candle "sdxl" engine + a weights swap (sc-3677 verifies its layout).
+    let repo = match request.model.as_str() {
+        "realvisxl" => "SG161222/RealVisXL_V5.0",
+        _ => "stabilityai/stable-diffusion-xl-base-1.0",
+    };
+    let weights_dir = huggingface_snapshot_dir(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("candle sdxl weights snapshot not found for {repo}"))
+    })?;
+
+    // SDXL production defaults (the candle descriptor's wired surface): 30 steps, CFG 7.0.
+    let steps = request
+        .advanced
+        .get("steps")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .map(|s| (s as u32).clamp(1, 80))
+        .unwrap_or(30);
+    let guidance = Some(
+        request
+            .advanced
+            .get("guidanceScale")
+            .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
+            .map(|g| g as f32)
+            .unwrap_or(7.0),
+    );
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+
+    // Per-payload flash-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
+    // (default on). Process-global toggle, set before the generator loads (the candle pipeline reads
+    // it at load) — race-free because the worker runs image jobs sequentially. No effect unless the
+    // crate was built `--features flash-attn` (it is, on the Windows CUDA worker).
+    let flash_attn = request
+        .advanced
+        .get("flashAttn")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    candle_gen_sdxl::set_flash_attn(flash_attn);
+
+    let count = request.count as usize;
+    let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
+    let prompt = request.prompt.clone();
+    let (width, height) = (request.width, request.height);
+    let raw_settings = mlx_raw_settings(request, repo, steps, None, guidance);
+    let spec = load_spec(weights_dir, None, Vec::new(), None);
+
+    let (cancel, rx, blocking) = start_cached_gen_stream(
+        job.id.clone(),
+        "sdxl",
+        0,
+        spec,
+        "candle sdxl load failed".to_owned(),
+        move |generator, tx, cancel| {
+            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+                let (out_w, out_h, pixels) = generate_one(
+                    generator,
+                    &prompt,
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
+                    negative_prompt.clone(),
+                    None,
+                    None,
                     &cancel,
                     on_progress,
                 )?;

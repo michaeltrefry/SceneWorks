@@ -67,6 +67,7 @@ where
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn start_gen_stream<G, L, D>(
     job_id: String,
     engine_id: &'static str,
@@ -158,7 +159,9 @@ where
 /// requested model id is a known MLX engine model but its weights snapshot
 /// can't be resolved (partially deleted HF cache, stale refs, missing
 /// modelPath). None when the model isn't engine-backed (the stub is its
-/// intended path) or the weights resolve.
+/// intended path) or the weights resolve. MLX-only (uses `mlx_model` + the macOS
+/// `resolve_weights_dir`); the candle lane has no equivalent stub-gap check.
+#[cfg(target_os = "macos")]
 pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Option<String> {
     let model = mlx_model(&request.model)?;
     match resolve_weights_dir(request, settings) {
