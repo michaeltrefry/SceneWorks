@@ -304,6 +304,10 @@ export function ImageStudio() {
   // clear the override.
   const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
   const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
+  // Flash attention (sc-3674): fused attention on the candle (Windows/CUDA) SDXL backend — faster +
+  // less VRAM. Per-payload (sent in `advanced.flashAttn`); the worker honors it only on candle, and
+  // ignores it on every other backend. Default on. Sticky pref (persisted), not model-reset.
+  const [flashAttn, setFlashAttn] = useState(saved.flashAttn ?? true);
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
@@ -804,6 +808,7 @@ export function ImageStudio() {
     schedulerShift,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
+    flashAttn,
   });
 
   // Snapshot the current working config into a named recipe preset in the
@@ -945,6 +950,9 @@ export function ImageStudio() {
           ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
             ? { guidanceScale: Number(guidanceOverride) }
             : {}),
+          // Flash attention (sc-3674) — sent every payload; only the candle (Windows/CUDA) SDXL
+          // backend reads it (faster + lower VRAM), every other backend ignores it.
+          flashAttn,
           // IP-Adapter / InstantID reference strength only applies when a character
           // reference is attached AND the model uses the IP-Adapter knob; Qwen's
           // edit pipeline ignores this scalar (hideReferenceStrength gates it out).
@@ -1454,6 +1462,17 @@ export function ImageStudio() {
                     type="number"
                     value={guidanceOverride}
                   />
+                </label>
+                <label
+                  className="checkline flash-attn-toggle"
+                  title="Fused flash-attention on the candle (Windows/CUDA) SDXL backend — faster and lower VRAM. Ignored on other backends."
+                >
+                  <input
+                    checked={flashAttn}
+                    onChange={(event) => setFlashAttn(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Flash attention
                 </label>
                 <label className="checkline upscale-toggle">
                   <input
