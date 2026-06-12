@@ -314,14 +314,13 @@ mlx-gen-pulid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "95cd5
 # mlx providers). OPTIONAL + behind the `backend-candle` feature: its `cuda` feature compiles
 # candle-kernels for the target arch via nvcc, which must NOT run on the plain Desktop (Windows)
 # installer build — only the dedicated candle CI lane (sc-3676) opts in. Pinned to candle-gen
-# `5d7071a` (PR #2), whose `sceneworks-gen-core` pin is `8355152…`. NOTE: the worker's gen-core pin
-# moved to `95cd5c6` (sc-5012) while this candle pin still resolves `8355152`. The default skew gate
-# (`cargo tree` with no `--features backend-candle`) does NOT see this `optional` Windows-only dep, so
-# it stays green; but the candle lane (with `backend-candle`) WOULD split the gen-core registry until
-# candle-gen is re-pinned to `95cd5c6` and this rev bumped in lockstep — tracked as sc-5035 so it
-# isn't silently shipped on the Windows/CUDA lane.
+# `f5abb03` (PR #10, sc-5035), whose `sceneworks-gen-core` pin is `95cd5c6` — the SAME rev this
+# worker pins (sc-5012) — so the candle lane (`--features backend-candle`) resolves EXACTLY ONE
+# `sceneworks-gen-core` and the gen_core inventory registry no longer splits. This rev also carries
+# `set_flash_attn` (candle-gen `5143dd9`, sc-3674), which the `image_jobs/base.rs` call depends on;
+# the prior `5d7071a` pin predated it and broke the `backend-candle` compile.
 [target.'cfg(target_os = "windows")'.dependencies]
-candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5d7071ab152a759f4cdcb1cef020226f03ddb2c3", features = ["cuda"], optional = true }
+candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f5abb03325658ee17c9981f205805686469a7758", features = ["cuda"], optional = true }
 
 [lints]
 workspace = true

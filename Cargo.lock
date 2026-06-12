@@ -436,23 +436,25 @@ dependencies = [
 [[package]]
 name = "candle-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=5d7071ab152a759f4cdcb1cef020226f03ddb2c3#5d7071ab152a759f4cdcb1cef020226f03ddb2c3"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=f5abb03325658ee17c9981f205805686469a7758#f5abb03325658ee17c9981f205805686469a7758"
 dependencies = [
  "candle-core",
  "candle-nn",
- "sceneworks-gen-core 0.1.0 (git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622)",
+ "sceneworks-gen-core",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "candle-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=5d7071ab152a759f4cdcb1cef020226f03ddb2c3#5d7071ab152a759f4cdcb1cef020226f03ddb2c3"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=f5abb03325658ee17c9981f205805686469a7758#f5abb03325658ee17c9981f205805686469a7758"
 dependencies = [
  "candle-gen",
  "candle-transformers",
  "hf-hub",
  "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
  "tokenizers 0.22.2",
 ]
 
@@ -3058,7 +3060,7 @@ source = "git+https://github.com/michaeltrefry/mlx-gen?rev=95cd5c692b974ecaafa57
 dependencies = [
  "inventory",
  "pmetal-mlx-rs",
- "sceneworks-gen-core 0.1.0 (git+https://github.com/michaeltrefry/mlx-gen?rev=95cd5c692b974ecaafa57c0af437f085b052e260)",
+ "sceneworks-gen-core",
  "thiserror 2.0.18",
  "tokenizers 0.21.4",
 ]
@@ -3880,7 +3882,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -4872,17 +4874,6 @@ dependencies = [
 [[package]]
 name = "sceneworks-gen-core"
 version = "0.1.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
-dependencies = [
- "inventory",
- "safetensors 0.4.5",
- "thiserror 2.0.18",
- "tokenizers 0.21.4",
-]
-
-[[package]]
-name = "sceneworks-gen-core"
-version = "0.1.0"
 source = "git+https://github.com/michaeltrefry/mlx-gen?rev=95cd5c692b974ecaafa57c0af437f085b052e260#95cd5c692b974ecaafa57c0af437f085b052e260"
 dependencies = [
  "inventory",
@@ -4959,7 +4950,7 @@ dependencies = [
  "pmetal-mlx-rs",
  "reqwest 0.12.28",
  "sceneworks-core",
- "sceneworks-gen-core 0.1.0 (git+https://github.com/michaeltrefry/mlx-gen?rev=95cd5c692b974ecaafa57c0af437f085b052e260)",
+ "sceneworks-gen-core",
  "serde",
  "serde_json",
  "sha2",
@@ -7080,7 +7071,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
