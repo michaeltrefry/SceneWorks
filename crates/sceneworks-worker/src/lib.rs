@@ -441,6 +441,14 @@ pub async fn run() -> WorkerResult<()> {
 }
 
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
+    // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
+    // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
+    // diagnosable from one log line. One shared contract version backs every linked backend.
+    println!(
+        "rust_worker gen-core contract version {} (gpu_id={})",
+        gen_core::VERSION,
+        settings.gpu_id
+    );
     let gpu = discover_gpu(&settings).await;
     let api = ApiClient::new(&settings);
     let http_client = reqwest::Client::new();
