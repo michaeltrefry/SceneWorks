@@ -30,7 +30,7 @@ sceneworks-core = { path = "../sceneworks-core" }
 # The rev MUST stay identical to the `mlx-gen` pin in the macOS block: two gen-core revs would mean
 # two distinct `inventory` registries (one for the worker's derivation, one the provider crates
 # register into) and the runtime would see "engine not found". Bump both together.
-sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -82,6 +82,19 @@ inventory = "0.3"
 # desktop packager (build-sidecar.mjs) has a dylib to stage and dev runs work.
 ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "download-binaries"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Rev 394031d (mlx-gen main, merged PR #383, epic 3039 / sc-4886+sc-4887; bundles PR #382 /
+# sc-4874): the z-image LoRA OOM training fix. #382 adds the opt-in
+# `TrainingConfig.gradient_checkpointing` field + a pre-flight OOM guard; #383 adds always-on
+# attention-segment checkpointing (no wiring needed) AND the `train_dtype` field (engine default
+# "bf16") — the bf16 forward is THE lever that drops the 1024² first-step peak 135 → ~44 GB, so
+# the run survives without the checkbox. The mlx-rs fork pin moves e59ffd88 → b6e4e56 (the
+# checkpointing primitive lives partly in the fork — mlx-rs PR #8); the direct `mlx-rs` pin below
+# tracks it in lockstep or the worker links two incompatible `Exception`/`Error` types. `394031d`
+# is surgical: it stops BEFORE #384 (sc-4481 gen-core-testkit, which enforces a typed
+# `Error::Canceled` cancellation contract across the Generator families — an avoidable ripple into
+# the worker's cancel surface). New public surface is two additive config fields; the pin won't
+# compile until `map_training_config` sets `gradient_checkpointing` (advanced `gradientCheckpointing`)
+# AND `train_dtype` (advanced `mixedPrecision`, default "bf16") — see training_jobs.rs (sc-4881).
 # Rev 810a9ff (mlx-gen main, merged PR #381, epic 3720 / sc-3722): the sampler-policy + weights-
 # metadata split. The schedule/coefficient math (per-step affine `StepCoeffs`, the FlowMatch/LCM/TCD/
 # Lightning policies, the `AlphaSchedule`/sigma builders) and the safetensors header/byte-view reader
@@ -156,70 +169,72 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # forward residual, Qwen-Image ControlNet strict pose (epic 3401), LoRA/LoKr trainer surface
 # (epic 3039), Wan/LTX converter stack, Wan-VACE provider + per-request control_scale
 # (epic 3040), JoyCaption captioner (epic 3550), and the XLabs FLUX IP-Adapter (epic 3621).
-# One shared rev so MLX builds once with the unchanged mlx-rs pin (e59ffd88, identical across
-# the bump -> no MLX rebuild).
-mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+# One shared rev so MLX builds once. The #382 bump moves the mlx-rs fork pin
+# e59ffd88 -> b6e4e56 (the opt-in gradient-checkpointing primitive lives partly in the
+# fork — mlx-rs PR #8 / sc-4874), so the direct `mlx-rs` pin below MUST track it in
+# lockstep or the worker links two incompatible `Exception`/`Error` types.
+mlx-gen = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # `mlx-rs` (pmetal-mlx-rs fork) — used directly by the native MLX YOLO11 person
 # detector (person_jobs.rs, sc-3633) for the ops the shared `mlx_gen::nn` layer does
 # not cover: CSP channel splits, depthwise convs, SPPF max-pool, the C2PSA attention,
 # and the DFL/anchor decode. Pinned to the SAME rev mlx-gen uses so MLX builds once
 # (a different rev would compile pmetal-mlx-sys twice). Also exercised by the NAX
-# guard test (tests/nax_guard.rs).
-mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "e59ffd88014340e6a49b26de95446b8b76a57932" }
-mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+# guard test (tests/nax_guard.rs). Tracks the mlx-gen #382 mlx-rs bump (b6e4e56).
+mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "b6e4e56930d3b639e4989d51be0abface5addf58" }
+mlx-gen-z-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # FLUX.1 schnell/dev provider (epic 3018, sc-3023). Same git rev as mlx-gen so MLX
 # builds once; self-registers `flux1_schnell`/`flux1_dev` via inventory only when
 # linked + referenced (`use mlx_gen_flux as _;` in image_jobs.rs).
-mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-flux = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # Qwen-Image provider (epic 3018, sc-3024). Self-registers `qwen_image`.
-mlx-gen-qwen-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-qwen-image = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # FLUX.2-klein provider (epic 3018, sc-3025). Self-registers `flux2_klein_9b`
 # (txt2img) + `flux2_klein_9b_edit` + `flux2_klein_9b_kv_edit` (edit = sc-3029).
-mlx-gen-flux2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-flux2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # SDXL provider (epic 3018, sc-3026). Self-registers `sdxl` (also serves the
 # `realvisxl` finetune — same arch). Replaces the in-process _vendor/mlx_sd path.
-mlx-gen-sdxl = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-sdxl = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # Chroma provider (epic 3531, sc-3843). Self-registers `chroma1_hd` / `chroma1_base` /
 # `chroma1_flash` (FLUX.1-schnell-derived DiT, T5-only true-CFG conditioning) via inventory
 # when linked + referenced (`use mlx_gen_chroma as _;` in image_jobs.rs). Same git rev as the
 # other mlx-gen crates so MLX builds once.
-mlx-gen-chroma = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-chroma = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # SenseNova-U1 provider (epic 3180, sc-3900 / sc-3905). Self-registers `sensenova_u1_8b` (base) +
 # `sensenova_u1_8b_fast` (8-step distill) via inventory when linked + referenced
 # (`use mlx_gen_sensenova as _;` in image_jobs.rs). Also exposes the public `SenseNova` / `T2iModel`
 # types directly for the VQA + Document-Studio (interleave) paths the `Generator` contract can't
 # express (sc-3905). Same git rev as the other mlx-gen crates so MLX builds once.
-mlx-gen-sensenova = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-sensenova = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # Wan2.2 video provider (epic 3018, sc-3034). Self-registers `wan2_2_ti2v_5b`
 # (dense T2V/TI2V), `wan2_2_t2v_14b` + `wan2_2_i2v_14b` (dual-expert MoE) via
 # inventory when linked + referenced (`use mlx_gen_wan as _;` in video_jobs.rs).
-mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-wan = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # LTX-2.3 video provider (epic 3018, sc-3035). Self-registers `ltx_2_3` (T2V/I2V +
 # synchronized audio, 2-stage distilled). Linked + referenced (`use mlx_gen_ltx as _;`
 # in video_jobs.rs); the Gemma-3 text encoder is resolved by the engine (HF cache / env).
 # Same rev as the other mlx-gen crates (sc-3060 bump) so MLX + the shared core build once.
-mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-ltx = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # Stable Video Diffusion (SVD-XT) image→video provider (epic 3040, sc-3523). Self-registers
 # `svd_xt` (fixed ~25-frame img2vid burst, no text prompt — animates one source image via the
 # `motion_bucket_id`/`noise_aug_strength`/fps micro-conditioning) into the engine registry when
 # linked + referenced (`use mlx_gen_svd as _;` in video_jobs.rs). Same git rev + mlx-rs pin as the
 # other mlx-gen crates so MLX builds once.
-mlx-gen-svd = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-svd = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # JoyCaption image-to-text provider (epic 3550, sc-3556). Self-registers
 # `fancyfeast/llama-joycaption-beta-one-hf-llava` into mlx-gen's captioner
 # registry for native dataset captioning on the macOS MLX worker.
-mlx-gen-joycaption = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-joycaption = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # SAM2 (Segment Anything 2) segmenter (epic 3704, sc-3705..3709). A plain utility
 # crate (NOT a self-registering generation provider) — `person_segment.rs` builds a
 # `Sam2Segmenter` directly from the converted MLX weights to produce per-frame person
 # masks in `run_person_track`. Same git rev + mlx-rs pin as the other mlx-gen crates so
 # MLX builds once.
-mlx-gen-sam2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-sam2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # Native MLX face-analysis stack (epic 3079) — SCRFD 5-pt detector + glintr100 ArcFace
 # (iresnet100) 512-d embedder. A plain utility crate (NOT a self-registering generation
 # provider) consumed by the InstantID provider below to detect the reference face + produce
 # the ArcFace embedding with zero Python (replaces insightface/onnxruntime on the Mac path).
-mlx-gen-face = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-face = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # InstantID identity-preserving SDXL provider (epic 3109 engine / sc-3345 integration). A
 # bespoke API (`InstantId::load(InstantIdPaths{ sdxl_base, identitynet, ip_adapter })` →
 # `.with_face`/`.with_openpose` → `generate`/`generate_angle`/`generate_pose`/`restore_face`),
@@ -228,7 +243,7 @@ mlx-gen-face = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9f
 # mlx-gen-sdxl (UNet + IdentityNet ControlNet + IP-Adapter Resampler) with mlx-gen-face. The
 # pinned rev (ed8e6a1) carries the base port (#153), the sc-3329 quant fix (#155), AND pose mode
 # + face-restore (#193: with_openpose/generate_pose/restore_face — sc-3117/3380). Same mlx-rs pin.
-mlx-gen-instantid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-instantid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 # Kolors (Kwai-Kolors) provider crate (epic 3090). Registers the inference generator id `kolors`
 # (sc-3874) AND — the piece this worker consumes today — the `KolorsTrainer` LoRA/LoKr trainer under
 # the same id `kolors` (sc-4568), reached via `mlx_gen::load_trainer("kolors", spec)` for the Kolors
@@ -236,7 +251,7 @@ mlx-gen-instantid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "8
 # force-link the crate (`use mlx_gen_kolors as _;`) or the linker drops the `TrainerRegistration`.
 # Same git rev + mlx-rs pin as the other mlx-gen crates so MLX builds once. (The inference-side
 # routing cutover is sc-3875; this dep is added now for the trainer registration.)
-mlx-gen-kolors = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "810a9ff6170690e0f01c1410730d8e5528c40e65" }
+mlx-gen-kolors = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "394031d74acc1b45b610a43ef310efe15d9500f3" }
 
 [lints]
 workspace = true

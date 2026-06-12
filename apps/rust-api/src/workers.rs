@@ -112,3 +112,24 @@ pub(crate) async fn heartbeat_worker(
     publish(&state, "worker.updated", &worker);
     Ok(Json(worker))
 }
+
+/// The supervisor reports a worker child that died by an uncatchable signal
+/// (SIGKILL/OOM, SIGABRT, SIGSEGV, …). We fail that worker's still-active job with
+/// a signal-attributed error instead of waiting for the heartbeat sweep to mark it
+/// the generic `interrupted` — so the user sees a real, actionable failure rather
+/// than a frozen progress bar (sc-4881). Returns the failed job, if any.
+pub(crate) async fn worker_signal_death(
+    State(state): State<AppState>,
+    Path(worker_id): Path<String>,
+    ApiJson(payload): ApiJson<WorkerSignalDeathRequest>,
+) -> Result<Json<Option<JobSnapshot>>, ApiError> {
+    let failed = store_call(state.clone(), move |store, _timeout| {
+        store.fail_worker_job_killed_by_signal(&worker_id, payload.signal)
+    })
+    .await?;
+    if let Some(job) = &failed {
+        publish(&state, "job.updated", job);
+        publish_queue(&state).await?;
+    }
+    Ok(Json(failed))
+}

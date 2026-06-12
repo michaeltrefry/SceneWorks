@@ -1028,6 +1028,56 @@ fn idle_heartbeat_interrupts_previous_heartbeated_job() {
 }
 
 #[test]
+fn signal_death_fails_active_job_with_attributed_error() {
+    // sc-4881: a worker hard-killed by SIGKILL/OOM can't report its own death, so
+    // the supervisor attributes it. The worker's active job must become a real
+    // FAILURE (with an actionable, signal-attributed error), not a heartbeat-sweep
+    // `interrupted` that reads as a frozen progress bar.
+    let store = store("signal-death-fails-job");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, created.id);
+
+    let failed = store
+        .fail_worker_job_killed_by_signal("worker-1", 9)
+        .expect("signal death recorded")
+        .expect("the worker's active job is failed");
+
+    assert_eq!(failed.id, created.id);
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert_eq!(failed.worker_id, None);
+    let error = failed.error.clone().unwrap_or_default();
+    assert!(
+        error.contains("signal 9 (SIGKILL)") && error.contains("Gradient Checkpointing"),
+        "error should attribute the OOM SIGKILL and surface the remediation, got {error:?}"
+    );
+
+    // The worker is released so the UI never shows it pinned to the dead job.
+    let worker = store.get_worker("worker-1").expect("worker loads");
+    assert_eq!(worker.current_job_id, None);
+    assert_eq!(worker.status, WorkerStatus::Offline);
+}
+
+#[test]
+fn signal_death_with_no_active_job_is_a_noop() {
+    // A worker that dies idle between jobs has nothing to fail (sc-4881).
+    let store = store("signal-death-idle-worker");
+    register_image_worker(&store);
+
+    let failed = store
+        .fail_worker_job_killed_by_signal("worker-1", 11)
+        .expect("signal death recorded");
+
+    assert!(failed.is_none(), "an idle worker death fails no job");
+}
+
+#[test]
 fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
     // A job claimed by one worker incarnation must survive an idle heartbeat
     // (currentJobId=null) that races the claim — e.g. from another process

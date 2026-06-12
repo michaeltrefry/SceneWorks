@@ -318,6 +318,34 @@ fn advanced_u32(advanced: &JsonObject, key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+/// Read an `advanced` field as a bool (accepting a JSON bool or a `"true"`/`"false"`
+/// string), else `default`.
+#[cfg(target_os = "macos")]
+fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
+    advanced
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_bool()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .unwrap_or(default)
+}
+
+/// Normalize the advanced `mixedPrecision` string onto the engine's `train_dtype`
+/// domain, which is exactly `{"bf16", "f32"}` (sc-4887). Only an explicit `"bf16"`
+/// (case-insensitive) selects bf16; every other value — `"fp16"`, `"no"`, empty,
+/// anything unrecognized — falls back to full-precision `"f32"`, matching the
+/// engine's own "unrecognized ⇒ f32" rule. The *absent*-key default is applied by
+/// the caller (`"bf16"`), so a plan that omits the key keeps the OOM fix on.
+#[cfg(target_os = "macos")]
+fn normalize_train_dtype(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "bf16" => "bf16".to_owned(),
+        _ => "f32".to_owned(),
+    }
+}
+
 /// Map the SceneWorks `TrainingConfig` (plan `config` + its free-form `advanced`
 /// bag) onto the engine's typed [`mlx_gen::TrainingConfig`]. The optimizer string is
 /// passed verbatim — the engine normalizes aliases (`adamw8bit`→`adamw`,
@@ -360,6 +388,19 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         timestep_type: advanced_str(advanced, "timestepType", "sigmoid"),
         timestep_bias: advanced_str(advanced, "timestepBias", "balanced"),
         loss_type: advanced_str(advanced, "lossType", "mse"),
+        // Training compute dtype — the primary OOM fix (sc-4887). bf16 halves the
+        // activation working set and drops the 1024² z-image first-step peak 135 → ~44 GB,
+        // so the run survives. This mapping builds the engine config field-by-field (no
+        // `..Default::default()`), so the engine's "bf16" default never reaches here — it
+        // MUST be set explicitly. Sourced from the advanced `mixedPrecision` key (presets
+        // already carry "bf16"); the engine only supports bf16/f32, so anything else
+        // (incl. "fp16", "no", empty) normalizes to "f32". Absent → "bf16" (keep the fix on).
+        train_dtype: normalize_train_dtype(&advanced_str(advanced, "mixedPrecision", "bf16")),
+        // Honor the "Gradient Checkpointing" UI checkbox on the Rust path (sc-4881) — an
+        // extra lever for smaller machines / higher resolution on top of the bf16 fix.
+        // Previously dropped here, so the engine always ran at its `false` default. Absent
+        // (legacy payloads) preserves that default.
+        gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
         trigger_word: config.trigger_word.clone(),
     }
 }
@@ -815,6 +856,57 @@ mod tests {
         serde_json::from_value(value).expect("plan deserializes")
     }
 
+    /// sc-4887: only an explicit bf16 selects bf16; every other value (incl. the
+    /// engine-unsupported fp16, "no", empty) falls back to full-precision f32.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn normalize_train_dtype_only_bf16_selects_bf16() {
+        assert_eq!(normalize_train_dtype("bf16"), "bf16");
+        assert_eq!(normalize_train_dtype("BF16"), "bf16");
+        assert_eq!(normalize_train_dtype("  bf16 "), "bf16");
+        assert_eq!(normalize_train_dtype("fp16"), "f32");
+        assert_eq!(normalize_train_dtype("no"), "f32");
+        assert_eq!(normalize_train_dtype(""), "f32");
+    }
+
+    /// sc-4881 / sc-4887: the two OOM-fix levers must reach the engine config. The
+    /// mapping builds it field-by-field (no `..Default::default()`), so a dropped
+    /// field silently reverts to the wrong value — exactly the bug this story fixes.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn map_training_config_wires_train_dtype_and_gradient_checkpointing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+
+        // Absent keys: the OOM fix stays on (bf16) and checkpointing stays off, so a
+        // legacy plan that omits both still trains under the safe default.
+        let default_plan = parse(plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        ));
+        let mapped = map_training_config(&default_plan.config);
+        assert_eq!(mapped.train_dtype, "bf16");
+        assert!(!mapped.gradient_checkpointing);
+
+        // Explicit values flow through; a non-bf16 precision normalizes to f32.
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        value["config"]["advanced"]["mixedPrecision"] = json!("fp16");
+        value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
+        let mapped = map_training_config(&parse(value).config);
+        assert_eq!(mapped.train_dtype, "f32");
+        assert!(mapped.gradient_checkpointing);
+    }
+
     #[test]
     fn validate_rejects_unknown_plan_version() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1225,6 +1317,8 @@ mod tests {
             steps: 2,
             batch_size: 1,
             gradient_accumulation: 1,
+            gradient_checkpointing: false,
+            train_dtype: "bf16".to_owned(),
             resolution: 512,
             save_every: 0,
             seed: 42,
@@ -1279,6 +1373,107 @@ mod tests {
         assert!(last_loss.is_finite(), "a training-step loss was observed");
         assert!(
             output_dir.join("kolors_smoke.safetensors").exists(),
+            "trained adapter was written"
+        );
+    }
+
+    /// Real-weights production-scale smoke (sc-4881 / sc-4874+4886+4887, Part A4): load the
+    /// z-image trainer from the installed `Tongyi-MAI/Z-Image-Turbo` snapshot and run two LoRA
+    /// micro-steps **at resolution 1024 with `train_dtype="bf16"`** — the exact configuration
+    /// that SIGKILL-OOM'd the worker before this fix (the 1024² first step materialized ~135 GB
+    /// > 128 GB unified memory). The image *count* doesn't change the first-step peak (batch 1;
+    /// the peak is the per-step forward graph), so a one-image dataset faithfully reproduces the
+    /// memory profile of the 221-image production run. Passing step 1 with a finite loss proves
+    /// bf16 brings the peak under budget through the **full worker path** (`map_training_config`
+    /// → `load_trainer` → `train`), not just the engine isolation tests. `gradient_checkpointing`
+    /// stays off here to prove bf16 alone is sufficient. Run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored z_image_1024_bf16 --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real Z-Image-Turbo weights + Metal device; loads the full model and peaks ~44 GB at 1024"]
+    fn z_image_1024_bf16_trains_past_the_first_step() {
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME set"));
+        let snapshot = std::fs::read_dir(
+            home.join(".cache/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots"),
+        )
+        .expect("z-image snapshots dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("a z-image snapshot dir");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let image_path = tmp.path().join("swatch.png");
+        image::RgbImage::from_fn(1024, 1024, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        })
+        .save(&image_path)
+        .expect("write test image");
+        let output_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = TrainingConfig {
+            rank: 4,
+            alpha: 4.0,
+            learning_rate: 1e-4,
+            steps: 2,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            // The fix under test: bf16 forward, checkpointing OFF — bf16 alone must suffice.
+            gradient_checkpointing: false,
+            train_dtype: "bf16".to_owned(),
+            resolution: 1024,
+            save_every: 0,
+            seed: 42,
+            optimizer: "adamw".to_owned(),
+            weight_decay: 0.0,
+            lr_scheduler: LrSchedule::parse("constant"),
+            lr_warmup_steps: 0,
+            network_type: NetworkType::parse("lora"),
+            decompose_factor: -1,
+            lora_target_modules: Vec::new(),
+            timestep_type: "sigmoid".to_owned(),
+            timestep_bias: "balanced".to_owned(),
+            loss_type: "mse".to_owned(),
+            trigger_word: None,
+        };
+        let request = TrainingRequest {
+            items: vec![TrainingItem {
+                image_path,
+                caption: "a colorful test swatch".to_owned(),
+            }],
+            config,
+            output_dir: output_dir.clone(),
+            file_name: "z_image_1024_smoke.safetensors".to_owned(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        };
+
+        let mut trainer =
+            mlx_gen::load_trainer("z_image_turbo", &LoadSpec::new(WeightsSource::Dir(snapshot)))
+                .expect("z-image trainer loads");
+        trainer.validate(&request).expect("trainer accepts the plan");
+        let mut last_loss = f32::NAN;
+        let output = trainer
+            .train(&request, &mut |progress| {
+                if let TrainingProgress::Training { loss, .. } = progress {
+                    last_loss = loss;
+                }
+            })
+            .expect("training survives the 1024 first step (no OOM)");
+
+        eprintln!(
+            "[z-image-1024-bf16-smoke] steps={} final_loss={} last_step_loss={} adapter={}",
+            output.steps,
+            output.final_loss,
+            last_loss,
+            output.adapter_path.display()
+        );
+        assert!(output.steps >= 1, "expected at least one micro-step past step 1");
+        assert!(output.final_loss.is_finite(), "final loss must be finite");
+        assert!(last_loss.is_finite(), "a training-step loss was observed");
+        assert!(
+            output_dir.join("z_image_1024_smoke.safetensors").exists(),
             "trained adapter was written"
         );
     }

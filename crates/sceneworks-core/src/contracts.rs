@@ -630,6 +630,20 @@ pub struct WorkerHeartbeatRequest {
     pub extra: ExtraFields,
 }
 
+/// Posted by the supervisor when it reaps a worker child that died by an
+/// uncatchable signal (SIGKILL/OOM, SIGABRT, SIGSEGV, …). The dying worker can't
+/// report its own death, so the supervisor attributes it here and the server
+/// fails the worker's still-active job instead of waiting for the heartbeat sweep
+/// to mark it `interrupted` (sc-4881).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerSignalDeathRequest {
+    /// Terminating signal number reported by the OS (e.g. 9 for SIGKILL).
+    pub signal: i32,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressRequest {

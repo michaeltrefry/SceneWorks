@@ -731,6 +731,66 @@ impl JobsStore {
         })
     }
 
+    /// Surface a worker's death-by-uncatchable-signal (SIGKILL/OOM, SIGABRT,
+    /// SIGSEGV, …) as a terminal job FAILURE, instead of letting the heartbeat
+    /// sweep later mark it the generic `interrupted` (which reads to the user like
+    /// a frozen progress bar). The supervisor that reaped the child observes the
+    /// terminating signal — the only layer that can, since the death is
+    /// uncatchable in-process — and calls this with that signal. We fail the
+    /// worker's still-active job with an actionable, signal-attributed error and
+    /// release the worker so the UI doesn't show it pinned to a dead job. Returns
+    /// the failed job if the worker had an active one (else `None` — it died idle
+    /// between jobs). (sc-4881)
+    pub fn fail_worker_job_killed_by_signal(
+        &self,
+        worker_id: &str,
+        signal: i32,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = utc_now();
+        let worker_ids = [worker_id.to_owned()];
+        let active_jobs = self.active_jobs_for_workers(&transaction, &worker_ids)?;
+        let error = signal_failure_error(signal);
+        let mut failed = None;
+        if let Some(job) = active_jobs.into_iter().next() {
+            transaction.execute(
+                &format!(
+                    "
+                    update jobs
+                       set status = 'failed',
+                           stage = 'failed',
+                           message = 'Worker process terminated unexpectedly.',
+                           error = ?2,
+                           completed_at = ?1,
+                           updated_at = ?1,
+                           worker_id = null
+                     where id = ?3
+                       and status in ({active})
+                    ",
+                    active = active_statuses_sql()
+                ),
+                params![now, error, job.id],
+            )?;
+            failed = Some(self.get_job_on_connection(&transaction, &job.id)?);
+        }
+        // Release the worker so it isn't shown pinned to a now-failed job; the
+        // supervisor restarts the child, which re-registers itself fresh.
+        transaction.execute(
+            "
+            update workers
+               set status = 'offline',
+                   current_job_id = null,
+                   last_seen_at = ?1
+             where id = ?2
+            ",
+            params![now, worker_id],
+        )?;
+        transaction.commit()?;
+        Ok(failed)
+    }
+
     /// macOS "MLX-required" grace sweep (epic 3482 / sc-3483). When `mlx_required`, the
     /// non-mlx (MPS) worker never claims an MLX-eligible job — it defers unconditionally
     /// to the in-process `mlx` worker (see `should_defer_*`). If no **live** `mlx` worker
@@ -1803,6 +1863,40 @@ fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
          worker is running.",
         job_type = job.job_type.as_str()
     )
+}
+
+/// Human, actionable terminal error attributing a worker's death to its
+/// terminating signal (sc-4881). Signal 9 (the common first-step OOM SIGKILL from
+/// sc-4874) carries the gradient-checkpointing remediation hint; other uncatchable
+/// deaths (SIGABRT GPU/Metal abort, SIGSEGV) name themselves so the job card and
+/// System → Logs show a real cause instead of a frozen progress bar.
+fn signal_failure_error(signal: i32) -> String {
+    let hint = match signal {
+        9 => {
+            ", likely out-of-memory during the first training step \
+              — enable Gradient Checkpointing or reduce resolution"
+        }
+        6 => ", likely a GPU/Metal command-buffer abort or assertion",
+        11 => " (segmentation fault)",
+        _ => "",
+    };
+    match signal_name(signal) {
+        Some(name) => format!("Worker terminated by signal {signal} ({name}){hint}."),
+        None => format!("Worker terminated by signal {signal}{hint}."),
+    }
+}
+
+/// Conventional name for the common terminating signals we attribute (sc-4881).
+fn signal_name(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        15 => "SIGTERM",
+        _ => return None,
+    })
 }
 
 /// Why the Rust/MLX flow can't run a job on macOS (epic 3482 / sc-3484) — the inverse of the

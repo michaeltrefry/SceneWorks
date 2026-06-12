@@ -101,18 +101,30 @@ where
             // backoff below both read the same stored value.
             child.restart_attempt = child.restart_attempt.saturating_add(1);
             let delay = retry_delay(settings.poll_seconds, child.restart_attempt);
+            // A child reaped with a terminating signal died an uncatchable death
+            // (SIGKILL/OOM, SIGABRT, SIGSEGV, …) and never got to report it. Carry
+            // the signal so we can attribute its active job as a real FAILURE
+            // before restarting, rather than letting the heartbeat sweep mark it
+            // the generic `interrupted` (sc-4881).
+            let signal = terminating_signal(&status);
             emit_json(json!({
                 "event": "worker_exited",
                 "workerId": worker_id,
                 "gpuId": child.spec.gpu_id,
                 "exitCode": status.code(),
+                "signal": signal,
                 "restartInSeconds": delay,
                 "reportedAt": now_rfc3339(),
             }));
-            exited.push(worker_id.clone());
+            exited.push((worker_id.clone(), signal));
         }
     }
-    for worker_id in exited {
+    for (worker_id, signal) in exited {
+        // Surface an uncatchable death to the user before the backoff sleep, so a
+        // job that died on signal fails promptly instead of hanging until restart.
+        if let Some(signal) = signal {
+            report_worker_signal_death(settings, &worker_id, signal).await;
+        }
         let Some(mut child) = children.remove(&worker_id) else {
             continue;
         };
@@ -194,6 +206,41 @@ pub(crate) fn start_child_worker(_settings: &Settings, spec: &WorkerSpec) -> Wor
     let mut command = Command::new(executable);
     command.envs(child_environment(spec));
     command.spawn().map_err(Into::into)
+}
+
+/// The Unix signal that terminated a child, if it died by one (`WIFSIGNALED`).
+/// `None` for a normal exit (`status.code()` set) or on non-Unix platforms where
+/// the concept doesn't apply. This is the only place the death-by-signal can be
+/// observed — it is uncatchable in the dying child itself (sc-4881).
+#[cfg(unix)]
+pub(crate) fn terminating_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn terminating_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+/// Best-effort: tell the API that a worker child died by `signal` so its active
+/// job is failed (signal-attributed) rather than swept to `interrupted`
+/// (sc-4881). The dying worker can't report this itself, so the supervisor does.
+/// A failure here (API down, job already terminal) must never disrupt the restart
+/// loop — the heartbeat sweep remains the backstop — so it is logged, not raised.
+async fn report_worker_signal_death(settings: &Settings, worker_id: &str, signal: i32) {
+    let api = ApiClient::new(settings);
+    let path = format!("/api/v1/workers/{worker_id}/signal-death");
+    let outcome: WorkerResult<Value> = api.post_json(&path, &json!({ "signal": signal })).await;
+    if let Err(error) = outcome {
+        emit_json(json!({
+            "event": "worker_signal_death_report_failed",
+            "workerId": worker_id,
+            "signal": signal,
+            "error": error.to_string(),
+            "reportedAt": now_rfc3339(),
+        }));
+    }
 }
 
 pub(crate) fn child_environment(spec: &WorkerSpec) -> BTreeMap<String, String> {

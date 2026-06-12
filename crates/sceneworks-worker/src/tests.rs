@@ -37,7 +37,7 @@ use super::model_jobs::{
     HF_CLI_UTF8_ENV,
 };
 use super::supervisor::{
-    auto_worker_specs, child_environment, restart_exited_children_with_spawner,
+    auto_worker_specs, child_environment, restart_exited_children_with_spawner, terminating_signal,
     utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
@@ -777,6 +777,28 @@ async fn supervisor_resets_backoff_after_a_healthy_run() {
     );
     let _ = child.process.start_kill();
     let _ = child.process.wait().await;
+}
+
+/// sc-4881: a child reaped after an uncatchable signal (here SIGKILL, the OOM
+/// killer's weapon) is attributed to that signal, while a clean exit reports none.
+/// This is the only layer that can observe the death — it's uncatchable in the
+/// dying child itself.
+#[cfg(unix)]
+#[tokio::test]
+async fn terminating_signal_distinguishes_signal_death_from_clean_exit() {
+    let mut child = spawn_sleep_child();
+    let pid = child.id().expect("child has a pid");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("SIGKILL delivered");
+    let status = child.wait().await.expect("killed child reaped");
+    assert_eq!(terminating_signal(&status), Some(9));
+
+    let mut clean = spawn_exit_child();
+    let status = clean.wait().await.expect("clean child reaped");
+    assert_eq!(terminating_signal(&status), None);
 }
 
 #[tokio::test]
