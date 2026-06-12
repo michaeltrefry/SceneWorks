@@ -1594,9 +1594,44 @@ fn run_video_generation(
     run_loaded_video_generation(generator.as_ref(), input, cancel, on_progress)
 }
 
+/// Forward-progress watchdog: if the engine emits no progress event (no denoise `Step`, no
+/// `Decoding`) for this long — covering both the silent cold model-load phase and the gap
+/// between steps — the generation is treated as wedged and the job is failed with a clear
+/// error instead of heartbeating indefinitely. Tuned well above any legitimate single load or
+/// step on the current video models; override via `SCENEWORKS_VIDEO_STALL_SECS` for an
+/// unusually large/slow model or disk.
+#[cfg(target_os = "macos")]
+const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Grace period granted after a stall is detected and engine cancellation is requested, before
+/// the still-running blocking task is abandoned. A cooperative engine bails between steps well
+/// within this window (the manual-cancel path proves it honors the flag); the abandon escape
+/// only matters for a hard Metal wedge that never re-checks cancel, and keeps the watchdog from
+/// itself re-hanging on the join.
+#[cfg(target_os = "macos")]
+const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
+
+/// The effective forward-progress stall timeout: `SCENEWORKS_VIDEO_STALL_SECS` (a positive
+/// integer number of seconds) when set, else [`VIDEO_STALL_TIMEOUT`].
+#[cfg(target_os = "macos")]
+fn video_stall_timeout() -> Duration {
+    parse_stall_timeout(std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok())
+}
+
+/// Parse the `SCENEWORKS_VIDEO_STALL_SECS` override (a positive integer number of seconds),
+/// falling back to [`VIDEO_STALL_TIMEOUT`] when unset, blank, non-numeric, or zero.
+#[cfg(target_os = "macos")]
+fn parse_stall_timeout(raw: Option<String>) -> Duration {
+    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(VIDEO_STALL_TIMEOUT)
+}
+
 /// Drive a `run_video_generation` on a blocking thread, forwarding its streamed denoise
 /// progress to the async worker (Generating stage ~0.25..0.58) + polling cancel ~every 2s.
-/// The shared blocking + mpsc + cancel plumbing for Wan and LTX.
+/// The shared blocking + mpsc + cancel plumbing for Wan and LTX. A forward-progress watchdog
+/// ([`video_stall_timeout`]) fails a wedged job loudly rather than letting it look alive forever.
 #[cfg(target_os = "macos")]
 async fn generate_video(
     api: &ApiClient,
@@ -1606,6 +1641,8 @@ async fn generate_video(
     input: VideoGenInput,
 ) -> WorkerResult<DecodedVideo> {
     let cancel = CancelFlag::new();
+    let stall_timeout = video_stall_timeout();
+    let log_engine_id = input.engine_id;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Progress>(64);
     let blocking = {
         let cancel = cancel.clone();
@@ -1628,7 +1665,18 @@ async fn generate_video(
     };
 
     let mut canceled = false;
+    // Set when the watchdog (not the user) tripped, so the job is failed with a stall error
+    // rather than reported as a clean user cancellation.
+    let mut stalled = false;
+    // Once a stall is detected we request engine cancel and wait at most `VIDEO_STALL_GRACE`
+    // for the blocking task to unwind; past this deadline we abandon it (a hard Metal wedge)
+    // so the watchdog never re-hangs on the join.
+    let mut abandon_deadline: Option<Instant> = None;
+    let mut abandoned = false;
     let mut last_cancel = Instant::now();
+    // Time of the most recent progress event; the forward-progress watchdog fails the job if
+    // this goes stale for `stall_timeout` (covers both the silent load phase and step-to-step).
+    let mut last_progress = Instant::now();
     // Interval arm so the cold model-load phase (gen_core::load emits no progress)
     // still heartbeats and polls cancel, instead of looking dead to the API's
     // staleness check until the first denoise step (sc-4276 / F-MLXW-12; mirrors
@@ -1641,6 +1689,7 @@ async fn generate_video(
                 let Some(progress) = maybe_progress else {
                     break;
                 };
+                last_progress = Instant::now(); // forward progress — reset the stall watchdog.
                 if canceled {
                     continue; // drain so the blocking sender never blocks.
                 }
@@ -1683,13 +1732,59 @@ async fn generate_video(
                         canceled = true;
                     }
                 }
+                // Forward-progress watchdog: a wedged engine keeps this async loop heartbeating
+                // (the block runs on a separate thread), so the API sees a healthy job forever.
+                // If no progress has arrived for `stall_timeout`, request engine cancel and start
+                // the abandon countdown.
+                if !canceled && last_progress.elapsed() >= stall_timeout {
+                    eprintln!(
+                        "rust_worker_video_stalled: job={} engine={log_engine_id} no progress \
+                         for {}s — requesting cancel",
+                        job.id,
+                        stall_timeout.as_secs()
+                    );
+                    cancel.cancel();
+                    canceled = true;
+                    stalled = true;
+                    abandon_deadline = Some(Instant::now() + VIDEO_STALL_GRACE);
+                }
+                if let Some(deadline) = abandon_deadline {
+                    if Instant::now() >= deadline {
+                        abandoned = true;
+                        break;
+                    }
+                }
             }
         }
     }
 
+    if abandoned {
+        // The engine never honored the cancel flag within the grace window (a hard Metal wedge).
+        // Detach the still-running blocking task instead of awaiting it — awaiting would re-hang
+        // the very failure path this watchdog exists to break. The thread (and the GPU it holds)
+        // leaks until the worker is restarted by the supervisor.
+        eprintln!(
+            "rust_worker_video_abandoned: job={} engine={log_engine_id} did not respond to \
+             cancellation within {}s — abandoning the wedged task",
+            job.id,
+            VIDEO_STALL_GRACE.as_secs()
+        );
+        blocking.abort();
+        return Err(WorkerError::Engine(format!(
+            "Video generation stalled: no progress for {}s and the GPU job did not respond to \
+             cancellation. The job was abandoned; the worker may need to restart to free the GPU.",
+            stall_timeout.as_secs()
+        )));
+    }
     let result = blocking
         .await
         .map_err(|error| task_join_error("video task join", error))?;
+    if stalled {
+        return Err(WorkerError::Engine(format!(
+            "Video generation stalled: no progress for {}s. The job was canceled.",
+            stall_timeout.as_secs()
+        )));
+    }
     if canceled {
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
@@ -3440,6 +3535,34 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stall_timeout_override_parses_or_falls_back() {
+        // A valid positive override wins.
+        assert_eq!(
+            parse_stall_timeout(Some("120".to_owned())),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            parse_stall_timeout(Some("  90 ".to_owned())),
+            Duration::from_secs(90)
+        );
+        // Unset, blank, non-numeric, or zero all fall back to the default.
+        assert_eq!(parse_stall_timeout(None), VIDEO_STALL_TIMEOUT);
+        assert_eq!(
+            parse_stall_timeout(Some(String::new())),
+            VIDEO_STALL_TIMEOUT
+        );
+        assert_eq!(
+            parse_stall_timeout(Some("nope".to_owned())),
+            VIDEO_STALL_TIMEOUT
+        );
+        assert_eq!(
+            parse_stall_timeout(Some("0".to_owned())),
+            VIDEO_STALL_TIMEOUT
+        );
     }
 
     #[test]

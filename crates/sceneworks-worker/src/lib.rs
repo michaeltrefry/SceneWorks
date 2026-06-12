@@ -1097,10 +1097,16 @@ async fn directory_size(path: &Path) -> u64 {
         let mut entries = match tokio::fs::read_dir(&path).await {
             Ok(entries) => entries,
             Err(error) => {
-                eprintln!(
-                    "rust_worker_directory_size_failed: path={} error={error}",
-                    path.display()
-                );
+                // A missing directory is the normal start-of-a-fresh-download state (the HF
+                // `blobs/` dir does not exist until the first file lands), so it means "0 bytes
+                // so far", not a failure — don't log it at error level. Only surface genuine I/O
+                // problems (permissions, etc.).
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "rust_worker_directory_size_failed: path={} error={error}",
+                        path.display()
+                    );
+                }
                 continue;
             }
         };
