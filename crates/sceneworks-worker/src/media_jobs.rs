@@ -633,6 +633,37 @@ pub(crate) fn frame_seek_timestamp(timestamp: f64, duration: f64) -> f64 {
     timestamp.min((duration - FRAME_SEEK_GUARD_SECONDS).max(0.0))
 }
 
+/// The native-MLX person segmenter used by the macOS person-track masking pass.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersonSegmenter {
+    /// SAM3 text-concept (PCS) — the box-prompt-free default (sc-4926).
+    Sam3,
+    /// Legacy SAM2 box-prompt video predictor (epic 3704) — kept for A/B parity + fallback.
+    Sam2,
+}
+
+#[cfg(target_os = "macos")]
+impl PersonSegmenter {
+    /// The sidecar `tracker_meta.segmenter` id for this backend.
+    fn meta_label(self) -> &'static str {
+        match self {
+            PersonSegmenter::Sam3 => "sam3",
+            PersonSegmenter::Sam2 => "sam2.1_hiera_large",
+        }
+    }
+}
+
+/// Select the person segmenter: SAM3 PCS by default, the legacy SAM2 box-prompt path under
+/// `SCENEWORKS_PERSON_SEGMENTER=sam2` (A/B parity validation + cutover fallback, sc-4926).
+#[cfg(target_os = "macos")]
+fn person_segmenter_kind() -> PersonSegmenter {
+    match std::env::var("SCENEWORKS_PERSON_SEGMENTER").ok().as_deref() {
+        Some("sam2") => PersonSegmenter::Sam2,
+        _ => PersonSegmenter::Sam3,
+    }
+}
+
 /// The real (model-backed) outcome of `assemble_real_person_track`: the resampled track frames
 /// plus the metadata `run_person_track` folds into the sidecar.
 struct RealPersonTrack {
@@ -778,7 +809,7 @@ async fn assemble_real_person_track(
             "device": device,
             "model": "yolo11m",
             "tracker": "sort_bytetrack",
-            "segmenter": if segment_enabled { "sam2.1_hiera_large" } else { "disabled" },
+            "segmenter": if segment_enabled { person_segmenter_kind().meta_label() } else { "disabled" },
         }),
     })
 }
@@ -817,21 +848,15 @@ async fn segment_assembly_frames(
         return Ok("missing");
     }
 
-    // Resolve/download the SAM2 weights once; any failure degrades to box masks.
+    // Resolve/download the segmenter weights once; any failure degrades to box masks.
     let download_context = DownloadContext {
         api,
         client: http_client,
         settings,
         job_id: &job.id,
-        cancel_message: "Person segmentation canceled while fetching SAM2 weights.",
+        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
         fresh_download: false,
     };
-    let weights =
-        match crate::person_segment::ensure_segmenter_weights(settings, &download_context).await {
-            Ok(path) => path,
-            Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-            Err(_) => return Ok("degraded"),
-        };
     let masks_dir = project_path
         .join("person-tracks")
         .join(track_id)
@@ -871,16 +896,54 @@ async fn segment_assembly_frames(
     )
     .await?;
 
-    let weights_for_task = weights.clone();
-    let masks = match tokio::task::spawn_blocking(move || {
-        crate::person_segment::propagate_track_blocking(weights_for_task, clip_paths, anchors)
-    })
-    .await
-    {
-        Ok(Ok(masks)) => masks,
-        // Propagation failure degrades to box masks (handled by the replacement loader); a track
-        // that already located the person is never failed by the mask pass.
-        _ => return Ok("degraded"),
+    // Dispatch to the active segmenter (sc-4926): SAM3 text-concept PCS by default, the legacy
+    // SAM2 box-prompt path under `SCENEWORKS_PERSON_SEGMENTER=sam2` (kept for A/B parity +
+    // fallback during the cutover). Both return one binary mask per clip frame; either path's
+    // failure degrades to box masks (handled by the replacement loader) — a track that already
+    // located the person is never failed by the mask pass.
+    let masks = match person_segmenter_kind() {
+        PersonSegmenter::Sam3 => {
+            let (model, tokenizer) = match crate::person_segment_sam3::ensure_segmenter_weights(
+                settings,
+                &download_context,
+            )
+            .await
+            {
+                Ok(pair) => pair,
+                Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
+                Err(_) => return Ok("degraded"),
+            };
+            match tokio::task::spawn_blocking(move || {
+                crate::person_segment_sam3::segment_track_blocking(
+                    model, tokenizer, clip_paths, anchors,
+                )
+            })
+            .await
+            {
+                Ok(Ok(masks)) => masks,
+                _ => return Ok("degraded"),
+            }
+        }
+        PersonSegmenter::Sam2 => {
+            let weights =
+                match crate::person_segment::ensure_segmenter_weights(settings, &download_context)
+                    .await
+                {
+                    Ok(path) => path,
+                    Err(WorkerError::Canceled(message)) => {
+                        return Err(WorkerError::Canceled(message))
+                    }
+                    Err(_) => return Ok("degraded"),
+                };
+            match tokio::task::spawn_blocking(move || {
+                crate::person_segment::propagate_track_blocking(weights, clip_paths, anchors)
+            })
+            .await
+            {
+                Ok(Ok(masks)) => masks,
+                _ => return Ok("degraded"),
+            }
+        }
     };
 
     // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`. All the
@@ -2518,6 +2581,244 @@ mod person_track_e2e_tests {
             assert_eq!(
                 mask_state, "active",
                 "all detected frames masked → maskState=active"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// SAM3 cutover E2E (sc-4926): the same detect → track → assemble flow as the SAM2 test
+    /// above, then segment the selected person with the **SAM3 text-concept (PCS)** path
+    /// (`person_segment_sam3::segment_track_blocking`, prompt `"person"`, **no box prompt**) and
+    /// the legacy **SAM2 box-prompt** path on the identical clip + anchors, and compare. Proves
+    /// the box-free pipeline produces an `active` mask track end-to-end and reports SAM3-vs-SAM2
+    /// mask agreement (the "parity/quality vs the SAM2 baseline" acceptance).
+    ///
+    /// ```text
+    /// SCENEWORKS_SAM3_WEIGHTS=<facebook/sam3 snapshot dir> \  # or omit to download SceneWorks/sam3-mlx
+    /// SCENEWORKS_PERSON_E2E_VIDEO=/path/to/person_clip.mp4 \
+    /// SCENEWORKS_PERSON_E2E_DURATION=4 \
+    ///   cargo test -p sceneworks-worker --lib person_track_e2e_sam3 -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "real Mac E2E: SAM3 + SAM2 weights; set SCENEWORKS_PERSON_E2E_VIDEO; Apple Silicon only"]
+    fn person_track_e2e_sam3_segments_and_matches_sam2_baseline() {
+        let Some(video) = staged_video() else {
+            eprintln!(
+                "skipping: set SCENEWORKS_PERSON_E2E_VIDEO to a short clip containing a person"
+            );
+            return;
+        };
+        let scratch = std::env::temp_dir().join("sw-person-track-e2e-sam3");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let data_dir = scratch.join("data");
+        let frames_dir = scratch.join("frames");
+        std::fs::create_dir_all(&frames_dir).expect("frames dir");
+        std::env::set_var("SCENEWORKS_DATA_DIR", &data_dir);
+        let settings = crate::Settings::from_env();
+        let timestamps = crate::person_track::sample_timestamps(staged_duration());
+        assert!(!timestamps.is_empty(), "sample cadence produced no frames");
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let http = reqwest::Client::new();
+            let api = ApiClient::new(&settings);
+            let download_context = DownloadContext {
+                api: &api,
+                client: &http,
+                settings: &settings,
+                job_id: "person-track-e2e-sam3",
+                cancel_message: "person track e2e (sam3) canceled while fetching weights",
+                fresh_download: false,
+            };
+
+            // detect → track → assemble (identical to the SAM2 E2E above).
+            let det_weights =
+                crate::person_jobs::ensure_detector_weights(&settings, &download_context)
+                    .await
+                    .expect("yolo11 weights provisioned");
+            let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
+                Vec::with_capacity(timestamps.len());
+            let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
+            for (index, &timestamp) in timestamps.iter().enumerate() {
+                let frame_path = frames_dir.join(format!("frame_{index:04}.png"));
+                render_frame_png(
+                    "ffmpeg",
+                    &video,
+                    &frame_path,
+                    frame_seek_timestamp(timestamp, staged_duration()),
+                    1280,
+                    720,
+                    None,
+                )
+                .await
+                .expect("ffmpeg renders the sample frame");
+                let w = det_weights.clone();
+                let f = frame_path.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || {
+                        crate::person_jobs::detect_people_blocking(w, f, 0.25)
+                    })
+                    .await
+                    .expect("detect task joins")
+                    .expect("yolo11 detection runs");
+                let boxes = result
+                    .detections
+                    .iter()
+                    .map(|d| {
+                        (
+                            crate::person_track::xyxy_to_normalized(
+                                d.x1 as f64,
+                                d.y1 as f64,
+                                d.x2 as f64,
+                                d.y2 as f64,
+                                result.width,
+                                result.height,
+                            ),
+                            d.score as f64,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                per_frame.push((timestamp, boxes));
+                frame_paths.push(frame_path);
+            }
+            let (selected_timestamp, selected_box, _) = per_frame
+                .iter()
+                .flat_map(|(t, boxes)| boxes.iter().map(move |b| (*t, b.0, b.1)))
+                .max_by(|a, b| a.2.partial_cmp(&b.2).expect("finite conf"))
+                .expect("at least one detection");
+            let observations = crate::person_track::observe(per_frame);
+            let assembly = crate::person_track::assemble_track(
+                &observations,
+                selected_box,
+                selected_timestamp,
+                &timestamps,
+            );
+            assert!(
+                assembly.target_track_id.is_some(),
+                "tracker failed to lock onto the selected person"
+            );
+            let detected_total = assembly.frames.iter().filter(|f| f.detected).count();
+            assert!(detected_total > 0, "no detected target frames to segment");
+            let first = assembly
+                .frames
+                .iter()
+                .position(|f| f.detected)
+                .expect("a detected frame exists");
+            let last = assembly
+                .frames
+                .iter()
+                .rposition(|f| f.detected)
+                .unwrap_or(first);
+            let mut clip_paths = Vec::new();
+            let mut anchors = Vec::new();
+            for (frame, path) in assembly.frames[first..=last]
+                .iter()
+                .zip(&frame_paths[first..=last])
+            {
+                clip_paths.push(path.clone());
+                anchors.push(frame.detected.then(|| {
+                    let b = &frame.box_;
+                    (b.x, b.y, b.width, b.height)
+                }));
+            }
+
+            // SAM3 text-concept segmentation (no box prompt) — the path under test.
+            let (sam3_model, sam3_tok) =
+                crate::person_segment_sam3::ensure_segmenter_weights(&settings, &download_context)
+                    .await
+                    .expect("sam3 weights provisioned");
+            let (cp3, an3) = (clip_paths.clone(), anchors.clone());
+            let sam3 = tokio::task::spawn_blocking(move || {
+                crate::person_segment_sam3::segment_track_blocking(sam3_model, sam3_tok, cp3, an3)
+            })
+            .await
+            .expect("sam3 task joins")
+            .expect("sam3 segmentation runs");
+            assert_eq!(sam3.len(), last - first + 1, "one SAM3 mask per clip frame");
+            let mut sam3_generated = 0usize;
+            for (i, px) in sam3.iter().enumerate() {
+                let idx = first + i;
+                assert_eq!(px.len(), 1280 * 720, "SAM3 mask must match the frame size");
+                if assembly.frames[idx].detected {
+                    assert!(
+                        px.iter().any(|&p| p > 127),
+                        "SAM3 frame {idx} has no foreground — concept segmentation lost the person"
+                    );
+                    sam3_generated += 1;
+                }
+            }
+            let sam3_state = crate::person_segment::rollup_mask_state(sam3_generated, detected_total);
+            // SAM3 masking every detected frame is the hard acceptance gate for the cutover.
+            assert_eq!(
+                sam3_state, "active",
+                "every detected frame masked by SAM3 → maskState=active"
+            );
+
+            // SAM2 box-prompt baseline on the identical clip + anchors. Provisioning the SAM2
+            // video-predictor weights needs the download API (or a `SCENEWORKS_SAM2_WEIGHTS` pin);
+            // when it is unavailable the comparison is skipped — the SAM3 gate above still holds.
+            let sam2_weights =
+                match crate::person_segment::ensure_segmenter_weights(&settings, &download_context)
+                    .await
+                {
+                    Ok(path) => path,
+                    Err(e) => {
+                        eprintln!(
+                            "SAM3 E2E: sam3_state={sam3_state} sam3_generated={sam3_generated}; \
+                             SAM2 baseline skipped (weights unavailable: {e}). Pin \
+                             SCENEWORKS_SAM2_WEIGHTS to run the parity comparison."
+                        );
+                        return;
+                    }
+                };
+            let (cp2, an2) = (clip_paths.clone(), anchors.clone());
+            let sam2 = tokio::task::spawn_blocking(move || {
+                crate::person_segment::propagate_track_blocking(sam2_weights, cp2, an2)
+            })
+            .await
+            .expect("sam2 task joins")
+            .expect("sam2 propagation runs");
+
+            // Per-detected-frame mask IoU between the two segmenters.
+            let mut ious = Vec::new();
+            for i in 0..sam3.len() {
+                if !assembly.frames[first + i].detected {
+                    continue;
+                }
+                let (a, b) = (&sam3[i], &sam2[i]);
+                if a.is_empty() || b.is_empty() {
+                    continue;
+                }
+                let (mut inter, mut union) = (0u64, 0u64);
+                for k in 0..a.len() {
+                    let (pa, pb) = (a[k] > 127, b[k] > 127);
+                    if pa || pb {
+                        union += 1;
+                        if pa && pb {
+                            inter += 1;
+                        }
+                    }
+                }
+                if union > 0 {
+                    ious.push(inter as f64 / union as f64);
+                }
+            }
+            let mean_iou = if ious.is_empty() {
+                0.0
+            } else {
+                ious.iter().sum::<f64>() / ious.len() as f64
+            };
+            let sam3_cov = sam3.iter().map(|m| m.iter().filter(|&&p| p > 127).count()).sum::<usize>()
+                as f64
+                / (sam3.len() * 1280 * 720) as f64;
+            eprintln!(
+                "SAM3 E2E: detected={detected_total} sam3_generated={sam3_generated} \
+                 sam3_state={sam3_state} meanIoU(sam3,sam2)={mean_iou:.3} sam3_coverage={sam3_cov:.3}"
+            );
+            assert!(
+                mean_iou > 0.5,
+                "SAM3 vs SAM2 mean IoU {mean_iou:.3} below the parity floor (0.5)"
             );
         });
 

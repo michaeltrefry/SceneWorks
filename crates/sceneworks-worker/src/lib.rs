@@ -118,6 +118,11 @@ mod person_track;
 // Windows/Linux backend.
 #[cfg(target_os = "macos")]
 mod person_segment;
+// SAM3 text-concept (PCS) person segmenter — the box-prompt-free upgrade of `person_segment`
+// (epic 4910, sc-4926). macOS-only like its SAM2 sibling. The Python SAM2 path stays the
+// Windows/Linux backend until a parallel candle backport (cf. epic 3792).
+#[cfg(target_os = "macos")]
+mod person_segment_sam3;
 use downloads::*;
 #[cfg(target_os = "macos")]
 use kps_jobs::*;
