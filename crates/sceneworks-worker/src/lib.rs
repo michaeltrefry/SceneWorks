@@ -39,7 +39,12 @@ use uuid::Uuid;
 #[cfg(target_os = "macos")]
 mod advanced;
 mod api_client;
-#[cfg(target_os = "macos")]
+// Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
+// `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
+// (`with_cached_generator`) is reached only from the macOS image/video paths, but the all-targets
+// stub test exercises the load→progress→cancel→output contract with no backend linked. Off macOS
+// the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
 use api_client::*;
 // Backend-neutral engine dispatch table + registry-derived capability advertisement
@@ -441,6 +446,14 @@ pub async fn run() -> WorkerResult<()> {
 }
 
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
+    // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
+    // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
+    // diagnosable from one log line. One shared contract version backs every linked backend.
+    println!(
+        "rust_worker gen-core contract version {} (gpu_id={})",
+        gen_core::VERSION,
+        settings.gpu_id
+    );
     let gpu = discover_gpu(&settings).await;
     let api = ApiClient::new(&settings);
     let http_client = reqwest::Client::new();

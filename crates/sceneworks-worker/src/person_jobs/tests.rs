@@ -5,6 +5,7 @@
 //! when the fused MLX weights + fixtures are staged in the app cache.
 
 use super::*;
+// CARVE-OUT(epic 3720): backend-specific; absorbed by Detector in Phase 6.
 use mlx_gen::weights::Weights;
 use mlx_rs::Array;
 use std::path::PathBuf;

@@ -276,7 +276,7 @@ fn flux2_edit_raw_settings(
 }
 
 /// Real FLUX.2 edit generation: load the edit variant once, then `count` outputs each
-/// conditioned on the shared reference set. Mirrors [`generate_mlx_stream`]'s blocking-
+/// conditioned on the shared reference set. Mirrors [`generate_stream`]'s blocking-
 /// thread + streamed-events shape and reuses [`consume_gen_events`].
 async fn generate_flux2_edit_stream(
     api: &ApiClient,
@@ -393,7 +393,7 @@ async fn generate_flux2_edit_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = mlx_load_spec(weights_dir, quant, adapters, None);
+    let spec = load_spec(weights_dir, quant, adapters, None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,

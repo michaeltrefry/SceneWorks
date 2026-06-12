@@ -45,7 +45,7 @@ fn qwen_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
-    mlx_gen::load(QWEN_CONTROL_ENGINE_ID, &spec).map_err(|error| {
+    gen_core::load(QWEN_CONTROL_ENGINE_ID, &spec).map_err(|error| {
         WorkerError::Engine(format!("Qwen strict-pose control load failed: {error}"))
     })
 }
@@ -640,7 +640,7 @@ async fn generate_qwen_edit_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = mlx_load_spec(weights_dir, quant, adapters, None);
+    let spec = load_spec(weights_dir, quant, adapters, None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -720,7 +720,7 @@ async fn generate_qwen_edit_stream(
 // ---------------------------------------------------------------------------
 // SenseNova-U1 it2i (macOS, sc-3900 / epic 3180): instruction edit + Character Studio on the
 // unified `sensenova_u1_8b` / `sensenova_u1_8b_fast` ids. The same model does T2I (the base
-// `generate_mlx_stream` path) and it2i here; a `Conditioning::Reference` (single, edit_image) or
+// `generate_stream` path) and it2i here; a `Conditioning::Reference` (single, edit_image) or
 // `Conditioning::MultiReference` (N, character_image incl. the angle set) drives the
 // understanding-path vision encoder. SenseNova uses BOTH CFG knobs: the text CFG via `guidance`
 // (`advanced.guidanceScale`, default 4.0 base / 1.0 fast) AND the image-guidance via `true_cfg`

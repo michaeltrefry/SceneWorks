@@ -122,7 +122,7 @@ fn backend_label_defaults_empty_to_cpu() {
 #[cfg(target_os = "macos")]
 #[test]
 fn quant_mapping_defaults_to_q8_and_maps_bits() {
-    use mlx_gen::Quant;
+    use gen_core::Quant;
     let default = request(json!({ "projectId": "p" }));
     assert!(matches!(
         resolve_quant(&default),
@@ -335,19 +335,20 @@ fn sensenova_edit_available_needs_a_reference() {
 #[ignore = "needs real SenseNova-U1-8B-MoT weights (~35GB) + Metal device"]
 fn sensenova_it2i_real_weights_generates_one_image() {
     let snapshot = hf_snapshot("models--sensenova--SenseNova-U1-8B-MoT");
-    let generator = mlx_load(
+    let generator = load_engine(
         mlx_model("sensenova_u1_8b").unwrap().engine_id(),
         snapshot,
-        Some(mlx_gen::Quant::Q8),
+        Some(gen_core::Quant::Q8),
         Vec::new(),
+        None,
     )
     .unwrap();
-    let reference = mlx_gen::Image {
+    let reference = gen_core::Image {
         width: 512,
         height: 512,
         pixels: stub_rgb8(512, 512, 7),
     };
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let (w, h, pixels) = sensenova_edit_generate_one(
         generator.as_ref(),
@@ -362,7 +363,7 @@ fn sensenova_it2i_real_weights_generates_one_image() {
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -466,7 +467,7 @@ fn adapter_id_reports_per_family_mlx_label() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_engine_registry_links_image_families() {
-    let ids: Vec<&str> = mlx_gen::registry::generators()
+    let ids: Vec<&str> = gen_core::registry::generators()
         .map(|reg| (reg.descriptor)().id)
         .collect();
     for id in [
@@ -511,17 +512,18 @@ fn smoke_generate_one(
     negative_prompt: Option<String>,
 ) {
     let model = mlx_model(sceneworks_id).unwrap();
-    let generator = mlx_load(
+    let generator = load_engine(
         model.engine_id(),
         snapshot,
-        Some(mlx_gen::Quant::Q8),
+        Some(gen_core::Quant::Q8),
         Vec::new(),
+        None,
     )
     .unwrap();
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let steps = model.default_steps();
-    let (w, h, pixels) = mlx_generate_one(
+    let (w, h, pixels) = generate_one(
         generator.as_ref(),
         "a serene mountain lake at dawn",
         512,
@@ -534,7 +536,7 @@ fn smoke_generate_one(
         None,
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -886,7 +888,7 @@ fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
 
 /// Load + generate one small image for a TRUE-CFG family (Chroma): the CFG scale rides
 /// `true_cfg` (not the distilled `guidance` scalar the engine rejects), mirroring
-/// [`generate_mlx_stream`]'s wiring. Sibling of [`smoke_generate_one`].
+/// [`generate_stream`]'s wiring. Sibling of [`smoke_generate_one`].
 #[cfg(target_os = "macos")]
 fn smoke_generate_one_true_cfg(
     sceneworks_id: &str,
@@ -895,17 +897,18 @@ fn smoke_generate_one_true_cfg(
     negative_prompt: Option<String>,
 ) {
     let model = mlx_model(sceneworks_id).unwrap();
-    let generator = mlx_load(
+    let generator = load_engine(
         model.engine_id(),
         snapshot,
-        Some(mlx_gen::Quant::Q8),
+        Some(gen_core::Quant::Q8),
         Vec::new(),
+        None,
     )
     .unwrap();
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let steps = model.default_steps();
-    let (w, h, pixels) = mlx_generate_one(
+    let (w, h, pixels) = generate_one(
         generator.as_ref(),
         "a serene mountain lake at dawn",
         512,
@@ -918,7 +921,7 @@ fn smoke_generate_one_true_cfg(
         true_cfg,
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -1060,7 +1063,7 @@ fn qwen_control_raw_settings_records_control_recipe() {
 /// sc-3031 A/B dump (NOT a CI test): generate ONE image through the **real new-adapter
 /// path** — the production resolvers (`model_repo` / `resolve_steps` / `resolve_guidance` /
 /// `resolve_negative_prompt` / `resolve_quant` / `resolve_adapters` / `resolve_weights_dir` /
-/// `resolve_seed`) + the `mlx_load` + `mlx_generate_one` core that `generate_mlx_stream`
+/// `resolve_seed`) + the `load_engine` + `generate_one` core that `generate_stream`
 /// drives — and write it to `$SC3031_OUT` for head-to-head comparison against the Python
 /// `Mlx*Adapter` output. Covers the txt2img families (z-image / flux / qwen / flux2 / sdxl).
 /// Env: `SC3031_PAYLOAD` (job-payload JSON object), `SC3031_OUT` (.png path); set
@@ -1089,10 +1092,10 @@ fn sc3031_ab_dump_txt2img() {
         .expect("weights in HF cache");
     let adapters = resolve_adapters(&req).expect("adapters");
     let seed = resolve_seed(&req, 0);
-    let generator = mlx_load(model.engine_id(), weights, quant, adapters).expect("load");
+    let generator = load_engine(model.engine_id(), weights, quant, adapters, None).expect("load");
 
     let cancel = CancelFlag::new();
-    let (w, h, pixels) = mlx_generate_one(
+    let (w, h, pixels) = generate_one(
         generator.as_ref(),
         &req.prompt,
         req.width,
@@ -1303,7 +1306,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     .expect("control weights file");
 
     let generator =
-        zimage_control_load(base, control, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
+        zimage_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
 
     // A minimal standing skeleton at 512².
     let kp = crate::openpose_skeleton::normalize_keypoints(&json!([
@@ -1334,13 +1337,13 @@ fn zimage_control_real_weights_generates_one_pose() {
         None,
         crate::openpose_skeleton::body_stickwidth(512, 512),
     );
-    let control = mlx_gen::Image {
+    let control = gen_core::Image {
         width: 512,
         height: 512,
         pixels: skeleton.into_raw(),
     };
 
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let (w, h, pixels) = zimage_control_generate_one(
         generator.as_ref(),
@@ -1354,7 +1357,7 @@ fn zimage_control_real_weights_generates_one_pose() {
         None,
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -1383,7 +1386,8 @@ fn qwen_control_real_weights_generates_one_pose() {
         "Qwen control weights missing: {control:?}"
     );
 
-    let generator = qwen_control_load(base, control, Some(mlx_gen::Quant::Q8), Vec::new()).unwrap();
+    let generator =
+        qwen_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
 
     let kp = crate::openpose_skeleton::normalize_keypoints(&json!([
         [0.5, 0.2],
@@ -1413,13 +1417,13 @@ fn qwen_control_real_weights_generates_one_pose() {
         None,
         crate::openpose_skeleton::body_stickwidth(512, 512),
     );
-    let control = mlx_gen::Image {
+    let control = gen_core::Image {
         width: 512,
         height: 512,
         pixels: skeleton.into_raw(),
     };
 
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let (w, h, pixels) = qwen_control_generate_one(
         generator.as_ref(),
@@ -1434,7 +1438,7 @@ fn qwen_control_real_weights_generates_one_pose() {
         0.9,
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -1495,17 +1499,17 @@ fn flux2_edit_reference_ids_prefers_reference_then_source() {
 #[cfg(target_os = "macos")]
 #[test]
 fn build_edit_conditioning_single_vs_multi() {
-    let img = |seed| mlx_gen::Image {
+    let img = |seed| gen_core::Image {
         width: 8,
         height: 8,
         pixels: stub_rgb8(8, 8, seed),
     };
     match build_edit_conditioning(std::slice::from_ref(&img(1))).as_slice() {
-        [mlx_gen::Conditioning::Reference { .. }] => {}
+        [gen_core::Conditioning::Reference { .. }] => {}
         other => panic!("expected one Reference, got {other:?}"),
     }
     match build_edit_conditioning(&[img(1), img(2)]).as_slice() {
-        [mlx_gen::Conditioning::MultiReference { images }] => assert_eq!(images.len(), 2),
+        [gen_core::Conditioning::MultiReference { images }] => assert_eq!(images.len(), 2),
         other => panic!("expected MultiReference, got {other:?}"),
     }
 }
@@ -1519,19 +1523,20 @@ fn build_edit_conditioning_single_vs_multi() {
 #[ignore = "needs real FLUX.2-klein-9b weights + Metal device"]
 fn flux2_edit_real_weights_generates_one_image() {
     let snapshot = hf_snapshot("models--black-forest-labs--FLUX.2-klein-9b");
-    let generator = mlx_load(
+    let generator = load_engine(
         "flux2_klein_9b_edit",
         snapshot,
-        Some(mlx_gen::Quant::Q8),
+        Some(gen_core::Quant::Q8),
         Vec::new(),
+        None,
     )
     .unwrap();
-    let reference = mlx_gen::Image {
+    let reference = gen_core::Image {
         width: 512,
         height: 512,
         pixels: stub_rgb8(512, 512, 7),
     };
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
@@ -1544,7 +1549,7 @@ fn flux2_edit_real_weights_generates_one_image() {
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -1949,19 +1954,20 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
 #[ignore = "needs real Qwen-Image-Edit-2511 weights + Metal device"]
 fn qwen_edit_real_weights_generates_one_image() {
     let snapshot = hf_snapshot("models--Qwen--Qwen-Image-Edit-2511");
-    let generator = mlx_load(
+    let generator = load_engine(
         "qwen_image_edit",
         snapshot,
-        Some(mlx_gen::Quant::Q8),
+        Some(gen_core::Quant::Q8),
         Vec::new(),
+        None,
     )
     .unwrap();
-    let reference = mlx_gen::Image {
+    let reference = gen_core::Image {
         width: 512,
         height: 512,
         pixels: stub_rgb8(512, 512, 7),
     };
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let (w, h, pixels) = qwen_edit_generate_one(
         generator.as_ref(),
@@ -1976,7 +1982,7 @@ fn qwen_edit_real_weights_generates_one_image() {
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -2012,19 +2018,20 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
     );
 
     let snapshot = hf_snapshot("models--Qwen--Qwen-Image-Edit-2511");
-    let generator = mlx_load(
+    let generator = load_engine(
         "qwen_image_edit",
         snapshot,
-        Some(mlx_gen::Quant::Q8),
+        Some(gen_core::Quant::Q8),
         vec![AdapterSpec::new(lora_path, 1.0, AdapterKind::Lora)],
+        None,
     )
     .unwrap();
-    let reference = mlx_gen::Image {
+    let reference = gen_core::Image {
         width: 512,
         height: 512,
         pixels: stub_rgb8(512, 512, 7),
     };
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let (w, h, pixels) = qwen_edit_generate_one(
         generator.as_ref(),
@@ -2040,7 +2047,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -2063,11 +2070,12 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
 #[ignore = "needs real FLUX.2-klein-9b weights + Metal device"]
 fn flux2_pose_tier_real_weights_generates_one_image() {
     let snapshot = hf_snapshot("models--black-forest-labs--FLUX.2-klein-9b");
-    let generator = mlx_load(
+    let generator = load_engine(
         "flux2_klein_9b_edit",
         snapshot,
-        Some(mlx_gen::Quant::Q8),
+        Some(gen_core::Quant::Q8),
         Vec::new(),
+        None,
     )
     .unwrap();
     // A minimal standing skeleton (body only — the best-effort tier uses no
@@ -2100,20 +2108,20 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         None,
         crate::openpose_skeleton::body_stickwidth(512, 512),
     );
-    let skeleton_img = mlx_gen::Image {
+    let skeleton_img = gen_core::Image {
         width: 512,
         height: 512,
         pixels: skeleton.into_raw(),
     };
-    let reference = mlx_gen::Image {
+    let reference = gen_core::Image {
         width: 512,
         height: 512,
         pixels: stub_rgb8(512, 512, 7),
     };
-    let conditioning = vec![mlx_gen::Conditioning::MultiReference {
+    let conditioning = vec![gen_core::Conditioning::MultiReference {
         images: vec![skeleton_img, reference],
     }];
-    let cancel = mlx_gen::CancelFlag::new();
+    let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
@@ -2126,7 +2134,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         conditioning,
         &cancel,
         &mut |p| {
-            if let mlx_gen::Progress::Step { current, .. } = p {
+            if let gen_core::Progress::Step { current, .. } = p {
                 steps_seen = steps_seen.max(current);
             }
         },
@@ -2214,7 +2222,7 @@ fn detail_feather_ramps_over_overlap() {
 
 /// sc-3625 real-Mac E2E (epic 3621): drive the WORKER's FLUX.1 XLabs IP-Adapter reference path
 /// end to end on real weights — `resolve_flux_ip_adapter_dir` staging from the real HF cache +
-/// `mlx_load_with_ip` + a real `Conditioning::Reference` dev `true_cfg` render against the
+/// `load_engine` + a real `Conditioning::Reference` dev `true_cfg` render against the
 /// pinned mlx-gen engine. Guards the worker plumbing the engine-side A/B can't: the staged-dir
 /// contract + the dev reference render NOT regressing to the pre-#173 saturation (which
 /// collapsed `true_cfg=4` to a near-uniform white frame). Run (needs FLUX.1-dev +
@@ -2269,8 +2277,8 @@ fn flux_ip_reference_worker_e2e() {
         .expect("flux_dev in MODEL_TABLE")
         .engine_id();
     let flux_dev = hf_snapshot("black-forest-labs/FLUX.1-dev", "transformer");
-    let generator = mlx_load_with_ip(engine_id, flux_dev, None, vec![], Some(staged))
-        .unwrap_or_else(|e| panic!("mlx_load_with_ip {engine_id} + ip: {e}"));
+    let generator = load_engine(engine_id, flux_dev, None, vec![], Some(staged))
+        .unwrap_or_else(|e| panic!("load_engine {engine_id} + ip: {e}"));
 
     // (3) Reference render through the dev `true_cfg` path (white-dot garbage pre-#173).
     let reference = {

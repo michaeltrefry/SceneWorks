@@ -121,7 +121,7 @@ fn zimage_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
-    mlx_gen::load(ZIMAGE_CONTROL_ENGINE_ID, &spec)
+    gen_core::load(ZIMAGE_CONTROL_ENGINE_ID, &spec)
         .map_err(|error| WorkerError::Engine(format!("Z-Image control load failed: {error}")))
 }
 
@@ -209,7 +209,7 @@ fn zimage_control_raw_settings(
 
 /// Real Z-Image strict-pose generation: one image per pose, each conditioned on a DWPose
 /// skeleton rendered from the pose keypoints + locked by the Fun-Controlnet-Union branch.
-/// Mirrors [`generate_mlx_stream`]'s blocking-thread + streamed-events shape (the MLX
+/// Mirrors [`generate_stream`]'s blocking-thread + streamed-events shape (the MLX
 /// generator is `!Send` + single-thread), reusing [`consume_gen_events`].
 async fn generate_zimage_control_stream(
     api: &ApiClient,

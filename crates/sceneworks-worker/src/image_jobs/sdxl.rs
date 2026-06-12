@@ -9,7 +9,7 @@ const SDXL_INPAINT_STRENGTH: f32 = 0.85;
 const SDXL_IP_SCALE: f32 = 0.7;
 
 /// Which advanced SDXL path a request maps onto (or `None` for plain txt2img, which stays
-/// on [`generate_mlx_stream`]). Outpaint wins over a plain mask when `fit_mode == outpaint`
+/// on [`generate_stream`]). Outpaint wins over a plain mask when `fit_mode == outpaint`
 /// (the torch path checks outpaint first, then unions any user mask into the border).
 enum SdxlSubMode {
     /// Reference image-prompt via IP-Adapter (txt2img + decoupled cross-attn).
@@ -85,11 +85,11 @@ fn load_mask_asset_image(
 
 /// Composite `source` contained (long edge fits) + centered on a black `width`×`height`
 /// canvas, using the **engine's** `contain_box` so the padded source lines up pixel-for-pixel
-/// with [`mlx_gen::image::outpaint_border_mask`] (both derive the same kept rect).
+/// with [`gen_core::imageops::outpaint_border_mask`] (both derive the same kept rect).
 fn sdxl_outpaint_canvas(source: &image::RgbImage, width: u32, height: u32) -> Image {
     use image::imageops::FilterType::Lanczos3;
     let (new_w, new_h, left, top) =
-        mlx_gen::image::contain_box(source.width(), source.height(), width, height);
+        gen_core::imageops::contain_box(source.width(), source.height(), width, height);
     let resized = image::imageops::resize(source, new_w.max(1), new_h.max(1), Lanczos3);
     let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
     image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
@@ -343,7 +343,7 @@ async fn generate_sdxl_advanced_stream(
             let (src_w, src_h) = (source.width(), source.height());
             let canvas = sdxl_outpaint_canvas(&source, width, height);
             // White = generate (the padded border), black = keep (the centered source).
-            let mut mask = mlx_gen::image::outpaint_border_mask(src_w, src_h, width, height);
+            let mut mask = gen_core::imageops::outpaint_border_mask(src_w, src_h, width, height);
             if non_empty(&request.mask_asset_id) {
                 // Union the user edit region with the border (white wins) — pad-fit the user
                 // mask onto the same contained geometry first.
@@ -351,7 +351,7 @@ async fn generate_sdxl_advanced_stream(
                 let user_mask =
                     load_mask_asset_image(settings, &request.project_id, mask_id, project_path)?;
                 let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
-                mask = mlx_gen::image::union_masks(&mask, &user_mask).map_err(|error| {
+                mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
                     WorkerError::Engine(format!("outpaint mask union failed: {error}"))
                 })?;
             }

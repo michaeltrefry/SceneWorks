@@ -12,8 +12,11 @@ const JOY_CAPTION_MODEL: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava";
 #[cfg(target_os = "macos")]
 const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 
+// epic 3720 (sc-3724): the backend-neutral captioner contract types come from `gen_core`; the
+// `as _;` provider link below stays mlx-gen-specific (it registers the JoyCaption captioner into
+// the registry).
 #[cfg(target_os = "macos")]
-use mlx_gen::{
+use gen_core::{
     CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling, Image, LoadSpec, Progress,
     WeightsSource,
 };
@@ -131,7 +134,7 @@ pub(crate) async fn run_training_caption_job(
                 "engine": JOY_CAPTION_MODEL,
             }),
         );
-        let captioner = mlx_gen::load_captioner(
+        let captioner = gen_core::load_captioner(
             JOY_CAPTION_MODEL,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )
@@ -172,6 +175,7 @@ pub(crate) async fn run_training_caption_job(
                 .map_err(|error| {
                     WorkerError::Engine(format!("JoyCaption MLX generation failed: {error}"))
                 })?;
+            // epic 3720: JoyCaption trigger-word string helper stays mlx-gen-local until lifted to gen_core::caption.
             let text = mlx_gen::caption::joycaption::apply_trigger_words(
                 &output.text,
                 &item.trigger_words,

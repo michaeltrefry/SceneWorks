@@ -20,8 +20,12 @@ use sceneworks_core::image_request::ImageRequest;
 // Force each provider crate to link so its `inventory::submit!` registration survives
 // linker GC. Each per-family story adds its provider dep + a matching `use … as _;`.
 // See mlx-gen-z-image/tests/registry.rs ("the SceneWorks worker").
+// epic 3720 (sc-3724): the backend-neutral contract types come from `gen_core` (the registry
+// contract layer mlx-gen re-exports). The `as _;` provider links below stay mlx-gen-specific —
+// `cfg(target_os)` decides which backend crates register into the registry, not which contract
+// types the worker names.
 #[cfg(target_os = "macos")]
-use mlx_gen::{
+use gen_core::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, ControlKind, GenerationOutput,
     GenerationRequest, Generator, Image, LoadSpec, Progress, Quant, WeightsSource,
 };
@@ -41,10 +45,13 @@ use mlx_gen_sdxl as _;
 use mlx_gen_sensenova as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
+// CARVE-OUT(epic 3720): backend-specific; absorbed by FaceEmbedder in Phase 3.
 // InstantID (sc-3345) is a bespoke provider, not an inventory-registered `Generator`, so it is
 // referenced by name (`InstantId::load`) rather than anchored with `as _;` — and the native face
 // stack it composes (`mlx-gen-face`, SCRFD + ArcFace) rides in transitively but is anchored here so
-// the direct dep the story adds is meaningful + survives any future unused-crate lint.
+// the direct dep the story adds is meaningful + survives any future unused-crate lint. The
+// `mlx_gen::weights::Weights` loader and the `mlx_gen_instantid` API stay mlx-gen-typed until the
+// bespoke face stack is lifted onto a neutral FaceEmbedder contract.
 #[cfg(target_os = "macos")]
 use mlx_gen::weights::Weights;
 #[cfg(target_os = "macos")]
@@ -230,7 +237,7 @@ pub(crate) async fn run_image_generate_job(
                 .await?;
             }
             ImageRoute::Mlx => {
-                generate_mlx_stream(
+                generate_stream(
                     api,
                     settings,
                     job,
@@ -517,7 +524,7 @@ fn resolve_family(request: &ImageRequest) -> String {
     }
     #[cfg(target_os = "macos")]
     {
-        if let Some(family) = mlx_gen::registry::generators()
+        if let Some(family) = gen_core::registry::generators()
             .find(|registration| (registration.descriptor)().id == request.model)
             .map(|registration| (registration.descriptor)().family)
         {

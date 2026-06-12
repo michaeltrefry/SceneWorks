@@ -209,7 +209,7 @@ pub(crate) fn kolors_tokenizer_overlay_dest(repo: &str, snapshot_dir: &Path) -> 
 }
 
 /// After a Kolors base-model download, overlay the derived `tokenizer.json` (sc-4764) from the
-/// SceneWorks tokenizer repo into the snapshot's `tokenizer/` dir, so `mlx_gen::load("kolors", …)`
+/// SceneWorks tokenizer repo into the snapshot's `tokenizer/` dir, so `gen_core::load("kolors", …)`
 /// and `load_trainer("kolors", …)` can construct (they read only `tokenizer/tokenizer.json`, which
 /// upstream omits). No-op for any other repo; idempotent — skips when the file is already present
 /// (a re-install, or a snapshot that already shipped it). Reuses the standard HF resolve + download
@@ -274,6 +274,7 @@ fn convert_flux2_klein_diffusers(
     base_dir: &Path,
     out_dir: &Path,
 ) -> Result<(), String> {
+    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     mlx_gen_flux2::convert_and_assemble(source_file, base_dir, out_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -305,6 +306,7 @@ fn convert_wan_native(
     out_dir: &Path,
     quant: Option<(i32, i32)>,
 ) -> Result<(), String> {
+    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     use mlx_gen_wan::convert::{convert_i2v_14b, convert_t2v_14b, convert_ti2v_5b};
     match kind {
         "wan_ti2v_5b" => convert_ti2v_5b(checkpoint_dir, out_dir).map(|_| ()),
@@ -340,6 +342,7 @@ fn convert_ltx_native(
     out_dir: &Path,
     bits: i32,
 ) -> Result<(), String> {
+    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     let opts = mlx_gen_ltx::LtxConvertOpts::audio_quant(bits);
     mlx_gen_ltx::convert_and_assemble(source_file, Some(upscaler_dir), out_dir, &opts)
         .map(|_| ())

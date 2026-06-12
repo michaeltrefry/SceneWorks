@@ -243,7 +243,7 @@ async fn generate_sensenova_edit_stream(
         raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
     }
 
-    let spec = mlx_load_spec(weights_dir, quant, Vec::new(), None);
+    let spec = load_spec(weights_dir, quant, Vec::new(), None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -296,7 +296,7 @@ async fn generate_sensenova_edit_stream(
 // ---------------------------------------------------------------------------
 // SDXL advanced conditioning (macOS, epic 3041 / sc-3060): reference (IP-Adapter),
 // img2img edit, masked inpaint, and outpaint on the `sdxl` engine model. The plain
-// txt2img + LoRA path stays on `generate_mlx_stream`; this branch handles every SDXL
+// txt2img + LoRA path stays on `generate_stream`; this branch handles every SDXL
 // shape that used to fall through to the Python torch `SdxlDiffusersAdapter`. The
 // engine selects the path from the loaded weights (`ip_adapter`) + conditioning combo
 // (mlx-gen-sdxl PRs #137/#138); we just build the right `LoadSpec` + `Conditioning`.

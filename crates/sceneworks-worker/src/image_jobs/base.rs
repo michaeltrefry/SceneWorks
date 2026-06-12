@@ -322,18 +322,7 @@ fn mlx_raw_settings(
     raw
 }
 
-/// Load the generator for `engine_id` (heavy; once per job).
-#[cfg(all(target_os = "macos", test))]
-fn mlx_load(
-    engine_id: &str,
-    weights_dir: PathBuf,
-    quant: Option<Quant>,
-    adapters: Vec<AdapterSpec>,
-) -> WorkerResult<Box<dyn Generator>> {
-    mlx_load_with_ip(engine_id, weights_dir, quant, adapters, None)
-}
-
-fn mlx_load_spec(
+fn load_spec(
     weights_dir: PathBuf,
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
@@ -352,19 +341,22 @@ fn mlx_load_spec(
     spec
 }
 
-/// As [`mlx_load`], but optionally installing an IP-Adapter from `ip_adapter_dir`
-/// (`LoadSpec::with_ip_adapter`). Used by the FLUX.1 XLabs IP-Adapter reference path
-/// (epic 3621): the engine then treats a `Conditioning::Reference` as the image prompt.
+/// Registry-only generator load (epic 3720, sc-3724): resolve `engine_id` through the
+/// backend-neutral `gen_core::load` seam and return a `Box<dyn gen_core::Generator>`. Optionally
+/// installs an IP-Adapter from `ip_adapter_dir` (`LoadSpec::with_ip_adapter`) — the FLUX.1 XLabs
+/// IP-Adapter reference path (epic 3621), after which the engine treats a `Conditioning::Reference`
+/// as the image prompt. `cfg(target_os)` decides which provider crate registered the engine, not
+/// this call.
 #[cfg(all(target_os = "macos", test))]
-fn mlx_load_with_ip(
+fn load_engine(
     engine_id: &str,
     weights_dir: PathBuf,
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
     ip_adapter_dir: Option<PathBuf>,
 ) -> WorkerResult<Box<dyn Generator>> {
-    let spec = mlx_load_spec(weights_dir, quant, adapters, ip_adapter_dir);
-    mlx_gen::load(engine_id, &spec)
+    let spec = load_spec(weights_dir, quant, adapters, ip_adapter_dir);
+    gen_core::load(engine_id, &spec)
         .map_err(|error| WorkerError::Engine(format!("{engine_id} load failed: {error}")))
 }
 
@@ -430,7 +422,7 @@ fn resolve_flux_ip_adapter_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 
 /// Emit an `image_pipeline_load_{start,complete}` event from inside a blocking
 /// generation closure (sc-3450), parity with the Python worker's pipeline-load
-/// events. On the MLX path `mlx_gen::load` is a single atomic call that also fuses
+/// events. On the backend path `gen_core::load` is a single atomic call that also fuses
 /// any distill LoRA and applies user LoRAs (`spec.with_adapters`), so there is no
 /// separable fuse/apply step to bracket: the adapter total (`adapter_count` =
 /// distill + user) is reported here instead of via the torch worker's separate
@@ -455,7 +447,7 @@ pub(crate) fn emit_load_event(event: &str, job_id: &str, engine: &str, adapter_c
 /// (no-ControlNet) Z-Image reference-without-pose path, reusing the same engine img2img the
 /// strict-pose tier already drives. `None` → plain txt2img.
 #[allow(clippy::too_many_arguments)]
-fn mlx_generate_one(
+fn generate_one(
     generator: &dyn Generator,
     prompt: &str,
     width: u32,
@@ -522,7 +514,7 @@ fn step_fraction(index: usize, current: u32, total: u32, count: u32) -> f64 {
 /// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the
 /// `Box<dyn Generator>` is `!Send` and the MLX device is single-thread).
 #[allow(clippy::too_many_arguments)]
-async fn generate_mlx_stream(
+async fn generate_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -631,7 +623,7 @@ async fn generate_mlx_stream(
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    let spec = mlx_load_spec(weights_dir, quant, adapters, flux_ip_dir);
+    let spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -640,7 +632,7 @@ async fn generate_mlx_stream(
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
-                let (out_w, out_h, pixels) = mlx_generate_one(
+                let (out_w, out_h, pixels) = generate_one(
                     generator,
                     &prompt,
                     width,
@@ -680,7 +672,7 @@ async fn generate_mlx_stream(
 /// Consume the streamed generation events (step / decoding / image) from the blocking
 /// thread: write each finished image as an asset fact, stream progress, and poll cancel
 /// ~every 2s (draining the channel after a cancel so the blocking sender never blocks).
-/// Shared by the base txt2img path ([`generate_mlx_stream`]) and the Z-Image strict-pose
+/// Shared by the base txt2img path ([`generate_stream`]) and the Z-Image strict-pose
 /// control path ([`generate_zimage_control_stream`]). `total` is the number of images
 /// the job produces (the request count, or the pose count).
 #[allow(clippy::too_many_arguments)]

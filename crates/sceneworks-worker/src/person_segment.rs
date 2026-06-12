@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
+// CARVE-OUT(epic 3720): backend-specific; absorbed by Segmenter in Phase 6.
 use mlx_gen::weights::Weights;
 use mlx_gen_sam2::{Sam2ModelSize, Sam2VideoPredictor};
 

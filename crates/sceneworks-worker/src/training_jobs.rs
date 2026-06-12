@@ -2,8 +2,8 @@
 //! [`image_jobs`](crate::image_jobs)/[`video_jobs`](crate::video_jobs).
 //!
 //! Parses a `lora_train` job into the Rust-resolved [`TrainingPlan`], then either
-//! validates it (dry run) or maps it onto an [`mlx_gen::TrainingRequest`] and drives
-//! `mlx_gen::load_trainer(id, &LoadSpec).train(req, on_progress)` — exactly as the
+//! validates it (dry run) or maps it onto a [`gen_core::TrainingRequest`] and drives
+//! `gen_core::load_trainer(id, &LoadSpec).train(req, on_progress)` — exactly as the
 //! image path maps `ImageRequest` → `GenerationRequest` and calls `Generator::generate`.
 //! The engine writes the adapter to the plan's `output.outputDir`; the API registers
 //! it from the staged `manifestEntry` + the files on disk (apps/rust-api jobs.rs
@@ -22,12 +22,14 @@
 use super::*;
 use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
 
+// epic 3720 (sc-3724): the backend-neutral training contract types come from `gen_core`.
 // Force each trainer-provider crate to link so its `inventory::submit!` trainer
 // registration survives linker GC and `load_trainer` can find it. The same crates
 // are referenced by image_jobs/video_jobs for generation; re-stating the training
-// dependency here keeps it explicit and independent of those modules.
+// dependency here keeps it explicit and independent of those modules. `cfg(target_os)`
+// decides which backend crates register, not which contract types this module names.
 #[cfg(target_os = "macos")]
-use mlx_gen::{
+use gen_core::{
     CancelFlag, LoadSpec, LrSchedule, NetworkType, TrainingConfig, TrainingItem, TrainingOutput,
     TrainingProgress, TrainingRequest, WeightsSource,
 };
@@ -347,7 +349,7 @@ fn normalize_train_dtype(value: &str) -> String {
 }
 
 /// Map the SceneWorks `TrainingConfig` (plan `config` + its free-form `advanced`
-/// bag) onto the engine's typed [`mlx_gen::TrainingConfig`]. The optimizer string is
+/// bag) onto the engine's typed [`gen_core::TrainingConfig`]. The optimizer string is
 /// passed verbatim — the engine normalizes aliases (`adamw8bit`→`adamw`,
 /// `prodigyopt`→`prodigy`). An empty `loraTargetModules` lets the family trainer use
 /// its default target set.
@@ -413,7 +415,7 @@ enum TrainEvent {
 }
 
 /// Execute a real training run on the in-process mlx-gen engine. Loads the (frozen)
-/// base model via a [`LoadSpec`] (exactly as inference's `mlx_load`), runs the
+/// base model via a [`LoadSpec`] (exactly as inference's `load_engine`), runs the
 /// family trainer on a blocking thread, streams staged progress, honors cancellation
 /// via the engine's [`CancelFlag`], and reports the produced adapter. The adapter is
 /// written by the engine into the plan's `output.outputDir`; the API registers it
@@ -490,10 +492,10 @@ async fn run_training_execution(
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
             let mut trainer =
-                mlx_gen::load_trainer(engine_id, &LoadSpec::new(WeightsSource::Dir(weights_dir)))
+                gen_core::load_trainer(engine_id, &LoadSpec::new(WeightsSource::Dir(weights_dir)))
                     .map_err(|error| {
-                    WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
-                })?;
+                        WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+                    })?;
             let request = TrainingRequest {
                 items,
                 config,
@@ -1347,7 +1349,7 @@ mod tests {
         };
 
         let mut trainer =
-            mlx_gen::load_trainer("kolors", &LoadSpec::new(WeightsSource::Dir(snapshot)))
+            gen_core::load_trainer("kolors", &LoadSpec::new(WeightsSource::Dir(snapshot)))
                 .expect("kolors trainer loads (tokenizer.json present)");
         trainer
             .validate(&request)

@@ -22,7 +22,7 @@
 pub(crate) struct ModelRow {
     /// SceneWorks model id (the job payload `model`).
     pub sceneworks_id: &'static str,
-    /// mlx-gen registry id passed to `mlx_gen::load`.
+    /// registry id passed to `gen_core::load`.
     pub engine_id: &'static str,
     /// Default HuggingFace repo when the manifest entry omits `repo`.
     pub default_repo: &'static str,
@@ -195,7 +195,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // Python `MODEL_TARGETS` / `KolorsDiffusersAdapter` parity: 25 steps, guidance 5.0. The engine
     // `kolors` model (sc-3874) supports the full surface — img2img / ControlNet-pose /
     // IP-Adapter-Plus / Q8/Q4 / LoRA/LoKr — but this base row drives plain T2I (+ quant + LoRA)
-    // through `generate_mlx_stream`; the advanced conditioning modes are gated to torch by
+    // through `generate_stream`; the advanced conditioning modes are gated to torch by
     // `kolors_mlx_eligible` until their dedicated streams land (subsequent epic-3090 slices).
     ModelRow {
         sceneworks_id: "kolors",
@@ -246,7 +246,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // image-guidance via `true_cfg` (edit ≈ 1.0 / character ≈ 1.5) — so it is NOT a
     // [`uses_true_cfg`] family (which is for engines that read the *single* CFG knob from
     // `true_cfg`). The descriptor advertises no negative prompt. Plain T2I rides
-    // [`generate_mlx_stream`]; edit (`Reference`) + Character Studio (`MultiReference`) divert to
+    // [`generate_stream`]; edit (`Reference`) + Character Studio (`MultiReference`) divert to
     // [`generate_sensenova_edit_stream`] where the dual CFG + reference conditioning are built.
     // `_fast` is the same base weights with the 8-step distill LoRA merged internally at load
     // (`load_fast`); the worker only selects the engine id, the engine resolves + merges the

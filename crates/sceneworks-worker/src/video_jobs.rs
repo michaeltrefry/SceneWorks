@@ -14,7 +14,7 @@
 //! synchronized tone for the LTX family, mirroring the engine: LTX emits audio, Wan
 //! does not). The real in-process MLX video models — Wan2.2 (sc-3034) and LTX-2.3 +
 //! audio (sc-3035) — link the `mlx-gen-wan` / `mlx-gen-ltx` provider crates and decode
-//! `mlx_gen::GenerationOutput::Video { frames, fps, audio }` into the same
+//! `gen_core::GenerationOutput::Video { frames, fps, audio }` into the same
 //! [`DecodedVideo`], so the encode/mux/poster path below is unchanged for them.
 
 use std::f32::consts::PI;
@@ -30,8 +30,12 @@ use crate::media_jobs::{run_ffmpeg, FfmpegContext};
 // the same link-time pattern as the image families in `image_jobs.rs`).
 #[cfg(target_os = "macos")]
 use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
+// epic 3720 (sc-3724): the backend-neutral generation contract types come from `gen_core`; the
+// `as _;` provider links below stay mlx-gen-specific (they register the video engines into the
+// registry). `cfg(target_os)` decides which backend crates link, not which contract types this
+// module names.
 #[cfg(target_os = "macos")]
-use mlx_gen::{
+use gen_core::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
     Generator, Image, LoadSpec, MoeExpert, Precision, Progress, Quant, ReplacementMode,
     WeightsSource,
@@ -55,7 +59,7 @@ const STUB_ADAPTER: &str = "procedural_video";
 const CANCEL_MESSAGE: &str = "Video generation canceled by user.";
 
 /// Decoded video ready for muxing — the worker-side shape both the procedural stub
-/// (sc-3033) and the real engine output (`mlx_gen::GenerationOutput::Video`,
+/// (sc-3033) and the real engine output (`gen_core::GenerationOutput::Video`,
 /// sc-3034/3035) feed into [`encode_media`]. Mirrors the engine contract: `frames`
 /// are RGB8, `audio` is `Some` for LTX (a synchronized track) and `None` for Wan.
 /// The frames are held in memory (the engine returns them that way); the duration
@@ -1576,7 +1580,7 @@ fn load_video_generation_for_tests(input: &VideoGenInput) -> WorkerResult<Box<dy
         ip_adapter: None,
         adapters: input.adapters.clone(),
     };
-    mlx_gen::load(input.engine_id, &spec)
+    gen_core::load(input.engine_id, &spec)
         .map_err(|error| WorkerError::Engine(format!("video load failed: {error}")))
 }
 
@@ -1625,7 +1629,7 @@ async fn generate_video(
 
     let mut canceled = false;
     let mut last_cancel = Instant::now();
-    // Interval arm so the cold model-load phase (mlx_gen::load emits no progress)
+    // Interval arm so the cold model-load phase (gen_core::load emits no progress)
     // still heartbeats and polls cancel, instead of looking dead to the API's
     // staleness check until the first denoise step (sc-4276 / F-MLXW-12; mirrors
     // the caption-job select!-with-interval).
@@ -2657,7 +2661,7 @@ fn replacement_mode_from(value: &str) -> ReplacementMode {
 }
 
 /// Whether `dir` is a load-ready assembled Wan-VACE snapshot — the diffusers VACE
-/// `transformer/` plus the shared base-Wan UMT5/VAE/tokenizer that `mlx_gen::load("wan_vace")`
+/// `transformer/` plus the shared base-Wan UMT5/VAE/tokenizer that `gen_core::load("wan_vace")`
 /// reads (sc-3467 `assemble_wan_vace_snapshot` layout).
 #[cfg(target_os = "macos")]
 fn wan_vace_dir_is_complete(dir: &Path) -> bool {
@@ -2713,6 +2717,7 @@ fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
                     .to_owned(),
             )
         })?;
+    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     mlx_gen_wan::convert::assemble_wan_vace_snapshot(&out_dir, &transformer_dir, &base_wan, true)
         .map_err(|error| {
         WorkerError::InvalidPayload(format!(
@@ -4291,7 +4296,7 @@ mod tests {
             steps: Some(2),
             seed: 7,
             conditioning: vec![Conditioning::Reference {
-                image: mlx_gen::Image {
+                image: Image {
                     width: w,
                     height: h,
                     pixels,

@@ -55,6 +55,14 @@ jobs:
         run: |
           npm run check
           npm run check:compose
+      - name: Guard against gen-core version skew (sc-4482, epic 3720)
+        # Fails if more than one distinct `sceneworks-gen-core` rev resolves in the worker's
+        # build graph (the inventory skew trap => runtime "engine not found"). `--target all`
+        # resolves the macOS-only mlx-gen transitive gen-core even on this Linux lane. The
+        # self-test proves the gate fires without a deliberately-broken pin checked in.
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh
       - name: Run Rust workspace checks
         run: npm run rust:check
       - name: Build Rust API before contract tests

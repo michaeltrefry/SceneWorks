@@ -38,6 +38,7 @@ use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use image::RgbImage;
 use serde_json::{json, Value};
 
+// CARVE-OUT(epic 3720): backend-specific; absorbed by Detector in Phase 6.
 use mlx_gen::nn::{conv2d, silu, upsample_nearest};
 use mlx_gen::weights::Weights;
 use mlx_gen::Result as MlxResult;

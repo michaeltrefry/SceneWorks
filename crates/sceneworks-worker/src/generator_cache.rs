@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc, OnceLock};
 use std::thread;
 
-use mlx_gen::{
+use gen_core::{
     AdapterKind, AdapterSpec, Generator, LoadSpec, MoeExpert, Precision, Quant, WeightsSource,
 };
 use tokio::sync::oneshot;
@@ -106,7 +106,7 @@ impl GeneratorCache {
     ) -> WorkerResult<R> {
         if self.entry.as_ref().map_or(true, |entry| entry.key != key) {
             self.entry = None;
-            let generator = mlx_gen::load(&key.engine_id, &spec)
+            let generator = gen_core::load(&key.engine_id, &spec)
                 .map_err(|error| WorkerError::Engine(format!("{load_error_context}: {error}")))?;
             self.entry = Some(GeneratorCacheEntry {
                 key: key.clone(),
@@ -202,6 +202,166 @@ mod tests {
         assert_ne!(
             GeneratorCacheKey::from_load_spec("sdxl", &control),
             GeneratorCacheKey::from_load_spec("sdxl", &ip)
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Backend-neutral acceptance seam (epic 3720, sc-3724). A pure-`gen_core`
+    // `Generator` registered into the same `inventory` registry the real provider crates use
+    // (with a UNIQUE id so it never collides with a real engine or the engines.rs derivation
+    // stubs). It links NO tensor backend, so these tests run on Linux/Windows AND macOS, proving
+    // the load→progress→cancel→output contract that `with_cached_generator` is the production seam
+    // for. Mirrors the inventory pattern at engines.rs.
+    struct StubGenerator {
+        descriptor: gen_core::ModelDescriptor,
+    }
+
+    impl Generator for StubGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            req: &gen_core::GenerationRequest,
+            on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            on_progress(gen_core::Progress::Step {
+                current: 1,
+                total: 2,
+            });
+            if req.cancel.is_cancelled() {
+                return Err(gen_core::Error::Canceled);
+            }
+            on_progress(gen_core::Progress::Step {
+                current: 2,
+                total: 2,
+            });
+            Ok(gen_core::GenerationOutput::Images(vec![gen_core::Image {
+                width: 2,
+                height: 2,
+                pixels: vec![0u8; 12],
+            }]))
+        }
+    }
+
+    fn stub_descriptor() -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id: "sc3724_stub",
+            family: "test",
+            backend: "stub",
+            modality: gen_core::Modality::Image,
+            capabilities: gen_core::Capabilities::default(),
+        }
+    }
+
+    fn stub_load(_spec: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
+        Ok(Box::new(StubGenerator {
+            descriptor: stub_descriptor(),
+        }))
+    }
+
+    inventory::submit! {
+        gen_core::registry::ModelRegistration { descriptor: stub_descriptor, load: stub_load }
+    }
+
+    // load → progress → asset: drive the production cache seam end to end with a backend-neutral
+    // generator. Collect progress, take the produced image, write a PNG, and build a minimal
+    // asset-fact JSON — the same shape (load → generate → persist) the macOS image path follows.
+    #[tokio::test]
+    async fn cached_generator_loads_progresses_and_writes_asset() {
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let assets = tempfile::tempdir().expect("asset tempdir");
+        let png_path = assets.path().join("stub.png");
+        let png_path_for_run = png_path.clone();
+
+        let fact = with_cached_generator("sc3724_stub", spec, "stub load", move |generator| {
+            let req = gen_core::GenerationRequest {
+                width: 2,
+                height: 2,
+                ..Default::default()
+            };
+            let mut steps: Vec<gen_core::Progress> = Vec::new();
+            let output = generator
+                .generate(&req, &mut |progress| steps.push(progress))
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
+            let image = match output {
+                gen_core::GenerationOutput::Images(mut images) => images.remove(0),
+                other => {
+                    return Err(WorkerError::Engine(format!(
+                        "expected images, got {other:?}"
+                    )))
+                }
+            };
+            let buffer = image::RgbImage::from_raw(image.width, image.height, image.pixels)
+                .ok_or_else(|| WorkerError::Engine("stub image buffer size mismatch".to_owned()))?;
+            buffer
+                .save(&png_path_for_run)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
+            let step_count = steps
+                .iter()
+                .filter(|p| matches!(p, gen_core::Progress::Step { .. }))
+                .count();
+            Ok(serde_json::json!({
+                "assetId": uuid::Uuid::new_v4().to_string(),
+                "path": png_path_for_run.display().to_string(),
+                "steps": step_count,
+            }))
+        })
+        .await
+        .expect("stub generate succeeds");
+
+        assert!(
+            fact.get("steps")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                >= 1,
+            "expected at least one Progress::Step"
+        );
+        assert!(png_path.exists(), "expected the PNG asset to be written");
+        assert!(
+            fact.get("assetId")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "expected the asset fact to carry an asset id"
+        );
+    }
+
+    // cancel honored: a pre-tripped CancelFlag makes the generator return `Error::Canceled`, which
+    // the seam maps to `WorkerError::Canceled` (the typed cancellation the worker distinguishes
+    // from generic failure).
+    #[tokio::test]
+    async fn cached_generator_honors_cancel() {
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+
+        let result = with_cached_generator("sc3724_stub", spec, "stub load", move |generator| {
+            let cancel = gen_core::runtime::CancelFlag::new();
+            cancel.cancel();
+            let req = gen_core::GenerationRequest {
+                width: 2,
+                height: 2,
+                cancel,
+                ..Default::default()
+            };
+            generator
+                .generate(&req, &mut |_progress| {})
+                .map(|_| ())
+                .map_err(|error| match error {
+                    gen_core::Error::Canceled => WorkerError::Canceled(error.to_string()),
+                    other => WorkerError::Engine(other.to_string()),
+                })
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(WorkerError::Canceled(_))),
+            "expected the cancel flag to map to WorkerError::Canceled, got {result:?}"
         );
     }
 }

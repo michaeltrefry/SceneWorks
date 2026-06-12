@@ -29,6 +29,13 @@ use super::*;
 #[cfg(target_os = "macos")]
 use sceneworks_core::image_request::ImageRequest;
 
+// CARVE-OUT(epic 3720): backend-specific; absorbed by TextLlm in Phase 5.
+// VQA + Document-Studio interleave bypass the `Generator` registry and drive the concrete
+// `mlx_gen_sensenova::T2iModel` directly (text / text+images output the neutral `GenerationOutput`
+// contract can't express). The whole module stays mlx-gen-typed — `Image`, `TextTokenizer`,
+// `resize_bicubic_u8`, and `decoded_to_image` (which operates on a backend tensor and MUST stay
+// mlx-gen-local) are kept on the `mlx_gen::` paths to protect byte-identical VQA/interleave
+// decode — until the understanding path is lifted onto a neutral TextLlm contract.
 #[cfg(target_os = "macos")]
 use mlx_gen::image::{decoded_to_image, resize_bicubic_u8};
 #[cfg(target_os = "macos")]
