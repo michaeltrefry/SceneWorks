@@ -405,22 +405,23 @@ pub(crate) fn registry_capabilities(
         }
     }
 
-    // Trainers/captioners have no `backend` field at this gen_core rev (Phase-0 limitation),
-    // so gate them on "any enabled backend" + a matching registration rather than a per-item
-    // backend. `lora_train` (dry-run plan validation) and `lora_train_execute` (real run) are
-    // both served in-process by the same trainer registry, so they light up together.
-    if !backends.is_empty()
-        && gen_core::registry::trainers().any(|r| TRAINER_IDS.contains(&(r.descriptor)().id))
-    {
+    // Trainers/captioners now carry `backend` (sc-4906), so gate them per-backend exactly like the
+    // generators above — a candle-only trainer no longer lights up under `backend_mlx_enabled`
+    // alone, and vice versa. `lora_train` (dry-run plan validation) and `lora_train_execute` (real
+    // run) are both served in-process by the same trainer registry, so they light up together.
+    if gen_core::registry::trainers().any(|r| {
+        let d = (r.descriptor)();
+        backends.contains(&d.backend) && TRAINER_IDS.contains(&d.id)
+    }) {
         push(Cap::LoraTrain, &mut caps);
         push(Cap::LoraTrainExecute, &mut caps);
     }
     // The JoyCaption captioner registers under the HF repo id (mlx-gen `JOY_CAPTION_MODEL_ID`),
     // not a short name.
-    if !backends.is_empty()
-        && gen_core::registry::captioners()
-            .any(|r| (r.descriptor)().id == "fancyfeast/llama-joycaption-beta-one-hf-llava")
-    {
+    if gen_core::registry::captioners().any(|r| {
+        let d = (r.descriptor)();
+        backends.contains(&d.backend) && d.id == "fancyfeast/llama-joycaption-beta-one-hf-llava"
+    }) {
         push(Cap::TrainingCaption, &mut caps);
     }
     caps

@@ -2510,7 +2510,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "pmetal-mlx-rs",
@@ -2522,7 +2522,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-chroma"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2534,7 +2534,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-face"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -2543,7 +2543,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2555,7 +2555,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2566,7 +2566,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-instantid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "mlx-gen",
  "mlx-gen-face",
@@ -2577,7 +2577,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-joycaption"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2587,7 +2587,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-kolors"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "image",
  "inventory",
@@ -2599,7 +2599,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "image",
  "inventory",
@@ -2611,7 +2611,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2621,7 +2621,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sam2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -2630,7 +2630,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "image",
  "inventory",
@@ -2643,7 +2643,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sensenova"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2654,7 +2654,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-svd"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -2665,7 +2665,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "image",
  "inventory",
@@ -2679,7 +2679,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "image",
  "inventory",
@@ -4216,7 +4216,7 @@ dependencies = [
 [[package]]
 name = "sceneworks-gen-core"
 version = "0.1.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ea08d47f0346a12988a5e94abd20899fa011aa72#ea08d47f0346a12988a5e94abd20899fa011aa72"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=8355152a79d6d328d3798c19a2b5a37bb8468622#8355152a79d6d328d3798c19a2b5a37bb8468622"
 dependencies = [
  "inventory",
  "safetensors",
