@@ -30,11 +30,11 @@ const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
 /// the native face stack needs for `face_features_image`. Public repo, mirroring the
 /// `SceneWorks/instantid-mlx` upload InstantID uses (sc-3633 / sc-3707).
 ///
-/// PROVISIONING NOTE (sc-3344): this repo must hold the two converted safetensors named below.
-/// They are produced by the engine's `tools/convert_eva_clip.py` (EVA) + the BiSeNet converter,
-/// then uploaded once — exactly as `SceneWorks/instantid-mlx` was. Until it is populated the
-/// download path 404s; the `SCENEWORKS_PULID_WEIGHTS` / explicit-env overrides below let an
-/// operator (or the parity gate) point at a pre-staged dir without the HF upload.
+/// PROVISIONING NOTE (sc-3344 / sc-5045): this repo holds the two converted safetensors named
+/// below — `eva02_clip_l_336.safetensors` (f16, from `tools/convert_eva_clip.py`) +
+/// `bisenet_parsing.safetensors`. PUBLISHED (sc-5045) + validated end-to-end (fresh HF download →
+/// worker-path ArcFace identity 0.6815). The `SCENEWORKS_PULID_WEIGHTS` / explicit-env overrides
+/// below still let an operator (or the parity gate) point at a pre-staged dir.
 const PULID_MLX_REPO: &str = "SceneWorks/pulid-flux-mlx";
 const PULID_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
 const PULID_BISENET_FILE: &str = "bisenet_parsing.safetensors";
