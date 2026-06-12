@@ -1382,8 +1382,8 @@ mod tests {
     /// Real-weights production-scale smoke (sc-4881 / sc-4874+4886+4887, Part A4): load the
     /// z-image trainer from the installed `Tongyi-MAI/Z-Image-Turbo` snapshot and run two LoRA
     /// micro-steps **at resolution 1024 with `train_dtype="bf16"`** — the exact configuration
-    /// that SIGKILL-OOM'd the worker before this fix (the 1024² first step materialized ~135 GB
-    /// > 128 GB unified memory). The image *count* doesn't change the first-step peak (batch 1;
+    /// that SIGKILL-OOM'd the worker before this fix (the 1024² first step materialized ~135 GB,
+    /// over the 128 GB unified-memory budget). The image *count* doesn't change the first-step peak (batch 1;
     /// the peak is the per-step forward graph), so a one-image dataset faithfully reproduces the
     /// memory profile of the 221-image production run. Passing step 1 with a finite loss proves
     /// bf16 brings the peak under budget through the **full worker path** (`map_training_config`
@@ -1451,10 +1451,14 @@ mod tests {
             cancel: CancelFlag::new(),
         };
 
-        let mut trainer =
-            mlx_gen::load_trainer("z_image_turbo", &LoadSpec::new(WeightsSource::Dir(snapshot)))
-                .expect("z-image trainer loads");
-        trainer.validate(&request).expect("trainer accepts the plan");
+        let mut trainer = gen_core::load_trainer(
+            "z_image_turbo",
+            &LoadSpec::new(WeightsSource::Dir(snapshot)),
+        )
+        .expect("z-image trainer loads");
+        trainer
+            .validate(&request)
+            .expect("trainer accepts the plan");
         let mut last_loss = f32::NAN;
         let output = trainer
             .train(&request, &mut |progress| {
@@ -1471,7 +1475,10 @@ mod tests {
             last_loss,
             output.adapter_path.display()
         );
-        assert!(output.steps >= 1, "expected at least one micro-step past step 1");
+        assert!(
+            output.steps >= 1,
+            "expected at least one micro-step past step 1"
+        );
         assert!(output.final_loss.is_finite(), "final loss must be finite");
         assert!(last_loss.is_finite(), "a training-step loss was observed");
         assert!(
