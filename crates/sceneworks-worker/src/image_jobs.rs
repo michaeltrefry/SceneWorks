@@ -45,6 +45,14 @@ use mlx_gen_sdxl as _;
 use mlx_gen_sensenova as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
+// candle (Windows/CUDA) backend — epic 3672, sc-3675. Mirror of the mlx `use … as _;` anchors above:
+// force the candle SDXL provider to link so its `inventory::submit!` (engine id `sdxl`, backend
+// `candle`) survives linker GC and resolves through the SAME gen_core registry — no candle-specific
+// dispatch, `cfg(target_os)` just decides which backend registers. Gated on the optional
+// `backend-candle` build feature too (the dep is pulled only by the CUDA build); whether candle is
+// actually USED at runtime is the separate `backend_candle_enabled` setting, not this link anchor.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_sdxl as _;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by FaceEmbedder in Phase 3.
 // InstantID (sc-3345) is a bespoke provider, not an inventory-registered `Generator`, so it is
 // referenced by name (`InstantId::load`) rather than anchored with `as _;` — and the native face

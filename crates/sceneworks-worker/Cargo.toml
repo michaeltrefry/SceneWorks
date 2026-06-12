@@ -65,6 +65,17 @@ inventory = "0.3"
 # (image_jobs.rs) to keep the linker from dropping the registration. Per-family
 # stories (sc-3022..3035) add their provider here; this scaffold links Z-Image
 # (sc-3022, next) to prove the cross-crate registry path end to end.
+
+[features]
+# Off by default. Opt-in build flag for the candle (Windows/CUDA) generative backend (epic 3672,
+# sc-3675): pulls the optional `candle-gen-sdxl` provider (built with its `cuda` feature). Kept OUT
+# of the default set so the Desktop (Windows) installer build (desktop-windows.yml, windows-latest,
+# no CUDA toolkit) and every non-CUDA build resolve WITHOUT candle / cudarc / nvcc. The dedicated
+# candle Windows CI lane (sc-3676) builds with `--features backend-candle`. Linking the crate does
+# NOT enable it at runtime — that is the separate `backend_candle_enabled` setting, read by
+# `engines::registry_capabilities`. Two-level gating: build feature + runtime setting.
+backend-candle = ["dep:candle-gen-sdxl"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # DWPose whole-body pose detection in Rust (epic 3482, sc-3487): RTMW (yolox_m +
 # rtmw-dw-x-l) via onnxruntime with the CoreML execution provider, replacing the
@@ -262,6 +273,18 @@ mlx-gen-instantid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "8
 # Same git rev + mlx-rs pin as the other mlx-gen crates so MLX builds once. (The inference-side
 # routing cutover is sc-3875; this dep is added now for the trainer registration.)
 mlx-gen-kolors = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "8355152a79d6d328d3798c19a2b5a37bb8468622" }
+
+# candle (Windows/CUDA) generative backend (epic 3672, sc-3675) — the Windows sibling of the macOS
+# mlx provider crates above. `candle-gen-sdxl` self-registers `sdxl` into the SAME gen_core inventory
+# registry, so the worker drives it through the registry with NO candle-specific code (just like the
+# mlx providers). OPTIONAL + behind the `backend-candle` feature: its `cuda` feature compiles
+# candle-kernels for the target arch via nvcc, which must NOT run on the plain Desktop (Windows)
+# installer build — only the dedicated candle CI lane (sc-3676) opts in. Pinned to candle-gen
+# `5d7071a` (PR #2), whose `sceneworks-gen-core` pin is `8355152…` — the SAME rev this worker pins —
+# so the inventory registry is single. A drift here trips the skew gate (two gen-core builds split
+# the registry → "no generator registered" at runtime). Bump in lockstep with the mlx-gen pin above.
+[target.'cfg(target_os = "windows")'.dependencies]
+candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5d7071ab152a759f4cdcb1cef020226f03ddb2c3", features = ["cuda"], optional = true }
 
 [lints]
 workspace = true
