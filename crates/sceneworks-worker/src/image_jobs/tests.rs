@@ -711,6 +711,198 @@ fn kolors_real_weights_generates_one_image() {
     );
 }
 
+/// Real-weights smoke (sc-4765): Kolors img2img through the base path — a `Reference` conditioning
+/// (img2img init, no IP-Adapter loaded) on the `kolors` engine, the same `load_engine` + `generate_one`
+/// seam `generate_stream` drives. Needs the Kolors snapshot (+ tokenizer overlay) + a Metal device.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs real Kolors weights (+ tokenizer.json overlay) + Metal device"]
+fn kolors_real_weights_img2img_generates_one_image() {
+    let base = hf_snapshot("models--Kwai-Kolors--Kolors-diffusers");
+    let generator =
+        load_engine("kolors", base, Some(gen_core::Quant::Q8), Vec::new(), None).unwrap();
+    let source = synthetic_rgb(512, 512, |x, y| {
+        [((x * 255) / 512) as u8, ((y * 255) / 512) as u8, 96]
+    });
+    let cancel = gen_core::CancelFlag::new();
+    let mut steps_seen = 0u32;
+    let (w, h, pixels) = generate_one(
+        generator.as_ref(),
+        "an oil painting of a landscape",
+        512,
+        512,
+        42,
+        8,
+        Some(5.0),
+        Some("blurry, low quality".to_owned()),
+        Some(&(source, 0.6)),
+        None,
+        &cancel,
+        &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!((w, h), (512, 512));
+    assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(pixels.iter().any(|&p| p > 16) && pixels.iter().any(|&p| p < 239));
+}
+
+/// Real-weights smoke (sc-4767): Kolors IP-Adapter-Plus reference through the base path — a `Reference`
+/// conditioning with the IP-Adapter loaded (`with_ip_adapter`), so the engine treats it as the image
+/// prompt. Needs the Kolors + IP-Adapter-Plus snapshots + a Metal device.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs real Kolors + IP-Adapter-Plus weights + Metal device"]
+fn kolors_real_weights_ip_adapter_generates_one_image() {
+    let base = hf_snapshot("models--Kwai-Kolors--Kolors-diffusers");
+    let ip = hf_snapshot("models--Kwai-Kolors--Kolors-IP-Adapter-Plus");
+    let generator = load_engine(
+        "kolors",
+        base,
+        Some(gen_core::Quant::Q8),
+        Vec::new(),
+        Some(ip),
+    )
+    .unwrap();
+    let reference = synthetic_rgb(512, 512, |x, y| {
+        [((x * 255) / 512) as u8, 128, ((y * 255) / 512) as u8]
+    });
+    let cancel = gen_core::CancelFlag::new();
+    let mut steps_seen = 0u32;
+    let (w, h, pixels) = generate_one(
+        generator.as_ref(),
+        "a portrait of a person",
+        512,
+        512,
+        42,
+        8,
+        Some(5.0),
+        Some("blurry, low quality".to_owned()),
+        Some(&(reference, 0.6)),
+        None,
+        &cancel,
+        &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!((w, h), (512, 512));
+    assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(pixels.iter().any(|&p| p > 16) && pixels.iter().any(|&p| p < 239));
+}
+
+/// A deterministic synthetic RGB [`Image`] from a per-pixel `(x, y) -> [r, g, b]` closure.
+#[cfg(target_os = "macos")]
+fn synthetic_rgb(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Image {
+    let mut pixels = vec![0u8; (w * h * 3) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 3) as usize;
+            pixels[i..i + 3].copy_from_slice(&f(x, y));
+        }
+    }
+    Image {
+        width: w,
+        height: h,
+        pixels,
+    }
+}
+
+/// Real-weights smoke (sc-4766 / engine sc-5012): load the combined Kolors pose spec (base + pose
+/// ControlNet + IP-Adapter-Plus) and generate one image through the **dispatchable registry** path
+/// (`gen_core::load("kolors", spec).generate(req)`) with BOTH a `Control` (skeleton) and a `Reference`
+/// (identity) conditioning — the combined strict-pose tier. This is the worker-integration complement
+/// to the engine's mlx-gen#403 test (which exercised the direct `Kolors` API, NOT the registry): it
+/// proves the relaxed `validate_impl` admits Control+Reference when an IP-Adapter is loaded and the
+/// combined `generate_impl` arm runs end-to-end through the same `gen_core::load` seam the worker's
+/// `generate_kolors_control_stream` uses. Needs the three HF snapshots (Kolors-diffusers + the
+/// tokenizer overlay, Kolors-ControlNet-Pose, Kolors-IP-Adapter-Plus) + a Metal device. On demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored kolors_real_weights_pose --nocapture`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs real Kolors + ControlNet-Pose + IP-Adapter-Plus weights + Metal device"]
+fn kolors_real_weights_pose_generates_one_image() {
+    let base = hf_snapshot("models--Kwai-Kolors--Kolors-diffusers");
+    assert!(
+        base.join("tokenizer").join("tokenizer.json").exists(),
+        "kolors snapshot is missing the overlaid tokenizer.json (sc-4764)"
+    );
+    let controlnet = hf_snapshot("models--Kwai-Kolors--Kolors-ControlNet-Pose");
+    let ip = hf_snapshot("models--Kwai-Kolors--Kolors-IP-Adapter-Plus");
+
+    // The combined LoadSpec the worker's `kolors_control_spec` builds: base + ControlNet (Dir) +
+    // IP-Adapter (Dir) + Q8.
+    let spec = LoadSpec::new(WeightsSource::Dir(base))
+        .with_control(WeightsSource::Dir(controlnet))
+        .with_ip_adapter(WeightsSource::Dir(ip))
+        .with_quant(gen_core::Quant::Q8);
+    let generator = gen_core::load("kolors", &spec).expect("load combined kolors pose spec");
+
+    let (w, h) = (512u32, 512u32);
+    // Reference = the IP identity + img2img init; skeleton = the pose ControlNet. Synthetic content
+    // (the combined denoise is numerically validated in mlx-gen#403; this asserts a coherent render).
+    let reference = synthetic_rgb(w, h, |x, y| {
+        [((x * 255) / w) as u8, ((y * 255) / h) as u8, 128]
+    });
+    let skeleton = synthetic_rgb(w, h, |x, y| {
+        if (h / 5..h / 5 + 12).contains(&y) && (w / 6..5 * w / 6).contains(&x) {
+            [255, 255, 255]
+        } else {
+            [0, 0, 0]
+        }
+    });
+
+    let cancel = gen_core::CancelFlag::new();
+    let mut steps_seen = 0u32;
+    let request = GenerationRequest {
+        prompt: "a portrait of a person, studio lighting".to_owned(),
+        negative_prompt: Some("blurry, low quality".to_owned()),
+        width: w,
+        height: h,
+        count: 1,
+        seed: Some(42),
+        steps: Some(8),
+        guidance: Some(5.0),
+        strength: Some(1.0),
+        conditioning: vec![
+            Conditioning::Control {
+                image: skeleton,
+                kind: ControlKind::Pose,
+                scale: 0.7,
+            },
+            Conditioning::Reference {
+                image: reference,
+                strength: Some(0.6),
+            },
+        ],
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator
+        .generate(&request, &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        })
+        .expect("combined kolors pose generation");
+    let GenerationOutput::Images(images) = output else {
+        panic!("expected image output");
+    };
+    let image = images.into_iter().next().expect("one image");
+    assert_eq!((image.width, image.height), (w, h));
+    assert_eq!(image.pixels.len() as u32, w * h * 3);
+    assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(
+        image.pixels.iter().any(|&p| p > 16) && image.pixels.iter().any(|&p| p < 239),
+        "degenerate kolors pose render"
+    );
+}
+
 /// L2-normalized cosine similarity between two ArcFace embeddings (test helper).
 #[cfg(target_os = "macos")]
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
