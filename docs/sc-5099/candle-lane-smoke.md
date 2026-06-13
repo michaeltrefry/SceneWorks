@@ -70,5 +70,33 @@ confirming `assetWrites` streaming, progress, and mid-generation cancellation on
   `candle_<x>` labeling, streamed assetWrites, progress, and honored cancellation.
 - The fallback spot-check runs on Python with the control honored.
 
-> Status: code + routing + labeling + unit/routing tests landed in sc-5099. The **live GPU smoke is
-> executed on the deployed Windows/CUDA box** (hardware lane) — record the run results here when done.
+## Live smoke results (2026-06-13, RTX PRO 6000 Blackwell sm_120, CUDA 12.9 / MSVC 14.44)
+
+Ran the deployed stack natively: `sceneworks-rust-api` (port 8011, in-process CPU utility worker) +
+`sceneworks-rust-worker` built `--features sceneworks-worker/backend-candle`, env
+`SCENEWORKS_GPU_ID=0 SCENEWORKS_BACKEND_CANDLE_ENABLED=1 HF_HOME=<user hf cache>`, sharing a fresh
+`SCENEWORKS_DATA_DIR`. The worker registered advertising
+`["gpu","image_generate","video_generate","training_caption","candle","nvidia"]` — the full
+registry-derived candle surface (image + video + caption) lit up on the real GPU.
+
+- **Image — PASS.** A `z_image_turbo` txt2img job (1024², seed 42) generated end-to-end on candle:
+  pipeline load → inference (backend `candle`) → completed; asset `adapter = candle_z_image`; a real
+  1.4 MB PNG landed in the gallery. The full deployed path (dispatch → assetWrites → progress) works.
+- **Video — wiring PASS, candle Wan provider OOM.** A `wan_2_2` `text_to_video` job dispatched to the
+  candle lane and streamed denoise progress (steps 1→38/40), then failed at VAE decode with
+  `CUDA_ERROR_OUT_OF_MEMORY`. A retry at 320²/17-frame/20-step on a freshly-restarted worker (clean
+  GPU) still OOM'd, peaking at **~96.7 GB**. The **worker wiring is correct** — it dispatched the
+  candle provider, streamed progress, and surfaced the OOM **loudly as a clean job failure** (no
+  silent/garbage output). The OOM is a **candle-gen Wan provider memory characteristic** (the
+  Windows/CUDA spike already measured candle at ~2.2× torch VRAM; the providers here are built
+  `cuda`-only, not `flash-attn`, so video's larger token count runs full-memory attention). → follow-up
+  in **epic 3692** (candle-gen Wan/LTX): build/enable the providers' `flash-attn` feature and/or trim
+  the VAE-decode peak; LTX-22B will need the same. Not an epic-5095 worker-wiring defect.
+- **Caption — not yet run.** Needs a training dataset with an uploaded image (create dataset → upload
+  → caption-job). JoyCaption (~8 B) has no such memory issue and the wiring is covered by the candle
+  caption unit tests (incl. `apply_trigger_words`) + mirrors the GPU-verified MLX path; the live run is
+  pending dataset setup.
+
+Net: the deployed candle worker is real and the **image lane is fully validated live**; the smoke also
+surfaced a genuine candle Wan video-provider OOM for epic 3692. Caption live-run + the Wan memory fix
+are the open follow-ups.
