@@ -730,6 +730,15 @@ async fn run_utility_job(
         JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Image upscale failed.", error)),
+        // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
+        // (`mlx-gen-seedvr2`) — SceneWorks' first video upscaler. Decodes the source clip,
+        // runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio
+        // through. macOS-only; off macOS `VideoUpscale` is never advertised by any worker (no
+        // torch path), so this falls to the `_` arm and the routing oracle reports it unsupported.
+        #[cfg(target_os = "macos")]
+        JobType::VideoUpscale => run_video_upscale_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Video upscale failed.", error)),
         JobType::PersonTrack => run_person_track_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Person tracking failed.", error)),

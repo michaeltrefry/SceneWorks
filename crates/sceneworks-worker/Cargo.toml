@@ -115,15 +115,19 @@ ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "downloa
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Rev 1a97909 (mlx-gen main, merged PR #422, epic 4811 / sc-4816 + sc-4815): adds an optional
 # `softness: Option<f32>` to gen-core `GenerationRequest` (the SeedVR2 `--softness` pre-blur) read by
-# the `mlx-gen-seedvr2` registry, so the new `mlx-gen-seedvr2` dep below runs the SeedVR2 upscaler
-# through the worker's memory-bounded `with_cached_generator` seam with the UI's detail/softness
-# control. (sc-4815's own duplicate softness PR #423 was closed in favor of the already-merged #422 —
-# parallel video-upscale + image-upscale sessions both needed the same gen-core field.) Bundles the
-# entire SeedVR2 engine merged since `e9c569c`: seedvr2 image #416/#419 + video #421 + #422 softness,
-# plus the bernini connector #420/#426, none of which the worker's existing paths touch. ⚠️ mlx-rs
-# stays `44929a0` (none of #416–#426 touch the mlx-rs/engine ABI), so the direct `mlx-rs` pin below is
-# unchanged and MLX rebuilds only the new `mlx-gen-seedvr2` crate. The Windows `backend-candle` lane
-# needs a matching candle-gen gen-core re-pin to this rev (sc-5228, the sc-5176 pattern). On top of:
+# the `mlx-gen-seedvr2` registry, so the new `mlx-gen-seedvr2` dep below runs the SeedVR2 upscaler for
+# BOTH the image path (sc-4815, via the worker's memory-bounded `with_cached_generator` seam) and the
+# net-new `video_upscale` job (sc-4816, via `video_jobs::run_video_upscale_job`). (sc-4815's own
+# duplicate softness PR #423 was closed in favor of the already-merged #422 — parallel video-upscale +
+# image-upscale sessions both needed the same gen-core field.) Bundles the entire SeedVR2 engine
+# merged since `e9c569c`: seedvr2 image #416/#419 + video #421 + #422 softness + the #425 (sc-5224) DiT
+# perf hoist + engine-side 7B (sc-5197) / Q4-Q8 (sc-5198), plus the bernini connector #420/#426 — none
+# of which the worker wires yet (it loads `seedvr2_3b` fp16, quant None). ⚠️ mlx-rs stays `44929a0`
+# (none of #416–#426 touch the mlx-rs/engine ABI), so the direct `mlx-rs` pin below is unchanged and
+# MLX rebuilds only the new `mlx-gen-seedvr2` crate. gen-core is byte-identical to `e9c569c` EXCEPT the
+# additive `softness` field, so the default `check-gen-core-skew.sh` gate stays green (one rev); the
+# Windows `backend-candle` lane needs a matching candle-gen gen-core re-pin to this rev (sc-5228, the
+# sc-5176/sc-5035 pattern). On top of:
 # Rev e9c569c (mlx-gen main, merged PR #415, epic 3164 / sc-5148): adds the native-MLX Lens
 # LoRA/LoKr TRAINING kernel (`mlx-gen-lens/src/training.rs`, `LensTrainer` registered under `lens`),
 # unblocking the worker `lens_lora` training cutover (sc-5180 — the training sibling of sc-5105's
@@ -358,15 +362,20 @@ mlx-gen-pulid = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "1a979
 # `/opt/lens-venv` transformers-5 sidecar on Mac (Win/Linux/Docker keep the torch path). Same git rev
 # + mlx-rs pin as the other mlx-gen crates so MLX builds once.
 mlx-gen-lens = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "1a97909902c73ff8cc02e94c689bd1e86d9e8280" }
-# SeedVR2 one-step diffusion super-resolution provider (epic 4811 / sc-4815). An inventory-registered
-# `Generator` under ids `seedvr2` + `seedvr2_3b` (`Modality::Both` — image upscale via
-# `Conditioning::Reference`, video via `VideoClip`; only the image path is wired here, video = sc-4816).
+# SeedVR2 (ByteDance) one-step diffusion-transformer super-resolution provider (epic 4811). An
+# inventory-registered `Generator` under ids `seedvr2` (alias) + `seedvr2_3b`, `Modality::Both`: it
+# upscales a single image (`Conditioning::Reference` → `GenerationOutput::Images`; sc-4815 image
+# upscale) AND a frame sequence (`Conditioning::VideoClip` → `GenerationOutput::Video`, with internal
+# temporal chunking + overlap cross-fade + a memory-budgeted chunk sizer; sc-4816 `video_upscale`).
 # `mac_only` native MLX (no torch fallback; the Windows/Linux backend is the separate Candle port
-# sc-5157). The worker reaches it through the registry (`gen_core::load("seedvr2")` → `.generate`) via
-# `with_cached_generator`, so it must force-link the crate (`use mlx_gen_seedvr2 as _;` in
-# image_jobs.rs) or the linker drops the `ModelRegistration` (the "no generator registered" trap).
-# Loads from the raw `numz/SeedVR2_comfyUI` checkpoint dir (converted in-memory, neg-embed bundled — no
-# Python). Same git rev + mlx-rs pin as the other mlx-gen crates so MLX builds once.
+# sc-5157). The worker reaches it through the registry (`gen_core::load("seedvr2"|"seedvr2_3b")` →
+# `.generate`), so it must force-link the crate or the linker drops the `ModelRegistration` (the "no
+# generator registered" trap) — `use mlx_gen_seedvr2 as _;` in BOTH image_jobs.rs (sc-4815, via the
+# memory-bounded `with_cached_generator` seam) and video_jobs.rs (sc-4816). Weights = a raw
+# `numz/SeedVR2_comfyUI` checkpoint dir (`ema_vae_fp16.safetensors` + `seedvr2_ema_3b_fp16.safetensors`),
+# converted in-memory at load (no Python); the precomputed neg-prompt embedding is bundled in-crate. No
+# LoRA/guidance/CFG (one-step). 3B fp16 only here — 7B (sc-5197) + int8 (sc-5198) are engine-side and
+# unwired. Same git rev + mlx-rs pin as the other mlx-gen crates so MLX builds once.
 mlx-gen-seedvr2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "1a97909902c73ff8cc02e94c689bd1e86d9e8280" }
 
 # candle (Windows/CUDA) generative backend (epic 3672, sc-3675) — the Windows sibling of the macOS

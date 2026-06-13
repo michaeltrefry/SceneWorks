@@ -2419,10 +2419,13 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // via each video model's macSupport.features.videoModes instead.
     assert!(!mac.features.contains_key("advancedVideoModes"));
     assert!(mac.features["datasetCaptioning"].supported);
-    // datasetCaptioning + imageUpscale + imageUpscaleSeedvr2 + personDetect + poseFromPhoto are
-    // the ported (supported) infra features; the rest stay gated until their port lands.
-    // poseFromPhoto joined the supported set in sc-4206 (DWPose ported, sc-3487);
-    // imageUpscaleSeedvr2 in sc-4815 (Mac-only native-MLX SeedVR2, epic 4811).
+    // Video upscale is net-new on Mac (epic 4811 / sc-4816, native-MLX SeedVR2) → supported, no epic.
+    assert_eq!(epic("videoUpscale"), None);
+    assert!(mac.features["videoUpscale"].supported);
+    // datasetCaptioning + imageUpscale + imageUpscaleSeedvr2 + personDetect + poseFromPhoto +
+    // videoUpscale are the ported (supported) infra features; the rest stay gated until their port
+    // lands. poseFromPhoto joined the supported set in sc-4206 (DWPose ported, sc-3487);
+    // imageUpscaleSeedvr2 in sc-4815, videoUpscale in sc-4816 (both native-MLX SeedVR2, epic 4811).
     assert!(mac
         .features
         .iter()
@@ -2434,6 +2437,7 @@ fn mac_capabilities_master_switch_and_infra_features() {
                     | "imageUpscaleSeedvr2"
                     | "personDetect"
                     | "poseFromPhoto"
+                    | "videoUpscale"
             )
         })
         .all(|(_, f)| !f.supported));

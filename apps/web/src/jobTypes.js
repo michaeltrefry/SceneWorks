@@ -16,6 +16,7 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
   "video_generate",
   "video_extend",
   "video_bridge",
+  "video_upscale",
   "person_replace",
   "lora_train",
   "training_caption",

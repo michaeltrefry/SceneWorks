@@ -42,6 +42,7 @@ const JOB_TYPE_CHIP = {
   video_generate: "Generate Video",
   video_extend: "Generate Video",
   video_bridge: "Generate Video",
+  video_upscale: "Upscale Video",
   person_replace: "Person Replace",
   lora_train: "Training Run",
   training_caption: "Dataset Captioning",
@@ -119,6 +120,8 @@ export function deriveJobTitle(job) {
     case "video_extend":
     case "video_bridge":
       return `Generate Video — ${truncatePrompt(payload.prompt ?? "") || "(no prompt)"}`;
+    case "video_upscale":
+      return `Upscale Video — ${payload.displayName || "source clip"}`;
     case "person_replace":
       return `Person Replace — ${truncatePrompt(payload.prompt ?? "") || "(no prompt)"}`;
     default:

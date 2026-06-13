@@ -7,6 +7,7 @@ import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import { VideoUpscalePanel } from "./VideoUpscalePanel.jsx";
 
 const MOTIONS = [
   "static",
@@ -114,6 +115,7 @@ export function VideoStudio() {
     createPersonDetectionJob,
     createPersonTrackJob,
     createVideoJob,
+    createVideoUpscaleJob,
     createPreset,
     refinePrompt,
     deleteAsset,
@@ -1448,6 +1450,17 @@ export function VideoStudio() {
                 </div>
               ) : null}
             </aside>
+
+            <VideoUpscalePanel
+              createVideoUpscaleJob={createVideoUpscaleJob}
+              macCapabilities={macCapabilities}
+              onSubmitted={(job) => {
+                onLocalJobCreated(job);
+                onOpenQueue();
+              }}
+              selectedAsset={selectedAsset}
+              videoAssets={videoAssets}
+            />
 
             <aside className="tips-card">
               <h3>Tips</h3>

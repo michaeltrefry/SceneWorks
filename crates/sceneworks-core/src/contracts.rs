@@ -240,6 +240,12 @@ string_enum! {
         // tile ControlNet run over feathered tiles to add micro-texture; GPU-required
         // like generation. Composes after image_upscale (creative upscale).
         ImageDetail => "image_detail",
+        // Standalone upscale of an existing VIDEO asset (Video Studio, epic 4811 /
+        // sc-4816) — SceneWorks' first video upscaler. Native-MLX SeedVR2 one-step
+        // super-resolution on the macOS Rust worker (zero-Python, epic 3482): decode
+        // the source clip -> temporal-chunked 5D upscale -> re-encode + source-audio
+        // passthrough. GPU-required like generation; mac-only (no torch fallback).
+        VideoUpscale => "video_upscale",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
@@ -351,6 +357,10 @@ string_enum! {
         // backend is available (runtime.py); the Rust utility worker never emits it.
         // See jobs_store::job_requires_gpu.
         ImageDetail => "image_detail",
+        // Standalone VIDEO upscale (Video Studio, epic 4811 / sc-4816). Advertised by
+        // the macOS Rust/MLX worker (native SeedVR2, zero-Python); no Python-worker
+        // backend (mac-only). GPU-required. See jobs_store::worker_supports_job.
+        VideoUpscale => "video_upscale",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
         ModelDownload => "model_download",
@@ -600,6 +610,78 @@ pub const fn default_image_upscale_factor() -> u8 {
 
 pub fn default_image_upscale_engine() -> String {
     "real-esrgan".to_owned()
+}
+
+/// Payload for a standalone `video_upscale` job (epic 4811 / sc-4816). Upscales an existing video
+/// asset with the native-MLX SeedVR2 engine. The target size is `factor × source` unless
+/// `target_width`/`target_height` override it; either way the worker snaps both dims to a multiple of
+/// 16 (the SeedVR2 VAE/patch stride). `softness` is the input pre-blur (0.0 = none, the default).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoUpscaleRequest {
+    /// The source video asset to upscale (required; the worker validates non-empty).
+    #[serde(default)]
+    pub source_asset_id: String,
+    /// Integer scale factor applied to the source dimensions (2 or 4). Ignored when explicit
+    /// `target_width`/`target_height` are supplied.
+    #[serde(default = "default_video_upscale_factor")]
+    pub factor: u8,
+    /// Explicit target width override (snapped to ÷16). `None` ⇒ `factor × source_width`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_width: Option<u32>,
+    /// Explicit target height override (snapped to ÷16). `None` ⇒ `factor × source_height`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_height: Option<u32>,
+    /// Upscale engine. Only `seedvr2` is Mac-supported today (native MLX).
+    #[serde(default = "default_video_upscale_engine")]
+    pub engine: String,
+    /// SeedVR2 model variant id. `seedvr2_3b` is the only wired variant (7B = sc-5197).
+    #[serde(default = "default_video_upscale_model")]
+    pub model: String,
+    /// SeedVR2 input pre-blur (0.0 = none, the reference default). Higher smooths source artifacts.
+    #[serde(default)]
+    pub softness: f32,
+    /// Optional reproducibility seed (SeedVR2 invents plausible detail; one-step but non-deterministic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    /// Project the source asset belongs to. `None` ⇒ the worker falls back to the job's project id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Optional display name for the result asset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl Default for VideoUpscaleRequest {
+    fn default() -> Self {
+        Self {
+            source_asset_id: String::new(),
+            factor: default_video_upscale_factor(),
+            target_width: None,
+            target_height: None,
+            engine: default_video_upscale_engine(),
+            model: default_video_upscale_model(),
+            softness: 0.0,
+            seed: None,
+            project_id: None,
+            display_name: None,
+            extra: ExtraFields::default(),
+        }
+    }
+}
+
+pub const fn default_video_upscale_factor() -> u8 {
+    2
+}
+
+pub fn default_video_upscale_engine() -> String {
+    "seedvr2".to_owned()
+}
+
+pub fn default_video_upscale_model() -> String {
+    "seedvr2_3b".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

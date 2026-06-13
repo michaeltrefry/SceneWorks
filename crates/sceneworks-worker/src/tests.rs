@@ -566,6 +566,7 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::PoseDetect,
         WorkerCapability::KpsExtract,
         WorkerCapability::ImageUpscale,
+        WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,
         WorkerCapability::PersonTrack,
     ]
