@@ -268,6 +268,33 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_sensenova",
     },
+    // Microsoft Lens / Lens-Turbo (epic 3164 engine / sc-5105 cutover) — gpt-oss-20b MoE text
+    // encoder + 48-layer dual-stream MMDiT + the Flux.2 VAE. Pure **T2I** (the descriptor advertises
+    // no conditioning — no img2img / ControlNet / IP), so both ids ride the base [`generate_stream`]
+    // path with quant (Q8 default) + LoRA/LoKr. Standard guidance family: `supports_guidance=true` +
+    // `supports_negative_prompt=true` (NOT [`uses_true_cfg`]), so the CFG scale flows through
+    // `guidance` and the negative prompt is forwarded. `mac_only` — there is no torch fallback on the
+    // macOS path (the Python `/opt/lens-venv` sidecar is retired on Mac; Win/Linux/Docker keep it).
+    // The two SceneWorks ids map 1:1 to the engine registry ids of the same name and differ only in
+    // their step/guidance defaults: base `lens` is 20-step / CFG 5.0, distilled `lens_turbo` is
+    // 4-step / guidance 1.0 (≈ no CFG) — Python `MODEL_TARGETS` parity. Each variant resolves its own
+    // `microsoft/Lens` / `microsoft/Lens-Turbo` HF snapshot dir.
+    ModelRow {
+        sceneworks_id: "lens",
+        engine_id: "lens",
+        default_repo: "microsoft/Lens",
+        default_steps: 20,
+        default_guidance: 5.0,
+        adapter_label: "mlx_lens",
+    },
+    ModelRow {
+        sceneworks_id: "lens_turbo",
+        engine_id: "lens_turbo",
+        default_repo: "microsoft/Lens-Turbo",
+        default_steps: 4,
+        default_guidance: 1.0,
+        adapter_label: "mlx_lens",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids

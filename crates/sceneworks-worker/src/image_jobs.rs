@@ -46,6 +46,12 @@ use mlx_gen_flux as _;
 use mlx_gen_flux2 as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
+// Lens / Lens-Turbo (epic 3164 engine / sc-5105) — an inventory-registered `Generator` under the ids
+// `lens` + `lens_turbo`, reached through the generic MODEL_TABLE / `generate_stream` path. Force-link
+// or the linker GCs its `ModelRegistration` and `gen_core::load("lens_turbo")` returns "no generator
+// registered" (the bug that bit Kolors).
+#[cfg(target_os = "macos")]
+use mlx_gen_lens as _;
 // PuLID-FLUX (sc-3344) IS an inventory-registered `Generator` (engine id `pulid_flux`), unlike the
 // bespoke InstantID provider below — so it is force-linked here like the other registry families
 // (its `ModelRegistration` is otherwise dropped by linker GC) and reached via `gen_core::load`. The

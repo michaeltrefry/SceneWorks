@@ -2392,27 +2392,17 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 /// unported model gets its own port epic + is dropped on Mac until it lands). `None` = a
 /// model we don't have a port epic for yet, which the oracle reports as "needs an epic".
 /// Keep in sync with `docs/mac-rust-gaps.md` §1.
-fn torch_only_image_model_epic(model: &str) -> Option<&'static str> {
-    match model {
-        // Kolors base T2I was ported to MLX (epic 3090 / sc-3875) — it is now in
-        // `MLX_ROUTED_MODELS`, so it never reaches this whole-model torch-only classifier. Its
-        // not-yet-wired advanced modes (img2img / IP-Adapter / pose) are named per-feature in
-        // `classify_image_gap`, not as a whole-model gap.
-        // InstantID (instantid_realvisxl) was ported to MLX (epic 3109 engine / sc-3345) — it is
-        // now in `MLX_ROUTED_MODELS`, so it never reaches this torch-only classifier. Its
-        // remaining gaps (pose-library mode, face-restore) are named per-feature in
-        // `classify_image_gap`, not as a whole-model gap.
-        // PuLID-FLUX (pulid_flux_dev) was ported to MLX (epic 3069 engine / sc-3344) — it is now in
-        // `MLX_ROUTED_MODELS`, so it never reaches this torch-only classifier. A reference-less /
-        // non-character job has no PuLID path and is named per-feature in `classify_image_gap`.
-        // z_image_edit was ported to MLX (epic 3529 / sc-3923) — it is now in
-        // `MLX_ROUTED_MODELS`, so it never reaches this torch-only gap classifier.
-        m if m.starts_with("lens") => Some("epic 3164"),
-        // Chroma (chroma1_*, epic 3531 / sc-3843) and SenseNova-U1 (sensenova_u1_8b[_fast],
-        // epic 3180 / sc-3900) were ported to MLX — they are now in `MLX_ROUTED_MODELS`, so
-        // neither reaches this torch-only gap classifier.
-        _ => None,
-    }
+///
+/// **No whole-model torch-only image families remain.** Each was ported to MLX and moved into
+/// `MLX_ROUTED_MODELS`, so it never reaches this classifier: Kolors (epic 3090 / sc-3875), InstantID
+/// (epic 3109 / sc-3345), PuLID-FLUX (epic 3069 / sc-3344), z_image_edit (epic 3529 / sc-3923),
+/// Chroma (epic 3531 / sc-3843), SenseNova-U1 (epic 3180 / sc-3900), and finally Lens / Lens-Turbo
+/// (epic 3164 / sc-5105 — the LAST one). Models with a partial surface (e.g. InstantID pose-library,
+/// PuLID reference-less) are named per-feature in `classify_image_gap`, not here. This function is
+/// retained for the generic "unported model → needs a port epic" path and as the seam for any future
+/// torch-only image model: add a `match _model { "<id>" => Some("epic NNNN"), _ => None }` arm here.
+fn torch_only_image_model_epic(_model: &str) -> Option<&'static str> {
+    None
 }
 
 /// Name the precise gap for an ineligible `image_generate` / `image_edit` job: a torch-only
@@ -2937,6 +2927,14 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     // img2img (sc-4765), the IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 /
     // engine sc-5012, the combined pose-ControlNet + IP-Adapter-identity + img2img pass).
     "kolors",
+    // Microsoft Lens / Lens-Turbo (epic 3164 engine / sc-5105 cutover): pure T2I on the native
+    // `mlx-gen-lens` engine (gpt-oss-20b MoE encoder + dual-stream MMDiT + Flux.2 VAE), retiring the
+    // Python `/opt/lens-venv` transformers-5 sidecar on Mac. Both ids are always MLX-eligible
+    // (`lens_mlx_eligible` — no conditioning surface to gate). Lens was the LAST whole-model
+    // torch-only image family; with it routed, every image model here is MLX (`torch_only_image_model_epic`
+    // now matches nothing).
+    "lens",
+    "lens_turbo",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -2994,6 +2992,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
         "kolors" => kolors_mlx_eligible(payload),
+        "lens" | "lens_turbo" => lens_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -3327,6 +3326,19 @@ fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// LoKr apply on the SDXL-family loader (epic 3641), so a LoRA never forces torch.
 fn kolors_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
+}
+
+/// Lens / Lens-Turbo (epic 3164 / sc-5105) is a pure T2I family — the `mlx-gen-lens` descriptor
+/// advertises no conditioning (no img2img / ControlNet / IP), and the base + turbo ids share the
+/// architecture/weights tree, differing only in their step/guidance defaults. Every non-edit
+/// `image_generate` job routes to the in-process Rust `mlx-gen-lens` worker on Mac. An `edit_image`
+/// mode — which Lens has no path for on any platform (`supportsEdit=false`) — stays off MLX so it is
+/// never silently run as plain T2I against a dropped source image (defensive; the UI never offers
+/// edit for Lens). Mirrors [`chroma_mlx_eligible`]. (LoRA/LoKr apply at load on the DiT — sc-3174 —
+/// so a LoRA never forces torch; training stays Python via the `lens_lora` kernel, a recorded
+/// non-goal.)
+fn lens_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,

@@ -2725,8 +2725,8 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
             { "id": "z_image_turbo", "name": "Z-Image-Turbo", "family": "z-image", "type": "image",
               "adapter": "z_image_diffusers", "capabilities": ["text_to_image"], "downloads": [],
               "paths": {}, "defaults": {}, "limits": {}, "loraCompatibility": { "families": [], "types": [] }, "ui": {} },
-            { "id": "lens", "name": "Lens", "family": "lens", "type": "image",
-              "adapter": "lens_turbo", "capabilities": ["text_to_image"], "downloads": [],
+            { "id": "unported_image_model", "name": "Unported", "family": "unported", "type": "image",
+              "adapter": "procedural_preview", "capabilities": ["text_to_image"], "downloads": [],
               "paths": {}, "defaults": {}, "limits": {}, "loraCompatibility": { "families": [], "types": [] }, "ui": {} },
             { "id": "svd", "name": "SVD", "family": "svd", "type": "video",
               "adapter": "svd_video", "capabilities": ["image_to_video"], "downloads": [],
@@ -2752,15 +2752,15 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
             .cloned()
             .unwrap_or(Value::Null)
     };
-    // Torch-only image model → unsupported on Mac, names its port epic. (Kolors base T2I — sc-3875
-    // — and PuLID-FLUX — sc-3344 — are now MLX-routed, so neither is a torch-only example anymore;
-    // the `lens` family is still torch-only, epic 3164.)
-    let torch_only = by_id("lens");
+    // Unported image model (no Rust/MLX engine) → unsupported on Mac, with a gap reason. No real
+    // image model is torch-only anymore: every family was ported to MLX — Kolors (sc-3875),
+    // PuLID-FLUX (sc-3344), and finally Lens / Lens-Turbo (epic 3164 / sc-5105, the last one) — so
+    // the torch-only gating is demonstrated with a synthetic unported id, which has no dedicated
+    // port epic (suggestedEpic absent → "needs an epic", epic 3482 policy).
+    let torch_only = by_id("unported_image_model");
     assert_eq!(torch_only["macSupport"]["supported"], false);
-    assert_eq!(
-        torch_only["macSupport"]["reason"]["suggestedEpic"],
-        "epic 3164"
-    );
+    assert!(torch_only["macSupport"]["reason"].is_object());
+    assert!(torch_only["macSupport"]["reason"]["suggestedEpic"].is_null());
     // MLX-routed family → supported, stays in the picker.
     assert_eq!(by_id("z_image_turbo")["macSupport"]["supported"], true);
     // SVD is now MLX-routed (sc-3523: `svd`→`svd_xt`, image→video only) → supported.

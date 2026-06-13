@@ -54,7 +54,10 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 |---|---|---|---|
 | `kolors` | kolors (SDXL UNet + ChatGLM3) | 🟡 Base **T2I** ported (sc-3875); img2img / ControlNet-pose / IP-Adapter-Plus stay torch (per-feature gaps) until later epic-3090 slices | epic 3090 |
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
-| `lens`, `lens_turbo` | lens (Python sidecar `/opt/lens-venv`) | 🔵 Port → drop-on-Mac until then | epic 3164 |
+
+> **No whole-model torch-only image families remain.** `lens` / `lens_turbo` were the last; they
+> are MLX on Mac as of epic 3164 / sc-5105 (see §6). `torch_only_image_model_epic` now names nothing
+> — the gap path fires only for a hypothetical unported model id.
 
 > A torch-only image model with **no** porting epic yet → `torch_only_image_model_epic` returns
 > `None` and the oracle reports "needs a port epic (epic 3482 policy)"; file one + add it to the
@@ -148,6 +151,12 @@ Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
   in-process via the concrete `T2iModel::{vqa, interleave_gen}` (the `Generator` registry emits
   Images/Video only). Loads dense (no distill LoRA, no quant) for torch parity; the VQA decode is
   bit-identical (no-think primed, sc-3905 engine fix). epic 3180 / sc-3905.
+- Lens / Lens-Turbo text-to-image: `lens` (20-step / CFG 5.0), `lens_turbo` (4-step / guidance 1.0)
+  — gpt-oss-20b MoE text encoder + 48-layer dual-stream MMDiT + Flux.2 VAE; pure T2I, standard
+  guidance + negative prompt, Q4/Q8 (encoder MoE + DiT), LoRA + LoKr at load (`mlx-gen-lens`,
+  `mac_only`). Retires the Python `/opt/lens-venv` transformers-5 sidecar on Mac (Win/Linux/Docker
+  keep the torch path). LoRA/LoKr *training* stays in the Python trainer (`lens_lora`, see §4 /
+  epic 3039 — a recorded non-goal). epic 3164 / sc-5105.
 - SDXL advanced shapes — reference/IP-Adapter, `edit_image`, masked inpaint, outpaint, and
   tile-detail (`image_detail` on `sdxl`/`realvisxl`) — epic 3041 / sc-3060.
 - Z-Image img2img-edit: `z_image_edit` + `z_image_turbo` `edit_image` mode (Turbo weights via the

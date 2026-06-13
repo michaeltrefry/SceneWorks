@@ -614,6 +614,12 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("chroma1_flash", false, true),
         ("sensenova_u1_8b", true, false),
         ("sensenova_u1_8b_fast", true, false),
+        // Lens / Lens-Turbo (epic 3164 / sc-5105): the `mlx-gen-lens` descriptor advertises the
+        // norm-rescaled CFG path (`supports_guidance=true`) + a negative prompt
+        // (`supports_negative_prompt=true`) — a standard guidance family (NOT true-CFG), so the worker
+        // forwards the CFG scale via `guidance`. Turbo simply defaults guidance to 1.0 (≈ no CFG).
+        ("lens", true, true),
+        ("lens_turbo", true, true),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());

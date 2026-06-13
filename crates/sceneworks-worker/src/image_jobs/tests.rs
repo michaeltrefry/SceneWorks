@@ -592,6 +592,13 @@ fn adapter_id_reports_per_family_mlx_label() {
         adapter_id(&request(json!({ "model": "kolors" }))),
         "mlx_kolors"
     );
+    // Lens / Lens-Turbo are MLX-routed (sc-5105) via the MODEL_TABLE registry families → both record
+    // the shared mlx_lens adapter label.
+    assert_eq!(adapter_id(&request(json!({ "model": "lens" }))), "mlx_lens");
+    assert_eq!(
+        adapter_id(&request(json!({ "model": "lens_turbo" }))),
+        "mlx_lens"
+    );
     // PuLID-FLUX (sc-3344) is MLX-routed but via a BESPOKE route (not the MODEL_TABLE registry
     // families), so `adapter_id` — which only resolves MODEL_TABLE rows — reports the stub label;
     // the real per-asset label (`mlx_pulid_flux`) is applied in `generate_pulid_flux_stream` via
@@ -625,6 +632,8 @@ fn mlx_engine_registry_links_image_families() {
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "kolors",
+        "lens",
+        "lens_turbo",
     ] {
         assert!(ids.contains(&id), "registry missing {id}");
     }
@@ -779,6 +788,78 @@ fn flux2_klein_9b_kv_real_weights_generates_one_image() {
         Some(1.0),
         None,
     );
+}
+
+/// Real-weights smoke: Microsoft Lens base (epic 3164 / sc-5105) — 20-step, standard guidance 5.0 +
+/// a negative prompt (the `mlx-gen-lens` descriptor is `supports_guidance` + `supports_negative_prompt`,
+/// NOT true-CFG). Loads the `microsoft/Lens` snapshot dir (tokenizer/ text_encoder/ transformer/ vae/)
+/// at the Q8 default (encoder MoE + DiT). Needs the HF cache + a Metal device; run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored lens_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs real microsoft/Lens weights + Metal device"]
+fn lens_real_weights_generates_one_image() {
+    smoke_generate_one(
+        "lens",
+        hf_snapshot("models--microsoft--Lens"),
+        Some(5.0),
+        Some("blurry, low quality".to_owned()),
+    );
+}
+
+/// Real-weights smoke: Lens-Turbo (the distilled 4-step / guidance 1.0 variant, ≈ no CFG) — same
+/// architecture/weights tree as base Lens, different defaults. Loads the `microsoft/Lens-Turbo`
+/// snapshot at the Q8 default. Needs the HF cache + a Metal device; run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored lens_turbo_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs real microsoft/Lens-Turbo weights + Metal device"]
+fn lens_turbo_real_weights_generates_one_image() {
+    smoke_generate_one(
+        "lens_turbo",
+        hf_snapshot("models--microsoft--Lens-Turbo"),
+        Some(1.0),
+        None,
+    );
+}
+
+/// Real-weights smoke: Lens-Turbo at a **1024 resolution bucket** (sc-5105 acceptance — the Lens port
+/// supports 1024/1440 × 9 ARs; the worker forwards `width`/`height` straight to the engine, which
+/// validates ÷16). Confirms the larger latent + the 20B Q8 encoder run at a real bucket size on Mac,
+/// not just the 512² basic smoke. Run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored lens_turbo_real_weights_bucket`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs real microsoft/Lens-Turbo weights + Metal device"]
+fn lens_turbo_real_weights_bucket_resolution() {
+    let model = mlx_model("lens_turbo").unwrap();
+    let generator = load_engine(
+        model.engine_id(),
+        hf_snapshot("models--microsoft--Lens-Turbo"),
+        Some(gen_core::Quant::Q8),
+        Vec::new(),
+        None,
+    )
+    .unwrap();
+    let cancel = gen_core::CancelFlag::new();
+    let (w, h, pixels) = generate_one(
+        generator.as_ref(),
+        "a serene mountain lake at dawn",
+        1024,
+        1024,
+        7,
+        model.default_steps(),
+        Some(1.0),
+        None,
+        None,
+        None,
+        &cancel,
+        &mut |_p| {},
+    )
+    .unwrap();
+    assert_eq!((w, h), (1024, 1024));
+    assert_eq!(pixels.len(), 1024 * 1024 * 3);
+    assert!(pixels.windows(2).any(|w| w[0] != w[1]));
 }
 
 /// Real-weights smoke: FLUX.2-klein-9b-true_v2 (wikeeyang undistilled fine-tune,

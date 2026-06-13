@@ -1981,39 +1981,25 @@ fn mac_capabilities_features_agree_with_the_rust_oracle() {
 }
 
 #[test]
-fn mac_rust_supported_names_torch_only_image_model_with_its_port_epic() {
+fn mac_rust_supported_flags_an_unported_image_model_as_needing_a_port_epic() {
     let store = store("oracle-torch-model");
-    // Each torch-only model points at its dedicated MLX-porting epic (epic 3482 policy),
-    // not the generic done feasibility epic.
-    // (z_image_edit was ported to MLX, epic 3529 / sc-3923 — no longer torch-only.)
-    // (Kolors base T2I was ported to MLX, epic 3090 / sc-3875 — no longer wholly torch-only; its
-    // not-yet-wired advanced modes are per-feature gaps, covered by `kolors_*` tests below.)
-    let cases = [
-        // (pulid_flux_dev was ported to MLX, epic 3069 / sc-3344 — no longer torch-only; runs on
-        // the native mlx-gen `pulid_flux` worker target for character_image.)
-        // instantid_realvisxl is NO LONGER wholly torch-only (sc-3345: identity + angle set run on
-        // MLX); its remaining per-feature gaps are covered by
-        // `mac_rust_supported_instantid_identity_ok_but_pose_and_facerestore_gapped`.
-        // SenseNova-U1 (sensenova_u1_8b[_fast]) was likewise ported to MLX (epic 3180 / sc-3900
-        // image modes, sc-3905 VQA + interleave): all of its surface is now MLX-routed, so it is no
-        // longer a torch-only image model (and its understanding job types are MLX-supported too).
-        ("lens_turbo", "epic 3164"),
-    ];
-    for (model, epic) in cases {
-        let job = job_of(
-            &store,
-            JobType::ImageGenerate,
-            json!({ "model": model, "prompt": "p" }),
-        );
-        let reason = mac_rust_supported(&job).unwrap_err();
-        assert_eq!(reason.model.as_deref(), Some(model));
-        assert_eq!(
-            reason.suggested_epic.as_deref(),
-            Some(epic),
-            "{model} → {epic}"
-        );
-        assert!(reason.error_message().starts_with("mlx_unsupported:"));
-    }
+    // Every shipping image model now has a Rust/MLX engine and is in `MLX_ROUTED_MODELS`, so none
+    // reaches the whole-model torch-only classifier anymore: z_image_edit (epic 3529 / sc-3923),
+    // Kolors (epic 3090 / sc-3875), pulid_flux_dev (epic 3069 / sc-3344), instantid_realvisxl
+    // (sc-3345), SenseNova-U1 (epic 3180 / sc-3900 + sc-3905), and finally Lens / Lens-Turbo
+    // (epic 3164 / sc-5105) — the LAST whole-model torch-only image family. The torch-only gap path
+    // now only fires for a hypothetical *unported* model id; lacking a dedicated port epic, the
+    // oracle flags it `mlx_unsupported` and reports "needs an epic" (suggested_epic None — epic 3482
+    // policy: file a porting epic + drop on Mac until it lands).
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "unported_image_model", "prompt": "p" }),
+    );
+    let reason = mac_rust_supported(&job).unwrap_err();
+    assert_eq!(reason.model.as_deref(), Some("unported_image_model"));
+    assert_eq!(reason.suggested_epic.as_deref(), None);
+    assert!(reason.error_message().starts_with("mlx_unsupported:"));
 }
 
 #[test]
@@ -2261,19 +2247,29 @@ fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
 
 #[test]
 fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
-    // sc-3486: the picker-gating view of the same routing predicates. Torch-only image
-    // models are unsupported (hidden/disabled on Mac) and carry their port epic. (`lens` is the
-    // remaining torch-only image family; pulid_flux_dev — formerly this example — is MLX-routed
-    // after sc-3344, asserted below.)
-    let torch_only = model_mac_support("lens", "image");
+    // sc-3486: the picker-gating view of the same routing predicates. An *unported* image model (no
+    // Rust/MLX engine, not in `MLX_ROUTED_MODELS`) is unsupported — hidden/disabled on Mac — and,
+    // lacking a dedicated port epic, reports "needs an epic" (suggested_epic None). No real image
+    // model is torch-only anymore: Lens — formerly this example — is MLX-routed after epic 3164 /
+    // sc-5105 (asserted below), as is pulid_flux_dev after sc-3344.
+    let torch_only = model_mac_support("unported_image_model", "image");
     assert!(!torch_only.supported);
+    assert!(torch_only.reason.is_some());
     assert_eq!(
         torch_only
             .reason
             .as_ref()
             .and_then(|r| r.suggested_epic.as_deref()),
-        Some("epic 3164")
+        None
     );
+    // Lens / Lens-Turbo (epic 3164 / sc-5105) are MLX-routed now — pure T2I, so both are supported
+    // and in the picker with no gap reason. The edit-mode gating (Lens has no edit path) is asserted
+    // in `model_mac_support_feature_flags_mirror_routing_without_over_gating`.
+    for id in ["lens", "lens_turbo"] {
+        let lens = model_mac_support(id, "image");
+        assert!(lens.supported, "{id} should be MLX-supported");
+        assert!(lens.reason.is_none(), "{id} should carry no gap reason");
+    }
     // PuLID-FLUX (sc-3344) is MLX-routed now — it stays in the picker as a supported face-ID
     // backbone (character_image reference), no longer a torch-only port-epic gap.
     let pulid = model_mac_support("pulid_flux_dev", "image");
@@ -2342,6 +2338,15 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     let qwen_edit = model_mac_support("qwen_image_edit_2511", "image");
     assert!(qwen_edit.features.reference);
     assert!(qwen_edit.features.edit);
+    // Lens / Lens-Turbo (epic 3164 / sc-5105) are pure T2I — no edit path on any platform, so
+    // `edit_image` is gated off (mirrors Chroma / FLUX.1); a lens edit job never silently degrades to
+    // T2I against a dropped source image.
+    for id in ["lens", "lens_turbo"] {
+        assert!(
+            !model_mac_support(id, "image").features.edit,
+            "{id} has no edit path → edit must be gated off"
+        );
+    }
     // Third-party LyCORIS now applies on every MLX provider (epic 3641) → supported.
     assert!(model_mac_support("sdxl", "image").features.lycoris);
     // Video models expose per-mode eligibility.
@@ -2688,14 +2693,14 @@ fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
     assert_eq!(claimed_mlx.id, mlx_job.id);
     assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
 
-    // A Lens job is the MPS job: Lens is torch-only on Mac (epic 3164, not in MLX_ROUTED_MODELS),
-    // so it stays on the torch worker — exercising the shared-GPU exclusion without being
-    // soft-deferred. (PuLID-FLUX is fully MLX now — sc-3344 — so it's no longer a torch example,
-    // like Kolors before it.)
+    // An unported image model is the MPS job: not in MLX_ROUTED_MODELS, so it isn't MLX-eligible and
+    // isn't soft-deferred to the mlx worker — it stays on the torch worker, exercising the shared-GPU
+    // exclusion cleanly. (No real image model is torch-only anymore: Lens — formerly this example —
+    // is MLX after epic 3164 / sc-5105, as Kolors/PuLID-FLUX were before it.)
     let mps_job = store
         .create_job(image_job_with(
             json!({
-                "model": "lens",
+                "model": "unported_image_model",
                 "prompt": "p"
             }),
             "auto",
@@ -2725,12 +2730,13 @@ fn active_mps_image_edit_blocks_mlx_image_edit_claim() {
     register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // A Lens job is the MPS job (Lens is torch-only on Mac — epic 3164 — so it isn't soft-deferred
-    // to the mlx worker; PuLID-FLUX is MLX now after sc-3344).
+    // An unported image model is the MPS job (not in MLX_ROUTED_MODELS, so it isn't soft-deferred to
+    // the mlx worker). No real image model is torch-only anymore — Lens, the last one, is MLX after
+    // epic 3164 / sc-5105 (PuLID-FLUX was MLX after sc-3344).
     let mps_job = store
         .create_job(image_job_with(
             json!({
-                "model": "lens",
+                "model": "unported_image_model",
                 "prompt": "p"
             }),
             "auto",
@@ -2804,14 +2810,14 @@ fn torch_only_image_model_stays_on_torch() {
     let store = store("mlx-routing-image-torch-only");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    // Lens is torch-only on Mac (epic 3164, not in MLX_ROUTED_MODELS), so it stays on the Python
-    // torch path and the mlx worker must refuse it. (Every ported image family — incl. Kolors' full
-    // surface (epic 3090) and PuLID-FLUX (sc-3344) — is MLX now, so a torch-only example must come
-    // from an unported model.)
+    // An unported image model (not in MLX_ROUTED_MODELS) stays on the Python torch path and the mlx
+    // worker must refuse it. Every ported image family — incl. Kolors' full surface (epic 3090),
+    // PuLID-FLUX (sc-3344), and Lens (epic 3164 / sc-5105, the last one) — is MLX now, so a
+    // torch-only example must come from an unported model id.
     let job = store
         .create_job(image_job_with(
             json!({
-                "model": "lens",
+                "model": "unported_image_model",
                 "prompt": "p"
             }),
             "auto",
