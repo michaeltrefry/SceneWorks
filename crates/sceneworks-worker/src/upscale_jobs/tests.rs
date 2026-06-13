@@ -147,3 +147,101 @@ fn manifest_onnx_resource_extracts_repo_file() {
     );
     assert_eq!(manifest_onnx_resource(&Value::Null, 4), None);
 }
+
+// ---------------------------------------------------------------------------
+// SeedVR2 (sc-4815): pure helpers + a gated real-weight integration smoke
+// ---------------------------------------------------------------------------
+
+#[test]
+fn round_to_16_rounds_up_floored_at_16() {
+    assert_eq!(round_to_16(96), 96); // already a multiple
+    assert_eq!(round_to_16(64), 64);
+    assert_eq!(round_to_16(100), 112); // rounds up to the next multiple of 16
+    assert_eq!(round_to_16(17), 32);
+    assert_eq!(round_to_16(1), 16); // floored at 16
+    assert_eq!(round_to_16(0), 16);
+}
+
+#[test]
+fn manifest_seedvr2_resource_extracts_overrides_and_defaults() {
+    let entry = json!({
+        "resources": {
+            "imageUpscalers": {
+                "seedvr2": { "repo": "acme/seedvr2", "ditFile": "dit.safetensors", "vaeFile": "vae.safetensors" }
+            }
+        }
+    });
+    assert_eq!(
+        manifest_seedvr2_resource(&entry),
+        Some((
+            "acme/seedvr2".to_owned(),
+            "dit.safetensors".to_owned(),
+            "vae.safetensors".to_owned()
+        ))
+    );
+    // only `repo` → the DiT/VAE filenames default to the canonical names the engine loads.
+    let repo_only = json!({
+        "resources": { "imageUpscalers": { "seedvr2": { "repo": "acme/s" } } }
+    });
+    assert_eq!(
+        manifest_seedvr2_resource(&repo_only),
+        Some((
+            "acme/s".to_owned(),
+            SEEDVR2_DIT_FILE.to_owned(),
+            SEEDVR2_VAE_FILE.to_owned()
+        ))
+    );
+    assert_eq!(manifest_seedvr2_resource(&Value::Null), None);
+}
+
+/// Resolve the locally-cached `numz/SeedVR2_comfyUI` checkpoint dir (env override or the HF cache),
+/// so the smoke below can run on real weights without a download. `None` ⇒ skip.
+#[cfg(target_os = "macos")]
+fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
+    if let Ok(pinned) = std::env::var("SCENEWORKS_SEEDVR2_CHECKPOINT") {
+        let dir = std::path::PathBuf::from(pinned);
+        if dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists() {
+            return Some(dir);
+        }
+    }
+    let base = std::path::Path::new(&std::env::var("HOME").ok()?)
+        .join(".cache/huggingface/hub/models--numz--SeedVR2_comfyUI/snapshots");
+    let snap = std::fs::read_dir(&base).ok()?.flatten().next()?.path();
+    (snap.join(SEEDVR2_DIT_FILE).exists() && snap.join(SEEDVR2_VAE_FILE).exists()).then_some(snap)
+}
+
+/// Real-weight smoke for the SceneWorks SeedVR2 integration (sc-4815): drives the exact worker
+/// dispatch path — `with_cached_generator("seedvr2", …)` → registry → `generate` — on the cached
+/// 3B checkpoint, asserting (a) the factor→`round_to_16` target dims and (b) that the new `softness`
+/// request field actually reaches the engine (a softened run differs from a faithful one). Gated on
+/// the checkpoint being present (skips in CI, which has no weights), mirroring the family worker E2E
+/// smokes. Run with `cargo test -p sceneworks-worker -- --ignored seedvr2_upscale_real_weight_smoke`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "real-weight: needs the cached numz/SeedVR2_comfyUI checkpoint (~7 GB); Mac/MLX only"]
+async fn seedvr2_upscale_real_weight_smoke() {
+    let Some(dir) = cached_seedvr2_checkpoint() else {
+        eprintln!("SKIP: SeedVR2 checkpoint not cached (numz/SeedVR2_comfyUI)");
+        return;
+    };
+    // 48x32 deterministic gradient → factor 2 → 96x64 (both already multiples of 16).
+    let mut img = RgbImage::new(48, 32);
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        *pixel = Rgb([(x * 5) as u8, (y * 7) as u8, ((x + y) * 3 % 256) as u8]);
+    }
+    let faithful = run_seedvr2_upscale(dir.clone(), &img, 2, 0.0, 7)
+        .await
+        .expect("seedvr2 upscale (softness 0)");
+    assert_eq!((faithful.width(), faithful.height()), (96, 64));
+
+    // The softness request field must reach the engine: a heavily-softened run changes the result.
+    let softened = run_seedvr2_upscale(dir, &img, 2, 0.8, 7)
+        .await
+        .expect("seedvr2 upscale (softness 0.8)");
+    assert_eq!((softened.width(), softened.height()), (96, 64));
+    assert_ne!(
+        faithful.as_raw(),
+        softened.as_raw(),
+        "softness must change the output (the request field is wired to the engine)"
+    );
+}

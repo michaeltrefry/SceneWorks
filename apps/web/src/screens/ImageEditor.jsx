@@ -195,9 +195,12 @@ function konvaColorFilter(imageData) {
 }
 
 // Upscale engines + their valid factors (sc-2433). Mirrors the engines the worker
-// supports (image_adapters.create_image_upscaler): Real-ESRGAN 2x/4x, AuraSR 4x.
+// supports (image_adapters.create_image_upscaler): Real-ESRGAN 2x/4x, AuraSR 4x,
+// SeedVR2 2x/4x (the native-MLX one-step diffusion upscaler, Mac-only, epic 4811 / sc-4815).
+// `seedvr2` exposes a detail/softness control; the others do not (`softness: true`).
 const UPSCALE_ENGINES = [
   { key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
+  { key: "seedvr2", label: "SeedVR2", factors: [2, 4], softness: true },
   { key: "aura-sr", label: "AuraSR", factors: [4] },
 ];
 
@@ -206,16 +209,25 @@ export function upscaleFactorsForEngine(engineKey) {
   return found ? found.factors : [2, 4];
 }
 
+export function upscaleEngineHasSoftness(engineKey) {
+  return Boolean(UPSCALE_ENGINES.find((entry) => entry.key === engineKey)?.softness);
+}
+
 // The `POST /api/v1/jobs` body for a standalone image_upscale job (sc-2431). The
 // worker reads sourceAssetId/factor/engine from the payload; displayName names the
-// result. Pure for unit testing.
-export function buildUpscaleJobBody({ project, requestedGpu, sourceAssetId, factor, engine, displayName }) {
+// result. `softness` (0..1) is a SeedVR2-only detail knob (sc-4815) — omitted for engines
+// that ignore it. Pure for unit testing.
+export function buildUpscaleJobBody({ project, requestedGpu, sourceAssetId, factor, engine, displayName, softness }) {
+  const payload = { projectId: project.id, sourceAssetId, factor, engine, displayName };
+  if (upscaleEngineHasSoftness(engine) && typeof softness === "number") {
+    payload.softness = softness;
+  }
   return {
     type: "image_upscale",
     projectId: project.id,
     projectName: project.name ?? null,
     requestedGpu,
-    payload: { projectId: project.id, sourceAssetId, factor, engine, displayName },
+    payload,
   };
 }
 
@@ -367,6 +379,8 @@ export function ImageEditor() {
   // Upscale tool (sc-2433): engine + factor for the in-flight request.
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
   const [upscaleFactor, setUpscaleFactor] = useState(2);
+  // SeedVR2 detail/softness knob (0..1, sc-4815) — only meaningful for the seedvr2 engine.
+  const [upscaleSoftness, setUpscaleSoftness] = useState(0);
   // Engines offered in the picker; AuraSR is dropped on a gated Mac (sc-3668).
   const availableUpscaleEngines = UPSCALE_ENGINES.filter(
     (entry) => !macUpscaleEngineBlocked(macCapabilities, entry.key),
@@ -900,9 +914,15 @@ export function ImageEditor() {
   function runUpscale() {
     const valid = upscaleFactorsForEngine(upscaleEngine);
     const factor = valid.includes(upscaleFactor) ? upscaleFactor : valid[0];
+    const softness = upscaleEngineHasSoftness(upscaleEngine) ? upscaleSoftness : undefined;
     runAiOp({
       label: "upscale",
-      edit: { op: "upscale", engine: upscaleEngine, factor },
+      edit: {
+        op: "upscale",
+        engine: upscaleEngine,
+        factor,
+        ...(softness !== undefined ? { softness } : {}),
+      },
       buildBody: (scratch) =>
         buildUpscaleJobBody({
           project: activeProject,
@@ -911,6 +931,7 @@ export function ImageEditor() {
           factor,
           engine: upscaleEngine,
           displayName: working?.source?.name,
+          softness,
         }),
     });
   }
@@ -1382,6 +1403,21 @@ export function ImageEditor() {
                 </button>
               ))}
             </div>
+            {upscaleEngineHasSoftness(upscaleEngine) ? (
+              <label className="image-editor-upscale-softness" title="Higher restores more detail from a degraded source; 0 keeps it faithful.">
+                Detail
+                <input
+                  aria-label="SeedVR2 detail (softness)"
+                  max="1"
+                  min="0"
+                  onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
+                  step="0.05"
+                  type="range"
+                  value={upscaleSoftness}
+                />
+                <span>{upscaleSoftness.toFixed(2)}</span>
+              </label>
+            ) : null}
             <span className="image-editor-cropdims">
               {working.width * upscaleFactor} × {working.height * upscaleFactor}
             </span>

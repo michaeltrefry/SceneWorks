@@ -2084,9 +2084,16 @@ fn mac_rust_supported_names_infra_job_types() {
     let kps = job_of(&store, JobType::KpsExtract, json!({}));
     assert!(mac_rust_supported(&kps).is_ok());
     // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489): the default engine
-    // (real-esrgan) is supported; the AuraSR engine is dropped on Mac (sc-3668).
+    // (real-esrgan) is supported; the AuraSR engine is dropped on Mac (sc-3668). SeedVR2 is the
+    // native-MLX one-step diffusion upscaler (epic 4811 / sc-4815) and is also supported.
     let upscale = job_of(&store, JobType::ImageUpscale, json!({}));
     assert!(mac_rust_supported(&upscale).is_ok());
+    let seedvr2 = job_of(
+        &store,
+        JobType::ImageUpscale,
+        json!({ "engine": "seedvr2" }),
+    );
+    assert!(mac_rust_supported(&seedvr2).is_ok());
     let aura = job_of(
         &store,
         JobType::ImageUpscale,
@@ -2396,6 +2403,9 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // and names the spike; this must agree with the AuraSR arm of `mac_rust_supported`.
     assert!(!mac.features["imageUpscaleAuraSr"].supported);
     assert_eq!(epic("imageUpscaleAuraSr"), Some("sc-3668".to_owned()));
+    // SeedVR2 is the native-MLX upscaler (epic 4811 / sc-4815) → supported on Mac, no reason/epic.
+    assert!(mac.features["imageUpscaleSeedvr2"].supported);
+    assert_eq!(epic("imageUpscaleSeedvr2"), None);
     // DWPose pose detection is ported (sc-3487) → supported, no reason/epic (sc-4206).
     assert_eq!(epic("poseFromPhoto"), None);
     assert!(mac.features["poseFromPhoto"].supported);
@@ -2412,9 +2422,10 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Video upscale is net-new on Mac (epic 4811 / sc-4816, native-MLX SeedVR2) → supported, no epic.
     assert_eq!(epic("videoUpscale"), None);
     assert!(mac.features["videoUpscale"].supported);
-    // datasetCaptioning + imageUpscale + personDetect + poseFromPhoto + videoUpscale are the ported
-    // (supported) infra features; the rest stay gated until their port lands.
-    // poseFromPhoto joined the supported set in sc-4206 (DWPose ported, sc-3487); videoUpscale in sc-4816.
+    // datasetCaptioning + imageUpscale + imageUpscaleSeedvr2 + personDetect + poseFromPhoto +
+    // videoUpscale are the ported (supported) infra features; the rest stay gated until their port
+    // lands. poseFromPhoto joined the supported set in sc-4206 (DWPose ported, sc-3487);
+    // imageUpscaleSeedvr2 in sc-4815, videoUpscale in sc-4816 (both native-MLX SeedVR2, epic 4811).
     assert!(mac
         .features
         .iter()
@@ -2423,12 +2434,23 @@ fn mac_capabilities_master_switch_and_infra_features() {
                 key.as_str(),
                 "datasetCaptioning"
                     | "imageUpscale"
+                    | "imageUpscaleSeedvr2"
                     | "personDetect"
                     | "poseFromPhoto"
                     | "videoUpscale"
             )
         })
         .all(|(_, f)| !f.supported));
+    // SeedVR2 is Mac-only (epic 4811 R6): on a non-Mac host the capability is unsupported and
+    // names the Windows/Linux Candle backend port (sc-5157), so the web picker hides it there.
+    assert!(!inert.features["imageUpscaleSeedvr2"].supported);
+    assert_eq!(
+        inert.features["imageUpscaleSeedvr2"]
+            .reason
+            .as_ref()
+            .and_then(|r| r.suggested_epic.as_deref()),
+        Some("sc-5157")
+    );
     // Training kernels with a native Rust trainer stay enabled; LoKr-on-Wan does not.
     assert!(mac
         .training

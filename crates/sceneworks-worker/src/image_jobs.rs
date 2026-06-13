@@ -64,6 +64,8 @@ use mlx_gen_qwen_image as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_sdxl as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_seedvr2 as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_sensenova as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;

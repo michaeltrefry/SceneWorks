@@ -18,6 +18,7 @@ import {
   cropRatioForKey,
   centeredCropRect,
   upscaleFactorsForEngine,
+  upscaleEngineHasSoftness,
   buildUpscaleJobBody,
   editedFilename,
   buildSaveProvenance,
@@ -138,8 +139,15 @@ describe("crop geometry", () => {
 describe("upscale job", () => {
   it("constrains factors per engine", () => {
     expect(upscaleFactorsForEngine("real-esrgan")).toEqual([2, 4]);
+    expect(upscaleFactorsForEngine("seedvr2")).toEqual([2, 4]);
     expect(upscaleFactorsForEngine("aura-sr")).toEqual([4]);
     expect(upscaleFactorsForEngine("unknown")).toEqual([2, 4]);
+  });
+
+  it("exposes the softness control only for seedvr2 (sc-4815)", () => {
+    expect(upscaleEngineHasSoftness("seedvr2")).toBe(true);
+    expect(upscaleEngineHasSoftness("real-esrgan")).toBe(false);
+    expect(upscaleEngineHasSoftness("aura-sr")).toBe(false);
   });
 
   it("builds the image_upscale job body the worker expects (sourceAssetId/factor/engine)", () => {
@@ -164,6 +172,41 @@ describe("upscale job", () => {
         displayName: "shot.png",
       },
     });
+  });
+
+  it("threads softness into a seedvr2 job, and omits it for engines that ignore it (sc-4815)", () => {
+    const seed = buildUpscaleJobBody({
+      project: { id: "project_1" },
+      requestedGpu: "auto",
+      sourceAssetId: "asset_scratch",
+      factor: 2,
+      engine: "seedvr2",
+      displayName: "shot.png",
+      softness: 0.5,
+    });
+    expect(seed.payload.engine).toBe("seedvr2");
+    expect(seed.payload.softness).toBe(0.5);
+
+    // Real-ESRGAN ignores softness even if a value is passed.
+    const esrgan = buildUpscaleJobBody({
+      project: { id: "project_1" },
+      requestedGpu: "auto",
+      sourceAssetId: "asset_scratch",
+      factor: 2,
+      engine: "real-esrgan",
+      softness: 0.5,
+    });
+    expect(esrgan.payload).not.toHaveProperty("softness");
+
+    // seedvr2 without an explicit softness omits the key (worker defaults to 0).
+    const seedNoSoftness = buildUpscaleJobBody({
+      project: { id: "project_1" },
+      requestedGpu: "auto",
+      sourceAssetId: "asset_scratch",
+      factor: 2,
+      engine: "seedvr2",
+    });
+    expect(seedNoSoftness.payload).not.toHaveProperty("softness");
   });
 });
 

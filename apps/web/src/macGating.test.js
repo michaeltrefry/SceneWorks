@@ -26,6 +26,8 @@ const gating = {
       supported: false,
       reason: { feature: "image_upscale (AuraSR)", detail: "dropped on Mac.", suggestedEpic: "sc-3668" },
     },
+    // SeedVR2 is the Mac-only native-MLX upscaler (epic 4811 / sc-4815) → supported on macOS.
+    imageUpscaleSeedvr2: { supported: true },
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability feature entry.
   },
   training: { supportedKernels: ["z_image_lora", "sdxl_lora"], lokrOnWanSupported: false },
@@ -78,6 +80,26 @@ describe("macGating helpers", () => {
     expect(macUpscaleEngineBlocked(gating, "real-esrgan")).toBe(false);
     // Inert on Windows/Linux / observe mode — the engine picker is untouched.
     expect(macUpscaleEngineBlocked(DEFAULT_MAC_CAPABILITIES, "aura-sr")).toBe(false);
+  });
+
+  it("offers SeedVR2 only where the capability confirms support — Mac-only (epic 4811 / sc-4815)", () => {
+    // Supported on Mac (the capability is true) → shown.
+    expect(macUpscaleEngineBlocked(gating, "seedvr2")).toBe(false);
+    // Pre-load (no features) and on Windows/Linux (capability absent/false) → hidden, even though
+    // gating is inert there. This is the INVERSE of AuraSR's gating.
+    expect(macUpscaleEngineBlocked(DEFAULT_MAC_CAPABILITIES, "seedvr2")).toBe(true);
+    const windows = {
+      ...DEFAULT_MAC_CAPABILITIES,
+      platform: "windows",
+      features: {
+        imageUpscaleSeedvr2: {
+          supported: false,
+          reason: { feature: "image_upscale (SeedVR2)", detail: "Mac-only.", suggestedEpic: "sc-5157" },
+        },
+      },
+    };
+    expect(macUpscaleEngineBlocked(windows, "seedvr2")).toBe(true);
+    expect(macUpscaleEngineBlocked(windows, "real-esrgan")).toBe(false);
   });
 
   it("blocks a training kernel without a native Rust trainer", () => {

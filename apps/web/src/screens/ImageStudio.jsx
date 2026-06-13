@@ -117,8 +117,15 @@ function preferredOption(defaultValue, options) {
 
 const UPSCALE_ENGINES = [
   { id: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
+  // SeedVR2: native-MLX one-step diffusion upscaler (Mac-only, epic 4811 / sc-4815) with a
+  // detail/softness control; gated to Mac via macUpscaleEngineBlocked + imageUpscaleSeedvr2.
+  { id: "seedvr2", label: "SeedVR2", factors: [2, 4], softness: true },
   { id: "aura-sr", label: "AuraSR", factors: [4] },
 ];
+
+function upscaleEngineHasSoftness(engineId) {
+  return Boolean(UPSCALE_ENGINES.find((engine) => engine.id === engineId)?.softness);
+}
 
 function formatResolutionLabel(value) {
   const [width, height] = String(value).split("x");
@@ -316,6 +323,8 @@ export function ImageStudio() {
   const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
   const [upscaleFactor, setUpscaleFactor] = useState(saved.upscaleFactor ?? 2);
   const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
+  // SeedVR2 detail/softness knob (0..1, sc-4815) — only used by the seedvr2 engine.
+  const [upscaleSoftness, setUpscaleSoftness] = useState(saved.upscaleSoftness ?? 0);
   const [submitting, setSubmitting] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   // "Save as Preset" sidebar control — snapshots the current config into the
@@ -719,6 +728,9 @@ export function ImageStudio() {
     if (upscale?.engine) {
       handleUpscaleEngineChange(upscale.engine);
     }
+    if (typeof upscale?.softness === "number") {
+      setUpscaleSoftness(upscale.softness);
+    }
   }, [launchRequest?.id]);
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
@@ -752,6 +764,7 @@ export function ImageStudio() {
     ["upscaleEnabled", setUpscaleEnabled],
     ["upscaleFactor", setUpscaleFactor],
     ["upscaleEngine", setUpscaleEngine],
+    ["upscaleSoftness", setUpscaleSoftness],
   ];
   useEffect(() => {
     if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
@@ -799,6 +812,7 @@ export function ImageStudio() {
     upscaleEnabled,
     upscaleFactor,
     upscaleEngine,
+    upscaleSoftness,
     selectedLoraIds,
     loraWeights,
     showIncompatibleLoras,
@@ -854,6 +868,7 @@ export function ImageStudio() {
         upscaleEnabled,
         upscaleFactor,
         upscaleEngine,
+        upscaleSoftness,
         // Reference/identity knobs only matter for the character flow; keep them
         // out of plain text/edit presets so they don't carry irrelevant state.
         ...(mode === "character_image"
@@ -929,6 +944,8 @@ export function ImageStudio() {
                 enabled: true,
                 factor: upscaleFactor,
                 engine: upscaleEngine,
+                // SeedVR2-only detail/softness knob (sc-4815); omitted for engines that ignore it.
+                ...(upscaleEngineHasSoftness(upscaleEngine) ? { softness: upscaleSoftness } : {}),
               },
             }
           : {}),
@@ -1503,6 +1520,22 @@ export function ImageStudio() {
                     ))}
                   </select>
                 </label>
+                {upscaleEngineHasSoftness(upscaleEngine) ? (
+                  <label title="Higher restores more detail from a degraded source; 0 keeps it faithful.">
+                    Detail
+                    <input
+                      aria-label="SeedVR2 detail (softness)"
+                      disabled={!upscaleEnabled}
+                      max="1"
+                      min="0"
+                      onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
+                      step="0.05"
+                      type="range"
+                      value={upscaleSoftness}
+                    />
+                    <span>{upscaleSoftness.toFixed(2)}</span>
+                  </label>
+                ) : null}
                 <label className="prompt-field">
                   Negative prompt
                   <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />

@@ -2039,9 +2039,10 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // Python-free on Mac.
         JobType::KpsExtract => Ok(()),
 
-        // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489), so the
-        // Image Editor upscale tool runs Python-free. The second engine, `aura-sr` (a
-        // 617M-param torch-only GigaGAN), was DROPPED on Mac after the sc-3668 port-or-drop
+        // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489) and SeedVR2 (the
+        // native-MLX one-step diffusion upscaler, epic 4811 / sc-4815) runs in-process via
+        // `mlx-gen-seedvr2`, so the upscale tool runs Python-free. The AuraSR engine (`aura-sr`,
+        // a 617M-param torch-only GigaGAN) was DROPPED on Mac after the sc-3668 port-or-drop
         // spike (no viable Rust path; only a marginal, ~35-50x-slower quality difference vs
         // Real-ESRGAN x4). The Mac UI hides the AuraSR engine option, so this Err is now a
         // defensive submit-time guard; AuraSR stays available on Windows/Linux.
@@ -2324,6 +2325,10 @@ pub struct MacCapabilities {
 /// the non-model half of `docs/mac-rust-gaps.md` §5 (infra) plus the global feature gaps; keep it
 /// in sync with the oracle's job-type arms.
 pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilities {
+    // `std::env::consts::OS` is `"macos"` (the API host's OS, passed by the capabilities handler);
+    // accept the legacy `"darwin"` alias defensively. Drives the platform-intrinsic engine flags
+    // (e.g. `imageUpscaleSeedvr2`, which is Mac-only) rather than the gating-rollout flag.
+    let is_mac = matches!(platform, "macos" | "darwin");
     let mut features = BTreeMap::new();
     // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641:
     // core loader sc-3642/3643 + SDXL/Wan/LTX sc-3671), so it is no longer a Mac feature gap — the
@@ -2354,6 +2359,29 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
                 "AuraSR is a torch-only GAN upscaler, dropped on Mac; Real-ESRGAN x4 is the Mac upscaler (it stays available on Windows/Linux).",
                 Some("sc-3668"),
             )),
+        },
+    );
+    features.insert(
+        // SeedVR2 (`engine=seedvr2`) is the native-MLX one-step diffusion upscaler (epic 4811 /
+        // sc-4815) — the INVERSE of AuraSR: it is supported on Mac (in-process `mlx-gen-seedvr2`)
+        // and NOT yet available on Windows/Linux, where the backend is a separate Candle port
+        // (sc-5157). This flag is platform-intrinsic (true only on Mac, regardless of the gating
+        // rollout flag) so the web upscale picker can offer SeedVR2 on Mac and hide it elsewhere —
+        // contrast the other entries here, which describe Mac torch-only gaps the UI hides only
+        // under active gating.
+        "imageUpscaleSeedvr2".to_owned(),
+        MacFeatureSupport {
+            supported: is_mac,
+            reason: if is_mac {
+                None
+            } else {
+                Some(UnsupportedReason::new(
+                    None,
+                    "image_upscale (SeedVR2)",
+                    "SeedVR2 is a Mac-only native-MLX upscaler; Windows/Linux support is a separate Candle backend port.",
+                    Some("sc-5157"),
+                ))
+            },
         },
     );
     features.insert(
@@ -3636,10 +3664,13 @@ fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 }
 
 /// Whether an `image_upscale` job runs on the Rust/MLX path (epic 3482, sc-3489): the
-/// Real-ESRGAN (RRDBNet) engine — the default — is ported to the Rust worker. `aura-sr`
-/// (a 617M-param torch-only GigaGAN) was dropped on Mac after the sc-3668 port-or-drop
-/// spike, so the mlx worker refuses it (it runs on the Python worker on Windows/Linux).
-/// Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
+/// Real-ESRGAN (RRDBNet) engine — the default — is ported to the Rust worker, and `seedvr2`
+/// (the native-MLX one-step diffusion upscaler, epic 4811 / sc-4815) runs in-process via
+/// `mlx-gen-seedvr2`. `aura-sr` (a 617M-param torch-only GigaGAN) was dropped on Mac after the
+/// sc-3668 port-or-drop spike, so the mlx worker refuses it (it runs on the Python worker on
+/// Windows/Linux). Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
+/// SeedVR2 is Mac-only here (a Windows/Linux Candle backend is the separate sc-5157); the Mac UI
+/// gating + `imageUpscaleSeedvr2` capability keep it off non-Mac pickers.
 fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageUpscale) {
         return false;
@@ -3652,7 +3683,7 @@ fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         .unwrap_or_else(|| "real-esrgan".to_owned());
     matches!(
         engine.as_str(),
-        "" | "real-esrgan" | "realesrgan" | "real_esrgan"
+        "" | "real-esrgan" | "realesrgan" | "real_esrgan" | "seedvr2"
     )
 }
 
@@ -3771,9 +3802,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(job.job_type, JobType::TrainingCaption) && !caption_job_is_mlx_eligible(job) {
             return false;
         }
-        // Image upscale (sc-3489): the mlx worker runs Real-ESRGAN (the default engine)
-        // via `ort`/CoreML. `aura-sr` has no Rust path, so the mlx worker refuses it and
-        // it stays on the Python torch worker.
+        // Image upscale (sc-3489): the mlx worker runs Real-ESRGAN (the default engine) via
+        // `ort`/CoreML and SeedVR2 via in-process `mlx-gen-seedvr2` (sc-4815). `aura-sr` has no
+        // Rust path, so the mlx worker refuses it and it stays on the Python torch worker.
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
             return false;
         }

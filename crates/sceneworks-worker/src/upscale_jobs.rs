@@ -13,10 +13,17 @@
 //! (`tile_slices`, crop/place) is pure and unit-tested without the onnx weights; only
 //! the onnxruntime inference is gated.
 //!
-//! Engine scope: only `engine=real-esrgan` (the default) is served here. `aura-sr`
-//! (a 617M-param torch-only GigaGAN) was dropped on Mac after the sc-3668 port-or-drop
-//! spike — it is refused by the routing oracle (`upscale_job_is_mlx_eligible`) and hidden
-//! in the Mac UI, so it only runs on the Python worker on Windows/Linux.
+//! Engine scope: `engine=real-esrgan` (the default, the `ort`/CoreML path above) and
+//! `engine=seedvr2` (epic 4811 / sc-4815 — the native-MLX one-step diffusion super-resolution
+//! upscaler) are served here. SeedVR2 runs in-process via the `mlx-gen-seedvr2` registry generator,
+//! driven through the shared `with_cached_generator` seam (single-resident engine cache — it evicts
+//! any cached image-gen engine, bounding peak memory, which matters because the SeedVR2 image path
+//! has no spatial tiling yet). It takes a target resolution (factor → `round_to_16(src × factor)`)
+//! and an optional `--softness` pre-blur; `mac_only` (the Windows/Linux SeedVR2 backend is the
+//! separate Candle port, sc-5157). `aura-sr` (a 617M-param torch-only GigaGAN) was dropped on Mac
+//! after the sc-3668 port-or-drop spike — it is refused by the routing oracle
+//! (`upscale_job_is_mlx_eligible`) and hidden in the Mac UI, so it only runs on the Python worker on
+//! Windows/Linux.
 //!
 //! Tiling parity (matched to `upscalers.py:_run_tiled`):
 //!  - tile grid `tile_slices(w,h,512)`; per-tile crop padded by `tile_pad=16`
@@ -28,6 +35,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
+use crate::generator_cache::with_cached_generator;
+use gen_core::{
+    Conditioning, GenerationOutput, GenerationRequest, Image as GenImage, LoadSpec, WeightsSource,
+};
 use image::RgbImage;
 use ort::execution_providers::CoreMLExecutionProvider;
 use ort::session::Session;
@@ -301,6 +312,174 @@ fn manifest_onnx_resource(manifest_entry: &Value, factor: u8) -> Option<(String,
 }
 
 // ---------------------------------------------------------------------------
+// SeedVR2 native-MLX upscaler (epic 4811 / sc-4815)
+// ---------------------------------------------------------------------------
+
+/// Upstream HuggingFace repo holding the raw SeedVR2 ComfyUI checkpoint. The `mlx-gen-seedvr2`
+/// registry loads it directly (converts to MLX layout in-memory, no Python). Public; downloaded on
+/// first use. Overridable via the manifest `seedvr2` resource or `SCENEWORKS_SEEDVR2_CHECKPOINT`.
+const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
+/// The exact filenames `Seedvr2Pipeline::load` expects in the checkpoint dir (3B fp16 DiT + VAE).
+const SEEDVR2_DIT_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
+const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
+
+/// Round up to the nearest multiple of 16 (the SeedVR2 VAE /8 · patch /2 constraint the registry
+/// validates), floored at 16. `factor × src` is usually already a multiple of 16; odd sizes round.
+fn round_to_16(v: u32) -> u32 {
+    (v.div_ceil(16)).max(1) * 16
+}
+
+/// Pull a `{repo, ditFile, vaeFile}` override out of a job's `modelManifestEntry` if present:
+/// `resources.imageUpscalers.seedvr2` (or the legacy `resources.upscalers.seedvr2`).
+fn manifest_seedvr2_resource(manifest_entry: &Value) -> Option<(String, String, String)> {
+    let node = manifest_entry
+        .get("resources")?
+        .get("imageUpscalers")
+        .or_else(|| manifest_entry.get("resources")?.get("upscalers"))?
+        .get("seedvr2")?;
+    let repo = node.get("repo")?.as_str()?.to_owned();
+    let dit = node
+        .get("ditFile")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| SEEDVR2_DIT_FILE.to_owned());
+    let vae = node
+        .get("vaeFile")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| SEEDVR2_VAE_FILE.to_owned());
+    Some((repo, dit, vae))
+}
+
+/// Resolve the raw SeedVR2 checkpoint dir (containing the canonical DiT + VAE filenames the engine
+/// loads). Order mirrors `ensure_onnx`: env pin (`SCENEWORKS_SEEDVR2_CHECKPOINT`, a dir holding both
+/// files) → the app cache `<data_dir>/cache/upscale/seedvr2/` → download from the manifest/default HF
+/// repo on first use. The source filenames may be overridden by the manifest, but they are always
+/// stored under the canonical names so `Seedvr2Pipeline::load` finds them.
+async fn ensure_seedvr2_checkpoint(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    manifest_entry: &Value,
+) -> WorkerResult<PathBuf> {
+    if let Ok(pinned) = std::env::var("SCENEWORKS_SEEDVR2_CHECKPOINT") {
+        let dir = PathBuf::from(pinned);
+        if dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists() {
+            return Ok(dir);
+        }
+    }
+
+    let dir = settings
+        .data_dir
+        .join("cache")
+        .join("upscale")
+        .join("seedvr2");
+    tokio::fs::create_dir_all(&dir).await?;
+
+    let (repo, dit_src, vae_src) = manifest_seedvr2_resource(manifest_entry).unwrap_or_else(|| {
+        (
+            SEEDVR2_REPO.to_owned(),
+            SEEDVR2_DIT_FILE.to_owned(),
+            SEEDVR2_VAE_FILE.to_owned(),
+        )
+    });
+
+    let context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Image upscale canceled while fetching SeedVR2 weights.",
+        fresh_download: false,
+    };
+    for (src_file, canonical) in [
+        (dit_src.as_str(), SEEDVR2_DIT_FILE),
+        (vae_src.as_str(), SEEDVR2_VAE_FILE),
+    ] {
+        let target = dir.join(canonical);
+        if target.exists() {
+            continue;
+        }
+        ensure_hf_cached_file(&context, &repo, "main", src_file, &target)
+            .await
+            .map_err(|error| {
+                let detail = match &error {
+                    WorkerError::InvalidPayload(d) => d.clone(),
+                    other => other.to_string(),
+                };
+                WorkerError::Engine(format!(
+                    "SeedVR2 weight download failed ({repo}/{src_file}): {detail}. Set \
+                     SCENEWORKS_SEEDVR2_CHECKPOINT to a local checkpoint dir, or populate {SEEDVR2_REPO}."
+                ))
+            })?;
+    }
+    Ok(dir)
+}
+
+/// Run a SeedVR2 image upscale: the LR `source` (native resolution) → a `round_to_16(factor×)`
+/// super-resolved RGB image. Goes through the shared single-resident generator cache
+/// (`with_cached_generator`) so loading SeedVR2 evicts any cached image-gen engine (the engine's
+/// image path has no spatial tiling — keeping one resident model bounds peak memory). `softness`
+/// (0..1) is the optional `--softness` pre-blur; `seed` makes the generative result reproducible.
+async fn run_seedvr2_upscale(
+    dir: PathBuf,
+    source: &RgbImage,
+    factor: u8,
+    softness: f32,
+    seed: u64,
+) -> WorkerResult<RgbImage> {
+    let (src_w, src_h) = (source.width(), source.height());
+    let target_w = round_to_16(src_w.saturating_mul(u32::from(factor)));
+    let target_h = round_to_16(src_h.saturating_mul(u32::from(factor)));
+    let image = GenImage {
+        width: src_w,
+        height: src_h,
+        pixels: source.as_raw().clone(),
+    };
+
+    with_cached_generator(
+        "seedvr2",
+        LoadSpec::new(WeightsSource::Dir(dir)),
+        "SeedVR2 engine load",
+        move |generator| {
+            let request = GenerationRequest {
+                width: target_w,
+                height: target_h,
+                count: 1,
+                seed: Some(seed),
+                softness: Some(softness),
+                conditioning: vec![Conditioning::Reference {
+                    image,
+                    strength: None,
+                }],
+                ..Default::default()
+            };
+            let output = generator
+                .generate(&request, &mut |_progress| {})
+                .map_err(|error| match error {
+                    gen_core::Error::Canceled => WorkerError::Canceled(error.to_string()),
+                    other => WorkerError::Engine(format!("SeedVR2 upscale failed: {other}")),
+                })?;
+            let image = match output {
+                GenerationOutput::Images(mut images) if !images.is_empty() => images.remove(0),
+                GenerationOutput::Images(_) => {
+                    return Err(WorkerError::Engine("SeedVR2 produced no image".to_owned()))
+                }
+                other => {
+                    return Err(WorkerError::Engine(format!(
+                        "SeedVR2 returned non-image output: {other:?}"
+                    )))
+                }
+            };
+            RgbImage::from_raw(image.width, image.height, image.pixels)
+                .ok_or_else(|| WorkerError::Engine("SeedVR2 image buffer size mismatch".to_owned()))
+        },
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // source resolution (mirrors image_adapters.find_asset_media_path / _source_display_name)
 // ---------------------------------------------------------------------------
 
@@ -378,17 +557,26 @@ pub(crate) async fn run_image_upscale_job(
         .filter(|s| !s.is_empty())
         .unwrap_or("real-esrgan")
         .to_lowercase();
-    if !matches!(
-        engine.as_str(),
-        "real-esrgan" | "realesrgan" | "real_esrgan"
-    ) {
-        // aura-sr was dropped on Mac (sc-3668) and any future engine stays a torch/Mac gap —
-        // the routing oracle refuses it for the mlx worker, so this is a defensive guard only.
-        return Err(WorkerError::InvalidPayload(format!(
-            "Rust upscaler supports only engine=real-esrgan (got {engine}); aura-sr is dropped on Mac, available on Windows/Linux (sc-3668)."
-        )));
-    }
-    let engine_id = "real-esrgan"; // matches image_adapters RealESRGANUpscaler.id
+    // Canonical engine id. The mlx worker serves Real-ESRGAN (`ort`/CoreML) and SeedVR2 (native
+    // MLX); aura-sr was dropped on Mac (sc-3668). The routing oracle (`upscale_job_is_mlx_eligible`)
+    // already refuses anything else for the mlx worker, so this match is a defensive guard.
+    let engine_id = match engine.as_str() {
+        "real-esrgan" | "realesrgan" | "real_esrgan" => "real-esrgan",
+        "seedvr2" => "seedvr2",
+        other => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Rust upscaler supports engine=real-esrgan or engine=seedvr2 (got {other}); aura-sr is dropped on Mac, available on Windows/Linux (sc-3668)."
+            )));
+        }
+    };
+    // SeedVR2-only knobs (ignored by Real-ESRGAN): the `--softness` pre-blur (0..1) and a seed for
+    // reproducible generative output. Both default to 0 and are read leniently from the payload.
+    let softness = payload
+        .get("softness")
+        .and_then(Value::as_f64)
+        .map(|v| v.clamp(0.0, 1.0) as f32)
+        .unwrap_or(0.0);
+    let seed = payload.get("seed").and_then(Value::as_u64).unwrap_or(0);
     let manifest_entry = payload
         .get("modelManifestEntry")
         .cloned()
@@ -418,40 +606,75 @@ pub(crate) async fn run_image_upscale_job(
         .to_rgb8();
     let (src_w, src_h) = (source_image.width(), source_image.height());
 
-    update_job(
-        api,
-        &job.id,
-        progress_payload(
-            JobStatus::Running,
-            ProgressStage::Downloading,
-            0.25,
-            "Loading Real-ESRGAN weights.",
-            None,
-            None,
-            None,
-        ),
-    )
-    .await?;
-    let onnx_path = ensure_onnx(api, settings, http_client, job, factor, &manifest_entry).await?;
+    let upscaled = if engine_id == "seedvr2" {
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Downloading,
+                0.25,
+                "Loading SeedVR2 weights.",
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+        let dir =
+            ensure_seedvr2_checkpoint(api, settings, http_client, job, &manifest_entry).await?;
 
-    update_job(
-        api,
-        &job.id,
-        progress_payload(
-            JobStatus::Running,
-            ProgressStage::Running,
-            0.45,
-            &format!("Upscaling {factor}x with {engine_id}."),
-            None,
-            None,
-            None,
-        ),
-    )
-    .await?;
-    let upscaled =
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Running,
+                0.45,
+                &format!("Upscaling {factor}x with SeedVR2."),
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+        run_seedvr2_upscale(dir, &source_image, factor, softness, seed).await?
+    } else {
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Downloading,
+                0.25,
+                "Loading Real-ESRGAN weights.",
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+        let onnx_path =
+            ensure_onnx(api, settings, http_client, job, factor, &manifest_entry).await?;
+
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Running,
+                0.45,
+                &format!("Upscaling {factor}x with Real-ESRGAN."),
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
         tokio::task::spawn_blocking(move || upscale_blocking(onnx_path, factor, source_image))
             .await
-            .map_err(|error| task_join_error("upscale task", error))??;
+            .map_err(|error| task_join_error("upscale task", error))??
+    };
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 
     // write exactly one child asset with lineage back to the source (mirrors
@@ -484,7 +707,7 @@ pub(crate) async fn run_image_upscale_job(
         .map(str::to_owned)
         .or(source_display)
         .unwrap_or_else(|| "Image".to_owned());
-    let upscale_settings = json!({
+    let mut upscale_settings = json!({
         "enabled": true,
         "engine": engine_id,
         "factor": factor,
@@ -493,6 +716,12 @@ pub(crate) async fn run_image_upscale_job(
         "width": out_w,
         "height": out_h,
     });
+    if engine_id == "seedvr2" {
+        // SeedVR2 is a generative one-step upscaler: record the detail/softness knob and the seed so
+        // the result is reproducible + the UI can surface what produced it.
+        upscale_settings["softness"] = json!(softness);
+        upscale_settings["seed"] = json!(seed);
+    }
     let fact = json!({
         "assetId": asset_id,
         "mediaPath": media_rel,
@@ -503,7 +732,7 @@ pub(crate) async fn run_image_upscale_job(
         "normalizedWidth": out_w,
         "normalizedHeight": out_h,
         "count": 1,
-        "seed": 0,
+        "seed": seed,
         "displayName": format!("{source_name} ({factor}x upscaled)"),
         "createdAt": created_at.clone(),
         "mode": "image_upscale",

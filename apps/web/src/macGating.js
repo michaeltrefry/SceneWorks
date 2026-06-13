@@ -104,13 +104,22 @@ export function macFeatureBlock(caps, key) {
   return null;
 }
 
-// Whether a specific image_upscale engine is dropped on Mac (sc-3668). AuraSR is a
-// torch-only GigaGAN dropped on Mac; Real-ESRGAN is the Mac upscaler. Engine ids match the
-// worker (real-esrgan / aura-sr). Only acts under active gating; a no-op (false) on
-// Windows/Linux and in observe mode, so the engine picker is untouched there.
+// Whether a specific image_upscale engine should be hidden from the picker on this platform.
+// Two engines are platform-restricted (ids match the worker):
+//   * `aura-sr` — a torch-only GigaGAN DROPPED on Mac (sc-3668). Hidden only under active Mac
+//     gating; available on Windows/Linux. Real-ESRGAN is the cross-platform default.
+//   * `seedvr2` — the native-MLX one-step diffusion upscaler (epic 4811 / sc-4815), the INVERSE:
+//     Mac-ONLY (the Windows/Linux backend is the separate Candle port, sc-5157). Gated off the
+//     platform-intrinsic `imageUpscaleSeedvr2` capability (true only on macOS, in any mode), so it
+//     is hidden pre-load and on Windows/Linux and shown on Mac — independent of the gating switch.
 export function macUpscaleEngineBlocked(caps, engine) {
-  if (engine !== "aura-sr") return false;
-  return Boolean(macFeatureBlock(caps, "imageUpscaleAuraSr"));
+  if (engine === "seedvr2") {
+    return caps?.features?.imageUpscaleSeedvr2?.supported !== true;
+  }
+  if (engine === "aura-sr") {
+    return Boolean(macFeatureBlock(caps, "imageUpscaleAuraSr"));
+  }
+  return false;
 }
 
 // Whether a training kernel has no native Rust trainer (so its base model is gated in Training).
