@@ -484,6 +484,11 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // works on a Python-free Mac. Only `engine=real-esrgan` (the default) is
         // served here; `aura-sr` stays on the Python worker (routing oracle).
         WorkerCapability::ImageUpscale,
+        // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
+        // (`mlx-gen-seedvr2`), served in-process by `video_jobs::run_video_upscale_job` —
+        // SceneWorks' first video upscaler. Decodes the source clip, runs the temporal-chunked
+        // 5D upscale, re-encodes, and passes the source audio through. Mac-only (no torch path).
+        WorkerCapability::VideoUpscale,
         // Real, model-backed person detection + tracking (epic 3482, sc-3488 /
         // sc-3633/3634/3709): the native-MLX YOLO11 detector + SORT/ByteTrack tracker +
         // SAM2 segmenter run in-process (`person_jobs` / `person_track` /

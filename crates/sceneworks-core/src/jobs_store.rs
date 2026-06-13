@@ -1841,6 +1841,7 @@ impl RouteDecision {
 fn job_is_any_mlx_eligible(job: &JobSnapshot) -> bool {
     job_is_mlx_eligible(job)
         || video_job_is_mlx_eligible(job)
+        || video_upscale_job_is_mlx_eligible(job)
         || training_job_is_mlx_eligible(job)
         || caption_job_is_mlx_eligible(job)
         || understanding_job_is_mlx_eligible(job)
@@ -2053,6 +2054,23 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
                     "image_upscale (AuraSR)",
                     "the Rust upscaler runs Real-ESRGAN; the AuraSR engine is dropped on Mac (available on Windows/Linux).",
                     Some("sc-3668"),
+                ))
+            }
+        }
+
+        // Video upscaling is net-new on Mac (epic 4811 / sc-4816): the native-MLX SeedVR2
+        // engine is the only path (there is no torch video upscaler), so a SeedVR2 job is
+        // supported and anything else has no in-process engine. Eligible jobs early-return
+        // `Ok` above via `job_is_any_mlx_eligible`; this arm is the defensive guard.
+        JobType::VideoUpscale => {
+            if video_upscale_job_is_mlx_eligible(job) {
+                Ok(())
+            } else {
+                Err(UnsupportedReason::new(
+                    model,
+                    "video_upscale (non-SeedVR2 engine)",
+                    "video upscaling runs on the native-MLX SeedVR2 engine (seedvr2); no other engine is available.",
+                    Some("epic 4811"),
                 ))
             }
         }
@@ -2364,6 +2382,18 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     );
     features.insert(
         "datasetCaptioning".to_owned(),
+        MacFeatureSupport {
+            supported: true,
+            reason: None,
+        },
+    );
+    features.insert(
+        // Video upscaling is net-new on Mac (epic 4811 / sc-4816): the native-MLX SeedVR2
+        // engine gives SceneWorks its first video upscaler, running in-process on the macOS
+        // MLX worker (zero-Python). There is no torch fallback (mac-only), so this feature is
+        // the gate for the Video Studio "Upscale" action. Must agree with the VideoUpscale arm
+        // of `mac_rust_supported` (what the UI shows == what routing accepts).
+        "videoUpscale".to_owned(),
         MacFeatureSupport {
             supported: true,
             reason: None,
@@ -3626,6 +3656,24 @@ fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     )
 }
 
+/// Whether a `video_upscale` job is MLX-eligible (epic 4811 / sc-4816). The only Mac engine is the
+/// native-MLX SeedVR2 upscaler (`mlx-gen-seedvr2`); there is no torch fallback (mac-only). A job with
+/// any other engine is refused by the mlx worker — though no other backend advertises `video_upscale`
+/// today, so an unsupported engine simply has nowhere to run (surfaced as unsupported, not silently
+/// dropped). Defaults to `seedvr2` when the payload omits the engine.
+fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::VideoUpscale) {
+        return false;
+    }
+    let engine = job
+        .payload
+        .get("engine")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "seedvr2".to_owned());
+    matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b")
+}
+
 /// Training kernels with NO non-Rust fallback — only the in-process Rust mlx worker
 /// can run them. `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049)
 /// retired that Python trainer, leaving the native Rust LTX trainer as the sole path,
@@ -3727,6 +3775,13 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // via `ort`/CoreML. `aura-sr` has no Rust path, so the mlx worker refuses it and
         // it stays on the Python torch worker.
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
+            return false;
+        }
+        // Video upscale (epic 4811 / sc-4816): the mlx worker runs the native SeedVR2 engine
+        // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; since there is no torch
+        // video-upscale backend, this is mac-only by construction.
+        if matches!(job.job_type, JobType::VideoUpscale) && !video_upscale_job_is_mlx_eligible(job)
+        {
             return false;
         }
         // SenseNova-U1 understanding (sc-3905): the mlx worker serves `image_vqa` /
@@ -3987,6 +4042,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::VideoGenerate
             | JobType::VideoExtend
             | JobType::VideoBridge
+            | JobType::VideoUpscale
             | JobType::PersonReplace
             | JobType::LoraTrain
             | JobType::TrainingCaption
@@ -4383,6 +4439,108 @@ mod candle_routing_tests {
                 json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "a" })
             )
         ));
+    }
+
+    // ---- SeedVR2 video upscale (epic 4811 / sc-4816) ----
+
+    /// A queued `video_upscale` job carrying `payload`.
+    fn video_upscale_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_vu",
+            "type": "video_upscale",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-13T00:00:00Z",
+            "updatedAt": "2026-06-13T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// An idle MLX (`gpu_id = "mlx"`) worker advertising `capabilities`.
+    fn mlx_worker(capabilities: &[&str]) -> WorkerSnapshot {
+        serde_json::from_value(json!({
+            "id": "worker_mlx",
+            "gpuId": "mlx",
+            "status": "idle",
+            "capabilities": capabilities,
+            "loadedModels": [],
+            "registeredAt": "2026-06-12T00:00:00Z",
+            "lastSeenAt": "2026-06-12T00:00:00Z",
+        }))
+        .expect("valid WorkerSnapshot")
+    }
+
+    #[test]
+    fn video_upscale_seedvr2_is_mlx_eligible_other_engines_are_not() {
+        // seedvr2 (alias + 3b id) and the absent-engine default are eligible.
+        for engine in [json!("seedvr2"), json!("seedvr2_3b"), Value::Null] {
+            let payload = if engine.is_null() {
+                json!({ "sourceAssetId": "a" })
+            } else {
+                json!({ "sourceAssetId": "a", "engine": engine })
+            };
+            assert!(
+                video_upscale_job_is_mlx_eligible(&video_upscale_job(payload.clone())),
+                "video_upscale should be MLX-eligible for {payload}"
+            );
+        }
+        // An unknown engine is not eligible (no torch video upscaler exists).
+        assert!(!video_upscale_job_is_mlx_eligible(&video_upscale_job(
+            json!({ "sourceAssetId": "a", "engine": "aura-sr" })
+        )));
+        // The predicate is gated to the job type.
+        assert!(!video_upscale_job_is_mlx_eligible(&video_generate_job(
+            json!({ "model": "wan_2_2" })
+        )));
+    }
+
+    #[test]
+    fn mlx_worker_claims_seedvr2_video_upscale_and_refuses_other_engines() {
+        let mlx = mlx_worker(&["gpu", "video_upscale"]);
+        assert!(worker_supports_job(
+            &mlx,
+            &video_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
+        ));
+        // A non-SeedVR2 engine is refused by the mlx worker (mac-only; nowhere else to run).
+        assert!(!worker_supports_job(
+            &mlx,
+            &video_upscale_job(json!({ "sourceAssetId": "a", "engine": "aura-sr" }))
+        ));
+    }
+
+    #[test]
+    fn video_upscale_requires_gpu() {
+        assert!(job_requires_gpu(&JobType::VideoUpscale));
+    }
+
+    #[test]
+    fn mac_capabilities_advertises_video_upscale() {
+        let caps = mac_capabilities("darwin", true);
+        let feature = caps
+            .features
+            .get("videoUpscale")
+            .expect("videoUpscale feature present");
+        assert!(feature.supported);
+        assert!(feature.reason.is_none());
+    }
+
+    #[test]
+    fn mac_rust_supports_seedvr2_video_upscale_only() {
+        assert!(mac_rust_supported(&video_upscale_job(
+            json!({ "sourceAssetId": "a", "engine": "seedvr2" })
+        ))
+        .is_ok());
+        assert!(mac_rust_supported(&video_upscale_job(
+            json!({ "sourceAssetId": "a", "engine": "aura-sr" })
+        ))
+        .is_err());
     }
 
     // ---- Candle caption lane (sc-5098) ----

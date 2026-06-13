@@ -54,6 +54,8 @@ use gen_core::{AdapterKind, Image, MoeExpert, ReplacementMode};
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_seedvr2 as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_svd as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_wan as _;
@@ -891,6 +893,451 @@ fn video_progress(
 }
 
 // ---------------------------------------------------------------------------
+// SeedVR2 video upscale (epic 4811, sc-4816): the net-new `video_upscale` job —
+// SceneWorks' first video upscaler. Decode the source clip -> native-MLX SeedVR2
+// one-step super-resolution (temporal chunking + overlap is internal to the engine)
+// -> encode + source-audio passthrough. macOS-only (no torch path). Reuses the shared
+// encode pipeline (`encode_media`) + the streaming engine driver (`generate_video`).
+// ---------------------------------------------------------------------------
+
+/// HF repo hosting the raw SeedVR2 checkpoint (`numz/SeedVR2_comfyUI`); the engine converts it
+/// in-memory at load (no Python). Override the staged dir with `SCENEWORKS_SEEDVR2_DIR`.
+#[cfg(target_os = "macos")]
+const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
+#[cfg(target_os = "macos")]
+const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
+#[cfg(target_os = "macos")]
+const SEEDVR2_DIT_3B_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
+/// The engine registry id wired for video upscale (3B; 7B = sc-5197).
+#[cfg(target_os = "macos")]
+const SEEDVR2_ENGINE_ID: &str = "seedvr2_3b";
+/// Adapter id recorded on the result asset (mirrors the other `mlx_*` video adapters).
+#[cfg(target_os = "macos")]
+const SEEDVR2_ADAPTER: &str = "mlx_seedvr2";
+#[cfg(target_os = "macos")]
+const SEEDVR2_CANCEL_MESSAGE: &str = "Video upscale canceled by user.";
+
+/// Snap a dimension to the SeedVR2 VAE/patch stride (a multiple of 16, the engine's hard
+/// requirement), rounding to nearest and clamping to the engine's `[16, 4096]` size range.
+#[cfg(target_os = "macos")]
+fn snap_seedvr2_dim(value: u32) -> u32 {
+    let rounded = value.saturating_add(8) / 16 * 16;
+    rounded.clamp(16, 4096)
+}
+
+/// Resolve a project-relative asset path safely under `project_path` (reject `..` / absolute
+/// components — same guard as `upscale_jobs::resolve_source`).
+#[cfg(target_os = "macos")]
+fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
+    let mut path = project_path.to_path_buf();
+    for component in Path::new(rel).components() {
+        match component {
+            std::path::Component::Normal(value) => path.push(value),
+            _ => return None,
+        }
+    }
+    Some(path)
+}
+
+/// Provision the SeedVR2 checkpoint dir: an env-pinned dir (pre-staged for local validation) wins,
+/// else the app cache (download the VAE + 3B DiT from `numz/SeedVR2_comfyUI` on first use). Returns
+/// the dir to hand the engine as `WeightsSource::Dir`.
+#[cfg(target_os = "macos")]
+async fn ensure_seedvr2_weights(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<PathBuf> {
+    let dir = std::env::var("SCENEWORKS_SEEDVR2_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| settings.data_dir.join("cache").join("seedvr2-mlx"));
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Video upscale canceled while fetching SeedVR2 weights.",
+        fresh_download: false,
+    };
+    for file in [SEEDVR2_VAE_FILE, SEEDVR2_DIT_3B_FILE] {
+        crate::downloads::ensure_hf_cached_file(
+            &context,
+            SEEDVR2_REPO,
+            "main",
+            file,
+            &dir.join(file),
+        )
+        .await?;
+    }
+    Ok(dir)
+}
+
+/// Decode every frame of `source` to an engine [`Image`] sequence (native resolution — the engine
+/// bicubic-upscales internally to the target). Uses the bundled ffmpeg (`run_ffmpeg`) into PNGs in a
+/// temp dir, then loads them in order. `-fps_mode passthrough` keeps the exact source frame count.
+#[cfg(target_os = "macos")]
+async fn decode_seedvr2_source_frames(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    source: &Path,
+) -> WorkerResult<Vec<Image>> {
+    let frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_src_{job_id}"));
+    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
+    tokio::fs::create_dir_all(&frames_dir).await?;
+    let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
+    let decode = run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-fps_mode".to_owned(),
+            "passthrough".to_owned(),
+            frames_dir
+                .join("in_%05d.png")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+        Some(ctx),
+    )
+    .await;
+    let loaded = match decode {
+        Ok(()) => {
+            let dir = frames_dir.clone();
+            tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+                let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+                    .collect();
+                paths.sort();
+                let mut frames = Vec::with_capacity(paths.len());
+                for path in paths {
+                    let image = image::open(&path)
+                        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
+                        .to_rgb8();
+                    frames.push(rgb_image_to_engine(image));
+                }
+                Ok(frames)
+            })
+            .await
+            .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
+        }
+        Err(error) => Err(error),
+    };
+    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
+    let frames = loaded?;
+    if frames.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "source video produced no frames to upscale".to_owned(),
+        ));
+    }
+    Ok(frames)
+}
+
+/// Dispatch handler for `JobType::VideoUpscale`: decode the source clip, run the native-MLX SeedVR2
+/// upscaler, re-encode, pass the source audio through, and stream a single upscaled video asset.
+#[cfg(target_os = "macos")]
+pub(crate) async fn run_video_upscale_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let req: sceneworks_core::contracts::VideoUpscaleRequest =
+        serde_json::from_value(Value::Object(job.payload.clone())).map_err(|error| {
+            WorkerError::InvalidPayload(format!("Invalid video_upscale payload: {error}"))
+        })?;
+    if req.source_asset_id.trim().is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Video upscale jobs require a source video asset.".to_owned(),
+        ));
+    }
+    let engine = req.engine.trim().to_ascii_lowercase();
+    if !matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b") {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Rust video upscaler supports only engine=seedvr2 (got {engine})."
+        )));
+    }
+    let project_id = req
+        .project_id
+        .clone()
+        .or_else(|| job.project_id.clone())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| WorkerError::InvalidPayload("Missing payload.projectId".to_owned()))?;
+    let factor: u32 = if req.factor == 4 { 4 } else { 2 };
+    let backend = backend_label(&settings.gpu_id);
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        video_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.05,
+            "Loading source video.",
+            None,
+            backend,
+        ),
+    )
+    .await?;
+
+    // Resolve the source video asset (on-disk path + fps + display name) from its sidecar.
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.get_project(&project_id)?;
+    let project_path = PathBuf::from(project.path);
+    let asset = store
+        .get_asset(&project_id, &req.source_asset_id)
+        .map_err(|_| WorkerError::InvalidPayload("Source video asset not found.".to_owned()))?;
+    let file = asset
+        .get("file")
+        .ok_or_else(|| WorkerError::InvalidPayload("Source asset has no media file.".to_owned()))?;
+    let rel = file.get("path").and_then(Value::as_str).ok_or_else(|| {
+        WorkerError::InvalidPayload("Source asset media path missing.".to_owned())
+    })?;
+    let source_path = safe_join(&project_path, rel)
+        .filter(|path| path.exists())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Source media file is unavailable.".to_owned())
+        })?;
+    let source_fps = file
+        .get("fps")
+        .and_then(Value::as_f64)
+        .map(|fps| fps.round() as u32)
+        .filter(|fps| *fps > 0)
+        .unwrap_or(24);
+    let source_display = asset
+        .get("displayName")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    check_cancel(api, &job.id, SEEDVR2_CANCEL_MESSAGE).await?;
+    update_job(
+        api,
+        &job.id,
+        video_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.1,
+            "Fetching SeedVR2 weights.",
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    let weights_dir = ensure_seedvr2_weights(api, settings, job).await?;
+
+    update_job(
+        api,
+        &job.id,
+        video_progress(
+            JobStatus::Running,
+            ProgressStage::Generating,
+            0.18,
+            "Decoding source frames.",
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    let source_frames = decode_seedvr2_source_frames(api, settings, &job.id, &source_path).await?;
+    let src_w = source_frames[0].width;
+    let src_h = source_frames[0].height;
+    let frame_count = source_frames.len() as u32;
+    let (target_w, target_h) = match (req.target_width, req.target_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => (src_w.saturating_mul(factor), src_h.saturating_mul(factor)),
+    };
+    let target_w = snap_seedvr2_dim(target_w);
+    let target_h = snap_seedvr2_dim(target_h);
+    let seed = req.seed.unwrap_or(0);
+
+    // Run the SeedVR2 upscale through the shared streaming driver (generator cache + stall
+    // watchdog + cancel + Generating-stage progress). The VideoClip conditioning carries the LR
+    // source frame sequence; `width`/`height` are the target output size (÷16).
+    let input = VideoGenInput {
+        engine_id: SEEDVR2_ENGINE_ID,
+        model_dir: weights_dir,
+        conditioning: vec![Conditioning::VideoClip {
+            frames: source_frames,
+            frame_idx: 0,
+            strength: 1.0,
+        }],
+        width: target_w,
+        height: target_h,
+        frames: frame_count,
+        fps: source_fps,
+        seed,
+        softness: Some(req.softness),
+        ..Default::default()
+    };
+    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let out_fps = decoded.fps;
+    let out_count = decoded.frames.len();
+    let (out_w, out_h) = decoded
+        .frames
+        .first()
+        .map(|frame| (frame.width, frame.height))
+        .unwrap_or((target_w, target_h));
+    let duration = out_count as f64 / out_fps.max(1) as f64;
+
+    // Plan the output asset path (nested under the per-generation id, like VideoPlan).
+    let genset_id = format!("genset_{}", Uuid::new_v4().simple());
+    let asset_id = fresh_asset_id();
+    let created_at = now_rfc3339();
+    let media_rel = format!(
+        "assets/videos/{genset_id}/{}_seedvr2_upscale.mp4",
+        &created_at[..10]
+    );
+    let media_path = project_path.join(&media_rel);
+    if let Some(parent) = media_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    update_job(
+        api,
+        &job.id,
+        video_progress(
+            JobStatus::Running,
+            ProgressStage::Muxing,
+            0.6,
+            "Encoding upscaled video.",
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    // Encode the upscaled frames to a (silent) mp4 + poster + faststart.
+    let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
+    encode_media(&media_path, decoded, Some(ctx)).await?;
+
+    // Source-audio passthrough: remux the source's audio onto the upscaled video. `-map 1:a:0?`
+    // makes audio optional, so a source with no audio yields a clean video-only file (no error);
+    // `-c:v copy` keeps the upscaled video stream untouched, `+faststart` is preserved.
+    update_job(
+        api,
+        &job.id,
+        video_progress(
+            JobStatus::Running,
+            ProgressStage::Muxing,
+            0.85,
+            "Muxing source audio.",
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    let mux_tmp = media_path.with_extension("audiomux.mp4");
+    let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            media_path.to_string_lossy().into_owned(),
+            "-i".to_owned(),
+            source_path.to_string_lossy().into_owned(),
+            "-map".to_owned(),
+            "0:v:0".to_owned(),
+            "-map".to_owned(),
+            "1:a:0?".to_owned(),
+            "-c:v".to_owned(),
+            "copy".to_owned(),
+            "-c:a".to_owned(),
+            "aac".to_owned(),
+            "-movflags".to_owned(),
+            "+faststart".to_owned(),
+            "-shortest".to_owned(),
+            mux_tmp.to_string_lossy().into_owned(),
+        ],
+        Some(ctx),
+    )
+    .await?;
+    tokio::fs::rename(&mux_tmp, &media_path).await?;
+
+    let display_name = req
+        .display_name
+        .clone()
+        .unwrap_or_else(|| match &source_display {
+            Some(name) => format!("{name} ({factor}x upscaled)"),
+            None => format!("Upscaled video ({factor}x)"),
+        });
+    let raw_settings = json!({
+        "engine": "seedvr2",
+        "model": req.model,
+        "factor": factor,
+        "softness": req.softness,
+        "sourceAssetId": req.source_asset_id,
+        "sourceWidth": src_w,
+        "sourceHeight": src_h,
+        "targetWidth": out_w,
+        "targetHeight": out_h,
+        "frameCount": out_count,
+    });
+    let fact = json!({
+        "type": "video",
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "video/mp4",
+        "width": out_w,
+        "height": out_h,
+        "duration": duration,
+        "fps": out_fps,
+        "quality": "best",
+        "family": "video",
+        "seed": seed as i64,
+        "displayName": display_name,
+        "createdAt": created_at,
+        "mode": "video_upscale",
+        "model": req.model,
+        "adapter": SEEDVR2_ADAPTER,
+        "prompt": "",
+        "negativePrompt": Value::Null,
+        "loras": [],
+        "rawAdapterSettings": raw_settings,
+        "sourceAssetId": req.source_asset_id,
+        "timelineContext": json!({}),
+    });
+    let result = json!({
+        "generationSetId": genset_id,
+        "expectedCount": 1,
+        "adapter": SEEDVR2_ADAPTER,
+        "model": req.model,
+        "generationSet": {
+            "id": genset_id,
+            "mode": "video_upscale",
+            "model": req.model,
+            "prompt": "",
+            "negativePrompt": Value::Null,
+            "count": 1,
+            "createdAt": created_at,
+        },
+        "assetWrites": [fact],
+    })
+    .as_object()
+    .cloned()
+    .expect("json! object literal");
+
+    update_job(
+        api,
+        &job.id,
+        video_progress(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Video upscale complete.",
+            Some(result),
+            backend,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Real MLX Wan2.2 generation (macOS, via mlx-gen-wan, sc-3034): T2V/TI2V (5B
 // dense, z48 VAE), T2V/I2V (A14B dual-expert MoE) + MoE/Lightning LoRA. Decodes
 // the engine's `GenerationOutput::Video { frames, fps, audio: None }` into a
@@ -1579,6 +2026,8 @@ struct VideoGenInput {
     decode_chunk_size: Option<u32>,
     // SVD motion-conditioning fps, decoupled from the output `fps` (sc-3764); `None` elsewhere.
     conditioning_fps: Option<u32>,
+    // SeedVR2 input pre-blur (sc-4816); `None` on the other models.
+    softness: Option<f32>,
 }
 
 #[cfg(any(
@@ -1612,6 +2061,7 @@ impl Default for VideoGenInput {
             noise_aug_strength: None,
             decode_chunk_size: None,
             conditioning_fps: None,
+            softness: None,
         }
     }
 }
@@ -1667,6 +2117,7 @@ fn run_loaded_video_generation(
         noise_aug_strength: input.noise_aug_strength,
         decode_chunk_size: input.decode_chunk_size,
         conditioning_fps: input.conditioning_fps,
+        softness: input.softness,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -4883,6 +5334,71 @@ mod tests {
             .frames
             .iter()
             .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
+    }
+
+    /// SeedVR2 video upscale (epic 4811 / sc-4816) end-to-end against the real 3B weights:
+    /// drives the same `run_loaded_video_generation` path the `video_upscale` handler uses
+    /// (a `VideoClip` of LR frames + a target size + `softness`), asserting an upscaled,
+    /// frame-count-preserving clip comes back. `#[ignore]` — the ~7 GB checkpoint lives outside
+    /// CI; run manually with `SCENEWORKS_SEEDVR2_DIR` pointed at a `numz/SeedVR2_comfyUI` snapshot
+    /// (e.g. the HF cache dir), on a Metal device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "loads the real SeedVR2 3B weights (~7GB); run manually with SCENEWORKS_SEEDVR2_DIR set"]
+    fn seedvr2_video_upscale_real_weights() {
+        let dir = std::env::var("SCENEWORKS_SEEDVR2_DIR")
+            .expect("set SCENEWORKS_SEEDVR2_DIR to a numz/SeedVR2_comfyUI checkpoint snapshot dir");
+        // 8 low-res frames (a multiple of 4 ≥ 8 so the 4:1 causal-VAE compression preserves the
+        // count) fed as the LR `VideoClip`; target = 2× (both ÷16).
+        let frames: Vec<Image> = (0..8)
+            .map(|i| Image {
+                width: 64,
+                height: 48,
+                pixels: stub_video_rgb8(64, 48, 7, i, 8),
+            })
+            .collect();
+        let input = VideoGenInput {
+            engine_id: "seedvr2_3b",
+            model_dir: PathBuf::from(dir),
+            conditioning: vec![Conditioning::VideoClip {
+                frames,
+                frame_idx: 0,
+                strength: 1.0,
+            }],
+            width: 128,
+            height: 96,
+            frames: 8,
+            fps: 16,
+            seed: 0,
+            softness: Some(0.3),
+            ..VideoGenInput::default()
+        };
+        let cancel = CancelFlag::new();
+        let decoded = run_video_generation(input, &cancel, &mut |_| {})
+            .expect("seedvr2 video upscale generation");
+        assert_eq!(
+            decoded.frames.len(),
+            8,
+            "frame count preserved (chunk multiple-of-4, ≥8)"
+        );
+        assert!(
+            decoded
+                .frames
+                .iter()
+                .all(|f| f.width == 128 && f.height == 96),
+            "every frame upscaled to the target 128x96"
+        );
+        assert!(
+            decoded
+                .frames
+                .iter()
+                .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+            "RGB8 buffers are well-formed"
+        );
+        assert!(
+            decoded.audio.is_none(),
+            "the engine emits no audio (worker muxes the source)"
+        );
     }
 
     /// `advanced.noAudio` maps to the engine's `video_mode = "no_audio"`; enhance flags

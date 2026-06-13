@@ -1258,6 +1258,37 @@ export function App() {
     [token, activeProject, requestedGpu],
   );
 
+  // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
+  // on the generic /api/v1/jobs endpoint (like image_upscale), not the generation video
+  // endpoint. `payload` carries { sourceAssetId, factor, engine, softness, model, displayName }.
+  const createVideoUpscaleJob = useCallback(
+    async (payload) => {
+      if (!activeProject) {
+        setError("Create or open a project first.");
+        return null;
+      }
+      try {
+        const job = await apiFetch("/api/v1/jobs", token, {
+          method: "POST",
+          body: JSON.stringify({
+            type: "video_upscale",
+            projectId: activeProject.id,
+            projectName: activeProject.name,
+            requestedGpu,
+            payload: { ...payload, projectId: activeProject.id },
+          }),
+        });
+        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, activeProject, requestedGpu],
+  );
+
   // Refine a prompt via the prompt_refine worker job: POST creates the job, then
   // poll until it reaches a terminal state and return the rewritten prompt. Project-
   // independent (no activeProject gate); throws on failure so the studio can surface
@@ -1652,6 +1683,7 @@ export function App() {
     workersById,
     // Generation studios (sc-1651 Phase B batch 3)
     createVideoJob,
+    createVideoUpscaleJob,
     createImageJob,
     refinePrompt,
     latestVideoAssets,
@@ -1742,7 +1774,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
-    createVideoJob, createImageJob, refinePrompt, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, latestVideoAssets, recentImageAssets,
     recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
     rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,
