@@ -196,7 +196,7 @@ pub(crate) async fn run_video_generate_job(
                     )
                     .await?,
                     WAN_ADAPTER,
-                    wan_raw_settings(&request),
+                    wan_raw_settings(&request, engine_id),
                     None,
                 )
             }
@@ -216,7 +216,7 @@ pub(crate) async fn run_video_generate_job(
             )
             .await?,
             WAN_ADAPTER,
-            wan_raw_settings(&request),
+            wan_raw_settings(&request, engine_id),
             None,
         )
     } else if let Some(engine_id) =
@@ -859,14 +859,23 @@ const WAN_ADAPTER: &str = "mlx_wan";
 const MAX_JOB_LORAS: usize = 3;
 
 /// Raw-settings recorded on a real MLX Wan asset: the request's `advanced` knobs plus
-/// the real-inference markers (mirrors the image `mlx_raw_settings`).
+/// the real-inference markers (mirrors the image `mlx_raw_settings`). Also records the
+/// effective sampler the worker actually dispatched (sc-4997) — the 5B interim default / the
+/// 14B Lightning preset — so the chosen steps/CFG is inspectable on the asset, not silent.
 #[cfg(target_os = "macos")]
-fn wan_raw_settings(request: &VideoRequest) -> Value {
+fn wan_raw_settings(request: &VideoRequest, engine_id: &str) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
     raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
+    let (steps, guidance) = wan_sampling(engine_id, request);
+    if let Some(steps) = steps {
+        raw.insert("effectiveSteps".to_owned(), json!(steps));
+    }
+    if let Some(guidance) = guidance {
+        raw.insert("effectiveGuidanceScale".to_owned(), json!(guidance));
+    }
     Value::Object(raw)
 }
 
@@ -983,25 +992,37 @@ fn local_mlx_dir(settings: &Settings, env: &str, local_id: &str) -> Option<PathB
         .find(|dir| dir.join("config.json").is_file())
 }
 
-/// The 4-step Lightning distill LoRA pair (high/low) for the T2V-A14B
-/// (`lightx2v/Wan2.2-Lightning`, the rank-64 Seko V1.1 distill). Errors if not downloaded.
+/// The 4-step Lightning distill LoRA pair (high/low) for an A14B MoE model
+/// (`lightx2v/Wan2.2-Lightning`, the rank-64 Seko distill). The subdir is architecture-specific:
+/// T2V-A14B (V1.1) and I2V-A14B (V1) ship distinct LoRAs that are NOT cross-compatible (sc-4997).
+/// Errors if not downloaded / the per-architecture subdir is missing.
 #[cfg(target_os = "macos")]
-fn resolve_lightning_loras(settings: &Settings) -> WorkerResult<(PathBuf, PathBuf)> {
+fn resolve_lightning_loras(
+    settings: &Settings,
+    engine_id: &str,
+) -> WorkerResult<(PathBuf, PathBuf)> {
     let snapshot = huggingface_snapshot_dir(&settings.data_dir, "lightx2v/Wan2.2-Lightning")
         .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "wan_2_2_t2v_14b: the Lightning distill LoRA (lightx2v/Wan2.2-Lightning) is not \
+            WorkerError::InvalidPayload(format!(
+                "{engine_id}: the Lightning distill LoRA (lightx2v/Wan2.2-Lightning) is not \
                  downloaded — fetch it via the model manager"
-                    .to_owned(),
-            )
+            ))
         })?;
-    let base = "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1";
+    let base = match engine_id {
+        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        other => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{other}: no Lightning distill LoRA — only the A14B MoE models bake Lightning"
+            )))
+        }
+    };
     let high = snapshot.join(base).join("high_noise_model.safetensors");
     let low = snapshot.join(base).join("low_noise_model.safetensors");
     for file in [&high, &low] {
         if !file.is_file() {
             return Err(WorkerError::InvalidPayload(format!(
-                "wan_2_2_t2v_14b: Lightning LoRA file missing: {}",
+                "{engine_id}: Lightning LoRA file missing: {}",
                 file.display()
             )));
         }
@@ -1059,7 +1080,8 @@ fn lora_scale(lora: &Value) -> f32 {
 }
 
 /// Build the adapter specs for a Wan generation (sc-3034): the Lightning distill pair
-/// (T2V-14B only, tagged high/low) followed by the user LoRAs. On the MoE models a user
+/// (both A14B MoE models — T2V + I2V — tagged high/low, sc-4997) followed by the user LoRAs.
+/// On the MoE models a user
 /// `*.high_noise.safetensors` with a `.low_noise` sibling tags high→High / low→Low; a
 /// single-file LoRA is shared (both experts on MoE, the single model on the 5B). peft LoKr AND
 /// third-party LyCORIS (LoHa / non-peft LoKr) both apply on the MLX Wan/LTX paths now (epic 3641,
@@ -1078,9 +1100,10 @@ fn resolve_wan_adapters(
     let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
     let mut specs: Vec<AdapterSpec> = Vec::new();
 
-    // Lightning distill (T2V-14B only): 4-step, applied per-expert at strength 1.0.
-    if engine_id == "wan2_2_t2v_14b" {
-        let (high, low) = resolve_lightning_loras(settings)?;
+    // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied
+    // per-expert at strength 1.0. The subdir is resolved per architecture (not cross-compatible).
+    if is_moe {
+        let (high, low) = resolve_lightning_loras(settings, engine_id)?;
         specs.push(moe_adapter(high, 1.0, AdapterKind::Lora, MoeExpert::High));
         specs.push(moe_adapter(low, 1.0, AdapterKind::Lora, MoeExpert::Low));
     }
@@ -1414,15 +1437,52 @@ fn resolve_wan_quant(request: &VideoRequest) -> Option<Quant> {
     }
 }
 
-/// Per-model sampling overrides: the T2V-14B runs the 4-step Lightning distill at guide
-/// 1.0; the 5B / I2V-14B use the engine's config defaults (`None` → engine fills in).
+/// Interim step count for the dense TI2V-5B until a 5B distill LoRA ships (sc-4999): half the
+/// engine's 40-step default, so an out-of-the-box 1280×720 job no longer runs the ~40-min /
+/// GPU-wedging 40-step+CFG schedule that wedged the GPU (sc-4986 / sc-4997). CFG is retained
+/// (no 5B distill exists, so dropping it would hurt prompt adherence); the user can still dial
+/// `steps`/`guidanceScale` lower from VideoStudio, and the engine pre-flight guard (sc-4986) is
+/// the memory backstop. The full few-step / no-CFG preset lands once the 5B distill LoRA exists.
 #[cfg(target_os = "macos")]
-fn wan_sampling(engine_id: &str) -> (Option<u32>, Option<f32>) {
-    if engine_id == "wan2_2_t2v_14b" {
-        (Some(4), Some(1.0))
-    } else {
-        (None, None)
+const WAN5B_INTERIM_STEPS: u32 = 20;
+
+/// An optional positive-integer `advanced` knob (`steps`); accepts a number or a numeric string.
+#[cfg(target_os = "macos")]
+fn advanced_opt_u32(request: &VideoRequest, key: &str) -> Option<u32> {
+    request.advanced.get(key).and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .map(|value| value as u32)
+    })
+}
+
+/// An optional float `advanced` knob (`guidanceScale`); accepts a number or a numeric string.
+#[cfg(target_os = "macos")]
+fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32> {
+    request.advanced.get(key).and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .map(|value| value as f32)
+    })
+}
+
+/// Per-model sampling for the base Wan path (sc-3034 / sc-4997). Both A14B MoE models (T2V + I2V)
+/// bake the 4-step Lightning distill → forced 4 steps / CFG-off (guide 1.0); the distill is
+/// mandatory, so a user `steps`/`guidanceScale` can't break it. The dense TI2V-5B has no distill
+/// LoRA yet (sc-4999): honor an explicit user `steps`/`guidanceScale`, else apply the interim
+/// default ([`WAN5B_INTERIM_STEPS`], CFG retained). `None` ⇒ the engine config default.
+#[cfg(target_os = "macos")]
+fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option<f32>) {
+    if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
+        return (Some(4), Some(1.0));
     }
+    // wan2_2_ti2v_5b (dense): user override wins, else the interim default; CFG left to the
+    // engine (guide 5.0) unless the user disables it via `guidanceScale`.
+    let steps = advanced_opt_u32(request, "steps").or(Some(WAN5B_INTERIM_STEPS));
+    let guidance = advanced_opt_f32(request, "guidanceScale");
+    (steps, guidance)
 }
 
 /// The resolved inputs for one video generation (engine load + request build), shared by
@@ -1803,7 +1863,7 @@ async fn generate_wan(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
-    let (steps, guidance) = wan_sampling(engine_id);
+    let (steps, guidance) = wan_sampling(engine_id, request);
     let negative_prompt = {
         let trimmed = request.negative_prompt.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -4115,14 +4175,29 @@ mod tests {
         assert_eq!(wan_engine_id("z_image_turbo"), None);
     }
 
-    /// Per-model sampling: only the T2V-14B forces the 4-step Lightning preset; the
-    /// others defer to the engine config defaults.
+    /// Per-model sampling (sc-4997): both A14B MoE models (T2V + I2V) force the 4-step
+    /// Lightning preset (CFG off); the dense 5B honors an explicit user `steps`/`guidanceScale`
+    /// and otherwise applies the interim default with CFG retained.
     #[cfg(target_os = "macos")]
     #[test]
-    fn wan_sampling_only_overrides_t2v_14b() {
-        assert_eq!(wan_sampling("wan2_2_t2v_14b"), (Some(4), Some(1.0)));
-        assert_eq!(wan_sampling("wan2_2_ti2v_5b"), (None, None));
-        assert_eq!(wan_sampling("wan2_2_i2v_14b"), (None, None));
+    fn wan_sampling_overrides_both_14b_and_5b_interim() {
+        let req = request(json!({ "projectId": "p" }));
+        // Both A14B MoE models: forced 4-step / guide 1.0 (Lightning baked).
+        assert_eq!(wan_sampling("wan2_2_t2v_14b", &req), (Some(4), Some(1.0)));
+        assert_eq!(wan_sampling("wan2_2_i2v_14b", &req), (Some(4), Some(1.0)));
+        // 5B, no override → interim default steps, CFG left to the engine (None ⇒ guide 5.0).
+        assert_eq!(
+            wan_sampling("wan2_2_ti2v_5b", &req),
+            (Some(WAN5B_INTERIM_STEPS), None)
+        );
+        // 5B honors an explicit user steps + guidanceScale (e.g. the ComfyUI fast settings).
+        let over = request(json!({
+            "projectId": "p", "advanced": { "steps": 6, "guidanceScale": 1.0 }
+        }));
+        assert_eq!(wan_sampling("wan2_2_ti2v_5b", &over), (Some(6), Some(1.0)));
+        // The 14B Lightning preset ignores user overrides — the distill is mandatory.
+        assert_eq!(wan_sampling("wan2_2_t2v_14b", &over), (Some(4), Some(1.0)));
+        assert_eq!(wan_sampling("wan2_2_i2v_14b", &over), (Some(4), Some(1.0)));
     }
 
     /// `advanced.mlxQuantize` maps to a quant level; absent → dense / engine-resolved.
