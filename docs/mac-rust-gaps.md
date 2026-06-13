@@ -109,13 +109,13 @@ for traceability (all ✅ Ported; see also §6):
 
 ## 4. Training (`lora_train`)
 
-`MLX_ROUTED_TRAINING_KERNELS` = `z_image_lora`, `sdxl_lora`, `kolors_lora`, `wan_lora`,
+`MLX_ROUTED_TRAINING_KERNELS` = `z_image_lora`, `sdxl_lora`, `kolors_lora`, `lens_lora`, `wan_lora`,
 `wan_moe_lora`, `ltx_mlx_lora` (the last is MLX-only). Gaps:
 
 | Kernel | Status | Closing work |
 |---|---|---|
 | `kolors_lora` (SDXL U-Net + ChatGLM3) | ✅ Ported (native mlx-gen `KolorsTrainer`, LoRA + LoKr) | engine sc-4568, SceneWorks cutover sc-4732 |
-| `lens_lora` (Python sidecar trainer) | 🔵 Port-pending | epic 3039 (follows Lens model port, epic 3164) |
+| `lens_lora` (gpt-oss MoE + Lens MMDiT) | ✅ Ported (native mlx-gen `LensTrainer`, LoRA + LoKr) | engine sc-5148, SceneWorks cutover sc-5180 (off-Mac keeps the Python sidecar trainer) |
 | LoKr-on-Wan (`wan_lora` / `wan_moe_lora` + `networkType=lokr`) | 🔵 Port-pending | epic 3039 |
 
 ## 5. Non-model Python infrastructure
@@ -155,8 +155,9 @@ Listed so a reviewer doesn't re-file these. All run in the Rust/MLX flow on Mac.
   — gpt-oss-20b MoE text encoder + 48-layer dual-stream MMDiT + Flux.2 VAE; pure T2I, standard
   guidance + negative prompt, Q4/Q8 (encoder MoE + DiT), LoRA + LoKr at load (`mlx-gen-lens`,
   `mac_only`). Retires the Python `/opt/lens-venv` transformers-5 sidecar on Mac (Win/Linux/Docker
-  keep the torch path). LoRA/LoKr *training* stays in the Python trainer (`lens_lora`, see §4 /
-  epic 3039 — a recorded non-goal). epic 3164 / sc-5105.
+  keep the torch path). LoRA/LoKr *training* is also native MLX now — the `lens_lora` kernel routes to
+  the `mlx-gen-lens` Rust trainer on Mac (engine sc-5148, worker cutover sc-5180; off-Mac keeps the
+  Python sidecar trainer). epic 3164 / sc-5105.
 - SDXL advanced shapes — reference/IP-Adapter, `edit_image`, masked inpaint, outpaint, and
   tile-detail (`image_detail` on `sdxl`/`realvisxl`) — epic 3041 / sc-3060.
 - Z-Image img2img-edit: `z_image_edit` + `z_image_turbo` `edit_image` mode (Turbo weights via the

@@ -30,11 +30,13 @@ use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
 // decides which backend crates register, not which contract types this module names.
 #[cfg(target_os = "macos")]
 use gen_core::{
-    CancelFlag, LoadSpec, LrSchedule, NetworkType, TrainingConfig, TrainingItem, TrainingOutput,
-    TrainingProgress, TrainingRequest, WeightsSource,
+    CancelFlag, LoadSpec, LrSchedule, NetworkType, Precision, TrainingConfig, TrainingItem,
+    TrainingOutput, TrainingProgress, TrainingRequest, WeightsSource,
 };
 #[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
+#[cfg(target_os = "macos")]
+use mlx_gen_lens as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
 #[cfg(target_os = "macos")]
@@ -267,6 +269,9 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // Kolors is an SDXL U-Net under a ChatGLM3-6B encoder; the engine registers its
         // LoRA/LoKr trainer under the same id as its generator (`"kolors"`), sc-4568.
         "kolors_lora" => Some("kolors"),
+        // Lens trains the base `microsoft/Lens` DiT; the engine registers its LoRA/LoKr trainer
+        // under the base generator id `"lens"` (arch-identical to lens_turbo), sc-5148.
+        "lens_lora" => Some("lens"),
         "ltx_mlx_lora" => Some("ltx_2_3"),
         // Dense Wan2.2-TI2V-5B.
         "wan_lora" => Some("wan2_2_ti2v_5b"),
@@ -491,11 +496,26 @@ async fn run_training_execution(
     let blocking = {
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            let mut trainer =
-                gen_core::load_trainer(engine_id, &LoadSpec::new(WeightsSource::Dir(weights_dir)))
-                    .map_err(|error| {
-                        WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
-                    })?;
+            // Load precision tracks the requested `train_dtype` (advanced `mixedPrecision`, default
+            // bf16). The Lens trainer loads its DiT at this precision and enforces `train_dtype`
+            // against it (sc-5148), so f32 training must load at Fp32; the cast-based trainers
+            // (z-image/kolors/sdxl/wan/ltx) load dense and ignore `precision`, so this is inert for
+            // them — the default bf16 path is byte-identical to before.
+            let load_precision = if config.train_dtype.trim().eq_ignore_ascii_case("f32") {
+                Precision::Fp32
+            } else {
+                Precision::Bf16
+            };
+            let mut trainer = gen_core::load_trainer(
+                engine_id,
+                &LoadSpec {
+                    precision: load_precision,
+                    ..LoadSpec::new(WeightsSource::Dir(weights_dir))
+                },
+            )
+            .map_err(|error| {
+                WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+            })?;
             let request = TrainingRequest {
                 items,
                 config,
@@ -1196,8 +1216,9 @@ mod tests {
             // Kolors gained a native mlx-gen trainer (sc-4568) and now routes here (sc-4732);
             // the trainer registers under the generator id `"kolors"`.
             ("kolors_lora", "kolors", Some("kolors")),
-            // Lens (sidecar) has no mlx-gen trainer crate — never routes here, maps to None.
-            ("lens_lora", "lens", None),
+            // Lens gained a native mlx-gen trainer (sc-5148) and now routes here (sc-5180); the
+            // trainer registers under the base generator id `"lens"`.
+            ("lens_lora", "lens", Some("lens")),
             // Unknown A14B base model variant.
             ("wan_moe_lora", "wan_2_2_mystery", None),
         ];
@@ -1375,6 +1396,105 @@ mod tests {
         assert!(last_loss.is_finite(), "a training-step loss was observed");
         assert!(
             output_dir.join("kolors_smoke.safetensors").exists(),
+            "trained adapter was written"
+        );
+    }
+
+    /// sc-5180 — the Lens training cutover's worker smoke: load the Lens trainer from the installed
+    /// `microsoft/Lens` snapshot and run two LoRA micro-steps on a one-image dataset. Proves the
+    /// worker LINKS `mlx-gen-lens` (the `load_trainer("lens", …)` trainer registration survives
+    /// linker GC — the dead-strip gotcha that bit Kolors) and a real step runs (finite loss) + writes
+    /// an adapter through the full worker path. The trainer loads the gpt-oss encoder Q8 (~12 GB) +
+    /// the DiT bf16 (res 64 keeps the per-step graph tiny — the encoder load is the heavy part).
+    /// Run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored lens_real_weights_trains --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real microsoft/Lens weights + Metal device; loads the 20B gpt-oss encoder (Q8)"]
+    fn lens_real_weights_trains_a_lora_step() {
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME set"));
+        let snapshot = std::fs::read_dir(
+            home.join(".cache/huggingface/hub/models--microsoft--Lens/snapshots"),
+        )
+        .expect("lens snapshots dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir() && path.join("transformer").is_dir())
+        .expect("a microsoft/Lens snapshot dir");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let image_path = tmp.path().join("swatch.png");
+        image::RgbImage::from_fn(256, 256, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        })
+        .save(&image_path)
+        .expect("write test image");
+        let output_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = TrainingConfig {
+            rank: 4,
+            alpha: 4.0,
+            learning_rate: 1e-4,
+            steps: 2,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            gradient_checkpointing: false,
+            train_dtype: "bf16".to_owned(),
+            resolution: 64,
+            save_every: 0,
+            seed: 42,
+            optimizer: "adamw".to_owned(),
+            weight_decay: 0.0,
+            lr_scheduler: LrSchedule::parse("constant"),
+            lr_warmup_steps: 0,
+            network_type: NetworkType::parse("lora"),
+            decompose_factor: -1,
+            lora_target_modules: Vec::new(),
+            timestep_type: "sigmoid".to_owned(),
+            timestep_bias: "balanced".to_owned(),
+            loss_type: "mse".to_owned(),
+            trigger_word: None,
+        };
+        let request = TrainingRequest {
+            items: vec![TrainingItem {
+                image_path,
+                caption: "a colorful test swatch".to_owned(),
+            }],
+            config,
+            output_dir: output_dir.clone(),
+            file_name: "lens_smoke.safetensors".to_owned(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        };
+
+        let mut trainer =
+            gen_core::load_trainer("lens", &LoadSpec::new(WeightsSource::Dir(snapshot)))
+                .expect("lens trainer loads + is registered (mlx_gen_lens force-link survived GC)");
+        trainer
+            .validate(&request)
+            .expect("trainer accepts the plan");
+        let mut last_loss = f32::NAN;
+        let output = trainer
+            .train(&request, &mut |progress| {
+                if let TrainingProgress::Training { loss, .. } = progress {
+                    last_loss = loss;
+                }
+            })
+            .expect("training runs a step");
+
+        eprintln!(
+            "[lens-train-smoke] steps={} final_loss={} last_step_loss={} adapter={}",
+            output.steps,
+            output.final_loss,
+            last_loss,
+            output.adapter_path.display()
+        );
+        assert!(output.steps >= 1, "expected at least one micro-step");
+        assert!(output.final_loss.is_finite(), "final loss must be finite");
+        assert!(last_loss.is_finite(), "a training-step loss was observed");
+        assert!(
+            output_dir.join("lens_smoke.safetensors").exists(),
             "trained adapter was written"
         );
     }

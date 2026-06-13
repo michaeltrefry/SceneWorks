@@ -2547,14 +2547,9 @@ fn classify_training_gap(payload: &Map<String, Value>) -> UnsupportedReason {
         .and_then(|target| target.get("kernel"))
         .and_then(Value::as_str);
     match kernel {
-        // `kolors_lora` is no longer a gap — it has a native mlx-gen Rust trainer (sc-4568)
-        // and routes to the mlx worker (sc-4732); it never reaches this classifier.
-        Some("lens_lora") => UnsupportedReason::new(
-            None,
-            "Lens LoRA training",
-            "the Lens trainer runs in a Python sidecar with no mlx-gen Rust trainer.",
-            Some("epic 3039"),
-        ),
+        // `kolors_lora` (sc-4568/sc-4732) and `lens_lora` (sc-5148/sc-5180) are no longer gaps —
+        // both have native mlx-gen Rust trainers and route to the mlx worker, so they never reach
+        // this classifier.
         Some("wan_lora") | Some("wan_moe_lora") => UnsupportedReason::new(
             None,
             "LoKr-on-Wan training",
@@ -3431,8 +3426,8 @@ fn kolors_mlx_eligible(_payload: &Map<String, Value>) -> bool {
 /// mode — which Lens has no path for on any platform (`supportsEdit=false`) — stays off MLX so it is
 /// never silently run as plain T2I against a dropped source image (defensive; the UI never offers
 /// edit for Lens). Mirrors [`chroma_mlx_eligible`]. (LoRA/LoKr apply at load on the DiT — sc-3174 —
-/// so a LoRA never forces torch; training stays Python via the `lens_lora` kernel, a recorded
-/// non-goal.)
+/// so a LoRA never forces torch; LoRA/LoKr *training* is also native MLX now — the `lens_lora` kernel
+/// routes to the `mlx-gen-lens` Rust trainer via [`MLX_ROUTED_TRAINING_KERNELS`], sc-5148/sc-5180.)
 fn lens_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
@@ -3552,12 +3547,13 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
 /// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
 /// kernel and base model onto an engine trainer id). `kolors_lora` (SDXL U-Net plus
 /// ChatGLM3) gained a native trainer in sc-4568, cut over here in sc-4732. `lens_lora`
-/// (sidecar) has no mlx-gen crate, so it stays on the Python torch worker. A kernel
-/// absent here is never routed to the mlx worker.
+/// gained a native mlx-gen-lens trainer in sc-5148, cut over here in sc-5180 (off-Mac
+/// keeps the Python sidecar trainer). A kernel absent here is never routed to the mlx worker.
 const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",
+    "lens_lora",
     "wan_lora",
     "wan_moe_lora",
     "ltx_mlx_lora",
