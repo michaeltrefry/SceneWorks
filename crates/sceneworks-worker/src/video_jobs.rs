@@ -4354,6 +4354,88 @@ mod tests {
             .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
     }
 
+    /// Real-weight perf probe for the TI2V-5B (sc-4997): measures the load / DiT-denoise /
+    /// VAE-decode wall-clock split at a configurable resolution, frame count, step count, and
+    /// CFG — to ground the "under 10 min" target on real numbers instead of estimates. Env-driven
+    /// so configs run without recompiling. MUST be `--release` (debug MLX timing is meaningless):
+    ///   SCENEWORKS_MLX_WAN5B_DIR=~/.cache/mlx-gen-models/wan_2_2_ti2v_5b_mlx_bf16 \
+    ///   WAN_TIMING_W=1280 WAN_TIMING_H=720 WAN_TIMING_FRAMES=121 WAN_TIMING_STEPS=20 WAN_TIMING_CFG=on \
+    ///   cargo test -p sceneworks-worker --release --lib wan_5b_timing -- --ignored --nocapture
+    /// CFG: `off`/`1` ⇒ guide 1.0 (no CFG); a number ⇒ that scale; `on`/unset ⇒ engine default (5.0).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight perf probe; needs the converted TI2V-5B snapshot + a Metal device"]
+    fn wan_5b_timing() {
+        use std::time::Instant;
+        let Some(model_dir) = wan_5b_dir() else {
+            eprintln!("skipping wan_5b_timing: no converted TI2V-5B dir found");
+            return;
+        };
+        let env_u32 = |k: &str, d: u32| {
+            std::env::var(k)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(d)
+        };
+        let width = env_u32("WAN_TIMING_W", 1280);
+        let height = env_u32("WAN_TIMING_H", 720);
+        let frames = env_u32("WAN_TIMING_FRAMES", 121);
+        let steps = env_u32("WAN_TIMING_STEPS", 20);
+        let guidance = match std::env::var("WAN_TIMING_CFG")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("off") | Some("1") | Some("1.0") => Some(1.0_f32),
+            Some("on") | Some("") | None => None,
+            Some(other) => other.parse().ok(),
+        };
+        let input = VideoGenInput {
+            engine_id: "wan2_2_ti2v_5b",
+            model_dir,
+            prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
+            width,
+            height,
+            frames,
+            fps: 24,
+            steps: Some(steps),
+            guidance,
+            seed: 7,
+            ..VideoGenInput::default()
+        };
+        let cancel = CancelFlag::new();
+        let start = Instant::now();
+        let mut first_step: Option<Instant> = None;
+        let mut last_step: Option<Instant> = None;
+        let mut decode_at: Option<Instant> = None;
+        let mut on_progress = |progress: Progress| match progress {
+            Progress::Step { .. } => {
+                let now = Instant::now();
+                first_step.get_or_insert(now);
+                last_step = Some(now);
+            }
+            Progress::Decoding => {
+                decode_at.get_or_insert(Instant::now());
+            }
+        };
+        let decoded =
+            run_video_generation(input, &cancel, &mut on_progress).expect("5B generation");
+        let end = Instant::now();
+        let secs = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64();
+        let fs = first_step.unwrap_or(start);
+        let dec = decode_at.or(last_step).unwrap_or(end);
+        eprintln!(
+            "WAN5B_TIMING {width}x{height} frames={frames} steps={steps} cfg={} => \
+             total={:.1}s load={:.1}s dit={:.1}s vae={:.1}s out_frames={}",
+            guidance.map_or_else(|| "5.0(default)".to_owned(), |g| format!("{g}")),
+            secs(start, end),
+            secs(start, fs),
+            secs(fs, dec),
+            secs(dec, end),
+            decoded.frames.len(),
+        );
+    }
+
     /// LTX model-id → engine-id mapping (both base + eros load the one engine model).
     #[cfg(target_os = "macos")]
     #[test]

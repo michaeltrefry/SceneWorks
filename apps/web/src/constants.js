@@ -448,7 +448,10 @@ export const fallbackModels = [
     name: "Wan2.2",
     type: "video",
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    defaults: { duration: 5, fps: 24, resolution: "1280x720", quality: "balanced" },
+    // Default to 832x480 for a sane out-of-the-box time on the Mac MLX path (sc-4997): measured
+    // 5B @ 832x480/121f/20-step/CFG = ~5 min vs ~20 min at 1280x720 (the z48 VAE decode dominates
+    // at high res). 1280x720 stays user-selectable via `limits.resolutions` for those who accept it.
+    defaults: { duration: 5, fps: 24, resolution: "832x480", quality: "balanced" },
     limits: {
       durations: [4, 5, 6, 7, 8],
       recommendedMaxDuration: 7,
