@@ -34,23 +34,49 @@ use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 // `as _;` provider links below stay mlx-gen-specific (they register the video engines into the
 // registry). `cfg(target_os)` decides which backend crates link, not which contract types this
 // module names.
-#[cfg(target_os = "macos")]
+// Backend-neutral contract types shared by the macOS MLX video path AND the Windows candle video
+// lane (sc-5097): the streaming driver (`generate_video`), the output decode
+// (`run_loaded_video_generation`), and `VideoGenInput`/`video_load_spec` are all backend-neutral, so
+// these types compile on both lanes. `cfg(target_os)` decides which provider crate registered the
+// video engine, not which contract types this module names.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use gen_core::{
-    AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
-    Generator, Image, LoadSpec, MoeExpert, Precision, Progress, Quant, ReplacementMode,
-    WeightsSource,
+    AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
+    LoadSpec, Precision, Progress, Quant, WeightsSource,
 };
+// MLX-only contract types (LoRA classification, MoE experts, ControlNet/VACE conditioning, Wan-VACE
+// replacement) — the candle txt2video first slice uses none of these.
+#[cfg(target_os = "macos")]
+use gen_core::{AdapterKind, Image, MoeExpert, ReplacementMode};
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_svd as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_wan as _;
+// Candle (Windows/CUDA) video providers (sc-5097) — force-link anchors so their `inventory::submit!`
+// registrations (`wan2_2_ti2v_5b` / `ltx_2_3_distilled`) survive the MSVC release linker, mirroring
+// the image providers in image_jobs.rs.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_ltx as _;
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_wan as _;
 #[cfg(target_os = "macos")]
 use sceneworks_core::character_store::CharacterStore;
-#[cfg(target_os = "macos")]
+// Frame-count stride coercion (Wan needs frames ≡ 1 mod 4; LTX snaps to 8k+1) — used by the MLX path
+// and the candle entry (sc-5097).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use sceneworks_core::video_request::{ltx_frame_count, wan_frame_count};
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use std::time::{Duration, Instant};
 
 /// Stub adapter id recorded on generated assets — matches the Python
@@ -270,7 +296,29 @@ pub(crate) async fn run_video_generate_job(
             None,
         )
     };
-    #[cfg(not(target_os = "macos"))]
+    // Windows/CUDA candle video lane (sc-5097): a real wan/ltx txt2video job runs through
+    // `generate_candle_video` (the same neutral encode/mux path as MLX + the stub); anything the
+    // candle lane doesn't serve stubs exactly as before. Gated on `backend_candle_enabled` (default
+    // off → routing unchanged until parity). Conditioning shapes never reach here — the router's
+    // `video_job_is_candle_eligible` confines the candle worker to txt2video.
+    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    let (decoded, adapter, raw_settings, replacement_status) =
+        if settings.backend_candle_enabled && is_candle_video_engine(&request.model) {
+            let (decoded, adapter, raw_settings) =
+                generate_candle_video(api, settings, job, &request, backend).await?;
+            (decoded, adapter, raw_settings, None::<Value>)
+        } else {
+            (
+                generate_stub_video(&request, seed),
+                STUB_ADAPTER,
+                stub_raw_settings(&request),
+                None::<Value>,
+            )
+        };
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "windows", feature = "backend-candle")
+    )))]
     let (decoded, adapter, raw_settings, replacement_status) = (
         generate_stub_video(&request, seed),
         STUB_ADAPTER,
@@ -1447,7 +1495,11 @@ fn resolve_wan_quant(request: &VideoRequest) -> Option<Quant> {
 const WAN5B_INTERIM_STEPS: u32 = 20;
 
 /// An optional positive-integer `advanced` knob (`steps`); accepts a number or a numeric string.
-#[cfg(target_os = "macos")]
+/// Shared by the MLX path and the candle video lane (sc-5097).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn advanced_opt_u32(request: &VideoRequest, key: &str) -> Option<u32> {
     request.advanced.get(key).and_then(|value| {
         value
@@ -1458,7 +1510,11 @@ fn advanced_opt_u32(request: &VideoRequest, key: &str) -> Option<u32> {
 }
 
 /// An optional float `advanced` knob (`guidanceScale`); accepts a number or a numeric string.
-#[cfg(target_os = "macos")]
+/// Shared by the MLX path and the candle video lane (sc-5097).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32> {
     request.advanced.get(key).and_then(|value| {
         value
@@ -1489,7 +1545,10 @@ fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option
 /// Wan (sc-3034) and LTX (sc-3035) — split out so the engine call is unit-testable on real
 /// weights without the API/job plumbing. The LTX-only knobs (`video_mode` no_audio,
 /// prompt-enhance) default off for Wan; the Wan-only `moe_expert` rides on `adapters`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 struct VideoGenInput {
     engine_id: &'static str,
     model_dir: PathBuf,
@@ -1522,7 +1581,10 @@ struct VideoGenInput {
     conditioning_fps: Option<u32>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 impl Default for VideoGenInput {
     fn default() -> Self {
         Self {
@@ -1554,7 +1616,10 @@ impl Default for VideoGenInput {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     LoadSpec {
         weights: WeightsSource::Dir(input.model_dir.clone()),
@@ -1571,7 +1636,10 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
 /// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already
 /// loaded video generator, streaming denoise progress via `on_progress` and honoring `cancel`.
 /// The engine fills the audio track (LTX) or leaves it `None` (Wan).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn run_loaded_video_generation(
     generator: &dyn Generator,
     input: VideoGenInput,
@@ -1660,7 +1728,10 @@ fn run_video_generation(
 /// error instead of heartbeating indefinitely. Tuned well above any legitimate single load or
 /// step on the current video models; override via `SCENEWORKS_VIDEO_STALL_SECS` for an
 /// unusually large/slow model or disk.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Grace period granted after a stall is detected and engine cancellation is requested, before
@@ -1668,19 +1739,28 @@ const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// within this window (the manual-cancel path proves it honors the flag); the abandon escape
 /// only matters for a hard Metal wedge that never re-checks cancel, and keeps the watchdog from
 /// itself re-hanging on the join.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 
 /// The effective forward-progress stall timeout: `SCENEWORKS_VIDEO_STALL_SECS` (a positive
 /// integer number of seconds) when set, else [`VIDEO_STALL_TIMEOUT`].
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn video_stall_timeout() -> Duration {
     parse_stall_timeout(std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok())
 }
 
 /// Parse the `SCENEWORKS_VIDEO_STALL_SECS` override (a positive integer number of seconds),
 /// falling back to [`VIDEO_STALL_TIMEOUT`] when unset, blank, non-numeric, or zero.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn parse_stall_timeout(raw: Option<String>) -> Duration {
     raw.and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
@@ -1692,7 +1772,10 @@ fn parse_stall_timeout(raw: Option<String>) -> Duration {
 /// progress to the async worker (Generating stage ~0.25..0.58) + polling cancel ~every 2s.
 /// The shared blocking + mpsc + cancel plumbing for Wan and LTX. A forward-progress watchdog
 /// ([`video_stall_timeout`]) fails a wedged job loudly rather than letting it look alive forever.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 async fn generate_video(
     api: &ApiClient,
     settings: &Settings,
@@ -1849,6 +1932,176 @@ async fn generate_video(
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Candle (Windows/CUDA) video lane (sc-5097, epic 5095). The candle wan/ltx providers serve a narrow
+// **txt2video-only** first slice (no image/VACE conditioning, audio, LoRA, or quant). This is the
+// video sibling of the candle image lane (image_jobs.rs `generate_candle_stream`): it builds a
+// `VideoGenInput` and drives the SAME neutral streaming harness (`generate_video` →
+// `run_loaded_video_generation` → the registry-resolved candle generator), reusing the shared
+// encode/mux/poster path. Reached only when `backend_candle_enabled` (default off).
+// ---------------------------------------------------------------------------
+
+/// Per-asset adapter ids for the candle video engines (`candle_<family>`), the candle siblings of
+/// the MLX `mlx_wan` / `mlx_ltx` labels (sc-5097).
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_WAN_ADAPTER: &str = "candle_wan";
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_LTX_ADAPTER: &str = "candle_ltx";
+
+/// Default HuggingFace repos the candle video providers load (overridable via the manifest `repo`).
+/// The candle wan provider reads a Wan2.2-TI2V-5B diffusers snapshot; ltx reads the LTX-2.3 checkpoint
+/// plus a separate Gemma-3-12B encoder snapshot (`LTX_GEMMA_DIR`).
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_WAN_REPO: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_LTX_REPO: &str = "Lightricks/LTX-2.3";
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
+
+/// SceneWorks video model id → candle registry engine id, or `None` for an id the candle video lane
+/// does not serve. Note ltx maps to `ltx_2_3_distilled` (the candle provider's id), not the MLX
+/// `ltx_2_3`. Only the base txt2video ids — the 14B Wan MoE, SVD, and `ltx_2_3_eros` stay on torch.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn candle_video_engine_id(model: &str) -> Option<&'static str> {
+    match model {
+        "wan_2_2" => Some("wan2_2_ti2v_5b"),
+        "ltx_2_3" => Some("ltx_2_3_distilled"),
+        _ => None,
+    }
+}
+
+/// Whether `model` is served by the candle video lane (sc-5097).
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn is_candle_video_engine(model: &str) -> bool {
+    candle_video_engine_id(model).is_some()
+}
+
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn candle_video_adapter_label(engine_id: &str) -> &'static str {
+    if engine_id == "ltx_2_3_distilled" {
+        CANDLE_LTX_ADAPTER
+    } else {
+        CANDLE_WAN_ADAPTER
+    }
+}
+
+/// The candle weights repo for a video engine: the manifest `repo` wins, else the candle default repo
+/// for the engine.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
+    let default_repo = if engine_id == "ltx_2_3_distilled" {
+        CANDLE_LTX_REPO
+    } else {
+        CANDLE_WAN_REPO
+    };
+    request
+        .model_manifest_entry
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_repo)
+        .to_owned()
+}
+
+/// Resolve the candle weights snapshot dir for `repo`. Errors loudly (no procedural-stub fallback)
+/// when the snapshot is absent, so a missing model surfaces a re-download error.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<PathBuf> {
+    huggingface_snapshot_dir(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "candle video weights snapshot not found for {repo}"
+        ))
+    })
+}
+
+/// Point the candle LTX provider at the Gemma-3-12B encoder snapshot via `LTX_GEMMA_DIR` (the env var
+/// the provider reads; it otherwise falls back to `<checkpoint>/text_encoder`). Best-effort: if the
+/// Gemma snapshot isn't in the HF cache we leave `LTX_GEMMA_DIR` unset so the provider tries its
+/// `<root>/text_encoder` fallback and emits its own clear "set LTX_GEMMA_DIR …" error. The worker runs
+/// video jobs sequentially, so the process-global env set is race-free.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn ensure_ltx_gemma_dir(settings: &Settings) {
+    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
+        return; // honor an explicit operator override.
+    }
+    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO) {
+        std::env::set_var("LTX_GEMMA_DIR", dir);
+    }
+}
+
+/// Raw-settings recorded on a candle video asset (mirrors `wan_raw_settings`, trimmed to the
+/// txt2video surface): the request `advanced` knobs plus the real-inference markers.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn candle_video_raw_settings(request: &VideoRequest, repo: &str) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
+    raw.insert("fps".to_owned(), json!(request.fps));
+    Value::Object(raw)
+}
+
+/// Windows/CUDA candle txt2video path (sc-5097). Resolves the engine + weights, provisions the LTX
+/// Gemma encoder, builds a txt2video `VideoGenInput`, and runs it through the shared
+/// [`generate_video`] streaming driver. Returns the decoded clip + the candle adapter label.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+async fn generate_candle_video(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+    let engine_id = candle_video_engine_id(&request.model).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("{} is not a candle video engine", request.model))
+    })?;
+    let adapter = candle_video_adapter_label(engine_id);
+    let repo = candle_video_repo(request, engine_id);
+    let model_dir = candle_video_snapshot_dir(settings, &repo)?;
+    // ltx needs the separate Gemma-3-12B encoder (its only conditioning input).
+    let is_ltx = engine_id == "ltx_2_3_distilled";
+    if is_ltx {
+        ensure_ltx_gemma_dir(settings);
+    }
+    // Descriptor-narrowed sampling surface: wan takes guidance + a negative prompt; the distilled ltx
+    // takes neither (single-stage, no CFG). Steps/guidance default to the provider's own constants
+    // when the request omits them.
+    let steps = advanced_opt_u32(request, "steps");
+    let (guidance, negative_prompt) = if is_ltx {
+        (None, None)
+    } else {
+        let guidance = advanced_opt_f32(request, "guidanceScale");
+        let trimmed = request.negative_prompt.trim();
+        let negative = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        (guidance, negative)
+    };
+    // Coerce the requested frame count onto each engine's temporal stride (wan: ≡1 mod 4; ltx: 8k+1).
+    let frames = if is_ltx {
+        ltx_frame_count(request.raw_frame_count())
+    } else {
+        wan_frame_count(request.raw_frame_count())
+    };
+    let input = VideoGenInput {
+        engine_id,
+        model_dir,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames,
+        fps: request.fps,
+        steps,
+        guidance,
+        seed: resolve_video_seed(request) as u64,
+        ..VideoGenInput::default()
+    };
+    let raw_settings = candle_video_raw_settings(request, &repo);
+    let decoded = generate_video(api, settings, job, backend, input).await?;
+    Ok((decoded, adapter, raw_settings))
 }
 
 /// Resolve a Wan request into a [`VideoGenInput`] and run it (sc-3034).

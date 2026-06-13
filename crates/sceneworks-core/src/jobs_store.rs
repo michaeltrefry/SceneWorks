@@ -3150,6 +3150,64 @@ fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
     true
 }
 
+/// The video models the candle (Windows/CUDA) lane serves (epic 5095, sc-5097): the base txt2video
+/// engines only — `wan_2_2` (→ candle `wan2_2_ti2v_5b`) and `ltx_2_3` (→ candle `ltx_2_3_distilled`).
+/// Mirrors the worker's `video_jobs::candle_video_engine_id`. The 14B Wan MoE, SVD, and `ltx_2_3_eros`
+/// have no candle provider; every conditioned mode + LoRA stays on the Python torch worker.
+const CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &["wan_2_2", "ltx_2_3"];
+
+/// Does this video job belong on the candle **txt2video-only** lane (sc-5097)? The candle wan/ltx
+/// providers drive plain text-to-video only — no image-to-video / first-last-frame / extend / bridge /
+/// replace (the advanced job types), no source/reference/mask conditioning, and no LoRAs. Every other
+/// shape must fall back to the Python torch worker, so the candle worker refuses it here.
+fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    // Only the base `video_generate` job type — the advanced types (VideoExtend/VideoBridge/
+    // PersonReplace) are conditioned modes the candle lane doesn't serve.
+    if !matches!(job.job_type, JobType::VideoGenerate) {
+        return false;
+    }
+    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+        return false;
+    };
+    video_request_candle_eligible(model, &job.payload)
+}
+
+/// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
+/// synthetic payloads (parity with `image_request_candle_eligible`).
+fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
+        return false;
+    }
+    // txt2video only: the base `video_generate` mode defaults to `image_to_video`, so require an
+    // explicit `text_to_video`. Every conditioned mode (i2v / first_last_frame / extend / bridge /
+    // replace) is thereby excluded.
+    if payload.get("mode").and_then(Value::as_str) != Some("text_to_video") {
+        return false;
+    }
+    let has_nonempty_id = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    // Any conditioning asset (img2vid source, reference, inpaint mask) → torch.
+    if has_nonempty_id("sourceAssetId")
+        || has_nonempty_id("referenceAssetId")
+        || has_nonempty_id("maskAssetId")
+    {
+        return false;
+    }
+    // LoRAs are not in the candle video lane (the providers advertise none).
+    if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty())
+    {
+        return false;
+    }
+    true
+}
+
 /// InstantID (`instantid_realvisxl`) MLX-routing conditions. The native `mlx-gen-instantid`
 /// provider now serves the FULL surface on Mac: single-identity `character_image`, the 11-view
 /// Character-Studio angle set (sc-3345), AND pose-library mode + face-restore (sc-3381, on the
@@ -3646,18 +3704,30 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             return false;
         }
     }
-    // Candle (Windows/CUDA) SDXL lane (epic 3672, sc-3678): the candle worker advertises only
-    // `image_generate` and serves a gated, narrow SDXL/RealVisXL **txt2img-only** lane. It must
-    // refuse every other `image_generate` shape — a non-SDXL family, or an SDXL img2img / inpaint /
-    // outpaint / reference / strict-pose / LoRA request — so those transparently fall back to the
-    // Python torch worker that co-resides on the box. Identified by the `candle` marker capability
-    // (not `gpu_id`, which is a real CUDA index here). When candle is disabled the marker is absent
-    // and this is inert, so production routing is unchanged until the lane is turned on.
-    if worker_is_candle(worker)
-        && matches!(job.job_type, JobType::ImageGenerate)
-        && !image_job_is_candle_eligible(job)
-    {
-        return false;
+    // Candle (Windows/CUDA) lane (epic 3672 image sc-3678; epic 5095 image families sc-5096 + video
+    // sc-5097): the candle worker advertises `image_generate` (+ `video_generate` once video engines
+    // are wired) and serves gated, narrow **txt2img / txt2video-only** lanes. It must refuse every
+    // other shape — a non-candle family, or a conditioned (img2img/edit/reference/inpaint/pose/
+    // i2v/extend/bridge/replace) / LoRA request — so those transparently fall back to the Python torch
+    // worker that co-resides on the box. Identified by the `candle` marker capability (not `gpu_id`,
+    // which is a real CUDA index here). When candle is disabled the marker is absent and this is inert,
+    // so production routing is unchanged until the lane is turned on.
+    if worker_is_candle(worker) {
+        if matches!(job.job_type, JobType::ImageGenerate) && !image_job_is_candle_eligible(job) {
+            return false;
+        }
+        // The candle worker advertises only the base `video_generate` (txt2video); refuse the
+        // advanced video job types and every non-eligible `video_generate` shape.
+        if matches!(
+            job.job_type,
+            JobType::VideoGenerate
+                | JobType::VideoExtend
+                | JobType::VideoBridge
+                | JobType::PersonReplace
+        ) && !video_job_is_candle_eligible(job)
+        {
+            return false;
+        }
     }
     let advertises = |capability: &str| {
         worker
@@ -4146,6 +4216,104 @@ mod candle_routing_tests {
                 "mode": "edit_image",
                 "sourceAssetId": "asset_1"
             }))
+        ));
+    }
+
+    // ---- Candle video lane (sc-5097) ----
+
+    /// A queued `video_generate` job carrying `payload`.
+    fn video_generate_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_v",
+            "type": "video_generate",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-13T00:00:00Z",
+            "updatedAt": "2026-06-13T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    // The candle worker on the video lane advertises `video_generate` + the `candle` marker.
+    const CANDLE_VIDEO_CAPS: &[&str] = &["gpu", "video_generate", "candle"];
+    const TORCH_VIDEO_CAPS: &[&str] = &["gpu", "video_generate"];
+
+    #[test]
+    fn candle_routed_video_models_txt2video_are_eligible() {
+        for model in CANDLE_VIDEO_ROUTED_MODELS {
+            assert!(
+                video_request_candle_eligible(
+                    model,
+                    &object(json!({ "mode": "text_to_video", "prompt": "a river at dawn" }))
+                ),
+                "{model} text_to_video should be candle-eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn non_candle_video_models_and_conditioned_shapes_fall_back() {
+        // Models with no candle video provider stay on torch even for text_to_video.
+        for model in ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "svd", "ltx_2_3_eros"] {
+            assert!(
+                !video_request_candle_eligible(model, &object(json!({ "mode": "text_to_video" }))),
+                "{model} must fall back to the Python worker"
+            );
+        }
+        // A wired model in any conditioned shape (default/i2v mode, a source, or a LoRA) → torch.
+        let cases = [
+            json!({ "prompt": "p" }), // no mode → defaults to i2v
+            json!({ "mode": "image_to_video", "sourceAssetId": "a" }),
+            json!({ "mode": "first_last_frame" }),
+            json!({ "mode": "text_to_video", "sourceAssetId": "a" }), // txt mode but conditioned
+            json!({ "mode": "text_to_video", "loras": [{ "name": "x" }] }),
+        ];
+        for case in cases {
+            assert!(
+                !video_request_candle_eligible("wan_2_2", &object(case.clone())),
+                "wan_2_2 shape must fall back to torch: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn candle_worker_claims_txt2video_but_refuses_other_video_shapes() {
+        let candle = gpu_worker(CANDLE_VIDEO_CAPS);
+        // Claims wan + ltx plain txt2video.
+        for model in ["wan_2_2", "ltx_2_3"] {
+            assert!(
+                worker_supports_job(
+                    &candle,
+                    &video_generate_job(json!({ "model": model, "mode": "text_to_video" }))
+                ),
+                "candle worker should claim {model} txt2video"
+            );
+        }
+        // Refuses a non-candle video model and a conditioned (i2v) shape on a wired model.
+        assert!(!worker_supports_job(
+            &candle,
+            &video_generate_job(json!({ "model": "svd", "mode": "text_to_video" }))
+        ));
+        assert!(!worker_supports_job(
+            &candle,
+            &video_generate_job(
+                json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "a" })
+            )
+        ));
+        // The co-resident torch worker claims everything the candle worker defers.
+        let torch = gpu_worker(TORCH_VIDEO_CAPS);
+        assert!(worker_supports_job(
+            &torch,
+            &video_generate_job(
+                json!({ "model": "wan_2_2", "mode": "image_to_video", "sourceAssetId": "a" })
+            )
         ));
     }
 }

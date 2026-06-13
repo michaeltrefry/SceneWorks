@@ -79,12 +79,18 @@ inventory = "0.3"
 # Windows/CUDA worker links + force-links their `inventory::submit!` registrations. Their engine ids
 # (`z_image_turbo` / `flux1_schnell` / `flux1_dev` / `flux2_klein_9b` / `qwen_image`) already have
 # `MODEL_TABLE` rows, so `engines::registry_capabilities` advertises them with no further change.
+# sc-5097 (epic 5095) adds the two candle VIDEO providers (wan, ltx) behind the same feature, wired
+# through the new worker candle-video dispatch (`GenerationOutput::Video`). ltx registers the engine id
+# `ltx_2_3_distilled` (not the MLX `ltx_2_3`); it needs the Gemma-3-12B encoder snapshot via
+# `LTX_GEMMA_DIR` (resolved by the worker).
 backend-candle = [
     "dep:candle-gen-sdxl",
     "dep:candle-gen-z-image",
     "dep:candle-gen-flux",
     "dep:candle-gen-flux2",
     "dep:candle-gen-qwen-image",
+    "dep:candle-gen-wan",
+    "dep:candle-gen-ltx",
 ]
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -346,6 +352,11 @@ candle-gen-z-image = { git = "https://github.com/michaeltrefry/candle-gen", rev 
 candle-gen-flux = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
 candle-gen-flux2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
 candle-gen-qwen-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
+# Candle VIDEO providers (sc-5097) — Windows/CUDA siblings of mlx-gen-wan / mlx-gen-ltx. wan registers
+# `wan2_2_ti2v_5b`; ltx registers `ltx_2_3_distilled` (txt2video first slice — no conditioning/audio/
+# LoRA/quant). Force-linked in video_jobs.rs (`use candle_gen_<x> as _;`). Same rev as the others.
+candle-gen-wan = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
+candle-gen-ltx = { git = "https://github.com/michaeltrefry/candle-gen", rev = "5ba7d8b6b2ec575b430d93cfaed07106506bfeba", features = ["cuda"], optional = true }
 
 [lints]
 workspace = true

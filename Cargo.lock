@@ -473,6 +473,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-ltx"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
+dependencies = [
+ "candle-gen",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
 name = "candle-gen-qwen-image"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
@@ -494,6 +506,18 @@ dependencies = [
  "candle-gen",
  "candle-transformers",
  "hf-hub",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-gen-wan"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=5ba7d8b6b2ec575b430d93cfaed07106506bfeba#5ba7d8b6b2ec575b430d93cfaed07106506bfeba"
+dependencies = [
+ "candle-gen",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
@@ -4974,8 +4998,10 @@ dependencies = [
  "axum",
  "candle-gen-flux",
  "candle-gen-flux2",
+ "candle-gen-ltx",
  "candle-gen-qwen-image",
  "candle-gen-sdxl",
+ "candle-gen-wan",
  "candle-gen-z-image",
  "futures-util",
  "glob",
@@ -7126,7 +7152,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

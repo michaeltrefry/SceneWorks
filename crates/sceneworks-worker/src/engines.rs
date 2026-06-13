@@ -279,6 +279,10 @@ pub(crate) const VIDEO_ENGINE_IDS: &[&str] = &[
     "wan2_2_t2v_14b",
     "wan2_2_i2v_14b",
     "ltx_2_3",
+    // The candle LTX provider registers a distinct engine id (`ltx_2_3_distilled`, not the MLX
+    // `ltx_2_3`); listed here so the registry-derived `video_generate` advertisement
+    // ([`registry_capabilities`]) picks up the candle LTX descriptor too (sc-5097).
+    "ltx_2_3_distilled",
     "svd_xt",
 ];
 
