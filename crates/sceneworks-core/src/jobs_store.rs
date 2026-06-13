@@ -3147,7 +3147,30 @@ fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
     if has_poses {
         return false;
     }
+    // On-the-fly quantization (`advanced.mlxQuantize` > 0) → torch. The candle providers advertise
+    // `supported_quants: &[]` (dense bf16/fp16 only), so an explicit quant request can't be honored
+    // here — route it to Python rather than silently running dense (sc-5099, no dropped controls).
+    if candle_request_wants_quant(payload) {
+        return false;
+    }
     true
+}
+
+/// Whether the request explicitly asks for on-the-fly quantization the candle backend can't do.
+/// `advanced.mlxQuantize` is an optional advanced override (the web UI doesn't send it; the MLX path
+/// otherwise defaults quant from the manifest) — so a payload-level value `> 0` is a deliberate quant
+/// request. `<= 0` (dense) and absent both leave candle on its native dense path (sc-5099).
+fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .is_some_and(|bits| bits > 0)
 }
 
 /// The video models the candle (Windows/CUDA) lane serves (epic 5095, sc-5097): the base txt2video
@@ -3203,6 +3226,10 @@ fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
         .and_then(Value::as_array)
         .is_some_and(|loras| !loras.is_empty())
     {
+        return false;
+    }
+    // On-the-fly quantization → torch (the candle video providers are dense; sc-5099).
+    if candle_request_wants_quant(payload) {
         return false;
     }
     true
@@ -4125,6 +4152,33 @@ mod candle_routing_tests {
                 "{model} conditioning shape must fall back to torch: {payload}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_quantization_falls_back_to_torch_image_and_video() {
+        // sc-5099: the candle providers are dense (supported_quants: &[]); an explicit
+        // `advanced.mlxQuantize > 0` must route to Python rather than silently running dense.
+        assert!(!image_request_candle_eligible(
+            "sdxl",
+            &object(json!({ "advanced": { "mlxQuantize": 8 } }))
+        ));
+        assert!(!image_request_candle_eligible(
+            "qwen_image",
+            &object(json!({ "advanced": { "mlxQuantize": 4 } }))
+        ));
+        assert!(!video_request_candle_eligible(
+            "wan_2_2",
+            &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
+        ));
+        // Dense (<= 0) or absent quant leaves candle on its native dense path → still eligible.
+        assert!(image_request_candle_eligible(
+            "sdxl",
+            &object(json!({ "advanced": { "mlxQuantize": 0 } }))
+        ));
+        assert!(image_request_candle_eligible(
+            "sdxl",
+            &object(json!({ "advanced": { "steps": 30 } }))
+        ));
     }
 
     #[test]

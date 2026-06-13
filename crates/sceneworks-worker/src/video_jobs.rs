@@ -5343,3 +5343,32 @@ mod tests {
             .unwrap_or(false)
     }
 }
+
+// Candle video lane labeling + engine-mapping unit tests (sc-5099). Windows/candle-gated; pure maps.
+#[cfg(all(test, target_os = "windows", feature = "backend-candle"))]
+mod candle_video_label_tests {
+    use super::*;
+
+    #[test]
+    fn candle_video_engine_ids_map_base_txt2video_only() {
+        assert_eq!(candle_video_engine_id("wan_2_2"), Some("wan2_2_ti2v_5b"));
+        // ltx maps to the candle distilled id, not the MLX `ltx_2_3`.
+        assert_eq!(candle_video_engine_id("ltx_2_3"), Some("ltx_2_3_distilled"));
+        // The 14B Wan MoE, SVD, and the eros LTX have no candle provider.
+        for model in ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "svd", "ltx_2_3_eros"] {
+            assert_eq!(candle_video_engine_id(model), None, "{model}");
+            assert!(!is_candle_video_engine(model));
+        }
+        assert!(is_candle_video_engine("wan_2_2"));
+        assert!(is_candle_video_engine("ltx_2_3"));
+    }
+
+    #[test]
+    fn candle_video_adapter_labels_are_per_family() {
+        assert_eq!(candle_video_adapter_label("wan2_2_ti2v_5b"), "candle_wan");
+        assert_eq!(
+            candle_video_adapter_label("ltx_2_3_distilled"),
+            "candle_ltx"
+        );
+    }
+}

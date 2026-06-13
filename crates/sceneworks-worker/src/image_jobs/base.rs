@@ -1084,3 +1084,59 @@ async fn consume_gen_events(
 // `z_image_turbo_control` variant. One image per pose, each driven by a DWPose
 // skeleton rendered from the pose's keypoints (see `openpose_skeleton`).
 // ---------------------------------------------------------------------------
+
+// Candle image lane labeling + engine-gate unit tests (sc-5099). Windows/candle-gated (the functions
+// only exist on that build); pure string maps, no GPU.
+#[cfg(all(test, target_os = "windows", feature = "backend-candle"))]
+mod candle_label_tests {
+    use super::*;
+
+    #[test]
+    fn candle_image_adapter_labels_are_per_family() {
+        assert_eq!(candle_adapter_label("z_image_turbo"), "candle_z_image");
+        assert_eq!(candle_adapter_label("flux_schnell"), "candle_flux");
+        assert_eq!(candle_adapter_label("flux_dev"), "candle_flux");
+        assert_eq!(candle_adapter_label("flux2_klein_9b"), "candle_flux2");
+        assert_eq!(candle_adapter_label("qwen_image"), "candle_qwen");
+        assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
+        assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
+        // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
+        for model in [
+            "z_image_turbo",
+            "flux_schnell",
+            "flux_dev",
+            "flux2_klein_9b",
+            "qwen_image",
+            "sdxl",
+            "realvisxl",
+        ] {
+            assert!(candle_adapter_label(model).starts_with("candle_"));
+        }
+    }
+
+    #[test]
+    fn is_candle_engine_covers_only_the_wired_txt2img_families() {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "z_image_turbo",
+            "flux_schnell",
+            "flux_dev",
+            "flux2_klein_9b",
+            "qwen_image",
+        ] {
+            assert!(is_candle_engine(model), "{model} should be a candle engine");
+        }
+        // Non-candle families + non-base variants (edit ids, the kv distill) are not in the lane.
+        for model in [
+            "chroma1_hd",
+            "kolors",
+            "z_image_edit",
+            "qwen_image_edit",
+            "flux2_klein_9b_kv",
+            "wan_2_2",
+        ] {
+            assert!(!is_candle_engine(model), "{model} must not be a candle engine");
+        }
+    }
+}
