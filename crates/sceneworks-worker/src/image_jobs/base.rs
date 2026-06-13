@@ -566,6 +566,50 @@ fn step_fraction(index: usize, current: u32, total: u32, count: u32) -> f64 {
     (0.1 + per * (index as f64 + within)).min(0.95)
 }
 
+/// Resolve a reference/source asset id to an in-memory RGB8 image (the engine VAE-encodes + resizes
+/// it). Uses the indexed `ProjectStore::get_asset` → `file.path`. Shared by the MLX image/video
+/// conditioning paths and the candle video i2v conditioning (sc-5175), so it lives here (both lanes)
+/// rather than in a macOS-only include.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+pub(crate) fn load_reference_image(
+    data_dir: &Path,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+) -> WorkerResult<Image> {
+    let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
+        .get_asset(project_id, asset_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("reference asset {asset_id}: {error}"))
+        })?;
+    let rel = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("reference asset {asset_id} has no media path"))
+        })?;
+    // The asset's file.path comes from an on-disk sidecar the user can edit, so
+    // route it through safe_project_path (rejects `..`/absolute components) rather
+    // than a bare join — matching the media-jobs reads and keeping a poisoned
+    // sidecar from reading an arbitrary file as the reference (sc-4278 / F-MLXW-14).
+    let path = crate::safe_project_path(project_path, rel)?;
+    let decoded = image::open(&path)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
+        })?
+        .to_rgb8();
+    Ok(Image {
+        width: decoded.width(),
+        height: decoded.height(),
+        pixels: decoded.into_raw(),
+    })
+}
+
 /// Real MLX generation: load once on a blocking thread, generate each image, and
 /// stream step/decode/image events back to the async worker (which saves PNGs, emits
 /// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the

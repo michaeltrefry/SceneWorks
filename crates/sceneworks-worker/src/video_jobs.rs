@@ -307,7 +307,7 @@ pub(crate) async fn run_video_generate_job(
     let (decoded, adapter, raw_settings, replacement_status) =
         if settings.backend_candle_enabled && is_candle_video_engine(&request.model) {
             let (decoded, adapter, raw_settings) =
-                generate_candle_video(api, settings, job, &request, backend).await?;
+                generate_candle_video(api, settings, job, &request, &project_path, backend).await?;
             (decoded, adapter, raw_settings, None::<Value>)
         } else {
             (
@@ -2402,10 +2402,15 @@ const CANDLE_WAN_ADAPTER: &str = "candle_wan";
 const CANDLE_LTX_ADAPTER: &str = "candle_ltx";
 
 /// Default HuggingFace repos the candle video providers load (overridable via the manifest `repo`).
-/// The candle wan provider reads a Wan2.2-TI2V-5B diffusers snapshot; ltx reads the LTX-2.3 checkpoint
-/// plus a separate Gemma-3-12B encoder snapshot (`LTX_GEMMA_DIR`).
+/// The candle wan providers read a Wan2.2 diffusers snapshot — the TI2V-5B, or the T2V-A14B /
+/// I2V-A14B 14B MoE (sc-5175); ltx reads the LTX-2.3 checkpoint plus a separate Gemma-3-12B encoder
+/// snapshot (`LTX_GEMMA_DIR`).
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
-const CANDLE_WAN_REPO: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
+const CANDLE_WAN_5B_REPO: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_WAN_T2V_14B_REPO: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 const CANDLE_LTX_REPO: &str = "Lightricks/LTX-2.3";
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
@@ -2413,11 +2418,15 @@ const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 
 /// SceneWorks video model id → candle registry engine id, or `None` for an id the candle video lane
 /// does not serve. Note ltx maps to `ltx_2_3_distilled` (the candle provider's id), not the MLX
-/// `ltx_2_3`. Only the base txt2video ids — the 14B Wan MoE, SVD, and `ltx_2_3_eros` stay on torch.
+/// `ltx_2_3`. Covers the base txt2video ids (5B + ltx) plus the Wan2.2 **14B** dual-expert MoE pair
+/// (sc-5174 / sc-5175): `wan_2_2_t2v_14b` (text→video) and `wan_2_2_i2v_14b` (image→video). SVD and
+/// `ltx_2_3_eros` have no candle provider and stay on torch.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 fn candle_video_engine_id(model: &str) -> Option<&'static str> {
     match model {
         "wan_2_2" => Some("wan2_2_ti2v_5b"),
+        "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
+        "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
         "ltx_2_3" => Some("ltx_2_3_distilled"),
         _ => None,
     }
@@ -2438,22 +2447,30 @@ fn candle_video_adapter_label(engine_id: &str) -> &'static str {
     }
 }
 
+/// The candle default weights repo for a video engine id (the per-variant Wan2.2 diffusers snapshot,
+/// or the LTX-2.3 checkpoint). Used when the manifest entry omits `repo`.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn candle_video_default_repo(engine_id: &str) -> &'static str {
+    match engine_id {
+        "ltx_2_3_distilled" => CANDLE_LTX_REPO,
+        "wan2_2_t2v_14b" => CANDLE_WAN_T2V_14B_REPO,
+        "wan2_2_i2v_14b" => CANDLE_WAN_I2V_14B_REPO,
+        // `wan2_2_ti2v_5b` (and any other wan id) → the 5B TI2V snapshot.
+        _ => CANDLE_WAN_5B_REPO,
+    }
+}
+
 /// The candle weights repo for a video engine: the manifest `repo` wins, else the candle default repo
 /// for the engine.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
-    let default_repo = if engine_id == "ltx_2_3_distilled" {
-        CANDLE_LTX_REPO
-    } else {
-        CANDLE_WAN_REPO
-    };
     request
         .model_manifest_entry
         .get("repo")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(default_repo)
+        .unwrap_or_else(|| candle_video_default_repo(engine_id))
         .to_owned()
 }
 
@@ -2496,15 +2513,57 @@ fn candle_video_raw_settings(request: &VideoRequest, repo: &str) -> Value {
     Value::Object(raw)
 }
 
-/// Windows/CUDA candle txt2video path (sc-5097). Resolves the engine + weights, provisions the LTX
-/// Gemma encoder, builds a txt2video `VideoGenInput`, and runs it through the shared
-/// [`generate_video`] streaming driver. Returns the decoded clip + the candle adapter label.
+/// Per-request conditioning for a candle video generation. Only the Wan2.2 **14B I2V** engine is
+/// conditioned (sc-5174 / sc-5175): it requires a source image, loaded to a single
+/// [`Conditioning::Reference`] — the channel-concat first frame the provider VAE-encodes into its
+/// `y` (`in_dim=36`). The candle analog of the MLX Wan i2v conditioning ([`resolve_wan_conditioning`]).
+/// Every other candle video engine (5B, T2V-14B, ltx) is txt2video-only, so this returns an empty set.
+/// The router's `video_request_candle_eligible` already guarantees the i2v shape carries a source and
+/// the txt2video ids do not, but the source is required here too so a mis-routed job fails clearly.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn resolve_candle_video_conditioning(
+    settings: &Settings,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &str,
+) -> WorkerResult<Vec<Conditioning>> {
+    if engine_id != "wan2_2_i2v_14b" {
+        return Ok(Vec::new());
+    }
+    let asset_id = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "wan_2_2_i2v_14b: image-to-video requires a source image (sourceAssetId)."
+                    .to_owned(),
+            )
+        })?;
+    let image = crate::image_jobs::load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    Ok(vec![Conditioning::Reference {
+        image,
+        strength: None,
+    }])
+}
+
+/// Windows/CUDA candle video path (sc-5097 txt2video; sc-5175 adds the Wan2.2 14B MoE T2V + I2V).
+/// Resolves the engine + weights, provisions the LTX Gemma encoder, resolves any i2v source-image
+/// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
+/// driver. Returns the decoded clip + the candle adapter label.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 async fn generate_candle_video(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     request: &VideoRequest,
+    project_path: &Path,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
     let engine_id = candle_video_engine_id(&request.model).ok_or_else(|| {
@@ -2518,9 +2577,13 @@ async fn generate_candle_video(
     if is_ltx {
         ensure_ltx_gemma_dir(settings);
     }
-    // Descriptor-narrowed sampling surface: wan takes guidance + a negative prompt; the distilled ltx
-    // takes neither (single-stage, no CFG). Steps/guidance default to the provider's own constants
-    // when the request omits them.
+    // Wan 14B I2V conditions on a source image (`Conditioning::Reference`); every other candle video
+    // engine is txt2video-only (empty conditioning).
+    let conditioning =
+        resolve_candle_video_conditioning(settings, request, project_path, engine_id)?;
+    // Descriptor-narrowed sampling surface: wan (5B + 14B) takes guidance + a negative prompt; the
+    // distilled ltx takes neither (single-stage, no CFG). Steps/guidance default to the provider's own
+    // constants when the request omits them.
     let steps = advanced_opt_u32(request, "steps");
     let (guidance, negative_prompt) = if is_ltx {
         (None, None)
@@ -2539,6 +2602,7 @@ async fn generate_candle_video(
     let input = VideoGenInput {
         engine_id,
         model_dir,
+        conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
         width: request.width,
@@ -5866,25 +5930,93 @@ mod candle_video_label_tests {
     use super::*;
 
     #[test]
-    fn candle_video_engine_ids_map_base_txt2video_only() {
+    fn candle_video_engine_ids_map_5b_ltx_and_14b() {
         assert_eq!(candle_video_engine_id("wan_2_2"), Some("wan2_2_ti2v_5b"));
+        // The Wan2.2 14B dual-expert MoE pair (sc-5175): T2V (text→video) + I2V (image→video).
+        assert_eq!(
+            candle_video_engine_id("wan_2_2_t2v_14b"),
+            Some("wan2_2_t2v_14b")
+        );
+        assert_eq!(
+            candle_video_engine_id("wan_2_2_i2v_14b"),
+            Some("wan2_2_i2v_14b")
+        );
         // ltx maps to the candle distilled id, not the MLX `ltx_2_3`.
         assert_eq!(candle_video_engine_id("ltx_2_3"), Some("ltx_2_3_distilled"));
-        // The 14B Wan MoE, SVD, and the eros LTX have no candle provider.
-        for model in ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "svd", "ltx_2_3_eros"] {
+        // SVD and the eros LTX have no candle provider.
+        for model in ["svd", "ltx_2_3_eros"] {
             assert_eq!(candle_video_engine_id(model), None, "{model}");
             assert!(!is_candle_video_engine(model));
         }
-        assert!(is_candle_video_engine("wan_2_2"));
-        assert!(is_candle_video_engine("ltx_2_3"));
+        for model in ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "ltx_2_3"] {
+            assert!(is_candle_video_engine(model), "{model}");
+        }
     }
 
     #[test]
     fn candle_video_adapter_labels_are_per_family() {
-        assert_eq!(candle_video_adapter_label("wan2_2_ti2v_5b"), "candle_wan");
+        // Every wan engine (5B + 14B T2V/I2V) reports the shared `candle_wan` adapter.
+        for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
+            assert_eq!(
+                candle_video_adapter_label(engine_id),
+                "candle_wan",
+                "{engine_id}"
+            );
+        }
         assert_eq!(
             candle_video_adapter_label("ltx_2_3_distilled"),
             "candle_ltx"
+        );
+    }
+
+    #[test]
+    fn candle_video_default_repos_are_per_engine() {
+        assert_eq!(
+            candle_video_default_repo("wan2_2_ti2v_5b"),
+            "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+        );
+        assert_eq!(
+            candle_video_default_repo("wan2_2_t2v_14b"),
+            "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+        );
+        assert_eq!(
+            candle_video_default_repo("wan2_2_i2v_14b"),
+            "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+        );
+        assert_eq!(
+            candle_video_default_repo("ltx_2_3_distilled"),
+            "Lightricks/LTX-2.3"
+        );
+    }
+
+    #[test]
+    fn candle_video_conditioning_only_for_i2v() {
+        let settings = crate::Settings::from_env();
+        let project_path = std::path::Path::new("");
+        // txt2video engines never build conditioning (even if a stray source asset is present).
+        for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "ltx_2_3_distilled"] {
+            let payload = json!({ "sourceAssetId": "asset_1" });
+            let request = VideoRequest::from_payload(payload.as_object().expect("object"));
+            let conditioning =
+                resolve_candle_video_conditioning(&settings, &request, project_path, engine_id)
+                    .expect("txt2video conditioning resolves");
+            assert!(
+                conditioning.is_empty(),
+                "{engine_id} must be txt2video-only"
+            );
+        }
+        // The 14B I2V requires a source image — a request without one errors before touching disk.
+        let payload = json!({ "mode": "image_to_video" });
+        let no_source = VideoRequest::from_payload(payload.as_object().expect("object"));
+        assert!(
+            resolve_candle_video_conditioning(
+                &settings,
+                &no_source,
+                project_path,
+                "wan2_2_i2v_14b"
+            )
+            .is_err(),
+            "i2v without a source image must error"
         );
     }
 }

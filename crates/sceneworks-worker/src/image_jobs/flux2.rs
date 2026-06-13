@@ -153,44 +153,6 @@ fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
-/// Resolve a reference/source asset id to an in-memory RGB8 image (the engine VAE-
-/// encodes + resizes it). Uses the indexed `ProjectStore::get_asset` → `file.path`.
-pub(crate) fn load_reference_image(
-    data_dir: &Path,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &Path,
-) -> WorkerResult<Image> {
-    let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
-        .get_asset(project_id, asset_id)
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("reference asset {asset_id}: {error}"))
-        })?;
-    let rel = asset
-        .get("file")
-        .and_then(|file| file.get("path"))
-        .and_then(Value::as_str)
-        .filter(|path| !path.trim().is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("reference asset {asset_id} has no media path"))
-        })?;
-    // The asset's file.path comes from an on-disk sidecar the user can edit, so
-    // route it through safe_project_path (rejects `..`/absolute components) rather
-    // than a bare join — matching the media-jobs reads and keeping a poisoned
-    // sidecar from reading an arbitrary file as the reference (sc-4278 / F-MLXW-14).
-    let path = crate::safe_project_path(project_path, rel)?;
-    let decoded = image::open(&path)
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
-        })?
-        .to_rgb8();
-    Ok(Image {
-        width: decoded.width(),
-        height: decoded.height(),
-        pixels: decoded.into_raw(),
-    })
-}
-
 /// One `Reference` (single) or one `MultiReference` (N) edit conditioning from the
 /// resolved reference images (cloned per output).
 fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
