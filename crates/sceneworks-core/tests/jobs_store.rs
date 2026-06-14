@@ -2034,6 +2034,49 @@ fn mac_rust_supported_instantid_full_surface_ok() {
 }
 
 #[test]
+fn mac_rust_supported_bernini_image_t2i_and_i2i() {
+    // Bernini still-image companion (epic 4699 / sc-5424): the `bernini_image` id routes its t2i +
+    // i2i jobs to the in-process Rust worker (same `engine_id:"bernini"`, `frames:1`).
+    let store = store("oracle-bernini-image");
+    // Plain text-to-image → supported.
+    let t2i = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "bernini_image", "prompt": "p" }),
+    );
+    assert!(
+        mac_rust_supported(&t2i).is_ok(),
+        "bernini_image t2i should be MLX-supported"
+    );
+    // i2i (`edit_image`) WITH a source → supported (the source becomes the engine's Reference).
+    let i2i = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({
+            "model": "bernini_image",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1",
+            "prompt": "p",
+        }),
+    );
+    assert!(
+        mac_rust_supported(&i2i).is_ok(),
+        "bernini_image i2i with a source should be MLX-supported"
+    );
+    // `edit_image` WITHOUT a source has nothing to edit → not routed (mirrors z_image_edit). The
+    // oracle flags it rather than silently degrading to t2i against a dropped source.
+    let i2i_no_source = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "bernini_image", "mode": "edit_image", "prompt": "p" }),
+    );
+    assert!(
+        mac_rust_supported(&i2i_no_source).is_err(),
+        "bernini_image edit_image without a source must not be MLX-eligible"
+    );
+}
+
+#[test]
 fn mac_rust_supported_names_qwen_strict_pose_and_lycoris() {
     let store = store("oracle-features");
     // Strict-pose ControlNet on Qwen is now Rust/MLX (epic 3401 / sc-3575).
@@ -2354,6 +2397,18 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
             "{id} has no edit path → edit must be gated off"
         );
     }
+    // Bernini still-image companion (epic 4699 / sc-5424): the image-typed `bernini_image` id
+    // serves t2i + i2i (`edit_image`) on MLX → supported with edit enabled. (Like lens/chroma it
+    // gates only `edit_image`, so the "available in some MLX config" `reference`/`pose` probes come
+    // out permissively true — harmless: the manifest `capabilities` are the real UI gate and the
+    // engine ignores a stray reference on a t2i job. The meaningful flag here is `edit`.)
+    let bernini_image = model_mac_support("bernini_image", "image");
+    assert!(
+        bernini_image.supported,
+        "bernini_image should be MLX-supported"
+    );
+    assert!(bernini_image.reason.is_none());
+    assert!(bernini_image.features.edit, "bernini_image i2i is MLX");
     // Third-party LyCORIS now applies on every MLX provider (epic 3641) → supported.
     assert!(model_mac_support("sdxl", "image").features.lycoris);
     // Video models expose per-mode eligibility.

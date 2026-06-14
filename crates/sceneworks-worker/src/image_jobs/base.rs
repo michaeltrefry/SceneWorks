@@ -16,6 +16,7 @@ enum ImageRoute {
     PulidFlux,
     SdxlAdvanced,
     SensenovaEdit,
+    Bernini,
     Mlx,
 }
 
@@ -39,6 +40,12 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::SdxlAdvanced)
     } else if sensenova_edit_available(request, settings) {
         Some(ImageRoute::SensenovaEdit)
+    } else if bernini_image_available(request, settings) {
+        // Bernini still-image companion (sc-5424): t2i / i2i on the `bernini_image` id. Must win
+        // over the generic `mlx_available` arm below — `bernini_image` is in MODEL_TABLE (so
+        // `mlx_available` would match it), but the generic `generate_stream` leaves `frames`/
+        // `video_mode` unset, which the engine treats as a multi-frame video request.
+        Some(ImageRoute::Bernini)
     } else if mlx_available(request, settings) {
         Some(ImageRoute::Mlx)
     } else {
@@ -62,8 +69,11 @@ impl ImageRoute {
                 Flux2Grouping::Poses(_) | Flux2Grouping::Plain => request.count,
             },
             // PuLID-FLUX is one identity image per seed (no angle/pose grouping) — like the base
-            // MLX + SDXL-advanced paths, the effective count is the requested count.
-            ImageRoute::PulidFlux | ImageRoute::SdxlAdvanced | ImageRoute::Mlx => request.count,
+            // MLX + SDXL-advanced + Bernini paths, the effective count is the requested count.
+            ImageRoute::PulidFlux
+            | ImageRoute::SdxlAdvanced
+            | ImageRoute::Bernini
+            | ImageRoute::Mlx => request.count,
         }
     }
 }

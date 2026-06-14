@@ -621,6 +621,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // forwards the CFG scale via `guidance`. Turbo simply defaults guidance to 1.0 (≈ no CFG).
         ("lens", true, true),
         ("lens_turbo", true, true),
+        // Bernini still-image companion (epic 4699 / sc-5424): the image-typed `bernini_image` id
+        // maps to the SAME `bernini` engine the video id uses (`Modality::Both`). Standard guidance
+        // family — `supports_guidance=true` (omega_txt) + `supports_negative_prompt=true`.
+        ("bernini_image", true, true),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());

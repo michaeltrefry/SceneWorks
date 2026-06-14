@@ -2729,7 +2729,7 @@ fn bernini_available(_request: &VideoRequest, settings: &Settings) -> bool {
 /// `<data>/models/mlx/bernini` → the turnkey download-on-first-use `SceneWorks/bernini-mlx` snapshot
 /// (mirrors `resolve_wan_model_dir`). Errors clearly if none is present (no stub fallback).
 #[cfg(target_os = "macos")]
-fn resolve_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+pub(crate) fn resolve_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
     if let Some(dir) = local_mlx_dir(settings, "SCENEWORKS_MLX_BERNINI_DIR", "bernini") {
         return Ok(dir);
     }

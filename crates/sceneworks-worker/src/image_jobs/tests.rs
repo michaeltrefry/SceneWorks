@@ -238,6 +238,17 @@ fn mlx_model_table_maps_known_families() {
     assert_eq!(fast.default_guidance(), 1.0);
     assert_eq!(fast.adapter_label(), "mlx_sensenova");
     assert!(fast.supports_guidance() && !fast.supports_negative_prompt());
+
+    // Bernini still-image companion (sc-5424): the image-typed `bernini_image` id maps to the SAME
+    // `bernini` engine the video id uses (two ids, one engine — like z_image_edit → z_image_turbo).
+    // Engine defaults 40 steps / guidance 4.0 (`FullDefaults`); standard guidance family (the
+    // descriptor advertises both guidance and a negative prompt).
+    let bernini_image = mlx_model("bernini_image").unwrap();
+    assert_eq!(bernini_image.engine_id(), "bernini");
+    assert_eq!(bernini_image.adapter_label(), "mlx_bernini");
+    assert_eq!(bernini_image.default_steps(), 40);
+    assert_eq!(bernini_image.default_guidance(), 4.0);
+    assert!(bernini_image.supports_guidance() && bernini_image.supports_negative_prompt());
 }
 
 #[cfg(target_os = "macos")]
@@ -373,6 +384,176 @@ fn sensenova_it2i_real_weights_generates_one_image() {
     assert_eq!(pixels.len(), 512 * 512 * 3);
     assert!(steps_seen >= 1, "expected denoise step progress");
     assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+}
+
+/// Bernini still-image companion (epic 4699 / sc-5424) pure mapping: the SceneWorks image mode →
+/// engine task string and the Q4-default quant resolver. Runs in CI on Mac (no weights).
+#[cfg(target_os = "macos")]
+#[test]
+fn bernini_image_task_and_quant_mapping() {
+    // `edit_image` → i2i; everything else (text_to_image / empty / anything) → t2i.
+    assert_eq!(bernini_image_engine_task("edit_image"), "i2i");
+    assert_eq!(bernini_image_engine_task("text_to_image"), "t2i");
+    assert_eq!(bernini_image_engine_task(""), "t2i");
+    assert_eq!(bernini_image_engine_task("character_image"), "t2i");
+    // Q4 default (NOT the generic image Q8 default); `mlxQuantize` selects Q8 / bf16.
+    let quant = |bits: Option<i64>| {
+        let advanced = match bits {
+            Some(b) => json!({ "mlxQuantize": b }),
+            None => json!({}),
+        };
+        resolve_bernini_image_quant(&request(json!({
+            "projectId": "p", "model": "bernini_image", "prompt": "p", "advanced": advanced,
+        })))
+    };
+    let (q, bits) = quant(None);
+    assert!(
+        matches!(q, Some(gen_core::Quant::Q4)) && bits == Some(4),
+        "default → Q4"
+    );
+    let (q, bits) = quant(Some(4));
+    assert!(matches!(q, Some(gen_core::Quant::Q4)) && bits == Some(4));
+    let (q, bits) = quant(Some(8));
+    assert!(matches!(q, Some(gen_core::Quant::Q8)) && bits == Some(8));
+    let (q, bits) = quant(Some(0));
+    assert!(q.is_none() && bits.is_none(), "<=0 → bf16 dense");
+    // The dedicated route claims only the `bernini_image` id (the model check short-circuits before
+    // any weight resolution), so a different model never diverts here.
+    assert!(!bernini_image_available(
+        &request(json!({ "projectId": "p", "model": "z_image_turbo", "prompt": "p" })),
+        &Settings::from_env()
+    ));
+}
+
+/// Resolve the Bernini MLX snapshot dir for the real-weight smokes: env override → the local
+/// mlx-gen-models conversion caches / app-managed dir → the turnkey `SceneWorks/bernini-mlx` HF-cache
+/// snapshot. Mirrors the video test's `bernini_dir()` candidate list. `None` ⇒ skip (weights live
+/// outside CI).
+#[cfg(target_os = "macos")]
+fn bernini_image_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Ok(dir) = std::env::var("SCENEWORKS_MLX_BERNINI_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if path.join("config.json").is_file() {
+            return Some(path);
+        }
+    }
+    let home = dirs_home();
+    for rel in [
+        ".cache/mlx-gen-models/bernini-mlx-upload",
+        ".cache/mlx-gen-models/bernini_full_mlx_bf16",
+        "Library/Application Support/SceneWorks/data/models/mlx/bernini",
+    ] {
+        let path = home.join(rel);
+        if path.join("config.json").is_file() {
+            return Some(path);
+        }
+    }
+    let snaps = home.join(".cache/huggingface/hub/models--SceneWorks--bernini-mlx/snapshots");
+    std::fs::read_dir(&snaps)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.join("config.json").is_file())
+}
+
+/// Real-weights smoke: Bernini t2i (sc-5424 / sc-4709). Loads `bernini` through the SAME
+/// `load_engine` → `gen_core::load("bernini")` seam the worker image path uses (proving the
+/// `mlx_gen_bernini` force-link survived in the worker binary), then drives the dedicated
+/// `bernini_image_generate_one` with `frames:1` + `video_mode:"t2i"`, asserting it returns a single
+/// RGB8 still with denoise progress. 8 steps + 512² for speed (~44 GB Q4 peak). Run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored bernini_image_t2i_real_weights`.
+#[cfg(target_os = "macos")]
+#[ignore = "loads the real Bernini snapshot; run manually on a Mac with SceneWorks/bernini-mlx present"]
+#[test]
+fn bernini_image_t2i_real_weights_generates_one_image() {
+    let Some(dir) = bernini_image_dir() else {
+        eprintln!("skipping bernini_image_t2i_real_weights: no Bernini MLX snapshot found");
+        return;
+    };
+    let generator =
+        load_engine("bernini", dir, Some(gen_core::Quant::Q4), Vec::new(), None).unwrap();
+    let cancel = gen_core::CancelFlag::new();
+    let mut steps_seen = 0u32;
+    let (w, h, pixels) = bernini_image_generate_one(
+        generator.as_ref(),
+        "a weathered lighthouse on a rocky cliff at golden hour, photorealistic, cinematic",
+        None,
+        512,
+        512,
+        42,
+        8,
+        Some(4.0),
+        "t2i",
+        Vec::new(),
+        &cancel,
+        &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(pixels.len(), (w * h * 3) as usize, "RGB8-sized buffer");
+    assert!(w >= 256 && h >= 256, "plausible still dimensions");
+    assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(
+        pixels.windows(2).any(|x| x[0] != x[1]),
+        "non-constant image"
+    );
+}
+
+/// Real-weights smoke: Bernini i2i (sc-5424). Same load seam, but `video_mode:"i2i"` + a synthetic
+/// source as the engine's `Conditioning::Reference` (the planner ViT/VAE-encodes it; the worker does
+/// no pre-fit). Asserts the edit returns a single RGB8 still. Run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored bernini_image_i2i_real_weights`.
+#[cfg(target_os = "macos")]
+#[ignore = "loads the real Bernini snapshot; run manually on a Mac with SceneWorks/bernini-mlx present"]
+#[test]
+fn bernini_image_i2i_real_weights_generates_one_image() {
+    let Some(dir) = bernini_image_dir() else {
+        eprintln!("skipping bernini_image_i2i_real_weights: no Bernini MLX snapshot found");
+        return;
+    };
+    let generator =
+        load_engine("bernini", dir, Some(gen_core::Quant::Q4), Vec::new(), None).unwrap();
+    let source = gen_core::Image {
+        width: 512,
+        height: 512,
+        pixels: stub_rgb8(512, 512, 7),
+    };
+    let conditioning = vec![gen_core::Conditioning::Reference {
+        image: source,
+        strength: None,
+    }];
+    let cancel = gen_core::CancelFlag::new();
+    let mut steps_seen = 0u32;
+    let (w, h, pixels) = bernini_image_generate_one(
+        generator.as_ref(),
+        "make it a watercolor painting, soft pastel palette",
+        None,
+        512,
+        512,
+        42,
+        8,
+        Some(4.0),
+        "i2i",
+        conditioning,
+        &cancel,
+        &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(pixels.len(), (w * h * 3) as usize, "RGB8-sized buffer");
+    assert!(w >= 256 && h >= 256, "plausible still dimensions");
+    assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(
+        pixels.windows(2).any(|x| x[0] != x[1]),
+        "non-constant image"
+    );
 }
 
 /// sc-3344 parity gate (worker path): drive the native `pulid_flux` registry generator through the
@@ -599,6 +780,12 @@ fn adapter_id_reports_per_family_mlx_label() {
         adapter_id(&request(json!({ "model": "lens_turbo" }))),
         "mlx_lens"
     );
+    // Bernini still-image companion (sc-5424) IS a MODEL_TABLE row (engine `bernini`), so unlike the
+    // bespoke pulid/instantid routes `adapter_id` resolves its real per-set label.
+    assert_eq!(
+        adapter_id(&request(json!({ "model": "bernini_image" }))),
+        "mlx_bernini"
+    );
     // PuLID-FLUX (sc-3344) is MLX-routed but via a BESPOKE route (not the MODEL_TABLE registry
     // families), so `adapter_id` — which only resolves MODEL_TABLE rows — reports the stub label;
     // the real per-asset label (`mlx_pulid_flux`) is applied in `generate_pulid_flux_stream` via
@@ -634,6 +821,10 @@ fn mlx_engine_registry_links_image_families() {
         "kolors",
         "lens",
         "lens_turbo",
+        // Bernini still-image companion (sc-5424): the `Modality::Both` `bernini` engine must be
+        // registry-linked from the IMAGE path too — proves `use mlx_gen_bernini as _;` in
+        // image_jobs.rs keeps the `ModelRegistration` (the "no generator registered" trap).
+        "bernini",
     ] {
         assert!(ids.contains(&id), "registry missing {id}");
     }

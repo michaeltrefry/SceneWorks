@@ -249,6 +249,13 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         ("image", "chroma") => vec!["text_to_image", "style_variations"],
         ("image", "kolors") => vec!["text_to_image", "character_image", "style_variations"],
         ("image", "sdxl") => vec!["text_to_image", "edit_image", "style_variations"],
+        // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
+        // engine the video `bernini` family uses, but the image-typed catalog id
+        // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
+        // (`edit_image`, the source-image edit via `Conditioning::Reference`). No
+        // `character_image`/`style_variations` (no IP-Adapter/style surface) and no LoRA
+        // (the descriptor reports `supports_lora: false`).
+        ("image", "bernini") => vec!["text_to_image", "edit_image"],
         ("video", "ltx-video") => vec![
             "image_to_video",
             "text_to_video",
@@ -1405,6 +1412,12 @@ mod tests {
                 "multi_video_to_video",
                 "ads2v",
             ],
+        );
+        // sc-5424: the image-typed companion (`bernini_image`) shares the `bernini`
+        // family/adapter but exposes only the still tasks — t2i + i2i (`edit_image`).
+        assert_eq!(
+            model_capabilities_for_type_and_family("image", "bernini"),
+            vec!["text_to_image", "edit_image"],
         );
     }
 

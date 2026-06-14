@@ -2997,6 +2997,12 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     // now matches nothing).
     "lens",
     "lens_turbo",
+    // Bernini still-image companion (epic 4699 / sc-5424): the image-typed catalog id
+    // (`bernini_image`) routes its t2i / i2i (`edit_image`) jobs to the in-process Rust
+    // worker, where the same `engine_id:"bernini"` planner+renderer runs with `frames:1`.
+    // The video `bernini` id lives in `VIDEO_MLX_ROUTED_MODELS`, not here. Mirrors
+    // `bernini_image_mlx_eligible`.
+    "bernini_image",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -3055,6 +3061,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
         "kolors" => kolors_mlx_eligible(payload),
         "lens" | "lens_turbo" => lens_mlx_eligible(payload),
+        "bernini_image" => bernini_image_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -3537,6 +3544,26 @@ fn kolors_mlx_eligible(_payload: &Map<String, Value>) -> bool {
 /// routes to the `mlx-gen-lens` Rust trainer via [`MLX_ROUTED_TRAINING_KERNELS`], sc-5148/sc-5180.)
 fn lens_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
+/// Bernini still-image companion (epic 4699 / sc-5424) MLX-routing conditions. The image-typed
+/// `bernini_image` id serves two still tasks on the same `engine_id:"bernini"` planner+renderer the
+/// video `bernini` id uses: plain text-to-image (t2i, the base path) and `edit_image` img2img (i2i —
+/// the source image is VAE/ViT-encoded as the engine's `Conditioning::Reference`, with the worker
+/// forcing `frames:1` + `video_mode:"t2i"|"i2i"` so the engine returns a single still). An
+/// `edit_image` mode without a `sourceAssetId` has nothing to edit, so it stays off MLX (mirrors
+/// [`z_image_mlx_eligible`]); plain t2i is always eligible. There is no reference/character/pose
+/// still surface (the renderer's reference path is video-only — `reference_to_video`), and the
+/// engine reports `supports_lora: false`, so no LoRA gate is needed. macOS-only (the engine is
+/// `mac_only`); on Windows/Linux no `mlx` worker is registered, so nothing defers.
+fn bernini_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return payload
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty());
+    }
+    true
 }
 
 /// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,

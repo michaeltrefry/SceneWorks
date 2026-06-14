@@ -2251,8 +2251,9 @@
     // — engine quantizes to Q8 at load). This entry covers the planner video task
     // surface — text_to_video plus the editing (`video_to_video`), reference-driven
     // (`reference_to_video` / `reference_video_to_video`, sc-4703), and multi-source
-    // (`multi_video_to_video` / `ads2v`, sc-5425) modes. The t2i/i2i image companion is
-    // a separate image-typed catalog id (tracked under epic 4699).
+    // (`multi_video_to_video` / `ads2v`, sc-5425) modes. The t2i/i2i still-image companion
+    // is the separate image-typed `bernini_image` catalog id below (sc-5424) — same
+    // `engine_id:"bernini"`, mirroring `z_image_edit → z_image_turbo`.
     {
       "id": "bernini",
       "name": "Bernini",
@@ -2339,6 +2340,93 @@
         "promptGuide": {
           "title": "Bernini Prompt Guide",
           "path": "/prompt-guides/bernini.md",
+          "sources": [
+            { "label": "Bernini full model card", "url": "https://huggingface.co/ByteDance/Bernini-Diffusers" },
+            { "label": "Bernini GitHub repo", "url": "https://github.com/bytedance/Bernini" }
+          ]
+        }
+      }
+    },
+    // Bernini still-image companion (epic 4699 / sc-5424). The Bernini engine is
+    // `Modality::Both`: t2i (text→image) and i2i (source-image edit) map to the SAME
+    // `engine_id:"bernini"` planner+renderer the video `bernini` id uses, but SceneWorks
+    // models are typed image|video, so the still-image surface needs its own image-typed
+    // catalog id routed through Image Studio + `image_jobs` (mirroring the
+    // `z_image_edit → z_image_turbo` two-id/one-engine pattern). Weights are the SAME
+    // turnkey `SceneWorks/bernini-mlx` snapshot (downloaded once; the HF cache dedupes the
+    // shared repo, like z_image_edit reusing the Z-Image-Turbo weights). The worker forces
+    // `frames:1` + `video_mode:"t2i"|"i2i"` so the engine returns a single still
+    // (`GenerationOutput::Images`), and i2i feeds the source as `Conditioning::Reference`.
+    // macOS-only native MLX; no Torch path. NOTE: routing a 7B planner + dual-14B renderer
+    // to make ONE still is minutes-per-image at ~44 GB peak (Q4) — slow by design; the fast
+    // native image models (z-image / flux / sdxl / kolors / lens / chroma / qwen / sensenova)
+    // remain the default for stills. This id exists for planner-driven still images.
+    {
+      "id": "bernini_image",
+      "name": "Bernini (Image)",
+      "family": "bernini",
+      "type": "image",
+      "adapter": "bernini",
+      "capabilities": ["text_to_image", "edit_image"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "files": [],
+          "platforms": ["macos"],
+          // Same pre-converted MLX snapshot the video `bernini` id uses (planner + dual-expert
+          // renderer + stock Wan2.2 UMT5/VAE/tokenizer), bf16 ≈ 82 GiB. Shared HF repo — the
+          // cache stores it once even with both ids installed.
+          "estimatedSizeBytes": 88046829568
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/bernini-mlx"
+      },
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 40,
+        "guidanceScale": 4.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // Renderer aligns W×H to the patch stride (16); engine max_size 1280. 512² is the
+        // validated lightweight smoke size (sc-4709, ~44 GB Q4 peak — weight-bound).
+        "resolutions": ["512x512", "768x768", "1024x1024", "1280x720", "720x1280"],
+        // Each still is minutes (the planner runs up front) — keep batches small.
+        "count": [1, 2, 4],
+        // MLX path is default-only (UniPC flow), like the video entry.
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        // The engine descriptor reports supports_lora: false for Bernini.
+        "families": ["bernini"],
+        "types": []
+      },
+      "mlx": {
+        // Turnkey pre-converted MLX repo (no requiresConversion). The worker resolves the
+        // same env override (SCENEWORKS_MLX_BERNINI_DIR) → local <data>/models/mlx/bernini →
+        // download-on-first-use snapshot the video id uses. Q4 default (fits 64 GB-class Macs);
+        // Q8 opt-in via the advanced `mlxQuantize: 8` control. minMemoryGb + quant from the
+        // sc-4709 real-weight Mac smoke (t2i 512² peaked ~44 GB at Q4 — weight-bound).
+        "minMemoryGb": 64,
+        "repo": "SceneWorks/bernini-mlx",
+        "quantize": 4,
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
+      "ui": {
+        "label": "Bernini (Image)",
+        "description": "ByteDance Bernini full pipeline as a still-image generator: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B renderer to produce a single image (text-to-image) or edit a source image (image-to-image). Highest-quality, planner-guided — but very large (≈179 GB) and slow (the 7B planner runs many passes per image). macOS native MLX only; needs ample unified memory. For everyday stills the fast native image models are recommended.",
+        "recommendedFor": ["text_to_image", "edit_image"],
+        "promptGuide": {
+          "title": "Bernini Image Prompt Guide",
+          "path": "/prompt-guides/bernini-image.md",
           "sources": [
             { "label": "Bernini full model card", "url": "https://huggingface.co/ByteDance/Bernini-Diffusers" },
             { "label": "Bernini GitHub repo", "url": "https://github.com/bytedance/Bernini" }

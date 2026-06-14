@@ -71,6 +71,13 @@ use mlx_gen_seedvr2 as _;
 use mlx_gen_sensenova as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
+// Bernini still-image companion (epic 4699 / sc-5424): the full planner+renderer `Generator`
+// self-registers under `bernini` (`Modality::Both`); the image path reaches it via
+// `gen_core::load("bernini")` (no direct type contact). Force-link here too — the binary already
+// links it for the video path (video_jobs.rs), but anchoring the dependency the image surface
+// actually uses keeps the `ModelRegistration` if the video path is ever cfg'd out.
+#[cfg(target_os = "macos")]
+use mlx_gen_bernini as _;
 // candle (Windows/CUDA) backend — epic 3672, sc-3675. Mirror of the mlx `use … as _;` anchors above:
 // force the candle SDXL provider to link so its `inventory::submit!` (engine id `sdxl`, backend
 // `candle`) survives linker GC and resolves through the SAME gen_core registry — no candle-specific
@@ -322,6 +329,20 @@ pub(crate) async fn run_image_generate_job(
                 // SenseNova-U1 instruction edit + Character Studio on the unified
                 // `sensenova_u1_8b` / `_fast` ids (sc-3900).
                 generate_sensenova_edit_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::Bernini => {
+                // Bernini still-image companion (sc-5424): t2i / i2i on the `bernini_image` id,
+                // routed to the same `engine_id:"bernini"` planner+renderer with `frames:1`.
+                generate_bernini_image_stream(
                     api,
                     settings,
                     job,
@@ -773,6 +794,9 @@ include!("image_jobs/qwen.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.
 include!("image_jobs/sensenova.rs");
+#[cfg(target_os = "macos")]
+// Bernini still-image (t2i/i2i) routing.
+include!("image_jobs/bernini.rs");
 #[cfg(target_os = "macos")]
 // SDXL advanced routing.
 include!("image_jobs/sdxl.rs");

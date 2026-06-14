@@ -295,6 +295,24 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_lens",
     },
+    // Bernini still-image companion (epic 4699 / sc-5424) — the image-typed catalog id maps to the
+    // SAME engine registry id (`bernini`) the video `bernini` id uses (`Modality::Both`), mirroring
+    // the `z_image_edit → z_image_turbo` two-id/one-engine row above. The dedicated
+    // `generate_bernini_image_stream` path (image_jobs/bernini.rs) builds the engine request itself
+    // — forcing `frames:1` + `video_mode:"t2i"|"i2i"` so the engine returns a single still — so it
+    // does NOT ride the generic `generate_stream`; this row supplies the `mlx_model` join the worker
+    // uses for `adapter_id` / `mlx_weights_gap` / the descriptor-capability lookup. Engine defaults:
+    // 40 steps, guidance (omega_txt) 4.0 (mlx-gen-bernini `FullDefaults`). No LoRA (descriptor
+    // `supports_lora: false`). `default_repo` is the turnkey snapshot, but the dedicated path
+    // resolves the dir via `resolve_bernini_model_dir` (env / app-managed / download), not this repo.
+    ModelRow {
+        sceneworks_id: "bernini_image",
+        engine_id: "bernini",
+        default_repo: "SceneWorks/bernini-mlx",
+        default_steps: 40,
+        default_guidance: 4.0,
+        adapter_label: "mlx_bernini",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids
