@@ -41,13 +41,13 @@ use super::supervisor::{
     utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
-    allow_pattern_matches, bounded_tail, cancel_requested, cleanup_uploaded_import_source,
-    copy_lora_source, fresh_asset_id, import_lora_source_file_as, import_lora_source_path,
-    now_rfc3339, parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
-    safe_download_dir, safe_project_path, value_f64, wan_moe_pair_filenames,
-    write_model_install_marker, CredentialScheme, JsonObject, SafetensorsHeaderError, Settings,
-    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    allow_pattern_matches, bounded_tail, cancel_requested, cancel_requested_peek,
+    cleanup_uploaded_import_source, copy_lora_source, fresh_asset_id, import_lora_source_file_as,
+    import_lora_source_path, now_rfc3339, parse_credentials_env, resolve_model_convert_output,
+    resolve_model_import_target, safe_download_dir, safe_project_path, value_f64,
+    wan_moe_pair_filenames, write_model_install_marker, CredentialScheme, JsonObject,
+    SafetensorsHeaderError, Settings, WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES,
+    DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
@@ -2526,6 +2526,46 @@ async fn cancel_poll_continues_when_no_cancel_requested() {
     })
     .await;
     assert!(!canceled);
+}
+
+/// sc-5515 — the in-loop image cancel poller uses a CHECK-ONLY peek that reads
+/// `cancel_requested` without posting any terminal status. The terminal Canceled
+/// is posted by `consume_gen_events` only after the blocking generation actually
+/// stops, so the worker row isn't freed (and the next queued job isn't misled)
+/// while the in-flight image is still rendering. `post_status` is wired to fail
+/// here to prove the peek never touches the progress route.
+async fn cancel_peek_with(get_status: AxumStatusCode, cancel_requested: bool) -> bool {
+    let base_url = spawn_cancel_poll_stub(CancelPollStubState {
+        get_status,
+        cancel_requested,
+        post_status: AxumStatusCode::INTERNAL_SERVER_ERROR,
+    })
+    .await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    cancel_requested_peek(&api, "job-1").await
+}
+
+#[tokio::test]
+async fn cancel_peek_reports_confirmed_cancel_without_posting() {
+    assert!(
+        cancel_peek_with(AxumStatusCode::OK, true).await,
+        "a confirmed cancel request must be reported by the check-only peek"
+    );
+}
+
+#[tokio::test]
+async fn cancel_peek_false_when_not_requested() {
+    assert!(!cancel_peek_with(AxumStatusCode::OK, false).await);
+}
+
+#[tokio::test]
+async fn cancel_peek_tolerates_transient_get_errors() {
+    assert!(
+        !cancel_peek_with(AxumStatusCode::INTERNAL_SERVER_ERROR, true).await,
+        "a transient GET failure must not read as a user cancel"
+    );
 }
 
 /// sc-4176 — on macOS an MLX-routed model whose weights don't resolve must

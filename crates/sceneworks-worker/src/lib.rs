@@ -920,6 +920,30 @@ async fn cancel_requested(api: &ApiClient, job_id: &str, message: &str) -> bool 
     }
 }
 
+/// Check-only cancel poll (sc-5515): returns `true` when the user requested
+/// cancellation, WITHOUT posting any status. Unlike [`check_cancel`] /
+/// [`cancel_requested`] this never writes the terminal `Canceled`. In-loop
+/// generation pollers that sit in front of a long, un-interruptible compute use
+/// this so the job stays non-terminal ("Cancelling…") until the in-flight work
+/// actually stops; they post the terminal `Canceled` themselves only once it does.
+/// Posting terminal at acknowledgement time frees the worker row
+/// (`jobs_store::update_job_progress`) while the worker process is still busy, so
+/// the next queued job is told a worker is free that isn't — deferring the
+/// terminal write to actual-stop keeps the two in sync. Transient GET failures are
+/// tolerated (read as "not canceled", retried on the next poll), matching
+/// [`cancel_requested`]'s policy (sc-4174).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+async fn cancel_requested_peek(api: &ApiClient, job_id: &str) -> bool {
+    let outcome: WorkerResult<JobSnapshot> = api.get_json(&format!("/api/v1/jobs/{job_id}")).await;
+    match outcome {
+        Ok(job) => job.cancel_requested,
+        Err(error) => {
+            eprintln!("cancel_poll_failed jobId={job_id}: {error}; retrying on the next poll");
+            false
+        }
+    }
+}
+
 async fn update_job(
     api: &ApiClient,
     job_id: &str,
