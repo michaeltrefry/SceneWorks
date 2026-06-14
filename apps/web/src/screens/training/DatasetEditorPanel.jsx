@@ -91,6 +91,10 @@ export function DatasetEditorPanel({
   toggleCaptionExtraOption,
   displayedCaptionPrompt,
   captionSettings,
+  captionModelMissing = false,
+  onDownloadCaptionModel,
+  captionModelSizeLabel = "",
+  captionModelName = "JoyCaption",
 }) {
   return (
     <>
@@ -282,6 +286,10 @@ export function DatasetEditorPanel({
               onToggleExtra={toggleCaptionExtraOption}
               promptValue={displayedCaptionPrompt}
               running={captioning}
+              modelMissing={captionModelMissing}
+              onDownloadModel={onDownloadCaptionModel}
+              modelSizeLabel={captionModelSizeLabel}
+              modelName={captionModelName}
               scope={
                 captionDialog.type === "item"
                   ? {

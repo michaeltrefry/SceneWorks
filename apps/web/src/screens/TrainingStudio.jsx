@@ -5,7 +5,7 @@ import { API_BASE_URL } from "../api.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
-import { terminalStatuses } from "../constants.js";
+import { JOY_CAPTION_MODEL_ID, terminalStatuses } from "../constants.js";
 import {
   buildJoyCaptionPrompt,
   defaultCaptionSettings,
@@ -297,6 +297,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     trainingTargetsError = "",
     setActiveView,
     studioLaunch,
+    models = [],
+    createModelDownloadJob,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
   const datasets = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
@@ -432,6 +434,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
     !savingDataset &&
     (!activeDataset || dirty);
   const displayedCaptionPrompt = captionSettings.captionPrompt || buildJoyCaptionPrompt(captionSettings);
+  // JoyCaption model provisioning (sc-5620): the native captioner has no auto-download (unlike
+  // the torch path), so on a gated Mac a missing model would just fail the queued caption job.
+  // Surface a download affordance in the caption dialog instead. Mac-gated because Windows/Linux
+  // torch still auto-downloads (missing ≠ broken there); scoped to the default/cataloged model.
+  const captionModel = useMemo(
+    () => models.find((entry) => entry.id === JOY_CAPTION_MODEL_ID),
+    [models],
+  );
+  const selectedCaptionModel = String(captionSettings.modelNameOrPath ?? "").trim() || joyCaptionModel;
+  const captionModelMissing =
+    Boolean(macCapabilities?.macGatingActive) &&
+    captionModel?.installState === "missing" &&
+    selectedCaptionModel === joyCaptionModel;
+  const captionModelSizeLabel = useMemo(() => {
+    const bytes = Number(captionModel?.downloadSizeBytes);
+    return Number.isFinite(bytes) && bytes > 0 ? `${(bytes / 1e9).toFixed(1)} GB` : "";
+  }, [captionModel?.downloadSizeBytes]);
+  const onDownloadCaptionModel = captionModel && typeof createModelDownloadJob === "function"
+    ? () => createModelDownloadJob(captionModel)
+    : undefined;
   const firstTarget = trainingTargets[0] ?? null;
   // Mac UI gating (sc-3486): a target whose kernel has no native mlx-gen Rust trainer
   // (kolors_lora / lens_lora) can't train on a gated Mac — disable it and snap off it.
@@ -1136,6 +1158,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   toggleCaptionExtraOption={toggleCaptionExtraOption}
                   displayedCaptionPrompt={displayedCaptionPrompt}
                   captionSettings={captionSettings}
+                  captionModelMissing={captionModelMissing}
+                  onDownloadCaptionModel={onDownloadCaptionModel}
+                  captionModelSizeLabel={captionModelSizeLabel}
+                  captionModelName={captionModel?.name ?? "JoyCaption"}
                 />
               ) : null}
 

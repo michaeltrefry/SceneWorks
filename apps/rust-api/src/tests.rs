@@ -8219,3 +8219,38 @@ fn builtin_manifest_registers_the_prompt_refine_model() {
         "${HF_CACHE}/huihui-ai/Llama-3.2-3B-Instruct-abliterated"
     );
 }
+
+#[test]
+fn builtin_manifest_registers_the_joycaption_model() {
+    // sc-5620: the native captioner (caption_jobs.rs, the training_caption job) resolves an
+    // already-cached HF snapshot via the same resolve_app_managed_model_dir seam and does NOT
+    // auto-download. JoyCaption must be a provisionable catalog artifact (same gap as sc-5605's
+    // prompt_refine). Guards the entry + repo == caption_jobs::JOY_CAPTION_MODEL + the cache path.
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
+    let model = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"] == "joycaption_beta_one")
+        .expect("joycaption_beta_one is registered in the catalog");
+    assert_eq!(model["type"], "utility");
+    let download = model["downloads"]
+        .as_array()
+        .and_then(|downloads| downloads.first())
+        .expect("a download entry");
+    assert_eq!(download["provider"], "huggingface");
+    // Must match the worker's JOY_CAPTION_MODEL (caption_jobs.rs) — the string the worker passes
+    // to huggingface_snapshot_dir.
+    assert_eq!(
+        download["repo"], "fancyfeast/llama-joycaption-beta-one-hf-llava",
+        "manifest repo must match the worker's JOY_CAPTION_MODEL"
+    );
+    assert_eq!(
+        model["paths"]["model"],
+        "${HF_CACHE}/fancyfeast/llama-joycaption-beta-one-hf-llava"
+    );
+}

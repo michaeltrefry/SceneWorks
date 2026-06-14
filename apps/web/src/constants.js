@@ -22,6 +22,11 @@ export const DEFAULT_INTERLEAVE_RESOLUTION = "2048x1152";
 // prompt" fails because the model isn't provisioned.
 export const PROMPT_REFINE_MODEL_ID = "prompt_refine_llama_3_2_3b";
 
+// Catalog id of the dataset-captioning model (sc-5620, builtin.models.jsonc). Same pattern
+// as PROMPT_REFINE_MODEL_ID — the native captioner resolves it by repo string; the web uses
+// this id to look up install state and offer a download in the caption dialog when missing.
+export const JOY_CAPTION_MODEL_ID = "joycaption_beta_one";
+
 // Default interleave system prompt (the think/no-think protocol). Prefilled in
 // Document Studio; the worker falls back to this same text when the field is blank.
 // Keep in sync with apps/worker/scene_worker/image_adapters.py::_INTERLEAVE_SYSTEM_MESSAGE.

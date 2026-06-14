@@ -1434,6 +1434,14 @@ label {
   justify-items: start;
 }
 
+/* Missing captioning-model affordance (sc-5620): the proactive "download the captioning
+   model" prompt in the caption dialog when JoyCaption isn't provisioned on a native Mac. */
+.caption-missing-model {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
 .refine-review {
   display: grid;
   gap: 8px;

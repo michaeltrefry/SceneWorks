@@ -2709,6 +2709,58 @@
           ]
         }
       }
+    },
+    {
+      // Dataset captioning LLM (sc-5620, the JoyCaption twin of the sc-5605 prompt_refine gap).
+      // The native captioner (`caption_jobs.rs`, the `training_caption` job used by LoRA-training
+      // auto-captioning) runs JoyCaption in-process — the MLX provider on macOS (sc-3556) and
+      // candle-gen-joycaption off-Mac — and resolves the model via the same
+      // `resolve_app_managed_model_dir` → `huggingface_snapshot_dir` seam that only *resolves* an
+      // already-cached snapshot (no auto-download like the torch path). Cataloging it lets Model
+      // Manager download it into the HF cache the worker reads from; the worker references it by
+      // repo string (`caption_jobs::JOY_CAPTION_MODEL`), not by this id.
+      //
+      // Stock repo, pulled as-is: a standard LLaVA transformers safetensors checkpoint — NOT
+      // MLX-converted and NOT requiring conversion (the mlx-gen-joycaption provider reads the stock
+      // config/safetensors/tokenizer/processor directly), so the epic-5594 re-host pattern
+      // (conversion-required models) does not apply. `files: []` pulls the repo's own LLAMA_LICENSE
+      // + LLAMA_USE_POLICY (Llama community license) alongside the weights.
+      "id": "joycaption_beta_one",
+      "name": "JoyCaption (beta one)",
+      "family": "joycaption",
+      "type": "utility",
+      "adapter": "joycaption",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "fancyfeast/llama-joycaption-beta-one-hf-llava",
+          "files": [],
+          "estimatedSizeBytes": 16977442945
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/fancyfeast/llama-joycaption-beta-one-hf-llava"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "JoyCaption (beta one)",
+        "description": "Optional vision-language model used by training-dataset captioning (\"Caption images\") to describe images. Runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA).",
+        "recommendedFor": ["training_caption"],
+        "promptGuide": {
+          "title": "JoyCaption Captioning Guide",
+          "path": "/prompt-guides/joycaption.md",
+          "sources": [
+            { "label": "JoyCaption beta-one model card", "url": "https://huggingface.co/fancyfeast/llama-joycaption-beta-one-hf-llava" },
+            { "label": "JoyCaption project (GitHub)", "url": "https://github.com/fpgaminer/joycaption" }
+          ]
+        }
+      }
     }
   ]
 }

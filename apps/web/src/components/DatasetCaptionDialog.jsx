@@ -1,10 +1,16 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Modal } from "./Modal.jsx";
 
 // Caption settings modal (sc-2025). One dialog drives both "Caption all" and a
 // single image's "Re-Caption" — the dataset editor owns the captioner settings
 // state and the job submission; this component only renders the controls and a
 // Run button scoped to the target.
+//
+// When the JoyCaption model isn't provisioned on the native worker (sc-5620), the
+// caption job would just fail in the Queue (captioning is fire-and-forget, not polled
+// inline), so we surface a proactive "download the captioning model" affordance and
+// block Run. `modelMissing` is gated by the parent (Mac + catalog installState
+// "missing" + the default model selected); `onDownloadModel` enqueues its download.
 export function DatasetCaptionDialog({
   settings,
   onChange,
@@ -18,11 +24,34 @@ export function DatasetCaptionDialog({
   onRun,
   onToggleExtra,
   onClose,
+  modelMissing = false,
+  onDownloadModel,
+  modelSizeLabel = "",
+  modelName = "JoyCaption",
 }) {
   const single = scope?.type === "item";
   const title = single ? `Re-caption ${scope.name ?? "image"}` : "Caption images";
   const runLabel = single ? "Re-caption image" : settings.recaption ? "Re-caption all" : "Caption missing";
   const joy = settings.captioner === "joy_caption";
+  const [downloadRequested, setDownloadRequested] = useState(false);
+
+  // Once the model finishes downloading (parent's catalog refresh flips modelMissing to
+  // false), clear the "downloading" note so Run re-enables.
+  useEffect(() => {
+    if (!modelMissing) {
+      setDownloadRequested(false);
+    }
+  }, [modelMissing]);
+
+  const blockRun = joy && modelMissing;
+
+  async function handleDownloadModel() {
+    if (typeof onDownloadModel !== "function") return;
+    const job = await onDownloadModel();
+    if (job) {
+      setDownloadRequested(true);
+    }
+  }
 
   return (
     <Modal className="dataset-caption-modal" labelledBy="dataset-caption-title" onClose={onClose}>
@@ -44,6 +73,31 @@ export function DatasetCaptionDialog({
             <option value="metadata">Metadata fallback</option>
           </select>
         </label>
+
+        {blockRun ? (
+          <div className="caption-missing-model" role="alert">
+            {downloadRequested ? (
+              <p className="inline-warning">
+                Downloading the captioning model… track progress on the Models screen, then caption
+                again.
+              </p>
+            ) : (
+              <>
+                <p className="inline-warning">
+                  The captioning model{modelSizeLabel ? ` (${modelSizeLabel})` : ""} isn’t installed
+                  yet.
+                </p>
+                {typeof onDownloadModel === "function" ? (
+                  <button className="secondary-action" onClick={handleDownloadModel} type="button">
+                    Download captioning model
+                  </button>
+                ) : (
+                  <p className="inline-warning">Open the Models screen to download “{modelName}”.</p>
+                )}
+              </>
+            )}
+          </div>
+        ) : null}
 
         {joy ? (
           <>
@@ -156,7 +210,7 @@ export function DatasetCaptionDialog({
         <button onClick={onClose} type="button">
           Cancel
         </button>
-        <button className="primary-action" disabled={running} onClick={onRun} type="button">
+        <button className="primary-action" disabled={running || blockRun} onClick={onRun} type="button">
           {running ? "Queuing…" : runLabel}
         </button>
       </footer>
