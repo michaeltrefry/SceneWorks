@@ -81,6 +81,7 @@ import {
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel, findReplacementModel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
@@ -118,6 +119,7 @@ export function VideoStudio() {
     createVideoUpscaleJob,
     createPreset,
     refinePrompt,
+    createModelDownloadJob,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -141,8 +143,16 @@ export function VideoStudio() {
     setRequestedGpu,
     updateAssetStatus,
     videoModels,
+    models = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
+  // refinement model" affordance in RefinePromptControl when Refine fails because the
+  // model isn't provisioned on the native worker.
+  const refineModel = useMemo(
+    () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
+    [models],
+  );
   // Recent Assets (sc-2089) — 20 most recent video assets in the active
   // project. Falls back to the legacy single-generation list for test
   // contexts that haven't migrated.
@@ -884,6 +894,8 @@ export function VideoStudio() {
               onApply={setPrompt}
               prompt={prompt}
               refinePrompt={refinePrompt}
+              refineModel={refineModel}
+              onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
               workflow="video"
             />
           )}

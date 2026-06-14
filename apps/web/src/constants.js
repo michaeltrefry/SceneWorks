@@ -16,6 +16,12 @@ export const INTERLEAVE_RESOLUTION_OPTIONS = [
 ];
 export const DEFAULT_INTERLEAVE_RESOLUTION = "2048x1152";
 
+// Catalog id of the prompt-refinement LLM (sc-5605, builtin.models.jsonc). The native
+// worker resolves the model by repo string, not this id; the web uses it to look up the
+// catalog entry's install state and to enqueue its ModelDownload job when "Refine my
+// prompt" fails because the model isn't provisioned.
+export const PROMPT_REFINE_MODEL_ID = "prompt_refine_llama_3_2_3b";
+
 // Default interleave system prompt (the think/no-think protocol). Prefilled in
 // Document Studio; the worker falls back to this same text when the field is blank.
 // Keep in sync with apps/worker/scene_worker/image_adapters.py::_INTERLEAVE_SYSTEM_MESSAGE.

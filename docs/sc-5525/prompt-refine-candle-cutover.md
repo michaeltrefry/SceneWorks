@@ -46,8 +46,12 @@ Build with **VS2022 BuildTools MSVC 14.44** (CUDA 12.9 rejects VS18/14.51), `CUD
 ### Prerequisites
 - Worker built `--features backend-candle` (MSVC 14.44 / CUDA 12.9) and deployed.
 - `SCENEWORKS_BACKEND_CANDLE_ENABLED=1` in the worker environment.
-- The refine model present in the HF cache (download via Model Manager / Settings):
-  `huihui-ai/Llama-3.2-3B-Instruct-abliterated`.
+- The refine model present in the HF cache. It is now a catalog artifact —
+  `prompt_refine_llama_3_2_3b` in `config/manifests/builtin.models.jsonc` (sc-5605) —
+  so download it from the **Models** screen (or it is offered inline when "Refine my
+  prompt" runs before the model is provisioned). The native path only *resolves* an
+  already-cached snapshot (`huggingface_snapshot_dir`); it does not auto-download like
+  the retired Python `PromptRefiner`. Repo: `huihui-ai/Llama-3.2-3B-Instruct-abliterated`.
 - No co-resident Python worker also advertising `prompt_refine` (else routing may pick either —
   preferring the candle worker is a future routing refinement; see below).
 

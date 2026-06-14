@@ -2652,6 +2652,60 @@
           ]
         }
       }
+    },
+    {
+      // Prompt-refinement LLM (sc-5605). The native worker (`prompt_refine_jobs.rs`)
+      // refines a user's prompt with a small in-process Llama-3.2-3B instruction model
+      // through the gen-core `TextLlm` contract — MLX on macOS (sc-5552) and candle on
+      // the Windows/CUDA build (sc-5525). Unlike the retired Python `PromptRefiner`
+      // (`from_pretrained` auto-downloaded on first use), the native path only *resolves*
+      // an already-cached snapshot via `huggingface_snapshot_dir`, so the model has to be
+      // a provisionable catalog artifact. Cataloging it here lets Model Manager download
+      // it into the HF cache the worker reads from; the worker still references it by repo
+      // string (`DEFAULT_REFINE_MODEL`), not by this id.
+      //
+      // Stock repo, pulled as-is: it is a standard transformers safetensors checkpoint —
+      // NOT MLX-converted and NOT requiring conversion (the mlx-gen-prompt-refine provider
+      // reads the stock config/safetensors/tokenizer directly; mlx-gen #457 validated
+      // against this exact repo), so the epic-5594 re-host pattern (conversion-required
+      // models) does not apply. `files: []` pulls the repo's own LICENSE.txt + USE_POLICY
+      // (Llama community license) alongside the weights.
+      "id": "prompt_refine_llama_3_2_3b",
+      "name": "Prompt Refiner (Llama-3.2-3B)",
+      "family": "prompt-refine",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "huihui-ai/Llama-3.2-3B-Instruct-abliterated",
+          "files": [],
+          "estimatedSizeBytes": 7222715642
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/huihui-ai/Llama-3.2-3B-Instruct-abliterated"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Prompt Refiner (Llama-3.2-3B)",
+        "description": "Optional small instruction LLM used by the \"Refine my prompt\" control to rewrite prompts to follow the selected model's guide. Runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA).",
+        "recommendedFor": ["prompt_refine"],
+        "promptGuide": {
+          "title": "Prompt Refiner Guide",
+          "path": "/prompt-guides/prompt-refine.md",
+          "sources": [
+            { "label": "huihui-ai Llama-3.2-3B-Instruct-abliterated model card", "url": "https://huggingface.co/huihui-ai/Llama-3.2-3B-Instruct-abliterated" },
+            { "label": "Meta Llama-3.2-3B-Instruct", "url": "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct" }
+          ]
+        }
+      }
     }
   ]
 }

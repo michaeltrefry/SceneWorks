@@ -8178,3 +8178,44 @@ fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
         "with no converted dir, fall back to the HF snapshot"
     );
 }
+
+#[test]
+fn builtin_manifest_registers_the_prompt_refine_model() {
+    // sc-5605: the native prompt_refine worker (prompt_refine_jobs.rs) resolves an
+    // already-cached HF snapshot via huggingface_snapshot_dir and does NOT auto-download
+    // (unlike the retired Python PromptRefiner's from_pretrained). The refine LLM must
+    // therefore be a provisionable catalog artifact so Model Manager can download it into
+    // the HF cache the worker reads from. This guards the real manifest entry against
+    // accidental removal and against the repo string drifting from the worker's
+    // DEFAULT_REFINE_MODEL.
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
+    let model = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"] == "prompt_refine_llama_3_2_3b")
+        .expect("prompt_refine_llama_3_2_3b is registered in the catalog");
+    // A non-generation utility entry (mirrors the upscalers): absent from the image/video
+    // studio pickers, present + downloadable in Model Manager.
+    assert_eq!(model["type"], "utility");
+    let download = model["downloads"]
+        .as_array()
+        .and_then(|downloads| downloads.first())
+        .expect("a download entry");
+    assert_eq!(download["provider"], "huggingface");
+    // Must match the worker's DEFAULT_REFINE_MODEL (prompt_refine_jobs.rs) — the string the
+    // worker passes to huggingface_snapshot_dir.
+    assert_eq!(
+        download["repo"], "huihui-ai/Llama-3.2-3B-Instruct-abliterated",
+        "manifest repo must match the worker's DEFAULT_REFINE_MODEL"
+    );
+    // The catalog install-state path must resolve the same HF repo the worker does.
+    assert_eq!(
+        model["paths"]["model"],
+        "${HF_CACHE}/huihui-ai/Llama-3.2-3B-Instruct-abliterated"
+    );
+}

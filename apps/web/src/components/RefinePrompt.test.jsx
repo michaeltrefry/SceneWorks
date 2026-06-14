@@ -131,4 +131,69 @@ describe("RefinePromptControl", () => {
     expect(refinePrompt).toHaveBeenCalledWith({ prompt: "dog", modelId: "z", workflow: "video", guide: "" });
     expect(container.querySelector(".refine-review-text").textContent).toBe("rewritten");
   });
+
+  it("offers to download the refinement model when it isn't installed (sc-5605)", async () => {
+    const refinePrompt = vi.fn(async () => {
+      throw new Error("prompt-refine model path snapshot is not cached for huihui-ai/Llama-3.2-3B-Instruct-abliterated.");
+    });
+    const onDownloadRefineModel = vi.fn(async () => ({ id: "job-1" }));
+    render(
+      <RefinePromptControl
+        prompt="dog"
+        guidePath=""
+        modelId="z"
+        workflow="image"
+        refinePrompt={refinePrompt}
+        onApply={vi.fn()}
+        refineModel={{ id: "prompt_refine_llama_3_2_3b", name: "Prompt Refiner", installState: "missing", downloadSizeBytes: 7222715642 }}
+        onDownloadRefineModel={onDownloadRefineModel}
+      />,
+    );
+
+    await act(async () => {
+      refineButton(container).click();
+    });
+    await settle();
+
+    // The raw worker error is replaced by a download affordance with a size hint.
+    expect(container.querySelector(".refine-missing-model").textContent).toContain("isn’t installed");
+    expect(container.querySelector(".refine-missing-model").textContent).toContain("7.2 GB");
+    const downloadButton = buttonByText(container, "Download refinement model");
+    expect(downloadButton).toBeTruthy();
+
+    await act(async () => {
+      downloadButton.click();
+    });
+    await settle();
+
+    expect(onDownloadRefineModel).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".refine-missing-model").textContent).toContain("Downloading");
+  });
+
+  it("shows a plain error (no download CTA) when the refinement model is installed", async () => {
+    const refinePrompt = vi.fn(async () => {
+      throw new Error("Prompt refinement failed.");
+    });
+    render(
+      <RefinePromptControl
+        prompt="dog"
+        guidePath=""
+        modelId="z"
+        workflow="image"
+        refinePrompt={refinePrompt}
+        onApply={vi.fn()}
+        refineModel={{ id: "prompt_refine_llama_3_2_3b", name: "Prompt Refiner", installState: "installed" }}
+        onDownloadRefineModel={vi.fn()}
+      />,
+    );
+
+    await act(async () => {
+      refineButton(container).click();
+    });
+    await settle();
+
+    expect(container.querySelector(".refine-missing-model")).toBeNull();
+    expect(container.querySelector(".refine-error").textContent).toContain("Prompt refinement failed.");
+    expect(buttonByText(container, "Download refinement model")).toBeUndefined();
+  });
 });

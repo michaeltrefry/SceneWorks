@@ -1426,6 +1426,14 @@ label {
   color: var(--danger, #d14343);
 }
 
+/* Missing prompt-refinement model affordance (sc-5605): the inline "download the
+   refinement model" prompt shown when Refine fails because the model isn't provisioned. */
+.refine-missing-model {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
 .refine-review {
   display: grid;
   gap: 8px;

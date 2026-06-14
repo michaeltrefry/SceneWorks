@@ -83,6 +83,7 @@ import {
   useGenerationStudio,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
@@ -220,10 +221,12 @@ export function ImageStudio() {
     createImageJob,
     createPreset,
     refinePrompt,
+    createModelDownloadJob,
     deleteAsset,
     purgeAsset,
     gpuOptions,
     imageModels,
+    models = [],
     importAsset,
     latestImageAssets,
     recentImageAssets,
@@ -241,6 +244,13 @@ export function ImageStudio() {
     updateAssetStatus,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
+  // refinement model" affordance in RefinePromptControl when Refine fails because the
+  // model isn't provisioned on the native worker.
+  const refineModel = useMemo(
+    () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
+    [models],
+  );
   // Recent Assets list (sc-2088). When the new context value is available, use
   // the bounded 20-most-recent list; fall back to the legacy single-generation
   // list for test contexts that haven't migrated. The existing useGenerationStudio
@@ -1081,6 +1091,8 @@ export function ImageStudio() {
             onApply={setPromptFromUser}
             prompt={prompt}
             refinePrompt={refinePrompt}
+            refineModel={refineModel}
+            onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
             workflow="image"
           />
 
