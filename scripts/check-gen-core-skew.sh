@@ -88,12 +88,44 @@ self_test() {
   return "$rc"
 }
 
-if [ "${1:-}" = "--self-test" ]; then
-  self_test
-  exit $?
-fi
+# Args: [PKG] [--features <list>]. PKG defaults to sceneworks-worker. `--features` is
+# passed through to `cargo tree` so the Windows candle lane (epic 5558, sc-5562) can
+# resolve the optional, feature-gated candle-gen providers
+# (`--features backend-candle`) that the default check can't see — the gate is blind
+# to them otherwise, so a candle-gen pin skew would only surface on the GPU box.
+PKG=""
+FEATURES=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --self-test)
+      self_test
+      exit $?
+      ;;
+    --features)
+      FEATURES="${2:-}"
+      shift 2
+      ;;
+    --features=*)
+      FEATURES="${1#--features=}"
+      shift
+      ;;
+    *)
+      PKG="$1"
+      shift
+      ;;
+  esac
+done
+PKG="${PKG:-sceneworks-worker}"
 
-PKG="${1:-sceneworks-worker}"
+# Run `cargo tree`, optionally with the requested features. A comma-separated feature
+# list is a single shell token, so the branch keeps quoting simple under `set -u`.
+run_tree() {
+  if [ -n "$FEATURES" ]; then
+    cargo tree -p "$PKG" --features "$FEATURES" --target all --color never --prefix none 2>/dev/null
+  else
+    cargo tree -p "$PKG" --target all --color never --prefix none 2>/dev/null
+  fi
+}
 
 # Flatten the tree (`--prefix none`), strip the ` (*)` dedupe marker cargo appends to repeated
 # nodes, keep only the contract crate, and unique-sort. Each unique (version + source) line is one
@@ -103,7 +135,7 @@ PKG="${1:-sceneworks-worker}"
 # marker in ANSI codes so the `(*)$` strip misses it and a deduped node looks "distinct" — a false
 # skew). The ESC-strip sed is a portable backstop (works on BSD + GNU sed).
 esc=$(printf '\033')
-cargo tree -p "$PKG" --target all --color never --prefix none 2>/dev/null \
+run_tree \
   | sed "s/${esc}\\[[0-9;]*m//g" \
   | sed 's/ (\*)$//' \
   | grep -E "^${CRATE} v" \
