@@ -2313,12 +2313,16 @@
         // Turnkey pre-converted MLX repo (no requiresConversion). The worker resolves
         // env override (SCENEWORKS_MLX_BERNINI_DIR) → local <data>/models/mlx/bernini →
         // this download-on-first-use snapshot, mirroring wan_2_2_t2v_14b's AITRADER path.
-        // minMemoryGb + quant from a real-weight Mac smoke (sc-4709): t2i 512² AND a
-        // t2v 832×480/20-frame clip BOTH peaked ~44 GB at Q4 — the footprint is
-        // weight-bound, not resolution/frame-bound. Q4 is the default (fits 64 GB-class
-        // Macs, faster); Q8 (~58 GB est. peak, higher quality) is opt-in via the advanced
-        // `mlxQuantize: 8` control. Note: bernini video is minutes-per-clip (the 7B planner
-        // runs up front, then dual-14B denoise) — slow by design, not a bug.
+        // minMemoryGb + quant from real-weight Mac smokes (sc-4709): t2i 512², a t2v
+        // 832×480/20-frame clip, AND the v2v/r2v/rv2v editing modes (256²) ALL peaked
+        // ~44 GB RSS at Q4 — the footprint is weight-bound, not resolution/frame-bound.
+        // Q4 is the default (fits 64 GB-class Macs, faster). Q8 (higher quality) is opt-in
+        // via the advanced `mlxQuantize: 8` control but runs CLOSE to the ceiling: a 256²
+        // Q8 t2v peaked ~98 GB memory-footprint on a 128 GB Mac — it passes in isolation,
+        // but aborts the Metal allocation under memory pressure (back-to-back loads) and
+        // OOMs at 512², so it is ample-RAM + small-clip only. Note: bernini video is
+        // minutes-per-clip (the 7B planner runs up front, then dual-14B denoise) — slow by
+        // design, not a bug.
         "minMemoryGb": 64,
         "repo": "SceneWorks/bernini-mlx",
         "quantize": 4,

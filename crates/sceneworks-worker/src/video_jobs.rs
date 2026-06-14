@@ -5166,11 +5166,39 @@ mod tests {
         None
     }
 
+    /// Test-only override for the quant tier a Bernini smoke loads (sc-4709): `SCENEWORKS_BERNINI_
+    /// SMOKE_QUANT` = `8` → Q8, `0` → bf16 (no quant), anything else / unset → Q4 (the committed
+    /// default). Lets the manual smokes profile peak memory at either tier without changing the
+    /// product default (e.g. capturing the Q8 video peak this story tracks).
+    #[cfg(target_os = "macos")]
+    fn bernini_smoke_quant() -> Option<Quant> {
+        match std::env::var("SCENEWORKS_BERNINI_SMOKE_QUANT")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+        {
+            Some(bits) if bits <= 0 => None,
+            Some(bits) if bits > 4 => Some(Quant::Q8),
+            _ => Some(Quant::Q4),
+        }
+    }
+
+    /// A test-only `usize`/`u32` env override, falling back to `default` when unset/unparseable.
+    #[cfg(target_os = "macos")]
+    fn bernini_smoke_u32(key: &str, default: u32) -> u32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(default)
+    }
+
     /// Real in-process Bernini text-to-video through the WORKER registry path (epic 4699 / sc-4707):
     /// `gen_core::load("bernini")` (proves the `mlx_gen_bernini` force-link survived in the worker
     /// binary — the "no generator registered" trap) → Q4 → a tiny t2v clip, asserting RGB8 frames
     /// stream back with denoise progress. Also confirms the lean published `SceneWorks/bernini-mlx`
     /// snapshot loads. `#[ignore]` — weights live outside CI; run on a Mac with the snapshot present.
+    /// The quant tier (`SCENEWORKS_BERNINI_SMOKE_QUANT`) and dims (`..._W`/`_H`/`_FRAMES`/`_STEPS`)
+    /// are env-overridable for memory profiling (sc-4709 Q8 peak); defaults reproduce the Q4 run.
     #[cfg(target_os = "macos")]
     #[ignore = "loads the real Bernini snapshot; run manually on a Mac with SceneWorks/bernini-mlx present"]
     #[test]
@@ -5179,17 +5207,18 @@ mod tests {
             eprintln!("skipping bernini_t2v_real_weights: no Bernini MLX snapshot found");
             return;
         };
-        let (w, h) = (832u32, 480u32);
+        let w = bernini_smoke_u32("SCENEWORKS_BERNINI_SMOKE_W", 832);
+        let h = bernini_smoke_u32("SCENEWORKS_BERNINI_SMOKE_H", 480);
         let input = VideoGenInput {
             engine_id: "bernini",
             model_dir,
-            quant: Some(Quant::Q4),
+            quant: bernini_smoke_quant(),
             prompt: "a golden retriever puppy running across a sunlit meadow, cinematic".to_owned(),
             width: w,
             height: h,
-            frames: 17,
+            frames: bernini_smoke_u32("SCENEWORKS_BERNINI_SMOKE_FRAMES", 17),
             fps: 16,
-            steps: Some(20),
+            steps: Some(bernini_smoke_u32("SCENEWORKS_BERNINI_SMOKE_STEPS", 20)),
             seed: 7,
             video_mode: Some("t2v".to_owned()),
             ..VideoGenInput::default()
@@ -5229,6 +5258,171 @@ mod tests {
         // Unknown / unset falls back to plain text-to-video.
         assert_eq!(bernini_engine_video_mode("image_to_video"), "t2v");
         assert_eq!(bernini_engine_video_mode(""), "t2v");
+    }
+
+    /// Only the `bernini` catalog id routes to the Bernini engine (sc-4707). Other video
+    /// families (Wan/LTX/SVD/image-typed ids) are `None` so they keep their own routing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bernini_engine_id_maps_only_the_bernini_family() {
+        assert_eq!(bernini_engine_id("bernini"), Some("bernini"));
+        assert_eq!(bernini_engine_id("wan_2_2"), None);
+        assert_eq!(bernini_engine_id("wan_2_2_t2v_14b"), None);
+        assert_eq!(bernini_engine_id("ltx_2_3"), None);
+        assert_eq!(bernini_engine_id("z_image_turbo"), None);
+        assert_eq!(bernini_engine_id(""), None);
+    }
+
+    /// Bernini load quantization (sc-4709): Q4 is the default (the validated 64 GB-fitting tier),
+    /// `mlxQuantize` opts up to Q8 or down to bf16 (`<= 0`), and the control parses from a JSON
+    /// number or a string. The snapshot is ~93 GB at bf16 so a missing control NEVER means bf16.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bernini_resolve_quant_defaults_q4_and_honors_override() {
+        let quant = |advanced: Value| {
+            resolve_bernini_quant(&request(json!({ "projectId": "p", "advanced": advanced })))
+        };
+        // No control → Q4 default (never bf16).
+        assert!(matches!(quant(json!({})), Some(Quant::Q4)));
+        // Explicit tiers (number).
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": 4 })),
+            Some(Quant::Q4)
+        ));
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": 8 })),
+            Some(Quant::Q8)
+        ));
+        // `<= 0` opts into bf16 (no quantization) for power users with ample RAM.
+        assert!(quant(json!({ "mlxQuantize": 0 })).is_none());
+        assert!(quant(json!({ "mlxQuantize": -1 })).is_none());
+        // String forms parse the same (the advanced map can carry stringly-typed values).
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": "8" })),
+            Some(Quant::Q8)
+        ));
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": " 4 " })),
+            Some(Quant::Q4)
+        ));
+        assert!(quant(json!({ "mlxQuantize": "0" })).is_none());
+        // A bits value between 4 and 8 rounds to the nearest supported tier (> 4 ⇒ Q8).
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": 6 })),
+            Some(Quant::Q8)
+        ));
+    }
+
+    /// Raw-settings lineage captured on a real Bernini asset (sc-4709): the real-inference marker,
+    /// the catalog model id, the produced frame count / fps, the resolved engine guidance task
+    /// (`berniniTask`), and a pass-through of the user's advanced controls.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bernini_raw_settings_capture_lineage_and_task() {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "bernini",
+            "mode": "reference_video_to_video",
+            "duration": 5,
+            "fps": 16,
+            "advanced": { "mlxQuantize": 8, "userKnob": "keep-me" }
+        }));
+        let raw = bernini_raw_settings(&req);
+        let raw = raw.as_object().expect("raw settings is an object");
+        assert_eq!(raw["realModelInference"], json!(true));
+        assert_eq!(raw["model"], json!("bernini"));
+        assert_eq!(raw["fps"], json!(req.fps));
+        assert_eq!(raw["frameCount"], json!(req.frame_count()));
+        // The SceneWorks mode resolved to its engine guidance task for observability/lineage.
+        assert_eq!(raw["berniniTask"], json!("rv2v"));
+        // The user's advanced controls survive verbatim (provenance).
+        assert_eq!(raw["userKnob"], json!("keep-me"));
+        assert_eq!(raw["mlxQuantize"], json!(8));
+    }
+
+    /// Bernini conditioning resolution enforces each editing/reference mode's required media
+    /// (sc-4703 / sc-4709), failing loudly BEFORE any IO when it is missing — defense in depth
+    /// behind the API-side validation. `text_to_video` needs none and resolves to empty
+    /// conditioning. The guards fire before touching the api / job / disk, so a minimal snapshot
+    /// suffices (mirrors `video_clip_conditioning_requires_ic_lora`).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn bernini_conditioning_enforces_required_media() {
+        let settings = Settings::from_env();
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-bernini-1",
+            "type": "video_generate",
+            "status": "preparing",
+            "projectId": "p",
+            "projectName": "P",
+            "payload": {},
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": null,
+            "progress": 0,
+            "stage": "preparing",
+            "message": "",
+            "error": null,
+            "etaSeconds": null,
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-14T00:00:00Z",
+            "updatedAt": "2026-06-14T00:00:00Z"
+        }))
+        .expect("job snapshot");
+        let resolve = |mode: &str, extra: Value| {
+            let mut payload = json!({ "projectId": "p", "model": "bernini", "prompt": "go" });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("mode".to_owned(), json!(mode));
+            for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+                payload.as_object_mut().unwrap().insert(k, v);
+            }
+            let req = request(payload);
+            let api = &api;
+            let settings = &settings;
+            let job = &job;
+            async move {
+                resolve_bernini_conditioning(api, settings, job, &req, Path::new("/tmp/p")).await
+            }
+        };
+
+        // text_to_video needs no source media → empty conditioning, no IO.
+        let t2v = resolve("text_to_video", json!({}))
+            .await
+            .expect("t2v resolves");
+        assert!(t2v.is_empty(), "t2v needs no conditioning");
+
+        // video_to_video / reference_video_to_video require a source clip.
+        let v2v_err = resolve("video_to_video", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            v2v_err.contains("source clip"),
+            "v2v missing-clip error: {v2v_err}"
+        );
+        let rv2v_err = resolve("reference_video_to_video", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            rv2v_err.contains("source clip"),
+            "rv2v missing-clip error: {rv2v_err}"
+        );
+
+        // reference_to_video requires at least one reference image.
+        let r2v_err = resolve("reference_to_video", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            r2v_err.contains("reference image"),
+            "r2v missing-refs error: {r2v_err}"
+        );
     }
 
     /// Real in-process Bernini editing/reference/multi-source video modes through the engine
