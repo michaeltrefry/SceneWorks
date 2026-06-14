@@ -246,3 +246,155 @@ describe("VideoStudio video_bridge", () => {
     });
   });
 });
+
+describe("VideoStudio Bernini task modes", () => {
+  let container;
+  let root;
+
+  // Bernini exposes the full planner video surface (sc-4703). No `macSupport` here so
+  // the (gating-off) test env leaves the mode buttons enabled — `capabilities` gates submit.
+  const BERNINI = {
+    id: "bernini",
+    name: "Bernini",
+    type: "video",
+    family: "bernini",
+    capabilities: ["text_to_video", "video_to_video", "reference_to_video", "reference_video_to_video"],
+    defaults: { duration: 5, resolution: "848x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["848x480", "480x848"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  const clip = { id: "vid_src", type: "video", projectId: "project_1", displayName: "Source Clip" };
+  const refA = { id: "img_ref_a", type: "image", projectId: "project_1", displayName: "Reference A" };
+  const refB = { id: "img_ref_b", type: "image", projectId: "project_1", displayName: "Reference B" };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // Scope to the mode's media-input band so the unrelated upscaler card (which also
+  // has a "Source clip" picker in the results rail) doesn't leak into the assertions.
+  const pickerLabels = () =>
+    [...(container.querySelector(".studio-source-band")?.querySelectorAll(".asset-picker-label") ?? [])].map(
+      (el) => el.textContent,
+    );
+  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
+
+  it("shows the right media slots for each mode", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [clip, refA, refB] });
+    await render(context);
+
+    await click(modeButton("Video → Video"));
+    expect(pickerLabels()).toContain("Source clip");
+    expect(pickerLabels()).not.toContain("Reference images");
+
+    await click(modeButton("Reference → Video"));
+    expect(pickerLabels()).toContain("Reference images");
+    expect(pickerLabels()).not.toContain("Source clip");
+
+    await click(modeButton("Reference + Video"));
+    expect(pickerLabels()).toEqual(expect.arrayContaining(["Source clip", "Reference images"]));
+  });
+
+  it("keeps Render disabled until the required reference image is selected", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [clip, refA, refB] });
+    await render(context);
+    await click(modeButton("Reference → Video"));
+
+    // No reference selected yet.
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+
+    await click(buttonWithText(container, "Select images"));
+    const modal = document.querySelector(".asset-picker-modal");
+    const option = [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Reference A"));
+    await click(option);
+    await click(buttonWithText(modal, "Use Selection"));
+
+    expect(buttonWithText(container, "Render clip").disabled).toBe(false);
+  });
+
+  it("submits the source clip for video_to_video", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [clip], selectedAsset: clip });
+    await render(context);
+    await click(modeButton("Video → Video"));
+    await click(buttonWithText(container, "Render clip"));
+
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({ mode: "video_to_video", sourceClipAssetId: "vid_src" });
+    expect(payload.referenceAssetIds).toEqual([]);
+  });
+
+  it("submits all chosen reference images for reference_to_video", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [refA, refB] });
+    await render(context);
+    await click(modeButton("Reference → Video"));
+
+    await click(buttonWithText(container, "Select images"));
+    const modal = document.querySelector(".asset-picker-modal");
+    for (const name of ["Reference A", "Reference B"]) {
+      const option = [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes(name));
+      await click(option);
+    }
+    await click(buttonWithText(modal, "Use Selection"));
+    await click(buttonWithText(container, "Render clip"));
+
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.mode).toBe("reference_to_video");
+    expect(payload.referenceAssetIds).toEqual(["img_ref_a", "img_ref_b"]);
+    expect(payload.sourceClipAssetId).toBeNull();
+  });
+
+  it("submits both clip and references for reference_video_to_video", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [clip, refA], selectedAsset: clip });
+    await render(context);
+    await click(modeButton("Reference + Video"));
+
+    await click(buttonWithText(container, "Select images"));
+    const modal = document.querySelector(".asset-picker-modal");
+    const option = [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Reference A"));
+    await click(option);
+    await click(buttonWithText(modal, "Use Selection"));
+    await click(buttonWithText(container, "Render clip"));
+
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      mode: "reference_video_to_video",
+      sourceClipAssetId: "vid_src",
+    });
+    expect(payload.referenceAssetIds).toEqual(["img_ref_a"]);
+  });
+
+  it("disables an editing mode on a model that does not support it", async () => {
+    const context = baseContext({ videoModels: [LTX], assets: [clip] });
+    await render(context);
+    await click(modeButton("Reference → Video"));
+
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+    expect(container.textContent).toContain("does not support this mode");
+  });
+});

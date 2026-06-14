@@ -1810,10 +1810,23 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "extend_clip",
         "video_bridge",
         "replace_person",
+        // Bernini editing / reference-driven video modes (sc-4703).
+        "video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
     ]
     .contains(&payload.mode.as_str())
     {
         return Err(ApiError::bad_request("Unsupported video mode"));
+    }
+    if payload
+        .reference_asset_ids
+        .iter()
+        .any(|id| id.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "referenceAssetIds must not contain blank ids",
+        ));
     }
     let duration = payload
         .duration
@@ -1858,6 +1871,20 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "replace_person" if payload.character_id.is_none() => Err(ApiError::bad_request(
             "Replace Person requires a Character.",
         )),
+        // Bernini editing / reference-driven video modes (sc-4703): each requires its
+        // source media so the worker never falls through to an unconditioned t2v render.
+        "video_to_video" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
+            "Video to Video requires a source clip.",
+        )),
+        "reference_to_video" if payload.reference_asset_ids.is_empty() => Err(
+            ApiError::bad_request("Reference to Video requires at least one reference image."),
+        ),
+        "reference_video_to_video" if payload.source_clip_asset_id.is_none() => Err(
+            ApiError::bad_request("Reference + Video requires a source clip."),
+        ),
+        "reference_video_to_video" if payload.reference_asset_ids.is_empty() => Err(
+            ApiError::bad_request("Reference + Video requires at least one reference image."),
+        ),
         _ => Ok(()),
     }
 }

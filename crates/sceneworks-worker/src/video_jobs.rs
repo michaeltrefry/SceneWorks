@@ -291,9 +291,11 @@ pub(crate) async fn run_video_generate_job(
     } else if let Some(engine_id) =
         bernini_engine_id(&request.model).filter(|_| bernini_available(&request, settings))
     {
-        // Bernini (epic 4699 / sc-4707): the full Qwen2.5-VL planner + Wan2.2-T2V-A14B renderer.
-        // text_to_video only for now (the routing gate admits only that mode); the editing/reference
-        // video modes (v2v/mv2v/ads2v/r2v/rv2v) + the t2i/i2i image companion land in sc-4703.
+        // Bernini (epic 4699 / sc-4707 + sc-4703): the full Qwen2.5-VL planner + Wan2.2-T2V-A14B
+        // renderer. Serves text_to_video + the editing/reference video modes (video_to_video /
+        // reference_to_video / reference_video_to_video); `generate_bernini` maps the SceneWorks mode
+        // to the engine guidance task and resolves the source media into the planner conditioning.
+        // (t2i/i2i image companion = a separate image-typed catalog id, tracked under epic 4699.)
         (
             generate_bernini(
                 api,
@@ -2696,11 +2698,14 @@ async fn generate_wan(
 }
 
 // ---------------------------------------------------------------------------
-// Real MLX Bernini generation (macOS, via mlx-gen-bernini, epic 4699 / sc-4707): the full
-// Qwen2.5-VL semantic planner + Wan2.2-T2V-A14B dual-expert renderer. text_to_video only for now
-// (no source media; sc-4703 adds the editing/reference modes + t2i/i2i image companion). Q4 default
-// / Q8 opt-in at load. The turnkey `SceneWorks/bernini-mlx` snapshot is self-contained, so this is a
-// thin `VideoGenInput` → `generate_video` wrapper like generate_wan.
+// Real MLX Bernini generation (macOS, via mlx-gen-bernini, epic 4699 / sc-4707 + sc-4703): the full
+// Qwen2.5-VL semantic planner + Wan2.2-T2V-A14B dual-expert renderer. Serves the planner video task
+// surface: text_to_video (t2v), video_to_video (v2v — source-clip edit), reference_to_video (r2v —
+// subject references → video), reference_video_to_video (rv2v — source clip + references). The
+// SceneWorks mode maps to the engine `video_mode` task string and the source media is resolved into
+// the planner's `VideoClip` / `MultiReference` conditioning. Q4 default / Q8 opt-in at load. The
+// turnkey `SceneWorks/bernini-mlx` snapshot is self-contained. (t2i/i2i image companion = a separate
+// image-typed catalog id, tracked under epic 4699.)
 // ---------------------------------------------------------------------------
 
 /// Adapter id recorded on a real MLX Bernini asset.
@@ -2767,20 +2772,112 @@ fn bernini_raw_settings(request: &VideoRequest) -> Value {
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
     raw.insert("frameCount".to_owned(), json!(request.frame_count()));
     raw.insert("fps".to_owned(), json!(request.fps));
+    // The engine guidance task the SceneWorks mode resolved to (lineage / observability).
+    raw.insert(
+        "berniniTask".to_owned(),
+        Value::String(bernini_engine_video_mode(&request.mode).to_owned()),
+    );
     Value::Object(raw)
 }
 
-/// Real MLX Bernini text-to-video (epic 4699 / sc-4707): build the `VideoGenInput` and run the shared
-/// `generate_video` path. No source conditioning or LoRA (the engine reports `supports_lora=false`);
-/// `video_mode:"t2v"` selects the renderer's T2vApg guidance; steps/guidance stay at the engine
-/// defaults (40 / omega 4.0). Frame count uses the Wan 1-mod-4 stride coercion (the renderer is Wan).
+/// Map a SceneWorks video mode to the Bernini engine `video_mode` task string (which selects the
+/// renderer guidance mode). The engine also infers the mode from the supplied conditioning, but the
+/// explicit task keeps the mapping unambiguous. Unknown / `text_to_video` ⇒ plain `t2v`.
+#[cfg(target_os = "macos")]
+fn bernini_engine_video_mode(mode: &str) -> &'static str {
+    match mode {
+        "video_to_video" => "v2v",
+        "reference_to_video" => "r2v",
+        "reference_video_to_video" => "rv2v",
+        _ => "t2v",
+    }
+}
+
+/// Resolve the source media for a Bernini editing/reference request into the planner conditioning:
+/// the source clip → [`Conditioning::VideoClip`] (the edit structure, VAE/ViT-encoded by the engine)
+/// and the subject reference images → [`Conditioning::MultiReference`]. `text_to_video` needs none.
+/// Each mode's required media is enforced here (defense in depth — the API validates the same), so a
+/// mis-built request fails loudly instead of silently rendering an unconditioned clip. The source
+/// clip is decoded to the output frame count (the engine resamples to its `target_fps` grid).
+#[cfg(target_os = "macos")]
+async fn resolve_bernini_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Conditioning>> {
+    let needs_clip = matches!(
+        request.mode.as_str(),
+        "video_to_video" | "reference_video_to_video"
+    );
+    let needs_refs = matches!(
+        request.mode.as_str(),
+        "reference_to_video" | "reference_video_to_video"
+    );
+    let mut conditioning = Vec::new();
+
+    if needs_clip {
+        let clip_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "bernini {} requires a source clip (sourceClipAssetId).",
+                request.mode.replace('_', " ")
+            ))
+        })?;
+        let frames = extract_clip_frames(
+            api,
+            settings,
+            job,
+            &request.project_id,
+            project_path,
+            clip_id,
+            request.width,
+            request.height,
+            wan_frame_count(request.raw_frame_count()),
+        )
+        .await?;
+        conditioning.push(Conditioning::VideoClip {
+            frames,
+            frame_idx: 0,
+            strength: 1.0,
+        });
+    }
+
+    if needs_refs {
+        if request.reference_asset_ids.is_empty() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "bernini {} requires at least one reference image (referenceAssetIds).",
+                request.mode.replace('_', " ")
+            )));
+        }
+        let mut images = Vec::with_capacity(request.reference_asset_ids.len());
+        for asset_id in &request.reference_asset_ids {
+            images.push(load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                asset_id,
+                project_path,
+            )?);
+        }
+        conditioning.push(Conditioning::MultiReference { images });
+    }
+
+    Ok(conditioning)
+}
+
+/// Real MLX Bernini video generation (epic 4699 / sc-4707 + sc-4703): build the `VideoGenInput` and
+/// run the shared `generate_video` path. The SceneWorks mode resolves to the engine `video_mode` task
+/// ([`bernini_engine_video_mode`]) and the source media into the planner conditioning
+/// ([`resolve_bernini_conditioning`]) — empty for t2v, a `VideoClip` for v2v/rv2v, `MultiReference`
+/// for r2v/rv2v. No LoRA (the engine reports `supports_lora=false`); steps/guidance stay at the engine
+/// defaults. Frame count uses the Wan 1-mod-4 stride coercion (the renderer is Wan).
 #[cfg(target_os = "macos")]
 async fn generate_bernini(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     request: &VideoRequest,
-    _project_path: &Path,
+    project_path: &Path,
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
@@ -2788,11 +2885,13 @@ async fn generate_bernini(
         let trimmed = request.negative_prompt.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     };
+    let conditioning =
+        resolve_bernini_conditioning(api, settings, job, request, project_path).await?;
     let input = VideoGenInput {
         engine_id,
         model_dir: resolve_bernini_model_dir(settings)?,
         quant: resolve_bernini_quant(request),
-        conditioning: Vec::new(),
+        conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
         width: request.width,
@@ -2800,7 +2899,7 @@ async fn generate_bernini(
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
         seed: resolve_video_seed(request) as u64,
-        video_mode: Some("t2v".to_owned()),
+        video_mode: Some(bernini_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
@@ -5073,6 +5172,111 @@ mod tests {
             .frames
             .iter()
             .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
+    }
+
+    /// The SceneWorks mode → engine guidance-task mapping (sc-4703). Pure; runs in CI on Mac.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bernini_engine_video_mode_maps_each_sceneworks_mode() {
+        assert_eq!(bernini_engine_video_mode("text_to_video"), "t2v");
+        assert_eq!(bernini_engine_video_mode("video_to_video"), "v2v");
+        assert_eq!(bernini_engine_video_mode("reference_to_video"), "r2v");
+        assert_eq!(
+            bernini_engine_video_mode("reference_video_to_video"),
+            "rv2v"
+        );
+        // Unknown / unset falls back to plain text-to-video.
+        assert_eq!(bernini_engine_video_mode("image_to_video"), "t2v");
+        assert_eq!(bernini_engine_video_mode(""), "t2v");
+    }
+
+    /// Real in-process Bernini editing/reference video modes through the engine (sc-4703 / sc-4709):
+    /// drive v2v (synthetic source clip → `VideoClip`), r2v (synthetic reference → `MultiReference`),
+    /// and rv2v (both), asserting each mode loads, consumes its conditioning, and streams RGB8 frames.
+    /// `#[ignore]` — weights live outside CI; run on a Mac with the `SceneWorks/bernini-mlx` snapshot.
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Bernini snapshot; run manually on a Mac with SceneWorks/bernini-mlx present"]
+    #[test]
+    fn bernini_editing_reference_modes_real_weights() {
+        let Some(model_dir) = bernini_dir() else {
+            eprintln!("skipping bernini_editing_reference_modes_real_weights: no snapshot found");
+            return;
+        };
+        let (w, h) = (256u32, 256u32);
+        let frame = |shade: u8| Image {
+            width: w,
+            height: h,
+            pixels: vec![shade; (w * h * 3) as usize],
+        };
+        // A 5-frame synthetic source clip and one synthetic subject reference.
+        let clip: Vec<Image> = (0..5).map(|i| frame(60 + i * 12)).collect();
+        let reference = frame(150);
+
+        let cases: &[(&str, Vec<Conditioning>)] = &[
+            (
+                "v2v",
+                vec![Conditioning::VideoClip {
+                    frames: clip.clone(),
+                    frame_idx: 0,
+                    strength: 1.0,
+                }],
+            ),
+            (
+                "r2v",
+                vec![Conditioning::MultiReference {
+                    images: vec![reference.clone()],
+                }],
+            ),
+            (
+                "rv2v",
+                vec![
+                    Conditioning::VideoClip {
+                        frames: clip.clone(),
+                        frame_idx: 0,
+                        strength: 1.0,
+                    },
+                    Conditioning::MultiReference {
+                        images: vec![reference.clone()],
+                    },
+                ],
+            ),
+        ];
+
+        for (task, conditioning) in cases {
+            let input = VideoGenInput {
+                engine_id: "bernini",
+                model_dir: model_dir.clone(),
+                quant: Some(Quant::Q4),
+                conditioning: conditioning.clone(),
+                prompt: "the subject walks through a neon-lit street, cinematic".to_owned(),
+                width: w,
+                height: h,
+                frames: 5,
+                fps: 16,
+                steps: Some(8),
+                seed: 11,
+                video_mode: Some((*task).to_owned()),
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut steps = 0u32;
+            let mut on_progress = |progress: Progress| {
+                if let Progress::Step { .. } = progress {
+                    steps += 1;
+                }
+            };
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|error| panic!("bernini {task} generation: {error}"));
+            assert!(steps > 0, "{task}: denoise progress streamed");
+            assert!(!decoded.frames.is_empty(), "{task}: frames returned");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{task}: frames are RGB8-sized"
+            );
+        }
     }
 
     /// Real in-process Wan-VACE extend/bridge through the engine (sc-3812): build the tier-C

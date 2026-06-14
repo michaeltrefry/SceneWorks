@@ -2248,16 +2248,22 @@
     // SAM2 / SAM3 pattern): the full 179 GB diffusers package is converted ONCE
     // (`assemble_bernini_snapshot`, ~93 GB bf16) and published as the turnkey
     // `SceneWorks/bernini-mlx` repo, downloaded on first use (no in-app conversion
-    // — engine quantizes to Q8 at load). This entry covers text_to_video; the
-    // video-editing (v2v/mv2v/ads2v), reference-driven (r2v/rv2v), and t2i/i2i
-    // image modes land in sc-4703.
+    // — engine quantizes to Q8 at load). This entry covers the planner video task
+    // surface — text_to_video plus the editing (`video_to_video`) and reference-driven
+    // (`reference_to_video` / `reference_video_to_video`) modes (sc-4703). The t2i/i2i
+    // image companion is a separate image-typed catalog id (tracked under epic 4699).
     {
       "id": "bernini",
       "name": "Bernini",
       "family": "bernini",
       "type": "video",
       "adapter": "bernini",
-      "capabilities": ["text_to_video"],
+      "capabilities": [
+        "text_to_video",
+        "video_to_video",
+        "reference_to_video",
+        "reference_video_to_video"
+      ],
       "downloads": [
         {
           "provider": "huggingface",

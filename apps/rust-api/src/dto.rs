@@ -517,6 +517,12 @@ pub(crate) struct VideoJobRequest {
     pub(crate) source_clip_asset_id: Option<String>,
     #[serde(default)]
     pub(crate) bridge_right_clip_asset_id: Option<String>,
+    /// Subject reference images for Bernini's reference-driven video modes
+    /// (`reference_to_video` / `reference_video_to_video`, sc-4703). Carried as a
+    /// list so r2v/rv2v can supply multiple references; the worker VAE/ViT-encodes
+    /// each into the planner's `MultiReference` conditioning.
+    #[serde(default)]
+    pub(crate) reference_asset_ids: Vec<String>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default)]

@@ -228,6 +228,9 @@ export function VideoStudio() {
   const [lastFrameAssetId, setLastFrameAssetId] = useState("");
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
   const [bridgeRightClipAssetId, setBridgeRightClipAssetId] = useState("");
+  // Subject reference images for Bernini's reference-driven video modes
+  // (reference_to_video / reference_video_to_video, sc-4703). 1–N images.
+  const [referenceAssetIds, setReferenceAssetIds] = useState([]);
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
   const [personTrackId, setPersonTrackId] = useState("");
@@ -256,7 +259,17 @@ export function VideoStudio() {
   // per-platform default (Q8_0 on MPS, Q4_K_M on CUDA).
   const quantVariants = Object.entries(selectedModel?.quantization?.variants ?? {});
   const supportsQuantization = quantVariants.length > 0;
-  const implementedMode = ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"].includes(mode);
+  const implementedMode = [
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+  ].includes(mode);
   const {
     availablePresets,
     selectedPreset,
@@ -589,6 +602,12 @@ export function VideoStudio() {
     ["extend_clip", "Extend"],
     ["video_bridge", "Bridge"],
     ["replace_person", "Replace person"],
+    // Bernini planner editing / reference-driven video modes (sc-4703). Enabled only
+    // on models whose capabilities include them (today: Bernini); disabled elsewhere,
+    // the same per-model gating as Replace person / the LTX clip modes.
+    ["video_to_video", "Video → Video"],
+    ["reference_to_video", "Reference → Video"],
+    ["reference_video_to_video", "Reference + Video"],
   ];
   // Mac UI gating (sc-3486, sc-3773): every video mode is disabled per-model via the selected
   // model's `macSupport.features.videoModes` — FLF on the non-Keyframe Wan MoE engines,
@@ -618,7 +637,11 @@ export function VideoStudio() {
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "video_bridge" && sourceClipAssetId && bridgeRightClipAssetId) ||
-    (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId);
+    (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId) ||
+    // Bernini editing / reference-driven modes (sc-4703).
+    (mode === "video_to_video" && sourceClipAssetId) ||
+    (mode === "reference_to_video" && referenceAssetIds.length > 0) ||
+    (mode === "reference_video_to_video" && sourceClipAssetId && referenceAssetIds.length > 0);
   // Don't let Replace Person queue a job the readiness endpoint says no live
   // worker can run — that would sit unclaimable instead of honoring the gate.
   const replaceReady = mode !== "replace_person" || personReadiness?.replace?.ready !== false;
@@ -683,10 +706,14 @@ export function VideoStudio() {
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
         lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
-        sourceClipAssetId: ["extend_clip", "replace_person", "video_bridge"].includes(mode)
+        sourceClipAssetId: ["extend_clip", "replace_person", "video_bridge", "video_to_video", "reference_video_to_video"].includes(
+          mode,
+        )
           ? sourceClipAssetId || null
           : null,
         bridgeRightClipAssetId: mode === "video_bridge" ? bridgeRightClipAssetId || null : null,
+        // Bernini subject references (sc-4703) — only the reference-driven modes carry them.
+        referenceAssetIds: ["reference_to_video", "reference_video_to_video"].includes(mode) ? referenceAssetIds : [],
         personTrackId: mode === "replace_person" ? personTrackId || null : null,
         replacementMode: mode === "replace_person" ? replacementMode : "face_only",
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
@@ -906,6 +933,30 @@ export function VideoStudio() {
                   value={bridgeRightClipAssetId}
                 />
               </>
+            ) : null}
+
+            {["video_to_video", "reference_video_to_video"].includes(mode) ? (
+              <AssetPickerField
+                assets={videoAssets}
+                buttonLabel="Select clip"
+                emptyLabel="No source clip selected"
+                label="Source clip"
+                onChange={setSourceClipAssetId}
+                value={sourceClipAssetId}
+              />
+            ) : null}
+
+            {["reference_to_video", "reference_video_to_video"].includes(mode) ? (
+              <AssetPickerField
+                assets={imageAssets}
+                buttonLabel="Select images"
+                changeLabel="Edit references"
+                emptyLabel="No reference images selected"
+                label="Reference images"
+                multiple
+                onChange={setReferenceAssetIds}
+                values={referenceAssetIds}
+              />
             ) : null}
 
             {mode === "replace_person" ? (

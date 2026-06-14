@@ -2242,6 +2242,12 @@ const VIDEO_UI_MODES: &[&str] = &[
     "extend_clip",
     "video_bridge",
     "replace_person",
+    // Bernini editing / reference-driven video modes (sc-4703): only `bernini` is
+    // eligible (see `video_mode_is_mlx_eligible`); they surface disabled on the other
+    // models, the same per-model gating as `replace_person` / the LTX clip modes.
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
 ];
 
 fn video_model_mac_support(model: &str) -> ModelMacSupport {
@@ -3609,12 +3615,18 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "svd" {
         return mode == "image_to_video";
     }
-    // Bernini's renderer is Wan2.2-T2V (text-conditioned) — it has no
-    // still-image-to-video. Slice A (sc-4707) serves text_to_video exclusively;
-    // its video-editing (v2v/mv2v/ads2v) and reference-driven (r2v/rv2v) modes
-    // need net-new SceneWorks mode vocabulary and land in sc-4703.
+    // Bernini's renderer is Wan2.2-T2V (text-conditioned) — it has no classic
+    // still-image-to-video. Beyond `text_to_video` (sc-4707) it serves the planner's
+    // editing + reference-driven video tasks (sc-4703): `video_to_video` (v2v — a
+    // source-clip edit, `Conditioning::VideoClip`), `reference_to_video` (r2v —
+    // subject reference images, `MultiReference`), and `reference_video_to_video`
+    // (rv2v — source clip + reference images). The engine selects the matching
+    // guidance mode from `video_mode` + the supplied conditioning.
     if model == "bernini" {
-        return mode == "text_to_video";
+        return matches!(
+            mode,
+            "text_to_video" | "video_to_video" | "reference_to_video" | "reference_video_to_video"
+        );
     }
     match mode {
         "text_to_video" | "image_to_video" => true,
@@ -5016,16 +5028,48 @@ mod mlx_routing_tests {
         ] {
             assert!(!video_mode_is_mlx_eligible("svd", mode));
         }
-        // Bernini serves text_to_video ONLY — its renderer is Wan2.2-T2V (no i2v/FLF/etc.). The
-        // editing/reference modes (v2v/r2v/...) are net-new and land in sc-4703.
-        assert!(video_mode_is_mlx_eligible("bernini", "text_to_video"));
+        // Bernini serves text_to_video + the planner editing/reference video modes (sc-4703:
+        // video_to_video / reference_to_video / reference_video_to_video). It has no classic
+        // still-image-to-video / FLF / replace_person (its renderer is Wan2.2-T2V).
+        for mode in [
+            "text_to_video",
+            "video_to_video",
+            "reference_to_video",
+            "reference_video_to_video",
+        ] {
+            assert!(
+                video_mode_is_mlx_eligible("bernini", mode),
+                "bernini should serve {mode}"
+            );
+        }
         for mode in [
             "image_to_video",
             "first_last_frame",
+            "extend_clip",
+            "video_bridge",
             "replace_person",
             "nonsense",
         ] {
-            assert!(!video_mode_is_mlx_eligible("bernini", mode));
+            assert!(
+                !video_mode_is_mlx_eligible("bernini", mode),
+                "bernini should not serve {mode}"
+            );
+        }
+        // The editing/reference modes are Bernini-only — every other routed model rejects them.
+        for model in VIDEO_MLX_ROUTED_MODELS {
+            if *model == "bernini" {
+                continue;
+            }
+            for mode in [
+                "video_to_video",
+                "reference_to_video",
+                "reference_video_to_video",
+            ] {
+                assert!(
+                    !video_mode_is_mlx_eligible(model, mode),
+                    "{mode} should be Bernini-only, not eligible on {model}"
+                );
+            }
         }
         // first_last_frame: MLX on LTX (base + eros) + Wan TI2V-5B (sc-3055 cutover).
         assert!(video_mode_is_mlx_eligible("ltx_2_3", "first_last_frame"));

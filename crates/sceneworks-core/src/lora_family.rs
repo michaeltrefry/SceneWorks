@@ -268,12 +268,20 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // does not support the timeline/replacement modes.
         ("video", "svd") => vec!["image_to_video"],
         // Bernini (epic 4699) is a Wan2.2-T2V-A14B renderer + Qwen2.5-VL semantic
-        // planner. `text_to_video` is the only task that maps onto the existing
-        // capability vocabulary. Its richer surface — video editing (v2v/mv2v/ads2v)
-        // and reference-driven video (r2v/rv2v), plus the t2i/i2i image companion —
-        // needs net-new capability strings + UI and lands in sc-4703. Bernini has no
-        // classic still-image-to-video (its renderer is T2V, not I2V).
-        ("video", "bernini") => vec!["text_to_video"],
+        // planner whose engine descriptor is `Modality::Both` with conditioning
+        // `[Reference, MultiReference, VideoClip]`. The video task surface maps onto
+        // SceneWorks modes (sc-4703): `text_to_video` (t2v), `video_to_video` (v2v —
+        // a source clip edit), `reference_to_video` (r2v — subject reference images →
+        // video), and `reference_video_to_video` (rv2v — source clip + reference
+        // images). Bernini has no classic still-image-to-video (its renderer is T2V,
+        // not I2V). The t2i/i2i image companion is a separate image-typed catalog id
+        // (tracked under epic 4699), not declared here.
+        ("video", "bernini") => vec![
+            "text_to_video",
+            "video_to_video",
+            "reference_to_video",
+            "reference_video_to_video",
+        ],
         _ => Vec::new(),
     }
 }
@@ -1377,13 +1385,19 @@ mod tests {
     }
 
     #[test]
-    fn bernini_family_maps_to_bernini_adapter_and_text_to_video_only() {
+    fn bernini_family_maps_to_bernini_adapter_and_full_video_task_surface() {
         assert_eq!(model_adapter_for_family("bernini"), Some("bernini"));
-        // Slice A (sc-4701) declares only the cleanly-mapped capability. The video
-        // editing / reference-driven modes are net-new vocabulary added in sc-4703.
+        // sc-4703: the full Bernini video task surface — t2v + the editing
+        // (`video_to_video`) and reference-driven (`reference_to_video` /
+        // `reference_video_to_video`) modes. No still-image-to-video (renderer is T2V).
         assert_eq!(
             model_capabilities_for_type_and_family("video", "bernini"),
-            vec!["text_to_video"],
+            vec![
+                "text_to_video",
+                "video_to_video",
+                "reference_to_video",
+                "reference_video_to_video",
+            ],
         );
     }
 

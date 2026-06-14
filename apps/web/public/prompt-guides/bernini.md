@@ -10,6 +10,29 @@ prompts more than terse ones.
 > Bernini is heavy: the planner runs many passes before rendering, so a clip takes several minutes.
 > Keep clips short and write motion that completes within the selected duration.
 
+## Task Modes
+
+Bernini's planner serves several video tasks. Pick the mode that matches the media you have — the
+Video Studio shows the right inputs for each, and the prompt always describes the **result you want**.
+
+| Mode | What it does | Inputs you provide |
+|---|---|---|
+| **Text → Video** | Generates a clip from the prompt alone. | Prompt |
+| **Video → Video** | Re-renders a source clip to follow your prompt (restyle, relight, change the setting) while keeping its motion and timing. | Source clip + prompt |
+| **Reference → Video** | Generates a clip whose subject matches one or more reference images (identity / look), driven by the prompt. | 1+ reference images + prompt |
+| **Reference + Video** | Edits a source clip so its subject matches your reference images — reference-driven video editing. | Source clip + 1+ reference images + prompt |
+
+Tips per mode:
+
+- **Video → Video / Reference + Video:** the source clip sets the motion and framing, so write the
+  prompt about *what changes* (the new style, lighting, wardrobe, or setting), not the motion the clip
+  already has.
+- **Reference → Video / Reference + Video:** use clean, well-lit reference images of the subject. More
+  than one reference (different angles) helps the planner hold identity across the clip. Then describe
+  the action and scene you want the subject placed into.
+- All modes share the same length / fps / resolution limits — keep clips short; the source clip is
+  resampled to the output length.
+
 ## Prompt Shape
 
 `subject + scene + motion + camera + aesthetic/style`

@@ -57,6 +57,10 @@ pub struct VideoRequest {
     pub last_frame_asset_id: Option<String>,
     pub source_clip_asset_id: Option<String>,
     pub bridge_right_clip_asset_id: Option<String>,
+    /// Subject reference images for Bernini's reference-driven video modes
+    /// (`reference_to_video` / `reference_video_to_video`, sc-4703). Consumed by the
+    /// MLX `generate_bernini` path as the planner's `MultiReference` conditioning.
+    pub reference_asset_ids: Vec<String>,
     /// Per-model advanced knobs (steps, guidanceScale, imageConditioningStrength,
     /// timelineContext, …), passed through.
     pub advanced: JsonObject,
@@ -91,6 +95,7 @@ impl VideoRequest {
             last_frame_asset_id: optional_id(payload, "lastFrameAssetId"),
             source_clip_asset_id: optional_id(payload, "sourceClipAssetId"),
             bridge_right_clip_asset_id: optional_id(payload, "bridgeRightClipAssetId"),
+            reference_asset_ids: string_list(payload, "referenceAssetIds"),
             advanced: object_or_empty(payload, "advanced"),
             model_manifest_entry: object_or_empty(payload, "modelManifestEntry"),
         }
@@ -225,6 +230,24 @@ fn safe_float(value: Option<&Value>, default: f32, min: f32, max: f32) -> f32 {
         .clamp(min, max)
 }
 
+/// Parse a list of non-empty trimmed string ids (e.g. `referenceAssetIds`); blanks
+/// and non-strings are dropped, so the worker only ever sees real asset ids.
+fn string_list(payload: &JsonObject, key: &str) -> Vec<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn array_or_empty(payload: &JsonObject, key: &str) -> Vec<Value> {
     payload
         .get(key)
@@ -322,6 +345,23 @@ mod tests {
             Some(&json!("ltx-video"))
         );
         assert_eq!(request.loras.len(), 1);
+    }
+
+    #[test]
+    fn parses_reference_asset_ids_dropping_blanks() {
+        let request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p",
+            "mode": "reference_video_to_video",
+            "sourceClipAssetId": "clip-a",
+            "referenceAssetIds": ["ref-1", "  ", "ref-2", 42]
+        })));
+        assert_eq!(request.mode, "reference_video_to_video");
+        assert_eq!(request.source_clip_asset_id.as_deref(), Some("clip-a"));
+        assert_eq!(request.reference_asset_ids, vec!["ref-1", "ref-2"]);
+
+        // Absent → empty, never a panic.
+        let bare = VideoRequest::from_payload(&payload(json!({ "projectId": "p" })));
+        assert!(bare.reference_asset_ids.is_empty());
     }
 
     #[test]

@@ -3007,6 +3007,121 @@ async fn image_and_video_job_routes_normalize_payloads() {
 }
 
 #[tokio::test]
+async fn bernini_video_modes_validate_required_media() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Bernini" }),
+    )
+    .await;
+
+    // video_to_video without a source clip is rejected.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "video_to_video",
+            "prompt": "make it golden hour"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // reference_to_video without reference images is rejected.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // reference_video_to_video needs BOTH a source clip and references.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_video_to_video",
+            "prompt": "swap the subject",
+            "referenceAssetIds": ["ref-1"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Blank reference ids are rejected.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances",
+            "referenceAssetIds": ["  "]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A complete video_to_video request creates a base video_generate job that
+    // carries the source clip.
+    let (status, v2v_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "video_to_video",
+            "prompt": "make it golden hour",
+            "sourceClipAssetId": "clip-a"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(v2v_job["type"], "video_generate");
+    assert_eq!(v2v_job["payload"]["mode"], "video_to_video");
+    assert_eq!(v2v_job["payload"]["sourceClipAssetId"], "clip-a");
+
+    // A complete reference_video_to_video request carries both the clip and the refs.
+    let (status, rv2v_job) = request(
+        app,
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_video_to_video",
+            "prompt": "swap the subject",
+            "sourceClipAssetId": "clip-a",
+            "referenceAssetIds": ["ref-1", "ref-2"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(rv2v_job["type"], "video_generate");
+    assert_eq!(rv2v_job["payload"]["referenceAssetIds"][0], "ref-1");
+    assert_eq!(rv2v_job["payload"]["referenceAssetIds"][1], "ref-2");
+}
+
+#[tokio::test]
 async fn person_tracking_routes_match_contracts() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
