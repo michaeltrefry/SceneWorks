@@ -1946,16 +1946,16 @@
       "type": "video",
       "adapter": "wan_video",
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-      // Per-platform source (sc-3240): macOS converts the native checkpoint to MLX in-process
-      // (mlx-gen-wan ingests native Wan format only); Windows/Linux load the diffusers layout via
-      // the torch wan_video adapter. The API serves only the entry matching the running OS.
+      // Per-platform source: macOS downloads the turnkey pre-converted MLX snapshot from the
+      // SceneWorks HF org (sc-5599, epic 5594); Windows/Linux load the diffusers layout via the
+      // torch wan_video adapter. The API serves only the entry matching the running OS.
       "downloads": [
         {
           "provider": "huggingface",
-          "repo": "Wan-AI/Wan2.2-TI2V-5B",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
           "files": [],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 34196904505
+          "estimatedSizeBytes": 24197123156
         },
         {
           "provider": "huggingface",
@@ -1966,7 +1966,7 @@
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Wan-AI/Wan2.2-TI2V-5B"
+        "model": "${HF_CACHE}/SceneWorks/wan2.2-ti2v-5b-mlx"
       },
       "defaults": {
         "duration": 5,
@@ -2012,13 +2012,14 @@
         }
       },
       "mlx": {
-        // TI2V-5B has no published MLX repo; the native checkpoint is converted locally
-        // in-process by the Rust mlx-gen-wan converter (sc-3240, converter "wan_ti2v_5b")
-        // into <data>/models/mlx/wan_2_2. Dense bf16 (no quantization).
+        // Turnkey pre-converted MLX snapshot on the SceneWorks HF org (sc-5599, epic 5594):
+        // dense bf16, self-contained (DiT + UMT5 encoder + VAE + tokenizer), downloaded on
+        // first use — no in-app conversion. The worker still resolves env override
+        // (SCENEWORKS_MLX_WAN5B_DIR) → local <data>/models/mlx/wan_2_2 (a local conversion
+        // supersedes) → this turnkey snapshot. Source Wan-AI/Wan2.2-TI2V-5B is Apache-2.0;
+        // converter "wan_ti2v_5b" emits bf16 (Q4/Q8 applied at load, not baked in).
         "minMemoryGb": 45,
-        "requiresConversion": true,
-        "converter": "wan_ti2v_5b",
-        "convertSourceRepo": "Wan-AI/Wan2.2-TI2V-5B",
+        "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
         // MLX path is sealed (own ODE solver, no diffusers scheduler) — override
         // the top-level sampler/scheduler menu to default-only (epic 1753 §14).
         "limits": {
@@ -2052,16 +2053,27 @@
       "type": "video",
       "adapter": "wan_video",
       "capabilities": ["text_to_video"],
+      // Per-platform source: macOS downloads the turnkey pre-converted dual-expert MLX snapshot
+      // from the SceneWorks HF org (sc-5607, epic 5594; replaces the third-party AITRADER mirror);
+      // Windows/Linux load the diffusers/GGUF layout via the torch wan_video adapter.
       "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "files": [],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 69040469369
+        },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
           "files": [],
+          "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 72000000000
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+        "model": "${HF_CACHE}/SceneWorks/wan2.2-t2v-a14b-mlx"
       },
       "defaults": {
         "duration": 5,
@@ -2111,10 +2123,15 @@
         }
       },
       "mlx": {
-        // Turnkey: pre-converted MLX repo + the lightx2v 4-step Lightning LoRA
-        // (downloaded on demand by MlxVideoAdapter at generation time).
+        // Turnkey pre-converted dual-expert MLX snapshot on the SceneWorks HF org (sc-5607,
+        // epic 5594) — replaces the third-party AITRADER/Wan2.2-T2V-A14B-mlx-bf16 mirror. Dense
+        // bf16, self-contained (high/low-noise experts + UMT5 encoder + z16 VAE + tokenizer),
+        // downloaded on first use. The worker resolves env override (SCENEWORKS_MLX_WAN14B_T2V_DIR)
+        // → local <data>/models/mlx/wan_2_2_t2v_14b → this snapshot. Source Wan-AI/Wan2.2-T2V-A14B
+        // is Apache-2.0; converter "wan_t2v_14b" emits bf16 (Q4/Q8 at load). The lightx2v 4-step
+        // Lightning LoRA is downloaded on demand by MlxVideoAdapter at generation time.
         "minMemoryGb": 133,
-        "repo": "AITRADER/Wan2.2-T2V-A14B-mlx-bf16",
+        "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
         "limits": {
           "samplers": ["default"],
           "schedulers": ["default"]
@@ -2143,17 +2160,16 @@
       "type": "video",
       "adapter": "wan_video",
       "capabilities": ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
-      // Per-platform source (sc-3240): macOS converts the native dual-expert checkpoint to MLX
-      // in-process (mlx-gen-wan); Windows/Linux load the diffusers/GGUF layout via the torch
-      // wan_video adapter. Native is larger than the diffusers layout (~126 GB vs ~72 GB). The
-      // API serves only the entry matching the running OS.
+      // Per-platform source: macOS downloads the turnkey pre-converted dual-expert MLX snapshot
+      // from the SceneWorks HF org (sc-5600, epic 5594); Windows/Linux load the diffusers/GGUF
+      // layout via the torch wan_video adapter. The API serves only the entry matching the OS.
       "downloads": [
         {
           "provider": "huggingface",
-          "repo": "Wan-AI/Wan2.2-I2V-A14B",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
           "files": [],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 126202610088
+          "estimatedSizeBytes": 69042107874
         },
         {
           "provider": "huggingface",
@@ -2164,7 +2180,7 @@
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Wan-AI/Wan2.2-I2V-A14B"
+        "model": "${HF_CACHE}/SceneWorks/wan2.2-i2v-a14b-mlx"
       },
       "defaults": {
         "duration": 5,
@@ -2212,14 +2228,15 @@
         }
       },
       "mlx": {
-        // I2V-A14B has no published MLX repo; the native checkpoint is converted locally
-        // in-process by the Rust mlx-gen-wan converter (sc-3240, converter "wan_i2v_14b")
-        // into <data>/models/mlx/wan_2_2_i2v_14b (in_dim 36 image-concat, z16 VAE; dense
-        // bf16 by default). Its distill LoRA is applied at run time.
+        // Turnkey pre-converted dual-expert MLX snapshot on the SceneWorks HF org (sc-5600,
+        // epic 5594): dense bf16, self-contained (high/low-noise experts + UMT5 encoder + z16
+        // VAE + tokenizer; in_dim 36 image-concat), downloaded on first use — no in-app
+        // conversion. The worker resolves env override (SCENEWORKS_MLX_WAN14B_I2V_DIR) → local
+        // <data>/models/mlx/wan_2_2_i2v_14b (a local conversion supersedes) → this snapshot.
+        // Source Wan-AI/Wan2.2-I2V-A14B is Apache-2.0; converter "wan_i2v_14b" emits bf16
+        // (Q4/Q8 at load). Its distill LoRA is applied at run time.
         "minMemoryGb": 133,
-        "requiresConversion": true,
-        "converter": "wan_i2v_14b",
-        "convertSourceRepo": "Wan-AI/Wan2.2-I2V-A14B",
+        "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
         "limits": {
           "samplers": ["default"],
           "schedulers": ["default"]

@@ -1728,6 +1728,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
+    /// One-shot real-weight conversion harness for re-hosting (epic 5594). Runs the SAME
+    /// `convert_wan_native` + `copy_wan_umt5_tokenizer` as `run_model_convert_job`, writing the
+    /// assembled MLX dir to `SW_CONVERT_OUT` (a real, persistent dir — NOT a temp dir — so the
+    /// artifact survives for upload). Env-driven so it is not machine-specific. Dense bf16
+    /// (quant=None), matching the manifest default for the A14B Wan models. Run e.g.:
+    ///   SW_CONVERT_KIND=wan_i2v_14b SW_CONVERT_SRC=models--Wan-AI--Wan2.2-I2V-A14B \
+    ///   SW_CONVERT_OUT="$HOME/Library/Application Support/SceneWorks/data/models/mlx/wan_2_2_i2v_14b" \
+    ///   cargo test -p sceneworks-worker --lib -- --ignored --nocapture oneshot_convert_wan_to_data_dir
+    #[test]
+    #[ignore]
+    fn oneshot_convert_wan_to_data_dir() {
+        let kind = std::env::var("SW_CONVERT_KIND").expect("SW_CONVERT_KIND");
+        let src = std::env::var("SW_CONVERT_SRC").expect("SW_CONVERT_SRC");
+        let out = PathBuf::from(std::env::var("SW_CONVERT_OUT").expect("SW_CONVERT_OUT"));
+        let checkpoint = hf_snapshot(&src);
+        eprintln!(
+            "[oneshot] converting {kind} from {} -> {}",
+            checkpoint.display(),
+            out.display()
+        );
+        let _ = std::fs::remove_dir_all(&out);
+        convert_wan_native(&kind, &checkpoint, &out, None).expect("native Wan convert");
+        copy_wan_umt5_tokenizer(&checkpoint, &out).expect("copy UMT5 tokenizer");
+
+        let mut biggest = 0u64;
+        for entry in std::fs::read_dir(&out).expect("read out").flatten() {
+            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            biggest = biggest.max(len);
+            eprintln!("  {} ({len} bytes)", entry.file_name().to_string_lossy());
+        }
+        assert!(out.join("config.json").is_file(), "missing config.json");
+        assert!(
+            out.join("tokenizer.json").is_file(),
+            "missing tokenizer.json"
+        );
+        assert!(
+            biggest > 1_000_000_000,
+            "no multi-GB weight shard written — conversion produced a stub"
+        );
+    }
+
     /// Real-weights smoke for the native Rust/MLX LTX-2.3 converter (sc-3224 engine + sc-3240
     /// cutover) — the LTX path was never routed through the Rust job before. Runs the actual
     /// `convert_ltx_native` used by `run_model_convert_job` on the cached eros single-file + the base

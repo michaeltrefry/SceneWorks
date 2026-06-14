@@ -1465,13 +1465,21 @@ fn resolve_wan_model_dir(
     _engine_id: &str,
 ) -> WorkerResult<PathBuf> {
     let (env, local_id, hf_repo): (&str, &str, Option<&str>) = match model {
-        "wan_2_2" => ("SCENEWORKS_MLX_WAN5B_DIR", "wan_2_2", None),
+        "wan_2_2" => (
+            "SCENEWORKS_MLX_WAN5B_DIR",
+            "wan_2_2",
+            Some("SceneWorks/wan2.2-ti2v-5b-mlx"),
+        ),
         "wan_2_2_t2v_14b" => (
             "SCENEWORKS_MLX_WAN14B_T2V_DIR",
             "wan_2_2_t2v_14b",
-            Some("AITRADER/Wan2.2-T2V-A14B-mlx-bf16"),
+            Some("SceneWorks/wan2.2-t2v-a14b-mlx"),
         ),
-        "wan_2_2_i2v_14b" => ("SCENEWORKS_MLX_WAN14B_I2V_DIR", "wan_2_2_i2v_14b", None),
+        "wan_2_2_i2v_14b" => (
+            "SCENEWORKS_MLX_WAN14B_I2V_DIR",
+            "wan_2_2_i2v_14b",
+            Some("SceneWorks/wan2.2-i2v-a14b-mlx"),
+        ),
         other => {
             return Err(WorkerError::InvalidPayload(format!(
                 "not a Wan model: {other}"

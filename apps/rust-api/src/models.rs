@@ -1618,14 +1618,26 @@ pub(crate) fn mlx_catalog_status(
             converted_path: None,
         })
     } else {
-        let installed = mlx
+        let repo_installed = mlx
             .get("repo")
             .and_then(Value::as_str)
             .is_some_and(repo_cached);
+        // A turnkey model may still be served by a pre-existing local conversion at
+        // <data>/models/mlx/<id> — the worker's resolve_*_model_dir prefers a local dir over
+        // the turnkey download. Count that as installed too, so a model flipped from
+        // requiresConversion → turnkey (sc-5599) doesn't read as "missing" for users who had
+        // already converted it locally.
+        let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let local_dir = data_dir.join("models").join("mlx").join(model_id);
+        let local_installed = local_dir.join("config.json").is_file();
         Some(MlxCatalogStatus {
-            install_state: if installed { "installed" } else { "missing" },
+            install_state: if repo_installed || local_installed {
+                "installed"
+            } else {
+                "missing"
+            },
             conversion_state: "ready",
-            converted_path: None,
+            converted_path: local_installed.then_some(local_dir),
         })
     }
 }
