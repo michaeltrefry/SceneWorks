@@ -125,6 +125,11 @@ mod person_segment;
 // Windows/Linux backend until a parallel candle backport (cf. epic 3792).
 #[cfg(target_os = "macos")]
 mod person_segment_sam3;
+// SCAIL-2 color-coded segmentation-mask painting (epic 5439, sc-5448): turns native SAM3
+// per-person masks into the palette-painted RGB masks the SCAIL-2 engine consumes. macOS-only
+// like its SAM3 dependency.
+#[cfg(target_os = "macos")]
+mod scail2_masks;
 use downloads::*;
 #[cfg(target_os = "macos")]
 use kps_jobs::*;

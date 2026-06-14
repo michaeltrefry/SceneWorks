@@ -2454,6 +2454,28 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
         bernini.features.video_modes.get("replace_person"),
         Some(&false)
     );
+    // SCAIL-2 (epic 5439) is MLX-routed for the standalone character-animation mode only (sc-5448);
+    // the worker paints its masks from native SAM3. No text/image-to-video; cross-identity
+    // replace_person reuses the same engine but is wired separately (sc-5452).
+    let scail2 = model_mac_support("scail2_14b", "video");
+    assert!(scail2.supported, "scail2 should be MLX-supported");
+    assert!(scail2.reason.is_none());
+    assert_eq!(
+        scail2.features.video_modes.get("animate_character"),
+        Some(&true)
+    );
+    assert_eq!(
+        scail2.features.video_modes.get("text_to_video"),
+        Some(&false)
+    );
+    assert_eq!(
+        scail2.features.video_modes.get("image_to_video"),
+        Some(&false)
+    );
+    assert_eq!(
+        scail2.features.video_modes.get("replace_person"),
+        Some(&false)
+    );
 }
 
 #[test]

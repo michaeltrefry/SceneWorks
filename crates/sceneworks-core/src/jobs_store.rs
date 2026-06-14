@@ -2253,6 +2253,10 @@ const VIDEO_UI_MODES: &[&str] = &[
     "reference_video_to_video",
     "multi_video_to_video",
     "ads2v",
+    // SCAIL-2 standalone character animation (epic 5439 / sc-5448): only `scail2_14b` is
+    // eligible; surfaces disabled on the other models. Reference character + driving video
+    // → animated clip. (Cross-identity replacement reuses `replace_person`, wired in sc-5452.)
+    "animate_character",
 ];
 
 fn video_model_mac_support(model: &str) -> ModelMacSupport {
@@ -3596,6 +3600,10 @@ const VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
     // only; the editing/reference video modes (v2v/mv2v/r2v/rv2v/ads2v) are
     // net-new UI vocabulary tracked under sc-4703.
     "bernini",
+    // SCAIL-2 (epic 5439 / sc-5448): Wan2.1-14B I2V end-to-end character animation,
+    // native MLX (engine id "scail2_14b"). Serves the standalone `animate_character`
+    // mode; cross-identity `replace_person` reuses the same engine, wired in sc-5452.
+    "scail2_14b",
 ];
 
 /// Epic 3018 routing (sc-3036, the video sibling of [`image_job_is_mlx_eligible`]):
@@ -3695,6 +3703,14 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
                 | "multi_video_to_video"
                 | "ads2v"
         );
+    }
+    // SCAIL-2 (epic 5439 / sc-5448) is a Wan2.1-14B I2V character-animation engine: a reference
+    // character image + a driving video → an animated clip. It serves the standalone
+    // `animate_character` mode (the worker paints the color-coded masks from native SAM3). It has no
+    // classic text/image-to-video; cross-identity `replace_person` reuses the same engine but is wired
+    // separately (sc-5452), so it is not admitted here yet.
+    if model == "scail2_14b" {
+        return mode == "animate_character";
     }
     match mode {
         "text_to_video" | "image_to_video" => true,
@@ -5161,17 +5177,18 @@ mod mlx_routing_tests {
     #[test]
     fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
         // image_to_video is MLX on every routed model EXCEPT Bernini (text_to_video only — its
-        // renderer is Wan2.2-T2V, no still-image-to-video); text_to_video on every routed model
-        // EXCEPT SVD (image-conditioned only, sc-3523).
+        // renderer is Wan2.2-T2V, no still-image-to-video) and SCAIL-2 (animate_character only);
+        // text_to_video on every routed model EXCEPT SVD (image-conditioned only, sc-3523) and
+        // SCAIL-2 (animate_character only — sc-5448).
         for model in VIDEO_MLX_ROUTED_MODELS {
             assert_eq!(
                 video_mode_is_mlx_eligible(model, "image_to_video"),
-                *model != "bernini",
+                *model != "bernini" && *model != "scail2_14b",
                 "image_to_video eligibility for {model}"
             );
             assert_eq!(
                 video_mode_is_mlx_eligible(model, "text_to_video"),
-                *model != "svd",
+                *model != "svd" && *model != "scail2_14b",
                 "text_to_video eligibility for {model}"
             );
         }
@@ -5233,6 +5250,38 @@ mod mlx_routing_tests {
                     "{mode} should be Bernini-only, not eligible on {model}"
                 );
             }
+        }
+        // SCAIL-2 (sc-5448) serves ONLY the standalone character-animation mode (the worker paints
+        // its masks from native SAM3). No text/image-to-video; cross-identity replace_person is wired
+        // separately (sc-5452), so it is not admitted here yet.
+        assert!(
+            video_mode_is_mlx_eligible("scail2_14b", "animate_character"),
+            "scail2 should serve animate_character"
+        );
+        for mode in [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+            "video_to_video",
+            "nonsense",
+        ] {
+            assert!(
+                !video_mode_is_mlx_eligible("scail2_14b", mode),
+                "scail2 should not serve {mode}"
+            );
+        }
+        // animate_character is SCAIL-2-only — every other routed model rejects it.
+        for model in VIDEO_MLX_ROUTED_MODELS {
+            if *model == "scail2_14b" {
+                continue;
+            }
+            assert!(
+                !video_mode_is_mlx_eligible(model, "animate_character"),
+                "animate_character should be SCAIL-2-only, not eligible on {model}"
+            );
         }
         // first_last_frame: MLX on LTX (base + eros) + Wan TI2V-5B (sc-3055 cutover).
         assert!(video_mode_is_mlx_eligible("ltx_2_3", "first_last_frame"));

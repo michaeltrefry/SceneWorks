@@ -64,6 +64,11 @@ use mlx_gen_wan as _;
 // `gen_core::load("bernini")`, no direct type contact — the "no generator registered" trap).
 #[cfg(target_os = "macos")]
 use mlx_gen_bernini as _;
+// SCAIL-2 (epic 5439): the character-animation `Generator` registers under `scail2_14b` via
+// `inventory::submit!`; force-link so the registration survives the linker (reached only through
+// `gen_core::load("scail2_14b")`, no direct type contact — the "no generator registered" trap).
+#[cfg(target_os = "macos")]
+use mlx_gen_scail2 as _;
 // Candle (Windows/CUDA) video providers (sc-5097) — force-link anchors so their `inventory::submit!`
 // registrations (`wan2_2_ti2v_5b` / `ltx_2_3_distilled`) survive the MSVC release linker, mirroring
 // the image providers in image_jobs.rs.
@@ -309,6 +314,28 @@ pub(crate) async fn run_video_generate_job(
             .await?,
             BERNINI_ADAPTER,
             bernini_raw_settings(&request),
+            None,
+        )
+    } else if let Some(engine_id) =
+        scail2_engine_id(&request.model).filter(|_| scail2_available(&request, settings))
+    {
+        // SCAIL-2 (epic 5439 / sc-5448): Wan2.1-14B I2V character animation. `generate_scail2`
+        // segments the reference image + driving frames with native SAM3, paints the color-coded
+        // masks, and maps the SceneWorks mode to the engine task (animate_character → animation;
+        // replace_person → replacement is wired in sc-5452). No torch path (mac-only engine).
+        (
+            generate_scail2(
+                api,
+                settings,
+                job,
+                &request,
+                &project_path,
+                engine_id,
+                backend,
+            )
+            .await?,
+            SCAIL2_ADAPTER,
+            scail2_raw_settings(&request),
             None,
         )
     } else {
@@ -1443,6 +1470,9 @@ pub(crate) fn ensure_video_engine_weights(
     }
     if bernini_engine_id(&request.model).is_some() {
         resolve_bernini_model_dir(settings)?;
+    }
+    if scail2_engine_id(&request.model).is_some() {
+        resolve_scail2_model_dir(settings)?;
     }
     Ok(())
 }
@@ -2991,6 +3021,261 @@ async fn generate_bernini(
         fps: request.fps,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some(bernini_engine_video_mode(&request.mode).to_owned()),
+        ..VideoGenInput::default()
+    };
+    generate_video(api, settings, job, backend, input).await
+}
+
+// ---------------------------------------------------------------------------
+// Real MLX SCAIL-2 generation (macOS, via mlx-gen-scail2, epic 5439 / sc-5448): end-to-end character
+// animation — a reference character image + a driving video → an animated clip of the character
+// performing the driving motion. The worker paints the color-coded segmentation masks the engine
+// needs from native SAM3 (no user masks): the reference image and the driving frames are each
+// segmented (every person → a distinct palette color, left-to-right) and painted onto the
+// whose-world-to-keep background (animation: driving bg black, ref bg white). Conditioning =
+// `Reference` (the character) + `Mask` (its color mask) + `ControlClip{frames, mask}` (driving video +
+// per-frame color masks). `replace_person` (cross-identity, replace_flag=true) is the same engine,
+// wired in sc-5452; multi-character (paired ref+mask) awaits the engine request-contract extension.
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real MLX SCAIL-2 asset.
+#[cfg(target_os = "macos")]
+const SCAIL2_ADAPTER: &str = "mlx_scail2";
+
+/// SceneWorks SCAIL-2 model id → mlx-gen registry id, or `None` if `model` is not SCAIL-2.
+#[cfg(target_os = "macos")]
+fn scail2_engine_id(model: &str) -> Option<&'static str> {
+    (model == "scail2_14b").then_some("scail2_14b")
+}
+
+/// Whether the linked SCAIL-2 engine can serve this request now (resolvable weights).
+#[cfg(target_os = "macos")]
+fn scail2_available(_request: &VideoRequest, settings: &Settings) -> bool {
+    resolve_scail2_model_dir(settings).is_ok()
+}
+
+/// Resolve the SCAIL-2 MLX snapshot dir: env override (`SCENEWORKS_MLX_SCAIL2_DIR`) → app-managed
+/// `<data>/models/mlx/scail2` → the turnkey download-on-first-use `SceneWorks/scail2-mlx` snapshot
+/// (mirrors `resolve_bernini_model_dir`). Errors clearly if none is present (no stub fallback).
+#[cfg(target_os = "macos")]
+fn resolve_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Some(dir) = local_mlx_dir(settings, "SCENEWORKS_MLX_SCAIL2_DIR", "scail2") {
+        return Ok(dir);
+    }
+    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, "SceneWorks/scail2-mlx") {
+        return Ok(dir);
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "scail2: no MLX weights found. Download the turnkey SceneWorks/scail2-mlx snapshot via the \
+         Model Manager, set $SCENEWORKS_MLX_SCAIL2_DIR, or place a converted snapshot at {}.",
+        settings
+            .data_dir
+            .join("models")
+            .join("mlx")
+            .join("scail2")
+            .display(),
+    )))
+}
+
+/// MLX quantization for a SCAIL-2 load: Q4 default, Q8 opt-in via the advanced `mlxQuantize: 8`
+/// control, explicit `<= 0` ⇒ bf16 (power users with ample RAM). Mirrors `resolve_bernini_quant`.
+#[cfg(target_os = "macos")]
+fn resolve_scail2_quant(request: &VideoRequest) -> Option<Quant> {
+    match request.advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    }) {
+        Some(bits) if bits <= 0 => None,
+        Some(bits) if bits <= 4 => Some(Quant::Q4),
+        Some(_) => Some(Quant::Q8),
+        None => Some(Quant::Q4),
+    }
+}
+
+/// Raw-settings recorded on a real MLX SCAIL-2 asset (mirrors `bernini_raw_settings`).
+#[cfg(target_os = "macos")]
+fn scail2_raw_settings(request: &VideoRequest) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
+    raw.insert("fps".to_owned(), json!(request.fps));
+    // The engine task the SceneWorks mode resolved to (lineage / observability).
+    raw.insert(
+        "scail2Task".to_owned(),
+        Value::String(scail2_engine_video_mode(&request.mode).to_owned()),
+    );
+    Value::Object(raw)
+}
+
+/// Map a SceneWorks video mode to the SCAIL-2 engine `video_mode` task string. `replace_person`
+/// (cross-identity, sc-5452) flips the engine `replace_flag`; everything else (`animate_character`)
+/// is plain animation.
+#[cfg(target_os = "macos")]
+fn scail2_engine_video_mode(mode: &str) -> &'static str {
+    match mode {
+        "replace_person" => "replacement",
+        _ => "animation",
+    }
+}
+
+/// Resolve a SCAIL-2 request into the engine conditioning: load the reference character image and the
+/// driving clip, segment both with native SAM3 (every person → a palette color), paint the color-coded
+/// masks (animation background convention), and assemble `Reference` + `Mask` + `ControlClip`. The
+/// segmentation + painting run on the blocking pool (GPU inference). The reference is
+/// `referenceAssetIds[0]` (preferred) or `sourceAssetId`; the driving clip is `sourceClipAssetId`.
+#[cfg(target_os = "macos")]
+async fn resolve_scail2_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Conditioning>> {
+    // The character: a reference image (referenceAssetIds first, else the i2v sourceAssetId).
+    let ref_id = request
+        .reference_asset_ids
+        .first()
+        .map(String::as_str)
+        .or(request.source_asset_id.as_deref())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "scail2 animate_character requires a reference character image (referenceAssetIds \
+                 or sourceAssetId)."
+                    .into(),
+            )
+        })?;
+    let reference = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        ref_id,
+        project_path,
+    )?;
+
+    // The driving video → frames at the output size (the engine re-resizes internally).
+    let clip_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "scail2 animate_character requires a driving video (sourceClipAssetId).".into(),
+        )
+    })?;
+    let driving = extract_clip_frames(
+        api,
+        settings,
+        job,
+        &request.project_id,
+        project_path,
+        clip_id,
+        request.width,
+        request.height,
+        wan_frame_count(request.raw_frame_count()),
+    )
+    .await?;
+
+    // SAM3 segmenter weights (download-on-first-use), shared by both segmentation passes.
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "SCAIL-2 canceled while fetching the SAM3 segmenter weights.",
+        fresh_download: false,
+    };
+    let (sam_model, sam_tokenizer) =
+        crate::person_segment_sam3::ensure_segmenter_weights(settings, &context).await?;
+
+    // Decode the engine `Image`s to `RgbImage`s for SAM3 (it normalizes RGB internally).
+    let ref_rgb =
+        image::RgbImage::from_raw(reference.width, reference.height, reference.pixels.clone())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("scail2 reference image is malformed".into())
+            })?;
+    let driving_rgb: Vec<image::RgbImage> = driving
+        .iter()
+        .map(|f| image::RgbImage::from_raw(f.width, f.height, f.pixels.clone()))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
+
+    // Segment + paint the reference mask (animation keeps the reference's world → white background).
+    let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
+    let ref_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+            &rm,
+            &rt,
+            std::slice::from_ref(&ref_rgb),
+        )?;
+        crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+
+    // Segment + paint the per-frame driving masks (animation → black background).
+    let driving_mask = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+            &sam_model,
+            &sam_tokenizer,
+            &driving_rgb,
+        )?;
+        Ok(crate::scail2_masks::paint_driving_masks(
+            &masks,
+            crate::scail2_masks::BG_BLACK,
+        ))
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+
+    Ok(vec![
+        Conditioning::Reference {
+            image: reference,
+            strength: None,
+        },
+        Conditioning::Mask { image: ref_mask },
+        Conditioning::ControlClip {
+            frames: driving,
+            mask: driving_mask,
+            masking_strength: 1.0,
+            start_frame: 0,
+            mode: ReplacementMode::default(),
+        },
+    ])
+}
+
+/// Real MLX SCAIL-2 generation (epic 5439 / sc-5448): build the `VideoGenInput` and run the shared
+/// `generate_video` path. The SceneWorks mode resolves to the engine `video_mode` task
+/// ([`scail2_engine_video_mode`]) and the source media into the SAM3-painted conditioning
+/// ([`resolve_scail2_conditioning`]). No LoRA (the engine reports `supports_lora=false`, sc-5451);
+/// steps/guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4 stride coercion (the
+/// renderer is Wan2.1); the engine stitches > 81-frame clips into overlapping segments internally.
+#[cfg(target_os = "macos")]
+async fn generate_scail2(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<DecodedVideo> {
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let conditioning =
+        resolve_scail2_conditioning(api, settings, job, request, project_path).await?;
+    let input = VideoGenInput {
+        engine_id,
+        model_dir: resolve_scail2_model_dir(settings)?,
+        quant: resolve_scail2_quant(request),
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        seed: resolve_video_seed(request) as u64,
+        video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await

@@ -142,6 +142,23 @@ backend-candle = [
 # desktop packager (build-sidecar.mjs) has a dylib to stage and dev runs work.
 ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "download-binaries"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Rev fa0f75b (mlx-gen main, merged PRs #453/#454/#455 + #456, epic 5439 / sc-5448): adds the full
+# **SCAIL-2** provider (`mlx-gen-scail2`, dep below) — a Wan2.1-14B I2V end-to-end character-animation /
+# cross-identity-replacement Generator self-registering as `scail2_14b` (reference character image +
+# driving video + auto-generated color-coded masks → animated/identity-replaced video; packed-token
+# conditioning + per-source RoPE + open-CLIP ViT-H/14 image cross-attn; reuses mlx-gen-wan's VAE/UMT5/
+# scheduler and depends on mlx-gen-wan internally). The new request conditioning the worker builds —
+# `Conditioning::Mask` (the reference's color mask) paired with `Reference`, plus the driving
+# `ControlClip{frames, mask}` — landed in gen-core at this rev (the descriptor advertises
+# `ConditioningKind::Mask`). Also bundles sc-5551 (#456): honor the cancel flag per-step in Wan/LTX
+# video denoise (output-neutral; the worker's existing cancel path just gets finer-grained). ⚠️ mlx-rs
+# stays `44929a0` (mlx-gen HEAD's internal mlx-rs rev is unchanged at this pin), so the direct `mlx-rs`
+# pin below is unchanged and MLX rebuilds only the new `mlx-gen-scail2` crate (+ its mlx-gen-wan dep).
+# `sceneworks-gen-core` is bumped in lockstep (the macOS block + the direct dep at line 33) so the skew
+# gate stays green (ONE rev). This bump moves EVERY mlx-gen crate rev to fa0f75b. The candle-gen pin
+# (`c032f16`) is NOT touched: candle deps are `optional` (off in the default `cargo tree --target all`
+# skew graph), so candle catches up to fa0f75b's gen-core separately in its own repo — exactly as the
+# 41c95a1 bernini bump below left candle at c032f16 and kept main green. On top of:
 # Rev 41c95a1 (mlx-gen main, merged PR #433, epic 4699 / sc-4707): adds the full **Bernini** provider
 # (`mlx-gen-bernini`, dep below) — a Qwen2.5-VL-7B semantic planner + Wan2.2-T2V-A14B dual-expert
 # renderer self-registering as `bernini`. The delta vs `1a97909` (which already carried the bernini
@@ -437,6 +454,18 @@ mlx-gen-bernini = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d3e
 # tokenizer.json + model-*.safetensors; default `huihui-ai/Llama-3.2-3B-Instruct-abliterated`). Same
 # git rev + mlx-rs pin as the other mlx-gen crates so MLX builds once.
 mlx-gen-prompt-refine = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d3ec5e5e97ba3c0e71a49a001f2b8a975451bb76" }
+# SCAIL-2 (zai-org) end-to-end character-animation provider (epic 5439, sc-5448). An inventory-registered
+# `Generator` under id `scail2_14b` (`Modality::Video`): a Wan2.1-14B I2V DiT that animates a reference
+# character with a driving video's motion (`video_mode == "replacement"` flips the cross-identity
+# replace path for sc-5452). Conditioning = `Reference` (the character) + `Mask` (its color-coded seg
+# mask) + `ControlClip{frames, mask}` (driving video + per-frame color masks); the worker paints those
+# masks from native SAM3 (`mlx-gen-sam3`, above). Reuses mlx-gen-wan's VAE/UMT5/scheduler (depends on
+# mlx-gen-wan internally) + an open-CLIP ViT-H/14 image tower. `mac_only` native MLX (no torch fallback).
+# Q4 default / Q8 opt-in at load. The worker reaches it through the registry (`gen_core::load("scail2_14b")`
+# → `.generate`), so video_jobs.rs must force-link the crate (`use mlx_gen_scail2 as _;`) or the linker
+# drops the `ModelRegistration` (the "no generator registered" trap). Weights = the turnkey converted
+# `SceneWorks/scail2-mlx` snapshot. Same git rev + mlx-rs pin as the other mlx-gen crates so MLX builds once.
+mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "d3ec5e5e97ba3c0e71a49a001f2b8a975451bb76" }
 
 # candle (Windows/CUDA) generative backend (epic 3672, sc-3675) — the Windows sibling of the macOS
 # mlx provider crates above. `candle-gen-sdxl` self-registers `sdxl` into the SAME gen_core inventory
