@@ -733,6 +733,46 @@ pub(crate) fn backend_label(gpu_id: &str) -> &str {
     }
 }
 
+/// First-detection handling for the in-loop image cancel poller (sc-5515): trip the
+/// engine `CancelFlag` and post a NON-terminal "Cancelling…" update (indeterminate
+/// progress; any completed thumbnails stay via the streamed result). The terminal
+/// `Canceled` is posted only after the blocking generation actually stops (see
+/// `consume_gen_events`), so the worker row — and therefore the next queued job — is
+/// not freed until the GPU is genuinely idle, and the UI honestly shows "Cancelling…"
+/// until completion. Best-effort: a failed status update here is non-fatal because the
+/// post-run terminal write is what ultimately frees the worker.
+//
+// Gated to where `consume_gen_events` (its only caller) and the `CancelFlag` import live — the
+// `include!`d `base.rs` block — so it isn't compiled (referencing the cfg-gated `CancelFlag`) on
+// non-macOS / non-candle builds.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+async fn begin_image_cancel(
+    api: &ApiClient,
+    job_id: &str,
+    cancel: &CancelFlag,
+    plan: &ImagePlan,
+    asset_writes: &[Value],
+    backend: &str,
+) {
+    cancel.cancel();
+    let _ = update_job(
+        api,
+        job_id,
+        image_progress(
+            JobStatus::Running,
+            ProgressStage::Generating,
+            0.0,
+            "Cancelling — finishing the current image…",
+            Some(streaming_result(plan, asset_writes)),
+            backend,
+        ),
+    )
+    .await;
+}
+
 /// Deterministic placeholder pixels: a vertical gradient from a per-seed base colour
 /// to white, exactly `width * height * 3` RGB8 bytes.
 fn stub_rgb8(width: u32, height: u32, seed: i64) -> Vec<u8> {
