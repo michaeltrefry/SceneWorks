@@ -3852,276 +3852,6 @@ def lens_resolution_for(width: int, height: int) -> tuple[int, str]:
     return base, snap_to_aspect_bucket(width, height, _LENS_ASPECT_BUCKETS)
 
 
-class LensTurboAdapter:
-    """Microsoft Lens / Lens-Turbo text-to-image, run OUT-OF-PROCESS.
-
-    Lens needs transformers 5.x (gpt-oss text encoder) + diffusers 0.38, which are
-    incompatible with the main worker venv's transformers 4.x stack that native
-    LTX-2.3 (ltx-core's Gemma-3 integration) requires. So Lens runs in a dedicated
-    sidecar venv (``/opt/lens-venv``) via ``scene_worker/lens_runner.py``; this
-    adapter only orchestrates that subprocess and writes the resulting PNGs through
-    the shared asset writer. The vendored ``lens`` package (scene_worker/_vendor)
-    is imported by the runner, not here.
-
-    Text-to-image only (no edit/img2img). LoRAs (the `lens` family, trained by
-    the `lens_lora` kernel) are resolved here and applied to the transformer in
-    the sidecar via PeftAdapterMixin (sc-1587).
-    """
-
-    id = "lens_turbo"
-
-    def __init__(self) -> None:
-        # Sidecar scratch dir for the in-flight job, reaped by discard_temp_outputs
-        # on force-cancel (os._exit skips the finally in generate). One job runs at
-        # a time (sc-1719).
-        self._scratch_dir: Path | None = None
-
-    def discard_temp_outputs(self, job_id: str | None = None) -> None:
-        """Reap the in-flight sidecar scratch dir only — filesystem-only.
-
-        Called from generate's finally and from the force-cancel monitor thread
-        right before os._exit, so it must stay filesystem-only (no torch/GPU; the
-        main thread may be wedged in a native call)."""
-        work_dir = self._scratch_dir
-        if work_dir is not None:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            self._scratch_dir = None
-
-    def loaded_models(self) -> list[str]:
-        # The sidecar process loads and frees the model per job; nothing stays
-        # resident in this (main-venv) process.
-        return []
-
-    @staticmethod
-    def _lens_python() -> str:
-        return os.getenv("SCENEWORKS_LENS_PYTHON", "/opt/lens-venv/bin/python")
-
-    @staticmethod
-    def _runner_path() -> Path:
-        return Path(__file__).resolve().parent / "lens_runner.py"
-
-    def _sidecar_available(self) -> bool:
-        return Path(self._lens_python()).exists() and self._runner_path().exists()
-
-    def generate(
-        self,
-        *,
-        settings: WorkerSettings,
-        job: dict[str, Any],
-        request: ImageRequest,
-        project_path: Path,
-        progress: ProgressCallback,
-        cancel_requested: CancelCallback,
-    ) -> dict[str, Any]:
-        if request.mode == "edit_image":
-            raise RuntimeError(f"{request.model} does not support image editing.")
-        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["lens_turbo"])
-        if model_target.get("adapter") != self.id:
-            raise RuntimeError(f"{request.model} is not a Lens target.")
-        # Lens LoRAs (sc-1587) are trained on the base and applied to the
-        # transformer inside the sidecar. Resolve + validate them in the main venv
-        # so a bad path or incompatible family fails before we spawn the
-        # subprocess; the sidecar only sees concrete file paths + weights.
-        validate_lora_compatibility(
-            request.loras, model_family=model_target.get("family"), adapter_id=self.id
-        )
-        lora_specs = normalize_lora_specs(request.loras)
-        if not self._sidecar_available():
-            raise RuntimeError(
-                "Lens generation requires the isolated Lens sidecar venv. Rebuild the worker image with "
-                "INCLUDE_LENS=1 (the Docker Compose default), or set SCENEWORKS_LENS_PYTHON to a Python "
-                f"interpreter that has the lens stack installed (looked for {self._lens_python()})."
-            )
-
-        total = request.count
-        repo = request.advanced.get("modelRepo") or model_target["repo"]
-        steps = self._num_inference_steps(request, model_target)
-        guidance_scale = self._guidance_scale(request, model_target)
-        base_resolution, aspect_ratio = lens_resolution_for(request.width, request.height)
-        seeds = [resolve_seed(request.seed, request.prompt, index, request.seeds) for index in range(total)]
-        lens_sampler, lens_scheduler, lens_shift = sampler_selection_from_advanced(request.advanced)
-        torch = importlib.import_module("torch")
-        device = select_torch_device(torch, getattr(settings, "gpu_id", None))
-        # mxfp4 keeps the gpt-oss-20b text encoder small but needs CUDA + Triton
-        # kernels, which exist only on NVIDIA. On MPS/CPU the encoder must load
-        # dequantized to bf16 (transformers auto-falls back, but force it here so
-        # a non-CUDA host never reaches the Triton path).
-        disable_mxfp4 = bool(request.advanced.get("disableMxfp4", False)) or not device.startswith("cuda")
-
-        progress("loading_model", "loading_model", 0.18, f"Loading {model_target['label']} (sidecar venv).")
-        work_dir = Path(tempfile.mkdtemp(prefix="lens_sidecar_"))
-        self._scratch_dir = work_dir
-        try:
-            images = self._run_sidecar(
-                job_id=job["id"],
-                work_dir=work_dir,
-                label=model_target["label"],
-                total=total,
-                spec={
-                    "repo": repo,
-                    "prompt": request.prompt,
-                    "negativePrompt": request.negative_prompt,
-                    "baseResolution": base_resolution,
-                    "aspectRatio": aspect_ratio,
-                    "numInferenceSteps": steps,
-                    "guidanceScale": guidance_scale,
-                    "seeds": seeds,
-                    "disableMxfp4": disable_mxfp4,
-                    "cpuOffload": bool(request.advanced.get("cpuOffload", False)),
-                    "dtype": request.advanced.get("dtype"),
-                    "device": device,
-                    "loras": [
-                        {"path": lora.path, "weight": lora.weight, "name": lora.adapter_name}
-                        for lora in lora_specs
-                    ],
-                    # Configurable sampler / scheduler (epic 1753 sc-1764). The
-                    # sidecar's lens_runner swaps pipe.scheduler via
-                    # apply_sampler before generation; the vendored Lens loop
-                    # branches between its empirical mu+linear-sigma path
-                    # (default) and the scheduler-native path (non-default).
-                    **({"sampler": lens_sampler} if lens_sampler != "default" else {}),
-                    **({"scheduler": lens_scheduler} if lens_scheduler != "default" else {}),
-                    **({"schedulerShift": lens_shift} if lens_shift is not None else {}),
-                },
-                progress=progress,
-                cancel_requested=cancel_requested,
-            )
-
-            def image_at_index(index: int) -> Image.Image:
-                progress(
-                    "running",
-                    "generating",
-                    image_batch_progress(index, total),
-                    format_batch_running_message("Lens-Turbo", index, total),
-                )
-                with Image.open(images[index]) as handle:
-                    return handle.convert("RGB")
-
-            return ImageAssetWriter().write_incremental_outputs(
-                request=request,
-                project_path=project_path,
-                image_count=total,
-                image_at_index=image_at_index,
-                adapter_id=self.id,
-                progress=progress,
-                cancel_requested=cancel_requested,
-                raw_settings={
-                    **request.advanced,
-                    "repo": repo,
-                    "numInferenceSteps": steps,
-                    "guidanceScale": guidance_scale,
-                    "baseResolution": base_resolution,
-                    "aspectRatio": aspect_ratio,
-                    "textEncoderMxfp4": not disable_mxfp4,
-                    "sidecarVenv": self._lens_python(),
-                    "realModelInference": True,
-                },
-                settings=settings,
-                job_id=job["id"],
-            )
-        finally:
-            # The writer has read every PNG into the project by now; drop the
-            # sidecar's scratch dir regardless of success/failure (also clears the
-            # force-cancel registry).
-            self.discard_temp_outputs(job["id"])
-
-    def _run_sidecar(
-        self,
-        *,
-        job_id: str,
-        work_dir: Path,
-        label: str,
-        total: int,
-        spec: dict[str, Any],
-        progress: ProgressCallback,
-        cancel_requested: CancelCallback,
-    ) -> list[str]:
-        spec = {**spec, "outDir": str(work_dir)}
-        spec_path = work_dir / "spec.json"
-        spec_path.write_text(json.dumps(spec), encoding="utf-8")
-        stdout_log = work_dir / "stdout.log"
-        cmd = [self._lens_python(), str(self._runner_path()), str(spec_path)]
-        emit_worker_event(
-            "lens_sidecar_start",
-            jobId=job_id,
-            adapter=self.id,
-            repo=spec["repo"],
-            imageCount=total,
-            device=spec["device"],
-            mxfp4=not spec["disableMxfp4"],
-            sidecar=self._lens_python(),
-        )
-        progress("running", "generating", image_batch_progress(0, total), f"Running {label} ({total} image(s)).")
-        # stdout -> file (avoids any pipe-fill deadlock); stderr inherits to the
-        # worker log for diagnostics. Poll so the job stays cancelable; the
-        # heartbeat thread keeps it alive during the (minutes-long) run.
-        with stdout_log.open("w", encoding="utf-8") as out:
-            # stderr merged into stdout.log so a native crash (SIGABRT/SIGSEGV)
-            # leaves a partial traceback we can surface; result.json stays the
-            # authoritative success channel (_read_result prefers it).
-            proc = subprocess.Popen(cmd, env=os.environ.copy(), stdout=out, stderr=subprocess.STDOUT)
-            while True:
-                try:
-                    proc.wait(timeout=2)
-                    break
-                except subprocess.TimeoutExpired:
-                    if cancel_requested():
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        raise InterruptedError("Image generation canceled by user.")
-        result = self._read_result(work_dir, stdout_log)
-        if proc.returncode != 0 or "error" in result:
-            error = result.get("error") or f"Lens sidecar exited with code {proc.returncode}."
-            emit_worker_event(
-                "lens_sidecar_failed",
-                jobId=job_id,
-                adapter=self.id,
-                error=error,
-                returnCode=proc.returncode,
-            )
-            raise RuntimeError(f"Lens generation failed in the sidecar venv: {error}")
-        images = [str(path) for path in result.get("images", [])]
-        if len(images) != total:
-            raise RuntimeError(f"Lens sidecar produced {len(images)} image(s); expected {total}.")
-        emit_worker_event("lens_sidecar_complete", jobId=job_id, adapter=self.id, imageCount=len(images))
-        return images
-
-    @staticmethod
-    def _read_result(work_dir: Path, stdout_log: Path) -> dict[str, Any]:
-        result_path = work_dir / "result.json"
-        if result_path.exists():
-            try:
-                return json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                pass
-        try:
-            lines = [line for line in stdout_log.read_text(encoding="utf-8").splitlines() if line.strip()]
-        except OSError:
-            lines = []
-        for line in reversed(lines):
-            try:
-                return json.loads(line)
-            except ValueError:
-                continue
-        return {"error": "Lens sidecar produced no parseable result."}
-
-    def _num_inference_steps(self, request: ImageRequest, model_target: dict[str, Any]) -> int:
-        return safe_int(request.advanced.get("steps"), model_target["steps"], 1, 80)
-
-    def _guidance_scale(self, request: ImageRequest, model_target: dict[str, Any]) -> float:
-        # Lens-Turbo is distilled for guidance_scale ~1.0 (no CFG); the base Lens
-        # model uses ~5.0. The per-model default comes from MODEL_TARGETS so each
-        # variant gets the right CFG when the request does not override it.
-        default = model_target.get("guidanceScale", 1.0)
-        try:
-            return float(request.advanced.get("guidanceScale", default))
-        except (TypeError, ValueError):
-            return float(default)
-
-
 class ProceduralImageAdapter:
     id = "procedural_preview"
 
@@ -5100,7 +4830,6 @@ def create_image_adapter(
     ProceduralImageAdapter
     | ZImageDiffusersAdapter
     | QwenImageAdapter
-    | LensTurboAdapter
     | SenseNovaU1Adapter
     | FluxDiffusersAdapter
     | KolorsDiffusersAdapter
@@ -5120,7 +4849,6 @@ def create_image_adapter(
     if requested and requested not in {
         ZImageDiffusersAdapter.id,
         QwenImageAdapter.id,
-        LensTurboAdapter.id,
         SenseNovaU1Adapter.id,
         FluxDiffusersAdapter.id,
         KolorsDiffusersAdapter.id,
@@ -5133,8 +4861,6 @@ def create_image_adapter(
         return adapters.get("z_image_diffusers") if adapters else ZImageDiffusersAdapter()
     if requested == QwenImageAdapter.id:
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
-    if requested == LensTurboAdapter.id:
-        return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
     if requested == SenseNovaU1Adapter.id:
         return adapters.get("sensenova_u1") if adapters else SenseNovaU1Adapter()
     if requested == FluxDiffusersAdapter.id:
@@ -5159,8 +4885,19 @@ def create_image_adapter(
         # the Python worker routes the torch fallback (Windows/Linux, or Mac when the mlx
         # worker is down). sc-3032.
         return adapters.get("qwen_image") if adapters else QwenImageAdapter()
-    if model_target.get("adapter") == LensTurboAdapter.id:
-        return adapters.get("lens_turbo") if adapters else LensTurboAdapter()
+    if model_target.get("adapter") == "lens_turbo":
+        # Lens / Lens-Turbo inference was ported to the native candle (Windows/CUDA) backend and the
+        # Python transformers-5 sidecar (lens_runner.py + the /opt/lens-venv interpreter) was retired
+        # (sc-5126, epic 5107). Off-Mac Lens inference is candle-only — a lens job only reaches this
+        # Python worker when no candle worker claimed it (candle disabled/unavailable), so fail loudly
+        # rather than silently rendering the procedural placeholder (mirrors the mlx_flux2 / pulid_flux
+        # arms below). Lens LoRA/LoKr TRAINING still runs in the sidecar (lens_train_runner.py) until
+        # the sc-5147 worker training cutover lands.
+        raise RuntimeError(
+            "Lens / Lens-Turbo inference is served by the native candle (Windows/CUDA) backend "
+            "(sc-5126); the Python Lens sidecar was retired. Enable the candle backend on a CUDA "
+            "worker to generate with Lens off-Mac."
+        )
     if model_target.get("adapter") == SenseNovaU1Adapter.id:
         return adapters.get("sensenova_u1") if adapters else SenseNovaU1Adapter()
     if model_target.get("adapter") == FluxDiffusersAdapter.id:

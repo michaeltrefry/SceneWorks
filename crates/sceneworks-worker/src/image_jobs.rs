@@ -31,13 +31,15 @@ use sceneworks_core::image_request::ImageRequest;
     all(target_os = "windows", feature = "backend-candle")
 ))]
 use gen_core::{
-    AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator, Image,
-    LoadSpec, Progress, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
+    Generator, Image, LoadSpec, Progress, Quant, WeightsSource,
 };
-// MLX-only contract types (LoRA classification + ControlNet conditioning) — the candle txt2img lane
-// uses neither.
+// `AdapterKind` (LoRA/LoKr classification) was MLX-only until sc-5126: the candle Lens lane is the
+// first candle family to take LoRA/LoKr, so it now classifies adapters too and the import moved into
+// the shared block above. `ControlKind` (ControlNet conditioning) stays MLX-only — the candle lane is
+// pure txt2img.
 #[cfg(target_os = "macos")]
-use gen_core::{AdapterKind, ControlKind};
+use gen_core::ControlKind;
 #[cfg(target_os = "macos")]
 use mlx_gen_chroma as _;
 #[cfg(target_os = "macos")]
@@ -89,6 +91,13 @@ use candle_gen_flux2 as _;
 use candle_gen_qwen_image as _;
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_z_image as _;
+// Lens / Lens-Turbo (epic 5107 engine / sc-5126 cutover) — the candle Windows/CUDA sibling of the
+// `mlx_gen_lens` anchor above, and the 8th candle image family (effectively). Self-registers `lens`
+// (20-step/CFG-5) + `lens_turbo` (4-step/g-1.0) into the shared gen_core inventory registry; the
+// FIRST candle family to advertise Q4/Q8 quant + LoRA/LoKr. Force-linked so the MSVC release linker
+// keeps the `inventory::submit!` (the dead-strip trap that bit Kolors on MLX).
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_lens as _;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by FaceEmbedder in Phase 3.
 // InstantID (sc-3345) is a bespoke provider, not an inventory-registered `Generator`, so it is
 // referenced by name (`InstantId::load`) rather than anchored with `as _;` — and the native face
@@ -113,7 +122,12 @@ const STUB_ADAPTER: &str = "procedural_preview";
 /// so the sidecar + result agree on which backend produced the image.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 const CANDLE_ADAPTER: &str = "candle_sdxl";
-#[cfg(target_os = "macos")]
+// Shared by the MLX path and the candle Lens lane (sc-5126) — both cap a job's user LoRAs at 3
+// (`resolve_adapters`), so the const is available on the Windows candle build too.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const MAX_JOB_LORAS: usize = 3;
 
 // The engine dispatch table + its `ModelRow`/`mlx_model` join moved to the all-targets

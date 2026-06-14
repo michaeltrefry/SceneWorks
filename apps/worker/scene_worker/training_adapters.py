@@ -2939,10 +2939,11 @@ class LensLoraTrainer:
     """Image LoRA trainer for Microsoft Lens, run OUT-OF-PROCESS.
 
     Lens needs transformers 5.x + diffusers 0.38, incompatible with this (main)
-    worker venv's transformers 4.x stack, so — like the Lens inference adapter
-    (:class:`scene_worker.image_adapters.LensTurboAdapter`) — the whole training
-    loop runs in the dedicated Lens sidecar venv via
-    ``scene_worker/lens_train_runner.py``. Per-step IPC across the venv boundary
+    worker venv's transformers 4.x stack, so the whole training loop runs in the
+    dedicated Lens sidecar venv via ``scene_worker/lens_train_runner.py``. (Lens
+    *inference* was ported to the native candle backend and its sidecar adapter
+    retired in sc-5126; training stays in the venv until the sc-5147 cutover.)
+    Per-step IPC across the venv boundary
     would be far too chatty, so unlike :class:`ZImageLoraTrainer` (which stages an
     in-process backend) this driver only writes the spec, launches the subprocess,
     maps its JSONL progress events onto the worker's progress bands, handles
@@ -2981,9 +2982,9 @@ class LensLoraTrainer:
 
     @staticmethod
     def _device_hint(settings: WorkerSettings) -> str:
-        """Resolve the device the sidecar should train on, mirroring the Lens
-        inference adapter (``LensTurboAdapter.generate``): ``select_torch_device``
-        picks ``mps`` on Apple Silicon, ``cuda``/``cuda:N`` on NVIDIA, and ``cpu``
+        """Resolve the device the sidecar should train on via the shared
+        ``select_torch_device``: it picks ``mps`` on Apple Silicon, ``cuda``/``cuda:N``
+        on NVIDIA, and ``cpu``
         when ``SCENEWORKS_GPU_ID=cpu`` is set. The driver runs in the main worker
         venv (which has torch); if torch is somehow unimportable here we fall back
         to a platform heuristic so the hint is still sane (the sidecar re-resolves

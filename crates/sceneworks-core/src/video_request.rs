@@ -56,11 +56,21 @@ pub struct VideoRequest {
     pub replacement_mode: String,
     pub last_frame_asset_id: Option<String>,
     pub source_clip_asset_id: Option<String>,
+    /// Multiple source clips for Bernini's multi-source-video edit mode
+    /// (`multi_video_to_video` / mv2v, sc-5425). `generate_bernini` pushes one
+    /// `Conditioning::VideoClip` per clip; the single-clip modes use
+    /// `source_clip_asset_id` instead.
+    pub source_clip_asset_ids: Vec<String>,
     pub bridge_right_clip_asset_id: Option<String>,
     /// Subject reference images for Bernini's reference-driven video modes
-    /// (`reference_to_video` / `reference_video_to_video`, sc-4703). Consumed by the
-    /// MLX `generate_bernini` path as the planner's `MultiReference` conditioning.
+    /// (`reference_to_video` / `reference_video_to_video` / `ads2v`, sc-4703 /
+    /// sc-5425). Consumed by the MLX `generate_bernini` path as the planner's
+    /// `MultiReference` conditioning.
     pub reference_asset_ids: Vec<String>,
+    /// The reference *video* slot for Bernini's `ads2v` mode (sc-5425): a second
+    /// source video distinct from `source_clip_asset_id`. `generate_bernini` pushes
+    /// it as a second `Conditioning::VideoClip` after the source clip.
+    pub reference_clip_asset_id: Option<String>,
     /// Per-model advanced knobs (steps, guidanceScale, imageConditioningStrength,
     /// timelineContext, …), passed through.
     pub advanced: JsonObject,
@@ -94,8 +104,10 @@ impl VideoRequest {
             replacement_mode: string_or(payload, "replacementMode", DEFAULT_REPLACEMENT_MODE),
             last_frame_asset_id: optional_id(payload, "lastFrameAssetId"),
             source_clip_asset_id: optional_id(payload, "sourceClipAssetId"),
+            source_clip_asset_ids: string_list(payload, "sourceClipAssetIds"),
             bridge_right_clip_asset_id: optional_id(payload, "bridgeRightClipAssetId"),
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
+            reference_clip_asset_id: optional_id(payload, "referenceClipAssetId"),
             advanced: object_or_empty(payload, "advanced"),
             model_manifest_entry: object_or_empty(payload, "modelManifestEntry"),
         }
@@ -362,6 +374,34 @@ mod tests {
         // Absent → empty, never a panic.
         let bare = VideoRequest::from_payload(&payload(json!({ "projectId": "p" })));
         assert!(bare.reference_asset_ids.is_empty());
+    }
+
+    #[test]
+    fn parses_mv2v_and_ads2v_multi_source_fields() {
+        // mv2v: multiple source clips, blanks/non-strings dropped.
+        let mv2v = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p",
+            "mode": "multi_video_to_video",
+            "sourceClipAssetIds": ["clip-a", "  ", "clip-b", 7]
+        })));
+        assert_eq!(mv2v.source_clip_asset_ids, vec!["clip-a", "clip-b"]);
+
+        // ads2v: source clip + reference clip + reference images.
+        let ads2v = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p",
+            "mode": "ads2v",
+            "sourceClipAssetId": "clip-src",
+            "referenceClipAssetId": "clip-ref",
+            "referenceAssetIds": ["ref-1"]
+        })));
+        assert_eq!(ads2v.source_clip_asset_id.as_deref(), Some("clip-src"));
+        assert_eq!(ads2v.reference_clip_asset_id.as_deref(), Some("clip-ref"));
+        assert_eq!(ads2v.reference_asset_ids, vec!["ref-1"]);
+
+        // Absent → empty / None, never a panic.
+        let bare = VideoRequest::from_payload(&payload(json!({ "projectId": "p" })));
+        assert!(bare.source_clip_asset_ids.is_empty());
+        assert!(bare.reference_clip_asset_id.is_none());
     }
 
     #[test]

@@ -669,20 +669,6 @@ def test_diffusers_cleanup_reaps_temp_outputs(tmp_path):
 
     assert not temp.exists()
 
-def test_lens_adapter_discards_sidecar_scratch_dir(tmp_path):
-    adapter = LensTurboAdapter()
-    scratch = tmp_path / "lens_sidecar_abc"
-    scratch.mkdir()
-    (scratch / "spec.json").write_text("{}", encoding="utf-8")
-    adapter._scratch_dir = scratch
-
-    adapter.discard_temp_outputs("job-5")
-
-    assert not scratch.exists()
-    assert adapter._scratch_dir is None
-    # No scratch dir registered -> no-op.
-    adapter.discard_temp_outputs("job-5")
-
 def test_native_ltx_adapter_reports_mocked_pipeline_requirements(tmp_path):
     data_dir = tmp_path / "data"
     config_dir = tmp_path / "config"

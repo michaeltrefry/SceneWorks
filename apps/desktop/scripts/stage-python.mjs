@@ -17,8 +17,10 @@ rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
 // requirements-lens.txt feeds the separate Lens sidecar venv (torch 2.11 /
-// transformers 5.8), provisioned alongside the main venv by setup.rs. scene_worker
-// (incl. lens_runner.py + _vendor/lens) is copied wholesale below.
+// transformers 5.8), provisioned alongside the main venv by setup.rs — still used by
+// the Lens LoRA/LoKr TRAINING sidecar (lens_train_runner.py + _vendor/lens) until the
+// sc-5147 training cutover. Lens INFERENCE moved to the native candle backend and its
+// sidecar (lens_runner.py) was retired (sc-5126). scene_worker is copied wholesale below.
 for (const file of [
   "requirements.txt",
   "requirements-ltx.txt",

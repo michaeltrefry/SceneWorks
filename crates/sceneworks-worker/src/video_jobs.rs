@@ -2698,14 +2698,15 @@ async fn generate_wan(
 }
 
 // ---------------------------------------------------------------------------
-// Real MLX Bernini generation (macOS, via mlx-gen-bernini, epic 4699 / sc-4707 + sc-4703): the full
-// Qwen2.5-VL semantic planner + Wan2.2-T2V-A14B dual-expert renderer. Serves the planner video task
-// surface: text_to_video (t2v), video_to_video (v2v — source-clip edit), reference_to_video (r2v —
-// subject references → video), reference_video_to_video (rv2v — source clip + references). The
-// SceneWorks mode maps to the engine `video_mode` task string and the source media is resolved into
-// the planner's `VideoClip` / `MultiReference` conditioning. Q4 default / Q8 opt-in at load. The
-// turnkey `SceneWorks/bernini-mlx` snapshot is self-contained. (t2i/i2i image companion = a separate
-// image-typed catalog id, tracked under epic 4699.)
+// Real MLX Bernini generation (macOS, via mlx-gen-bernini, epic 4699 / sc-4707 + sc-4703 + sc-5425):
+// the full Qwen2.5-VL semantic planner + Wan2.2-T2V-A14B dual-expert renderer. Serves the planner
+// video task surface: text_to_video (t2v), video_to_video (v2v — source-clip edit),
+// reference_to_video (r2v — subject references → video), reference_video_to_video (rv2v — source clip
+// + references), multi_video_to_video (mv2v — multiple source clips), ads2v (source video + reference
+// video + references). The SceneWorks mode maps to the engine `video_mode` task string and the source
+// media is resolved into the planner's `VideoClip` / `MultiReference` conditioning. Q4 default / Q8
+// opt-in at load. The turnkey `SceneWorks/bernini-mlx` snapshot is self-contained. (t2i/i2i image
+// companion = a separate image-typed catalog id, tracked under epic 4699.)
 // ---------------------------------------------------------------------------
 
 /// Adapter id recorded on a real MLX Bernini asset.
@@ -2789,16 +2790,26 @@ fn bernini_engine_video_mode(mode: &str) -> &'static str {
         "video_to_video" => "v2v",
         "reference_to_video" => "r2v",
         "reference_video_to_video" => "rv2v",
+        // Multi-source-video modes (sc-5425): mv2v (multiple source clips) and ads2v
+        // (source video + reference video + reference images). Both resolve to the
+        // engine's `V2vApg` guidance via `task_to_vit_mode`; they differ only in the
+        // supplied media.
+        "multi_video_to_video" => "mv2v",
+        "ads2v" => "ads2v",
         _ => "t2v",
     }
 }
 
 /// Resolve the source media for a Bernini editing/reference request into the planner conditioning:
-/// the source clip → [`Conditioning::VideoClip`] (the edit structure, VAE/ViT-encoded by the engine)
-/// and the subject reference images → [`Conditioning::MultiReference`]. `text_to_video` needs none.
-/// Each mode's required media is enforced here (defense in depth — the API validates the same), so a
-/// mis-built request fails loudly instead of silently rendering an unconditioned clip. The source
-/// clip is decoded to the output frame count (the engine resamples to its `target_fps` grid).
+/// source clips → [`Conditioning::VideoClip`] (the edit structure, VAE/ViT-encoded by the engine)
+/// and subject reference images → [`Conditioning::MultiReference`]. `text_to_video` needs none.
+/// The single-clip modes (v2v / rv2v / ads2v) use `sourceClipAssetId`; mv2v supplies several via
+/// `sourceClipAssetIds`; ads2v additionally appends the reference video (`referenceClipAssetId`) as a
+/// second clip after the source clip (sc-5425). Clips are emitted videos-first, in submission order,
+/// then images — matching the engine's `collect_conditioning` / `assign_source_ids` ordering. Each
+/// mode's required media is enforced here (defense in depth — the API validates the same), so a
+/// mis-built request fails loudly instead of silently rendering an unconditioned clip. Every clip is
+/// decoded to the output frame count (the engine resamples to its `target_fps` grid).
 #[cfg(target_os = "macos")]
 async fn resolve_bernini_conditioning(
     api: &ApiClient,
@@ -2807,23 +2818,44 @@ async fn resolve_bernini_conditioning(
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<Vec<Conditioning>> {
-    let needs_clip = matches!(
-        request.mode.as_str(),
-        "video_to_video" | "reference_video_to_video"
-    );
-    let needs_refs = matches!(
-        request.mode.as_str(),
-        "reference_to_video" | "reference_video_to_video"
-    );
-    let mut conditioning = Vec::new();
+    let mode = request.mode.as_str();
 
-    if needs_clip {
-        let clip_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "bernini {} requires a source clip (sourceClipAssetId).",
-                request.mode.replace('_', " ")
-            ))
+    // Source video clips, in the order the engine assigns source ids (videos first; for ads2v the
+    // source clip leads the reference video).
+    let mut clip_ids: Vec<&str> = Vec::new();
+    match mode {
+        "video_to_video" | "reference_video_to_video" | "ads2v" => {
+            let clip_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "bernini {} requires a source clip (sourceClipAssetId).",
+                    request.mode.replace('_', " ")
+                ))
+            })?;
+            clip_ids.push(clip_id);
+        }
+        "multi_video_to_video" => {
+            if request.source_clip_asset_ids.len() < 2 {
+                return Err(WorkerError::InvalidPayload(
+                    "bernini multi video to video requires at least two source clips \
+                     (sourceClipAssetIds)."
+                        .to_owned(),
+                ));
+            }
+            clip_ids.extend(request.source_clip_asset_ids.iter().map(String::as_str));
+        }
+        _ => {}
+    }
+    if mode == "ads2v" {
+        let ref_clip_id = request.reference_clip_asset_id.as_deref().ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "bernini ads2v requires a reference video (referenceClipAssetId).".to_owned(),
+            )
         })?;
+        clip_ids.push(ref_clip_id);
+    }
+
+    let mut conditioning = Vec::new();
+    for clip_id in clip_ids {
         let frames = extract_clip_frames(
             api,
             settings,
@@ -2843,6 +2875,11 @@ async fn resolve_bernini_conditioning(
         });
     }
 
+    // Subject reference images → MultiReference (r2v / rv2v / ads2v).
+    let needs_refs = matches!(
+        mode,
+        "reference_to_video" | "reference_video_to_video" | "ads2v"
+    );
     if needs_refs {
         if request.reference_asset_ids.is_empty() {
             return Err(WorkerError::InvalidPayload(format!(
@@ -2865,12 +2902,13 @@ async fn resolve_bernini_conditioning(
     Ok(conditioning)
 }
 
-/// Real MLX Bernini video generation (epic 4699 / sc-4707 + sc-4703): build the `VideoGenInput` and
-/// run the shared `generate_video` path. The SceneWorks mode resolves to the engine `video_mode` task
-/// ([`bernini_engine_video_mode`]) and the source media into the planner conditioning
-/// ([`resolve_bernini_conditioning`]) — empty for t2v, a `VideoClip` for v2v/rv2v, `MultiReference`
-/// for r2v/rv2v. No LoRA (the engine reports `supports_lora=false`); steps/guidance stay at the engine
-/// defaults. Frame count uses the Wan 1-mod-4 stride coercion (the renderer is Wan).
+/// Real MLX Bernini video generation (epic 4699 / sc-4707 + sc-4703 + sc-5425): build the
+/// `VideoGenInput` and run the shared `generate_video` path. The SceneWorks mode resolves to the
+/// engine `video_mode` task ([`bernini_engine_video_mode`]) and the source media into the planner
+/// conditioning ([`resolve_bernini_conditioning`]) — empty for t2v, one or more `VideoClip`s for
+/// v2v/mv2v/rv2v/ads2v, and `MultiReference` for r2v/rv2v/ads2v. No LoRA (the engine reports
+/// `supports_lora=false`); steps/guidance stay at the engine defaults. Frame count uses the Wan
+/// 1-mod-4 stride coercion (the renderer is Wan).
 #[cfg(target_os = "macos")]
 async fn generate_bernini(
     api: &ApiClient,
@@ -5214,6 +5252,9 @@ mod tests {
             bernini_engine_video_mode("reference_video_to_video"),
             "rv2v"
         );
+        // Multi-source modes (sc-5425).
+        assert_eq!(bernini_engine_video_mode("multi_video_to_video"), "mv2v");
+        assert_eq!(bernini_engine_video_mode("ads2v"), "ads2v");
         // Unknown / unset falls back to plain text-to-video.
         assert_eq!(bernini_engine_video_mode("image_to_video"), "t2v");
         assert_eq!(bernini_engine_video_mode(""), "t2v");
@@ -5384,10 +5425,12 @@ mod tests {
         );
     }
 
-    /// Real in-process Bernini editing/reference video modes through the engine (sc-4703 / sc-4709):
-    /// drive v2v (synthetic source clip → `VideoClip`), r2v (synthetic reference → `MultiReference`),
-    /// and rv2v (both), asserting each mode loads, consumes its conditioning, and streams RGB8 frames.
-    /// `#[ignore]` — weights live outside CI; run on a Mac with the `SceneWorks/bernini-mlx` snapshot.
+    /// Real in-process Bernini editing/reference/multi-source video modes through the engine
+    /// (sc-4703 / sc-4709 / sc-5425): drive v2v (synthetic source clip → `VideoClip`), r2v
+    /// (synthetic reference → `MultiReference`), rv2v (both), mv2v (two source clips), and ads2v
+    /// (source clip + reference clip + reference), asserting each mode loads, consumes its
+    /// conditioning, and streams RGB8 frames. `#[ignore]` — weights live outside CI; run on a Mac
+    /// with the `SceneWorks/bernini-mlx` snapshot.
     #[cfg(target_os = "macos")]
     #[ignore = "loads the real Bernini snapshot; run manually on a Mac with SceneWorks/bernini-mlx present"]
     #[test]
@@ -5402,19 +5445,18 @@ mod tests {
             height: h,
             pixels: vec![shade; (w * h * 3) as usize],
         };
-        // A 5-frame synthetic source clip and one synthetic subject reference.
+        // Two 5-frame synthetic source clips and one synthetic subject reference.
         let clip: Vec<Image> = (0..5).map(|i| frame(60 + i * 12)).collect();
+        let clip_b: Vec<Image> = (0..5).map(|i| frame(40 + i * 16)).collect();
         let reference = frame(150);
+        let video_clip = |frames: Vec<Image>| Conditioning::VideoClip {
+            frames,
+            frame_idx: 0,
+            strength: 1.0,
+        };
 
         let cases: &[(&str, Vec<Conditioning>)] = &[
-            (
-                "v2v",
-                vec![Conditioning::VideoClip {
-                    frames: clip.clone(),
-                    frame_idx: 0,
-                    strength: 1.0,
-                }],
-            ),
+            ("v2v", vec![video_clip(clip.clone())]),
             (
                 "r2v",
                 vec![Conditioning::MultiReference {
@@ -5424,11 +5466,23 @@ mod tests {
             (
                 "rv2v",
                 vec![
-                    Conditioning::VideoClip {
-                        frames: clip.clone(),
-                        frame_idx: 0,
-                        strength: 1.0,
+                    video_clip(clip.clone()),
+                    Conditioning::MultiReference {
+                        images: vec![reference.clone()],
                     },
+                ],
+            ),
+            // mv2v: two source clips, no references.
+            (
+                "mv2v",
+                vec![video_clip(clip.clone()), video_clip(clip_b.clone())],
+            ),
+            // ads2v: source clip + reference clip + reference image (videos first, then images).
+            (
+                "ads2v",
+                vec![
+                    video_clip(clip.clone()),
+                    video_clip(clip_b.clone()),
                     Conditioning::MultiReference {
                         images: vec![reference.clone()],
                     },

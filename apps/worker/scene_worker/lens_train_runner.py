@@ -391,8 +391,9 @@ def _save_lokr_adapter(
 
     ``save_lora_adapter`` only round-trips LoRA (``lora_A``/``lora_B``) keys — LoKr
     emits ``lokr_w1``/``lokr_w2`` — so serialize ``get_peft_model_state_dict``
-    directly and stamp the header the inference loader (``lens_runner._apply_loras``)
-    rebuilds the matching ``peft.LoKrConfig`` from. Mirrors
+    directly and stamp the header the inference adapter-merge rebuilds the matching
+    LoKr factors from (the native candle ``candle_gen_lens::adapters`` merge, since the
+    sc-5126 inference cutover retired the Python ``lens_runner``). Mirrors
     ``training_adapters.write_lokr_adapter`` (epic 2193, sc-2218)."""
     from peft.utils import get_peft_model_state_dict
     from safetensors.torch import save_file

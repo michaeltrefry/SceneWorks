@@ -44,7 +44,6 @@ from scene_worker.image_adapters import (
     FluxDiffusersAdapter,
     ImageAssetWriter,
     KolorsDiffusersAdapter,
-    LensTurboAdapter,
     MODEL_TARGETS,
     QwenImageAdapter,
     REAL_ESRGAN_MODEL_SPECS,

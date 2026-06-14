@@ -873,16 +873,29 @@ def test_image_adapter_env_aliases_and_unknown_values(monkeypatch):
     else:
         raise AssertionError("Unknown image adapter override should fail loudly.")
 
-def test_create_image_adapter_routes_lens_turbo():
-    adapter = create_image_adapter({"payload": {"model": "lens_turbo"}})
-    assert adapter.__class__.__name__ == "LensTurboAdapter"
-    assert adapter.id == "lens_turbo"
+def test_create_image_adapter_lens_raises_candle_only():
+    # sc-5126: Lens inference moved to the native candle (Windows/CUDA) backend and the Python
+    # transformers-5 sidecar was retired. A lens job that reaches the Python worker (no candle worker
+    # claimed it) must fail loudly rather than silently render the procedural placeholder — mirroring
+    # the mlx_flux2 / pulid_flux arms.
+    for model in ("lens", "lens_turbo"):
+        try:
+            create_image_adapter({"payload": {"model": model}})
+        except RuntimeError as exc:
+            assert "candle" in str(exc).lower()
+        else:
+            raise AssertionError(f"{model} must fail loudly on the Python worker after sc-5126.")
 
-def test_image_adapter_env_override_selects_lens(monkeypatch):
+def test_image_adapter_env_override_lens_is_unsupported(monkeypatch):
+    # `lens_turbo` is no longer a selectable Python image adapter (sc-5126), so an explicit override
+    # is rejected like any unknown adapter id.
     monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "lens_turbo")
-    # Env override wins even when the payload names a different family's model.
-    adapter = create_image_adapter({"payload": {"model": "z_image_turbo"}})
-    assert adapter.__class__.__name__ == "LensTurboAdapter"
+    try:
+        create_image_adapter({"payload": {"model": "z_image_turbo"}})
+    except RuntimeError as exc:
+        assert "Unsupported SCENEWORKS_IMAGE_ADAPTER" in str(exc)
+    else:
+        raise AssertionError("lens_turbo override should be rejected after the sidecar retirement.")
 
 def test_lens_turbo_model_target_defaults():
     target = MODEL_TARGETS["lens_turbo"]
@@ -901,61 +914,10 @@ def test_lens_base_model_target_defaults():
     assert target["guidanceScale"] == 5.0
     assert target["repo"] == "microsoft/Lens"
 
-def test_lens_guidance_scale_uses_per_model_default_and_override():
-    adapter = LensTurboAdapter()
-    base = MODEL_TARGETS["lens"]
-    turbo = MODEL_TARGETS["lens_turbo"]
-    # The per-model default applies when the request does not override guidance.
-    assert adapter._guidance_scale(SimpleNamespace(advanced={}), base) == 5.0
-    assert adapter._guidance_scale(SimpleNamespace(advanced={}), turbo) == 1.0
-    # An explicit request value wins for either variant.
-    assert adapter._guidance_scale(SimpleNamespace(advanced={"guidanceScale": 3.5}), base) == 3.5
-
-def test_lens_turbo_rejects_image_edit(tmp_path):
-    job = {
-        "id": "job_lens_edit",
-        "payload": {
-            "projectId": "project_x",
-            "mode": "edit_image",
-            "model": "lens_turbo",
-            "prompt": "a cat",
-        },
-    }
-    noop = lambda *args, **kwargs: None  # noqa: E731
-    try:
-        LensTurboAdapter().generate(
-            settings=None, job=job, request=image_request_from_job(job), project_path=None,
-            progress=noop, cancel_requested=lambda: False,
-        )
-    except RuntimeError as exc:
-        assert "does not support image editing" in str(exc)
-    else:
-        raise AssertionError("Lens-Turbo is text-to-image only and must reject edit_image.")
-
-def test_lens_turbo_requires_sidecar_when_missing(monkeypatch):
-    # Point the sidecar interpreter at a path that does not exist so the adapter
-    # reports the actionable "rebuild with INCLUDE_LENS" error instead of trying
-    # to import the (main-venv-incompatible) lens stack in-process.
-    monkeypatch.setenv("SCENEWORKS_LENS_PYTHON", "/nonexistent/lens-venv/bin/python")
-    job = {
-        "id": "job_lens_t2i",
-        "payload": {
-            "projectId": "project_x",
-            "mode": "text_to_image",
-            "model": "lens_turbo",
-            "prompt": "a cat",
-        },
-    }
-    noop = lambda *args, **kwargs: None  # noqa: E731
-    try:
-        LensTurboAdapter().generate(
-            settings=None, job=job, request=image_request_from_job(job), project_path=None,
-            progress=noop, cancel_requested=lambda: False,
-        )
-    except RuntimeError as exc:
-        assert "sidecar" in str(exc).lower()
-    else:
-        raise AssertionError("Lens generation must fail clearly when the sidecar venv is unavailable.")
+# Lens inference adapter tests (guidance defaults, edit rejection, sidecar-missing) were removed with
+# the `LensTurboAdapter` class (sc-5126): the step/guidance defaults now live in the Rust MODEL_TABLE
+# (`lens` 20/5.0, `lens_turbo` 4/1.0) and edit-shape rejection is enforced by the candle descriptor +
+# the `image_request_candle_eligible` routing gate.
 
 def test_create_image_adapter_routes_flux_schnell_and_dev():
     # Epic 3018 cutover (sc-3032): FLUX.1 on Mac is claimed by the Rust `mlx` GPU
@@ -1064,10 +1026,12 @@ def test_runtime_registry_covers_all_model_target_adapters():
     from scene_worker import runtime
     from scene_worker.image_adapters import MODEL_TARGETS
 
-    # MLX adapter ids the Python worker no longer owns (Rust `mlx` worker claims them).
-    # `pulid_flux` joined post-sc-3344: the torch PuLIDFluxAdapter was retired, so its
-    # MODEL_TARGETS sentinel adapter id is MLX-only (create_image_adapter raises on it).
-    rust_mlx_only = {"mlx_flux", "mlx_qwen", "mlx_z_image", "mlx_flux2", "pulid_flux"}
+    # Adapter ids the Python worker no longer owns — claimed by a Rust NATIVE worker (MLX on Mac
+    # and/or candle on Windows/CUDA), so create_image_adapter raises on them rather than dispatching
+    # to a Python adapter. `pulid_flux` joined post-sc-3344 (torch PuLIDFluxAdapter retired);
+    # `lens_turbo` joined post-sc-5126 (Lens inference sidecar retired — MLX on Mac, candle off-Mac).
+    # Their MODEL_TARGETS rows keep the `adapter` id as the sentinel create_image_adapter raises on.
+    rust_native_only = {"mlx_flux", "mlx_qwen", "mlx_z_image", "mlx_flux2", "pulid_flux", "lens_turbo"}
 
     src = Path(runtime.__file__).read_text(encoding="utf-8")
     block = src.split("image_adapters: dict[str, object] = {", 1)[1].split("}", 1)[0]
@@ -1076,12 +1040,12 @@ def test_runtime_registry_covers_all_model_target_adapters():
     needed = {
         target["adapter"]
         for target in MODEL_TARGETS.values()
-        if target.get("adapter") and target["adapter"] not in rust_mlx_only
+        if target.get("adapter") and target["adapter"] not in rust_native_only
     }
     missing = needed - registered
     assert not missing, f"adapter ids in MODEL_TARGETS not registered in runtime: {sorted(missing)}"
-    # The MLX adapters are intentionally absent from the Python registry post-cutover.
-    assert not (registered & rust_mlx_only)
+    # The native-worker adapters are intentionally absent from the Python registry post-cutover.
+    assert not (registered & rust_native_only)
 
 def test_flux2_klein_manifest_entries_present():
     # Both flux2_klein_9b and flux2_klein_9b_kv must be present in the

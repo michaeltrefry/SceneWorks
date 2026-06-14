@@ -122,7 +122,10 @@ pub(crate) fn resolve_weights_dir(
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn quant_int(value: &Value) -> Option<i64> {
     if value.is_boolean() {
         return None;
@@ -133,9 +136,17 @@ fn quant_int(value: &Value) -> Option<i64> {
 }
 
 /// Resolve quantization: `advanced.mlxQuantize` → `manifest.mlx.quantize` → Q8
-/// default. mlx-gen supports Q4/Q8; map (<=0 → dense, <=4 → Q4, else Q8). Returns the
-/// mlx-gen quant + the effective bit count for the recipe (None = dense bf16).
-#[cfg(target_os = "macos")]
+/// default. The engine supports Q4/Q8; map (<=0 → dense, <=4 → Q4, else Q8). Returns the
+/// engine quant + the effective bit count for the recipe (None = dense bf16).
+///
+/// Shared by the MLX path and the candle lane (sc-5126). On the candle lane it is called ONLY for a
+/// family whose descriptor advertises `supported_quants` (i.e. Lens — see `generate_candle_stream`'s
+/// `model.supports_quant()` gate), so the Q8 default applies to Lens exactly like the MLX families;
+/// the sc-3675/sc-5096 candle families advertise no quant and never reach this resolver (stay dense).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     let raw = request
         .advanced
@@ -263,7 +274,11 @@ fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Opt
 }
 
 /// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
-#[cfg(target_os = "macos")]
+/// Shared by the MLX path and the candle Lens lane (sc-5126).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
     for key in ["installedPath", "sourcePath", "path"] {
         if let Some(value) = lora
@@ -291,7 +306,14 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
 /// so `Lora` is the correct hint and the worker no longer rejects them. (A LyCORIS algo the engine
 /// doesn't implement — e.g. (IA)³/OFT — has no `lokr_*`/`hada_*` keys, so the engine's LoRA loader
 /// finds nothing and surfaces a loud "matched nothing" error rather than mis-applying.)
-#[cfg(target_os = "macos")]
+///
+/// Shared by the MLX path and the candle Lens lane (sc-5126): candle-gen-lens's `merge_adapters`
+/// dispatches on this `kind` (a `lokr`-metadata file declared `Lora` would find no lora_A/B keys and
+/// it surfaces the mismatch loudly), so the same `networkType: lokr` classification feeds both lanes.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     let header = read_safetensors_header(file)
         .map_err(|error| WorkerError::InvalidPayload(format!("LoRA header: {error}")))?;
@@ -306,8 +328,12 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     Ok(AdapterKind::Lora)
 }
 
-/// Resolve up to 3 request LoRAs into mlx-gen adapter specs (path + scale + kind).
-#[cfg(target_os = "macos")]
+/// Resolve up to 3 request LoRAs into engine adapter specs (path + scale + kind).
+/// Shared by the MLX path and the candle Lens lane (sc-5126).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_adapters(request: &ImageRequest) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
@@ -788,10 +814,13 @@ async fn generate_stream(
 
 /// Whether `model` is served by the candle (Windows/CUDA) backend's **txt2img** lane. SDXL/RealVisXL
 /// (sc-3675) plus the four image families wired in sc-5096 — z-image, flux schnell/dev, flux2-klein,
-/// qwen-image. `realvisxl` shares the candle `"sdxl"` engine via a weights swap; every other id maps
-/// 1:1 to its `MODEL_TABLE` engine id. Edit/control/reference shapes and the non-base weight variants
-/// stay on the Python torch worker (the router's `image_request_candle_eligible` enforces the same
-/// boundary), so this gate is intentionally the base-id set only.
+/// qwen-image — plus Lens / Lens-Turbo (sc-5126, the first candle family with quant + LoRA/LoKr).
+/// `realvisxl` shares the candle `"sdxl"` engine via a weights swap; every other id maps 1:1 to its
+/// `MODEL_TABLE` engine id. Edit/control/reference shapes and the non-base weight variants stay on the
+/// Python torch worker (the router's `image_request_candle_eligible` enforces the same boundary), so
+/// this gate is intentionally the base-id set only. Lens is pure T2I (no conditioning), so it joins
+/// the lane with no new dispatch shape — only quant + adapters, which `generate_candle_stream`
+/// resolves from the descriptor.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 fn is_candle_engine(model: &str) -> bool {
     matches!(
@@ -803,6 +832,8 @@ fn is_candle_engine(model: &str) -> bool {
             | "flux_dev"
             | "flux2_klein_9b"
             | "qwen_image"
+            | "lens"
+            | "lens_turbo"
     )
 }
 
@@ -817,6 +848,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "flux_schnell" | "flux_dev" => "candle_flux",
         "flux2_klein_9b" => "candle_flux2",
         "qwen_image" => "candle_qwen",
+        "lens" | "lens_turbo" => "candle_lens",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -829,11 +861,13 @@ fn candle_adapter_label(model: &str) -> &'static str {
 ///
 /// Backend-neutral resolution (sc-5096): the per-engine repo / steps / guidance / negative prompt all
 /// come from the shared [`mlx_model`] join (`MODEL_TABLE` row + the linked candle descriptor), exactly
-/// like the MLX path — so adding the four image families needs no new dispatch logic, just their
-/// provider crates linked. Quant + adapters are always empty (the candle descriptors advertise
-/// neither). No reference/img2img/control — those shapes fall back to the Python worker upstream
-/// (`image_request_candle_eligible`). Reached only when `backend_candle_enabled` (default off →
-/// production routing unchanged until parity).
+/// like the MLX path — so adding a family needs no new dispatch logic, just its provider crate linked.
+/// Quant + LoRA/LoKr are **descriptor-gated** (sc-5126): resolved (via the same `resolve_quant` /
+/// `resolve_adapters` the MLX path uses) only when the linked candle descriptor advertises them — i.e.
+/// for Lens (Q4/Q8 + LoRA/LoKr); the sc-3675/sc-5096 families advertise neither, so they stay dense +
+/// adapter-free exactly as before. No reference/img2img/control — those shapes fall back to the Python
+/// worker upstream (`image_request_candle_eligible`). Reached only when `backend_candle_enabled`
+/// (default off → production routing unchanged until parity).
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 async fn generate_candle_stream(
     api: &ApiClient,
@@ -894,18 +928,35 @@ async fn generate_candle_stream(
         _ => {}
     }
 
+    // Descriptor-gated quant + adapters (sc-5126). Lens advertises Q4/Q8 (Q8 default) + LoRA/LoKr, so
+    // it resolves them like the MLX path; the sc-3675/sc-5096 families advertise neither and skip both
+    // (dense bf16/fp16, no adapters) — preserving their shipped behavior. The router only lets a quant
+    // request / LoRA reach this worker for a family that supports it (`image_request_candle_eligible`).
+    let (quant, quant_bits) = if model.supports_quant() {
+        resolve_quant(request)
+    } else {
+        (None, None)
+    };
+    let adapters = if model.supports_adapters() {
+        resolve_adapters(request)?
+    } else {
+        Vec::new()
+    };
+    let adapter_count = adapters.len();
+
     let count = request.count as usize;
     let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
-    // Record the effective CFG knob (guidance for guided families, else true_cfg) in the recipe.
-    let raw_settings = mlx_raw_settings(request, &repo, steps, None, guidance.or(true_cfg));
-    let spec = load_spec(weights_dir, None, Vec::new(), None);
+    // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
+    // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path).
+    let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    let spec = load_spec(weights_dir, quant, adapters, None);
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
-        0,
+        adapter_count,
         spec,
         format!("candle {engine_id} load failed"),
         move |generator, tx, cancel| {
@@ -1142,6 +1193,8 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("flux_dev"), "candle_flux");
         assert_eq!(candle_adapter_label("flux2_klein_9b"), "candle_flux2");
         assert_eq!(candle_adapter_label("qwen_image"), "candle_qwen");
+        assert_eq!(candle_adapter_label("lens"), "candle_lens");
+        assert_eq!(candle_adapter_label("lens_turbo"), "candle_lens");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
@@ -1151,6 +1204,8 @@ mod candle_label_tests {
             "flux_dev",
             "flux2_klein_9b",
             "qwen_image",
+            "lens",
+            "lens_turbo",
             "sdxl",
             "realvisxl",
         ] {
@@ -1168,6 +1223,8 @@ mod candle_label_tests {
             "flux_dev",
             "flux2_klein_9b",
             "qwen_image",
+            "lens",
+            "lens_turbo",
         ] {
             assert!(is_candle_engine(model), "{model} should be a candle engine");
         }

@@ -89,6 +89,9 @@ backend-candle = [
     "dep:candle-gen-flux",
     "dep:candle-gen-flux2",
     "dep:candle-gen-qwen-image",
+    # sc-5126 (epic 5107): the candle Lens / Lens-Turbo image provider — gpt-oss-20b MoE encoder +
+    # 48-layer MMDiT + Flux.2 VAE. The first candle family with Q4/Q8 quant + LoRA/LoKr; pure T2I.
+    "dep:candle-gen-lens",
     "dep:candle-gen-wan",
     "dep:candle-gen-ltx",
     # sc-5098 (epic 5095): the candle JoyCaption captioner (image->text), wired into the worker's
@@ -431,25 +434,43 @@ mlx-gen-bernini = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "41c
 # with `c032f16` the candle lane resolves EXACTLY ONE `sceneworks-gen-core` (`1a97909`, == the mlx-gen
 # pin) again, and this also LINKS candle-gen's Wan2.2 14B T2V/I2V providers (sc-5174, candle-gen #23)
 # that the sc-5175 worker wiring routes to. ALL candle deps below MUST share this rev.
+#
+# sc-5126 bumps `c032f16` -> `f366f40` (candle-gen main + the gen-core re-pin): adds the candle Lens /
+# Lens-Turbo provider `candle-gen-lens` (epic 5107) AND re-pins candle-gen's `sceneworks-gen-core`
+# `1a97909` -> `41c95a1` to MATCH this worker's MLX pin after sc-4707 (#650) bumped it `1a97909` ->
+# `41c95a1` (mlx-gen #433, the Bernini provider). Same skew-trap reason as every prior candle bump:
+# without it the `--features backend-candle` graph resolved worker `41c95a1` vs candle-gen `1a97909`;
+# with `f366f40` the candle lane resolves EXACTLY ONE `sceneworks-gen-core` (`41c95a1`, == the mlx-gen
+# pin) again, and this LINKS `candle-gen-lens` (registers `lens` + `lens_turbo`, the sc-5126 cutover
+# target). ALL candle deps below MUST share this rev.
 [target.'cfg(target_os = "windows")'.dependencies]
-candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
+candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
 # `image_jobs.rs` (`use candle_gen_<x> as _;`) so the MSVC release linker keeps the registration.
 # Same git rev as `candle-gen-sdxl` so candle builds once and the gen-core pin stays single.
-candle-gen-z-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
-candle-gen-flux = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
-candle-gen-flux2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
-candle-gen-qwen-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
+candle-gen-z-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
+candle-gen-flux = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
+candle-gen-flux2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
+candle-gen-qwen-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
 # Candle VIDEO providers (sc-5097) — Windows/CUDA siblings of mlx-gen-wan / mlx-gen-ltx. wan registers
 # `wan2_2_ti2v_5b`; ltx registers `ltx_2_3_distilled` (txt2video first slice — no conditioning/audio/
 # LoRA/quant). Force-linked in video_jobs.rs (`use candle_gen_<x> as _;`). Same rev as the others.
-candle-gen-wan = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
-candle-gen-ltx = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
+candle-gen-wan = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
+candle-gen-ltx = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
 # Candle JoyCaption captioner (sc-5098) — Windows/CUDA sibling of mlx-gen-joycaption. Registers the
 # captioner id `fancyfeast/llama-joycaption-beta-one-hf-llava` (image->text). Force-linked in
 # caption_jobs.rs (`use candle_gen_joycaption as _;`). Same rev as the others.
-candle-gen-joycaption = { git = "https://github.com/michaeltrefry/candle-gen", rev = "c032f16acdee5559664e41a8e65ffa238645a57a", features = ["cuda"], optional = true }
+candle-gen-joycaption = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
+# Candle Lens / Lens-Turbo provider (epic 5107 / sc-5126) — Windows/CUDA sibling of mlx-gen-lens.
+# Self-registers TWO ids: `lens` (base, 20-step/CFG 5.0) + `lens_turbo` (distilled, 4-step/g 1.0).
+# gpt-oss-20b MoE text encoder + 48-layer dual-stream MMDiT + the Flux.2 VAE; pure T2I (no
+# img2img/control/IP), standard guidance + negative prompt, Q4/Q8 (encoder MoE + DiT) + LoRA/LoKr at
+# load — the FIRST candle family advertising quant + adapters, mapped into the LoadSpec by
+# `generate_candle_stream`. Force-linked in image_jobs.rs (`use candle_gen_lens as _;`) so the MSVC
+# release linker keeps the `inventory::submit!` registrations. Same rev as the others (one candle build,
+# single gen-core pin). Retires the Python `/opt/lens-venv` transformers-5 inference sidecar off-Mac.
+candle-gen-lens = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f366f4009126f268256ca6ce5cfbe86408bb8456", features = ["cuda"], optional = true }
 
 [lints]
 workspace = true

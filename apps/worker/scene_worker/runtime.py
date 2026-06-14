@@ -23,7 +23,6 @@ from .image_adapters import (
     ChromaDiffusersAdapter,
     FluxDiffusersAdapter,
     KolorsDiffusersAdapter,
-    LensTurboAdapter,
     ProceduralImageAdapter,
     QwenImageAdapter,
     SdxlDiffusersAdapter,
@@ -1474,7 +1473,9 @@ def run_worker_loop(settings: WorkerSettings) -> None:
         "procedural_preview": ProceduralImageAdapter(),
         "qwen_image": QwenImageAdapter(),
         "z_image_diffusers": ZImageDiffusersAdapter(),
-        "lens_turbo": LensTurboAdapter(),
+        # Lens / Lens-Turbo inference moved to the native candle (Windows/CUDA) backend; the Python
+        # transformers-5 sidecar was retired (sc-5126). No torch Lens adapter remains — a stray lens
+        # job that reaches this worker fails loudly in `create_image_adapter`.
         "sensenova_u1": SenseNovaU1Adapter(),
         "flux_diffusers": FluxDiffusersAdapter(),
         "kolors_diffusers": KolorsDiffusersAdapter(),

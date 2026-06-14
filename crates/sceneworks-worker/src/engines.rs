@@ -381,6 +381,21 @@ impl ResolvedModel {
     pub fn supports_negative_prompt(&self) -> bool {
         self.descriptor.capabilities.supports_negative_prompt
     }
+    /// Whether the engine advertises any on-the-fly Q4/Q8 quantization (descriptor-derived). The
+    /// candle SDXL / sc-5096 families advertise none (dense only); Lens advertises Q4/Q8 (sc-5126).
+    /// Candle-lane-only: the MLX path always resolves quant unconditionally, so this gate is unused
+    /// on macOS.
+    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    pub fn supports_quant(&self) -> bool {
+        !self.descriptor.capabilities.supported_quants.is_empty()
+    }
+    /// Whether the engine accepts LoRA/LoKr adapters (descriptor-derived). Lens is the first candle
+    /// family to advertise either (sc-5126); the others advertise neither. Candle-lane-only for the
+    /// same reason as [`Self::supports_quant`].
+    #[cfg(all(target_os = "windows", feature = "backend-candle"))]
+    pub fn supports_adapters(&self) -> bool {
+        self.descriptor.capabilities.supports_lora || self.descriptor.capabilities.supports_lokr
+    }
     /// The tensor backend that registered this engine (`"mlx"` | `"candle"`).
     pub fn backend(&self) -> &'static str {
         self.descriptor.backend
