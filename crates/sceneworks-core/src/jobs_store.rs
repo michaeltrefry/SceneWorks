@@ -2242,12 +2242,15 @@ const VIDEO_UI_MODES: &[&str] = &[
     "extend_clip",
     "video_bridge",
     "replace_person",
-    // Bernini editing / reference-driven video modes (sc-4703): only `bernini` is
-    // eligible (see `video_mode_is_mlx_eligible`); they surface disabled on the other
-    // models, the same per-model gating as `replace_person` / the LTX clip modes.
+    // Bernini editing / reference-driven video modes (sc-4703) + multi-source modes
+    // (sc-5425: `multi_video_to_video` / `ads2v`): only `bernini` is eligible (see
+    // `video_mode_is_mlx_eligible`); they surface disabled on the other models, the same
+    // per-model gating as `replace_person` / the LTX clip modes.
     "video_to_video",
     "reference_to_video",
     "reference_video_to_video",
+    "multi_video_to_video",
+    "ads2v",
 ];
 
 fn video_model_mac_support(model: &str) -> ModelMacSupport {
@@ -3637,12 +3640,19 @@ fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     // editing + reference-driven video tasks (sc-4703): `video_to_video` (v2v — a
     // source-clip edit, `Conditioning::VideoClip`), `reference_to_video` (r2v —
     // subject reference images, `MultiReference`), and `reference_video_to_video`
-    // (rv2v — source clip + reference images). The engine selects the matching
-    // guidance mode from `video_mode` + the supplied conditioning.
+    // (rv2v — source clip + reference images); plus the multi-source modes (sc-5425):
+    // `multi_video_to_video` (mv2v — several source clips) and `ads2v` (source video +
+    // reference video + reference images). The engine selects the matching guidance
+    // mode from `video_mode` + the supplied conditioning.
     if model == "bernini" {
         return matches!(
             mode,
-            "text_to_video" | "video_to_video" | "reference_to_video" | "reference_video_to_video"
+            "text_to_video"
+                | "video_to_video"
+                | "reference_to_video"
+                | "reference_video_to_video"
+                | "multi_video_to_video"
+                | "ads2v"
         );
     }
     match mode {
@@ -5096,13 +5106,16 @@ mod mlx_routing_tests {
             assert!(!video_mode_is_mlx_eligible("svd", mode));
         }
         // Bernini serves text_to_video + the planner editing/reference video modes (sc-4703:
-        // video_to_video / reference_to_video / reference_video_to_video). It has no classic
-        // still-image-to-video / FLF / replace_person (its renderer is Wan2.2-T2V).
+        // video_to_video / reference_to_video / reference_video_to_video) + the multi-source
+        // modes (sc-5425: multi_video_to_video / ads2v). It has no classic still-image-to-video
+        // / FLF / replace_person (its renderer is Wan2.2-T2V).
         for mode in [
             "text_to_video",
             "video_to_video",
             "reference_to_video",
             "reference_video_to_video",
+            "multi_video_to_video",
+            "ads2v",
         ] {
             assert!(
                 video_mode_is_mlx_eligible("bernini", mode),
@@ -5122,7 +5135,8 @@ mod mlx_routing_tests {
                 "bernini should not serve {mode}"
             );
         }
-        // The editing/reference modes are Bernini-only — every other routed model rejects them.
+        // The editing/reference + multi-source modes are Bernini-only — every other routed
+        // model rejects them.
         for model in VIDEO_MLX_ROUTED_MODELS {
             if *model == "bernini" {
                 continue;
@@ -5131,6 +5145,8 @@ mod mlx_routing_tests {
                 "video_to_video",
                 "reference_to_video",
                 "reference_video_to_video",
+                "multi_video_to_video",
+                "ads2v",
             ] {
                 assert!(
                     !video_mode_is_mlx_eligible(model, mode),

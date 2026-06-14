@@ -229,8 +229,13 @@ export function VideoStudio() {
   const [sourceClipAssetId, setSourceClipAssetId] = useState(selectedAsset?.type === "video" ? selectedAsset.id : "");
   const [bridgeRightClipAssetId, setBridgeRightClipAssetId] = useState("");
   // Subject reference images for Bernini's reference-driven video modes
-  // (reference_to_video / reference_video_to_video, sc-4703). 1–N images.
+  // (reference_to_video / reference_video_to_video / ads2v, sc-4703 / sc-5425). 1–N images.
   const [referenceAssetIds, setReferenceAssetIds] = useState([]);
+  // Multiple source clips for Bernini's multi-source-video edit (multi_video_to_video, sc-5425).
+  const [sourceClipAssetIds, setSourceClipAssetIds] = useState([]);
+  // Reference video for Bernini's ads2v mode (sc-5425): a second source clip distinct from the
+  // edited source clip (sourceClipAssetId).
+  const [referenceClipAssetId, setReferenceClipAssetId] = useState("");
   const [characterId, setCharacterId] = useState("");
   const [characterLookId, setCharacterLookId] = useState("");
   const [personTrackId, setPersonTrackId] = useState("");
@@ -269,6 +274,8 @@ export function VideoStudio() {
     "video_to_video",
     "reference_to_video",
     "reference_video_to_video",
+    "multi_video_to_video",
+    "ads2v",
   ].includes(mode);
   const {
     availablePresets,
@@ -602,12 +609,15 @@ export function VideoStudio() {
     ["extend_clip", "Extend"],
     ["video_bridge", "Bridge"],
     ["replace_person", "Replace person"],
-    // Bernini planner editing / reference-driven video modes (sc-4703). Enabled only
-    // on models whose capabilities include them (today: Bernini); disabled elsewhere,
-    // the same per-model gating as Replace person / the LTX clip modes.
+    // Bernini planner editing / reference-driven video modes (sc-4703) + multi-source
+    // modes (sc-5425). Enabled only on models whose capabilities include them (today:
+    // Bernini); disabled elsewhere, the same per-model gating as Replace person / the
+    // LTX clip modes.
     ["video_to_video", "Video → Video"],
     ["reference_to_video", "Reference → Video"],
     ["reference_video_to_video", "Reference + Video"],
+    ["multi_video_to_video", "Multi-Clip → Video"],
+    ["ads2v", "Clip + Ref Video"],
   ];
   // Mac UI gating (sc-3486, sc-3773): every video mode is disabled per-model via the selected
   // model's `macSupport.features.videoModes` — FLF on the non-Keyframe Wan MoE engines,
@@ -641,7 +651,11 @@ export function VideoStudio() {
     // Bernini editing / reference-driven modes (sc-4703).
     (mode === "video_to_video" && sourceClipAssetId) ||
     (mode === "reference_to_video" && referenceAssetIds.length > 0) ||
-    (mode === "reference_video_to_video" && sourceClipAssetId && referenceAssetIds.length > 0);
+    (mode === "reference_video_to_video" && sourceClipAssetId && referenceAssetIds.length > 0) ||
+    // Bernini multi-source modes (sc-5425): mv2v needs >=2 clips; ads2v needs a source
+    // clip, a reference video, and >=1 reference image.
+    (mode === "multi_video_to_video" && sourceClipAssetIds.length >= 2) ||
+    (mode === "ads2v" && sourceClipAssetId && referenceClipAssetId && referenceAssetIds.length > 0);
   // Don't let Replace Person queue a job the readiness endpoint says no live
   // worker can run — that would sit unclaimable instead of honoring the gate.
   const replaceReady = mode !== "replace_person" || personReadiness?.replace?.ready !== false;
@@ -706,14 +720,25 @@ export function VideoStudio() {
         characterLookId: characterLookId || null,
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
         lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
-        sourceClipAssetId: ["extend_clip", "replace_person", "video_bridge", "video_to_video", "reference_video_to_video"].includes(
-          mode,
-        )
+        sourceClipAssetId: [
+          "extend_clip",
+          "replace_person",
+          "video_bridge",
+          "video_to_video",
+          "reference_video_to_video",
+          "ads2v",
+        ].includes(mode)
           ? sourceClipAssetId || null
           : null,
+        // Bernini multi-source clips (sc-5425) — only mv2v carries the array.
+        sourceClipAssetIds: mode === "multi_video_to_video" ? sourceClipAssetIds : [],
         bridgeRightClipAssetId: mode === "video_bridge" ? bridgeRightClipAssetId || null : null,
-        // Bernini subject references (sc-4703) — only the reference-driven modes carry them.
-        referenceAssetIds: ["reference_to_video", "reference_video_to_video"].includes(mode) ? referenceAssetIds : [],
+        // Bernini subject references (sc-4703 / sc-5425) — the reference-driven modes + ads2v carry them.
+        referenceAssetIds: ["reference_to_video", "reference_video_to_video", "ads2v"].includes(mode)
+          ? referenceAssetIds
+          : [],
+        // Bernini ads2v reference video (sc-5425).
+        referenceClipAssetId: mode === "ads2v" ? referenceClipAssetId || null : null,
         personTrackId: mode === "replace_person" ? personTrackId || null : null,
         replacementMode: mode === "replace_person" ? replacementMode : "face_only",
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
@@ -935,7 +960,7 @@ export function VideoStudio() {
               </>
             ) : null}
 
-            {["video_to_video", "reference_video_to_video"].includes(mode) ? (
+            {["video_to_video", "reference_video_to_video", "ads2v"].includes(mode) ? (
               <AssetPickerField
                 assets={videoAssets}
                 buttonLabel="Select clip"
@@ -946,7 +971,31 @@ export function VideoStudio() {
               />
             ) : null}
 
-            {["reference_to_video", "reference_video_to_video"].includes(mode) ? (
+            {mode === "multi_video_to_video" ? (
+              <AssetPickerField
+                assets={videoAssets}
+                buttonLabel="Select clips"
+                changeLabel="Edit clips"
+                emptyLabel="No source clips selected"
+                label="Source clips"
+                multiple
+                onChange={setSourceClipAssetIds}
+                values={sourceClipAssetIds}
+              />
+            ) : null}
+
+            {mode === "ads2v" ? (
+              <AssetPickerField
+                assets={videoAssets}
+                buttonLabel="Select clip"
+                emptyLabel="No reference video selected"
+                label="Reference video"
+                onChange={setReferenceClipAssetId}
+                value={referenceClipAssetId}
+              />
+            ) : null}
+
+            {["reference_to_video", "reference_video_to_video", "ads2v"].includes(mode) ? (
               <AssetPickerField
                 assets={imageAssets}
                 buttonLabel="Select images"

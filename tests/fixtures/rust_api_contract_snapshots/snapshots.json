@@ -2616,10 +2616,12 @@
       "prompt": "hero walks through rain",
       "quality": "balanced",
       "referenceAssetIds": [],
+      "referenceClipAssetId": null,
       "replacementMode": "face_only",
       "seed": null,
       "sourceAssetId": null,
       "sourceClipAssetId": "asset-video",
+      "sourceClipAssetIds": [],
       "width": 768
     },
     "progress": 0.0,

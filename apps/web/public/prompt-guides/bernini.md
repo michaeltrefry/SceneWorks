@@ -21,16 +21,21 @@ Video Studio shows the right inputs for each, and the prompt always describes th
 | **Video → Video** | Re-renders a source clip to follow your prompt (restyle, relight, change the setting) while keeping its motion and timing. | Source clip + prompt |
 | **Reference → Video** | Generates a clip whose subject matches one or more reference images (identity / look), driven by the prompt. | 1+ reference images + prompt |
 | **Reference + Video** | Edits a source clip so its subject matches your reference images — reference-driven video editing. | Source clip + 1+ reference images + prompt |
+| **Multi-Clip → Video** | Blends/edits several source clips into one result clip following your prompt. | 2+ source clips + prompt |
+| **Clip + Ref Video** | Edits a source clip guided by a separate reference video *and* reference images. | Source clip + reference video + 1+ reference images + prompt |
 
 Tips per mode:
 
-- **Video → Video / Reference + Video:** the source clip sets the motion and framing, so write the
-  prompt about *what changes* (the new style, lighting, wardrobe, or setting), not the motion the clip
-  already has.
-- **Reference → Video / Reference + Video:** use clean, well-lit reference images of the subject. More
-  than one reference (different angles) helps the planner hold identity across the clip. Then describe
-  the action and scene you want the subject placed into.
-- All modes share the same length / fps / resolution limits — keep clips short; the source clip is
+- **Video → Video / Reference + Video / Multi-Clip → Video / Clip + Ref Video:** the source clip(s) set
+  the motion and framing, so write the prompt about *what changes* (the new style, lighting, wardrobe,
+  or setting), not the motion the clip already has.
+- **Reference → Video / Reference + Video / Clip + Ref Video:** use clean, well-lit reference images of
+  the subject. More than one reference (different angles) helps the planner hold identity across the
+  clip. Then describe the action and scene you want the subject placed into.
+- **Multi-Clip → Video:** supply two or more clips; the planner conditions on all of them in the order
+  you pick. **Clip + Ref Video** adds a separate reference video on top of the source clip and images —
+  use it when a second clip (not just stills) should drive the edit.
+- All modes share the same length / fps / resolution limits — keep clips short; source clips are
   resampled to the output length.
 
 ## Prompt Shape

@@ -1814,6 +1814,10 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "video_to_video",
         "reference_to_video",
         "reference_video_to_video",
+        // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
+        // and ads2v (source video + reference video + reference images).
+        "multi_video_to_video",
+        "ads2v",
     ]
     .contains(&payload.mode.as_str())
     {
@@ -1826,6 +1830,15 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     {
         return Err(ApiError::bad_request(
             "referenceAssetIds must not contain blank ids",
+        ));
+    }
+    if payload
+        .source_clip_asset_ids
+        .iter()
+        .any(|id| id.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "sourceClipAssetIds must not contain blank ids",
         ));
     }
     let duration = payload
@@ -1885,6 +1898,22 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "reference_video_to_video" if payload.reference_asset_ids.is_empty() => Err(
             ApiError::bad_request("Reference + Video requires at least one reference image."),
         ),
+        // Bernini multi-source-video modes (sc-5425): mv2v blends multiple source clips;
+        // ads2v edits a source clip using a reference video + reference images. Each
+        // requires its full media set so the worker never falls through to an
+        // unconditioned render.
+        "multi_video_to_video" if payload.source_clip_asset_ids.len() < 2 => Err(
+            ApiError::bad_request("Multi-Clip → Video requires at least two source clips."),
+        ),
+        "ads2v" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
+            "Source + Reference Video requires a source clip.",
+        )),
+        "ads2v" if payload.reference_clip_asset_id.is_none() => Err(ApiError::bad_request(
+            "Source + Reference Video requires a reference video.",
+        )),
+        "ads2v" if payload.reference_asset_ids.is_empty() => Err(ApiError::bad_request(
+            "Source + Reference Video requires at least one reference image.",
+        )),
         _ => Ok(()),
     }
 }

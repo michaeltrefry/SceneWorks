@@ -2249,9 +2249,10 @@
     // (`assemble_bernini_snapshot`, ~93 GB bf16) and published as the turnkey
     // `SceneWorks/bernini-mlx` repo, downloaded on first use (no in-app conversion
     // — engine quantizes to Q8 at load). This entry covers the planner video task
-    // surface — text_to_video plus the editing (`video_to_video`) and reference-driven
-    // (`reference_to_video` / `reference_video_to_video`) modes (sc-4703). The t2i/i2i
-    // image companion is a separate image-typed catalog id (tracked under epic 4699).
+    // surface — text_to_video plus the editing (`video_to_video`), reference-driven
+    // (`reference_to_video` / `reference_video_to_video`, sc-4703), and multi-source
+    // (`multi_video_to_video` / `ads2v`, sc-5425) modes. The t2i/i2i image companion is
+    // a separate image-typed catalog id (tracked under epic 4699).
     {
       "id": "bernini",
       "name": "Bernini",
@@ -2262,7 +2263,9 @@
         "text_to_video",
         "video_to_video",
         "reference_to_video",
-        "reference_video_to_video"
+        "reference_video_to_video",
+        "multi_video_to_video",
+        "ads2v"
       ],
       "downloads": [
         {

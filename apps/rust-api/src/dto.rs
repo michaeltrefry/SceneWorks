@@ -515,14 +515,25 @@ pub(crate) struct VideoJobRequest {
     pub(crate) last_frame_asset_id: Option<String>,
     #[serde(default)]
     pub(crate) source_clip_asset_id: Option<String>,
+    /// Multiple source clips for Bernini's multi-source-video edit mode
+    /// (`multi_video_to_video` / mv2v, sc-5425). The worker pushes one
+    /// `Conditioning::VideoClip` per clip; v2v/rv2v/ads2v use the single
+    /// `source_clip_asset_id` instead.
+    #[serde(default)]
+    pub(crate) source_clip_asset_ids: Vec<String>,
     #[serde(default)]
     pub(crate) bridge_right_clip_asset_id: Option<String>,
     /// Subject reference images for Bernini's reference-driven video modes
-    /// (`reference_to_video` / `reference_video_to_video`, sc-4703). Carried as a
-    /// list so r2v/rv2v can supply multiple references; the worker VAE/ViT-encodes
-    /// each into the planner's `MultiReference` conditioning.
+    /// (`reference_to_video` / `reference_video_to_video` / `ads2v`, sc-4703 /
+    /// sc-5425). Carried as a list so the mode can supply multiple references; the
+    /// worker VAE/ViT-encodes each into the planner's `MultiReference` conditioning.
     #[serde(default)]
     pub(crate) reference_asset_ids: Vec<String>,
+    /// The reference *video* slot for Bernini's `ads2v` mode (sc-5425): a second
+    /// source video distinct from `source_clip_asset_id` (the clip being edited).
+    /// The worker pushes it as a second `Conditioning::VideoClip`.
+    #[serde(default)]
+    pub(crate) reference_clip_asset_id: Option<String>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default)]

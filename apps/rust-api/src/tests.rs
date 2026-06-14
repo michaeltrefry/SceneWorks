@@ -3102,7 +3102,7 @@ async fn bernini_video_modes_validate_required_media() {
 
     // A complete reference_video_to_video request carries both the clip and the refs.
     let (status, rv2v_job) = request(
-        app,
+        app.clone(),
         "POST",
         "/api/v1/video/jobs",
         json!({
@@ -3119,6 +3119,102 @@ async fn bernini_video_modes_validate_required_media() {
     assert_eq!(rv2v_job["type"], "video_generate");
     assert_eq!(rv2v_job["payload"]["referenceAssetIds"][0], "ref-1");
     assert_eq!(rv2v_job["payload"]["referenceAssetIds"][1], "ref-2");
+
+    // multi_video_to_video (sc-5425) needs at least two source clips.
+    for clips in [json!([]), json!(["clip-a"])] {
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "bernini",
+                "mode": "multi_video_to_video",
+                "prompt": "blend the takes",
+                "sourceClipAssetIds": clips
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // Blank source-clip ids are rejected.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "multi_video_to_video",
+            "prompt": "blend the takes",
+            "sourceClipAssetIds": ["clip-a", "  "]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A complete multi_video_to_video request carries the clip array.
+    let (status, mv2v_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "multi_video_to_video",
+            "prompt": "blend the takes",
+            "sourceClipAssetIds": ["clip-a", "clip-b"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(mv2v_job["type"], "video_generate");
+    assert_eq!(mv2v_job["payload"]["sourceClipAssetIds"][0], "clip-a");
+    assert_eq!(mv2v_job["payload"]["sourceClipAssetIds"][1], "clip-b");
+
+    // ads2v (sc-5425) needs a source clip, a reference video, AND >=1 reference image.
+    let ads2v_incomplete = [
+        json!({ "referenceClipAssetId": "clip-ref", "referenceAssetIds": ["ref-1"] }),
+        json!({ "sourceClipAssetId": "clip-src", "referenceAssetIds": ["ref-1"] }),
+        json!({ "sourceClipAssetId": "clip-src", "referenceClipAssetId": "clip-ref" }),
+    ];
+    for extra in ads2v_incomplete {
+        let mut body = json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "ads2v",
+            "prompt": "drive the edit with the reference clip"
+        });
+        let object = body.as_object_mut().unwrap();
+        for (key, value) in extra.as_object().unwrap() {
+            object.insert(key.clone(), value.clone());
+        }
+        let (status, _) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // A complete ads2v request carries the source clip, reference video, and references.
+    let (status, ads2v_job) = request(
+        app,
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "ads2v",
+            "prompt": "drive the edit with the reference clip",
+            "sourceClipAssetId": "clip-src",
+            "referenceClipAssetId": "clip-ref",
+            "referenceAssetIds": ["ref-1"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(ads2v_job["type"], "video_generate");
+    assert_eq!(ads2v_job["payload"]["sourceClipAssetId"], "clip-src");
+    assert_eq!(ads2v_job["payload"]["referenceClipAssetId"], "clip-ref");
+    assert_eq!(ads2v_job["payload"]["referenceAssetIds"][0], "ref-1");
 }
 
 #[tokio::test]

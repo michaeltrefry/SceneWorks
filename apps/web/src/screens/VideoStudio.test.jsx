@@ -258,7 +258,14 @@ describe("VideoStudio Bernini task modes", () => {
     name: "Bernini",
     type: "video",
     family: "bernini",
-    capabilities: ["text_to_video", "video_to_video", "reference_to_video", "reference_video_to_video"],
+    capabilities: [
+      "text_to_video",
+      "video_to_video",
+      "reference_to_video",
+      "reference_video_to_video",
+      "multi_video_to_video",
+      "ads2v",
+    ],
     defaults: { duration: 5, resolution: "848x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["848x480", "480x848"] },
     quantization: {},
@@ -267,6 +274,8 @@ describe("VideoStudio Bernini task modes", () => {
   };
 
   const clip = { id: "vid_src", type: "video", projectId: "project_1", displayName: "Source Clip" };
+  const clip2 = { id: "vid_src_2", type: "video", projectId: "project_1", displayName: "Source Clip Two" };
+  const refClip = { id: "vid_ref", type: "video", projectId: "project_1", displayName: "Reference Clip" };
   const refA = { id: "img_ref_a", type: "image", projectId: "project_1", displayName: "Reference A" };
   const refB = { id: "img_ref_b", type: "image", projectId: "project_1", displayName: "Reference B" };
 
@@ -317,6 +326,18 @@ describe("VideoStudio Bernini task modes", () => {
 
     await click(modeButton("Reference + Video"));
     expect(pickerLabels()).toEqual(expect.arrayContaining(["Source clip", "Reference images"]));
+
+    // mv2v: a single multi-clip picker, no single "Source clip" or reference images.
+    await click(modeButton("Multi-Clip → Video"));
+    expect(pickerLabels()).toContain("Source clips");
+    expect(pickerLabels()).not.toContain("Source clip");
+    expect(pickerLabels()).not.toContain("Reference images");
+
+    // ads2v: source clip + reference video + reference images.
+    await click(modeButton("Clip + Ref Video"));
+    expect(pickerLabels()).toEqual(
+      expect.arrayContaining(["Source clip", "Reference video", "Reference images"]),
+    );
   });
 
   it("keeps Render disabled until the required reference image is selected", async () => {
@@ -387,6 +408,77 @@ describe("VideoStudio Bernini task modes", () => {
       sourceClipAssetId: "vid_src",
     });
     expect(payload.referenceAssetIds).toEqual(["img_ref_a"]);
+  });
+
+  it("requires at least two clips before submitting multi_video_to_video", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [clip, clip2], selectedAsset: clip });
+    await render(context);
+    await click(modeButton("Multi-Clip → Video"));
+
+    // One clip auto-selected from selectedAsset isn't enough — mv2v needs >=2.
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+
+    await click(buttonWithText(container, "Select clips"));
+    const modal = document.querySelector(".asset-picker-modal");
+    for (const name of ["Source Clip", "Source Clip Two"]) {
+      const option = [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes(name));
+      await click(option);
+    }
+    await click(buttonWithText(modal, "Use Selection"));
+
+    expect(buttonWithText(container, "Render clip").disabled).toBe(false);
+    await click(buttonWithText(container, "Render clip"));
+
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.mode).toBe("multi_video_to_video");
+    expect(payload.sourceClipAssetIds).toEqual(["vid_src", "vid_src_2"]);
+    expect(payload.sourceClipAssetId).toBeNull();
+    expect(payload.referenceAssetIds).toEqual([]);
+  });
+
+  it("submits source clip, reference video, and references for ads2v", async () => {
+    const context = baseContext({
+      videoModels: [BERNINI],
+      assets: [clip, refClip, refA],
+      selectedAsset: clip,
+    });
+    await render(context);
+    await click(modeButton("Clip + Ref Video"));
+
+    // Source clip auto-selected; reference video + a reference image still required.
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+
+    // The source clip picker shows "Change" (auto-selected), so the first "Select clip"
+    // button in document order is the empty reference-video picker.
+    await click(buttonWithText(container, "Select clip"));
+    let modal = document.querySelector(".asset-picker-modal");
+    const refClipOption = [...modal.querySelectorAll('[role="option"]')].find((el) =>
+      el.textContent.includes("Reference Clip"),
+    );
+    await click(refClipOption);
+    await click(buttonWithText(modal, "Use Selection"));
+
+    // Pick a reference image.
+    await click(buttonWithText(container, "Select images"));
+    modal = document.querySelector(".asset-picker-modal");
+    const refImageOption = [...modal.querySelectorAll('[role="option"]')].find((el) =>
+      el.textContent.includes("Reference A"),
+    );
+    await click(refImageOption);
+    await click(buttonWithText(modal, "Use Selection"));
+
+    expect(buttonWithText(container, "Render clip").disabled).toBe(false);
+    await click(buttonWithText(container, "Render clip"));
+
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      mode: "ads2v",
+      sourceClipAssetId: "vid_src",
+      referenceClipAssetId: "vid_ref",
+    });
+    expect(payload.referenceAssetIds).toEqual(["img_ref_a"]);
+    expect(payload.sourceClipAssetIds).toEqual([]);
   });
 
   it("disables an editing mode on a model that does not support it", async () => {
