@@ -73,6 +73,12 @@ pub struct Managed {
     /// binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
     /// `SCENEWORKS_GPU_ID=mlx`). Only populated on macOS.
     pub mlx_worker: Mutex<Option<CommandChild>>,
+    /// The Windows candle (CUDA) GPU worker (sc-5561): the same `sceneworks-api`
+    /// binary re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`,
+    /// `SCENEWORKS_GPU_ID=0`, `SCENEWORKS_BACKEND_CANDLE_ENABLED=true`). Runs
+    /// alongside the Python torch worker (Wave A). Only populated on the Windows
+    /// candle build.
+    pub candle_worker: Mutex<Option<CommandChild>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
     /// PIDs of the spawned sidecars, persisted to disk so an unclean exit
@@ -92,6 +98,10 @@ struct SidecarPids {
     /// an older build (no such field) still deserializes for reaping.
     #[serde(default)]
     mlx_worker: Option<u32>,
+    /// The Windows candle GPU worker (sc-5561). `#[serde(default)]` so an older
+    /// pidfile (no such field) still deserializes for reaping.
+    #[serde(default)]
+    candle_worker: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1019,7 +1029,19 @@ fn gate_window(app: AppHandle) {
                         supervise_mlx_worker(app, port);
                     }
                     #[cfg(not(target_os = "macos"))]
-                    supervise_worker(app, port);
+                    {
+                        // The Windows candle (CUDA) GPU worker (sc-5561) runs
+                        // candle-eligible jobs alongside the Python torch worker
+                        // (Wave A), exactly like the server lane — the existing
+                        // jobs_store claim/defer routing sends candle-eligible jobs
+                        // here and everything else to Python. Only when the candle
+                        // backend is actually bundled (a plain build has no DLLs).
+                        #[cfg(target_os = "windows")]
+                        if resolve_bundled_cuda_dir(&app).is_some() {
+                            supervise_candle_worker(app.clone(), port);
+                        }
+                        supervise_worker(app, port);
+                    }
                     return;
                 }
             }
@@ -1333,6 +1355,169 @@ fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
     });
 }
 
+/// Spawn and supervise the Windows candle (CUDA) GPU worker (sc-5561): the same
+/// `sceneworks-api` sidecar re-launched in worker mode (`SCENEWORKS_WORKER_ONLY=1`)
+/// with `SCENEWORKS_GPU_ID=0` (the first NVIDIA GPU) and the candle backend enabled
+/// (`SCENEWORKS_BACKEND_CANDLE_ENABLED=true`), so candle-eligible image/video/caption
+/// jobs run on the in-process candle gen-core engines instead of the Python torch
+/// path. A crash-isolated sibling of the API process; restarted with exponential
+/// backoff while the app is open. Output goes to candle-worker.log.
+///
+/// The Windows analogue of `supervise_mlx_worker`. Runs ALONGSIDE the Python torch
+/// worker (Wave A): the existing `jobs_store` claim/defer routing
+/// (`torch_worker_claims_everything_the_candle_worker_defers`) confines this worker
+/// to the candle lane and keeps everything else on Python. Only spawned when the
+/// candle redist DLLs are actually bundled (`resolve_bundled_cuda_dir`), so a plain
+/// desktop build never starts it.
+#[cfg(target_os = "windows")]
+fn supervise_candle_worker(app: AppHandle, api_port: u16) {
+    std::thread::spawn(move || {
+        let log_path = logs_dir().join("candle-worker.log");
+        let api_url = format!("http://127.0.0.1:{api_port}");
+        // Match the API sidecar's HF cache root so the engine reads the same
+        // downloaded weights the catalog tracks.
+        let hf_home = huggingface_home().to_string_lossy().to_string();
+        // Unique per launch (distinct prefix from the Python `worker-local-*`, the
+        // macOS `mlx-worker-local-*`, and the in-process utility worker) so the
+        // workers never collide in the shared jobs.db.
+        let worker_id = format!(
+            "candle-worker-local-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or_default()
+        );
+        let mut backoff = 1u64;
+        loop {
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            let sidecar = match app.shell().sidecar("sceneworks-api") {
+                Ok(command) => command,
+                Err(error) => {
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] candle worker: locate sidecar failed: {error}\n"),
+                    );
+                    return;
+                }
+            };
+            let mut command = sidecar
+                // Dispatches `main` to `run_worker()` (HTTP API never starts).
+                .env("SCENEWORKS_WORKER_ONLY", "1")
+                // The first NVIDIA GPU (nvidia-smi index 0); a bare index runs the
+                // single-GPU `run_worker_loop` (not the `auto` multi-GPU supervisor).
+                .env("SCENEWORKS_GPU_ID", "0")
+                // Light up the candle lane on the discovered NVIDIA GPU
+                // (gpu::with_candle_capabilities + engines::registry_capabilities).
+                .env("SCENEWORKS_BACKEND_CANDLE_ENABLED", "true")
+                .env("SCENEWORKS_WORKER_ID", &worker_id)
+                .env("SCENEWORKS_API_URL", &api_url)
+                .env("HF_HOME", &hf_home)
+                // Parent-death watchdog (run_worker() honours this): a force-quit
+                // self-terminates the worker so its multi-GB model + CUDA context
+                // isn't orphaned.
+                .env("SCENEWORKS_PARENT_PID", std::process::id().to_string())
+                .env(
+                    "SCENEWORKS_DATA_DIR",
+                    resolved_data_dir().to_string_lossy().to_string(),
+                )
+                .env(
+                    "SCENEWORKS_CONFIG_DIR",
+                    config_dir().to_string_lossy().to_string(),
+                );
+            // cudarc dynamic-linking `LoadLibrary`s the CUDA runtime DLLs by name;
+            // prepend the bundled redist dir to this worker's PATH so they resolve
+            // without a CUDA Toolkit on the machine (sc-5560).
+            if let Some(cuda_dir) = resolve_bundled_cuda_dir(&app) {
+                let existing = std::env::var_os("PATH").unwrap_or_default();
+                let mut paths = vec![cuda_dir];
+                paths.extend(std::env::split_paths(&existing));
+                if let Ok(joined) = std::env::join_paths(paths) {
+                    command = command.env("PATH", joined);
+                }
+            }
+            // The worker muxes generated video with ffmpeg; point it at the bundled
+            // binary when staged (else it falls back to PATH ffmpeg), as spawn_api does.
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg(&app) {
+                command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
+            }
+            if let Some(token) = crate::settings::read_hf_token() {
+                command = command.env("HF_TOKEN", token);
+            }
+            if let Some(credentials) = crate::settings::credentials_env_json() {
+                command = command.env("SCENEWORKS_CREDENTIALS", credentials);
+            }
+            let spawned = command.spawn();
+            let (mut events, child) = match spawned {
+                Ok(pair) => pair,
+                Err(error) => {
+                    append_log(
+                        &log_path,
+                        &format!("[desktop] candle worker spawn failed: {error}\n"),
+                    );
+                    std::thread::sleep(Duration::from_secs(backoff));
+                    backoff = (backoff * 2).min(30);
+                    continue;
+                }
+            };
+            record_candle_worker_pid(&app, Some(child.pid()));
+            app.state::<Managed>()
+                .candle_worker
+                .lock()
+                .expect("candle worker lock")
+                .replace(child);
+            let started = Instant::now();
+            loop {
+                match tauri::async_runtime::block_on(events.recv()) {
+                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
+                        append_log(&log_path, &String::from_utf8_lossy(&bytes));
+                    }
+                    Some(CommandEvent::Terminated(payload)) => {
+                        append_log(
+                            &log_path,
+                            &format!(
+                                "[desktop] candle worker terminated: code={:?} signal={:?}\n",
+                                payload.code, payload.signal
+                            ),
+                        );
+                        break;
+                    }
+                    Some(CommandEvent::Error(error)) => {
+                        append_log(
+                            &log_path,
+                            &format!("[desktop] candle worker error: {error}\n"),
+                        );
+                        break;
+                    }
+                    None => break,
+                    _ => {}
+                }
+            }
+            let _ = app
+                .state::<Managed>()
+                .candle_worker
+                .lock()
+                .expect("candle worker lock")
+                .take();
+            record_candle_worker_pid(&app, None);
+            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                backoff = 1;
+            }
+            append_log(
+                &log_path,
+                &format!("[desktop] restarting candle worker in {backoff}s\n"),
+            );
+            std::thread::sleep(Duration::from_secs(backoff));
+            backoff = (backoff * 2).min(30);
+        }
+    });
+}
+
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
@@ -1381,6 +1566,14 @@ fn record_mlx_worker_pid(app: &AppHandle, pid: Option<u32>) {
     let state = app.state::<Managed>();
     let mut pids = state.pids.lock().expect("pids lock");
     pids.mlx_worker = pid;
+    write_sidecar_pidfile(&pids);
+}
+
+#[cfg(target_os = "windows")]
+fn record_candle_worker_pid(app: &AppHandle, pid: Option<u32>) {
+    let state = app.state::<Managed>();
+    let mut pids = state.pids.lock().expect("pids lock");
+    pids.candle_worker = pid;
     write_sidecar_pidfile(&pids);
 }
 
@@ -1447,7 +1640,7 @@ pub fn reap_stale_sidecars() {
         return;
     };
     let pids: SidecarPids = serde_json::from_slice(&bytes).unwrap_or_default();
-    for pid in [pids.api, pids.worker, pids.mlx_worker]
+    for pid in [pids.api, pids.worker, pids.mlx_worker, pids.candle_worker]
         .into_iter()
         .flatten()
     {
@@ -1470,6 +1663,11 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
     }
     let worker = managed.worker.lock().expect("worker lock").take();
     let mlx_worker = managed.mlx_worker.lock().expect("mlx worker lock").take();
+    let candle_worker = managed
+        .candle_worker
+        .lock()
+        .expect("candle worker lock")
+        .take();
     let api_child = managed.api.lock().expect("api lock").take();
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -1509,6 +1707,12 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         if let Some(child) = mlx_worker {
             let _ = child.kill();
         }
+        // Windows-only (candle is Windows); None elsewhere. The Windows shutdown
+        // path force-kills (no SIGTERM grace above), and the worker also honours the
+        // parent-death watchdog, so this is the belt to that suspenders.
+        if let Some(child) = candle_worker {
+            let _ = child.kill();
+        }
         if let Some(child) = api_child {
             let _ = child.kill();
         }
@@ -1520,6 +1724,69 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
     true
 }
 
+/// Minimum NVIDIA display driver for the bundled CUDA 12.9 runtime (sc-3676 /
+/// sc-5560): the floor that supports it and forward-JITs the compute_80 PTX.
+#[cfg(target_os = "windows")]
+const MIN_NVIDIA_DRIVER: f64 = 576.02;
+
+#[cfg(target_os = "windows")]
+const CUDA_REQUIREMENT: &str = "SceneWorks on Windows requires an NVIDIA (CUDA) GPU. \
+    No NVIDIA GPU was detected — SceneWorks needs an NVIDIA GPU with driver 576.02 or \
+    newer (there is no CPU or AMD fallback).";
+
+/// Decide the preflight verdict from `nvidia-smi --query-gpu=name,driver_version`
+/// output (`None` = nvidia-smi missing/failed). Pure so it's unit-testable; the IO
+/// lives in `cuda_preflight`. `Ok(())` when a usable GPU is present; `Err(message)`
+/// with a clear requirement otherwise (no GPU, or a driver below the floor).
+#[cfg(target_os = "windows")]
+fn evaluate_nvidia_preflight(smi_output: Option<&str>) -> Result<(), String> {
+    let Some(line) =
+        smi_output.and_then(|out| out.lines().map(str::trim).find(|line| !line.is_empty()))
+    else {
+        return Err(CUDA_REQUIREMENT.to_owned());
+    };
+    let mut parts = line.split(',').map(str::trim);
+    let name = parts.next().unwrap_or("");
+    let driver = parts.next().unwrap_or("");
+    // Block on a too-old driver; if the version is unparseable, don't block on it
+    // (the GPU is present — let the worker surface any deeper issue).
+    if let Ok(version) = driver.parse::<f64>() {
+        if version < MIN_NVIDIA_DRIVER {
+            return Err(format!(
+                "SceneWorks on Windows requires NVIDIA driver {MIN_NVIDIA_DRIVER} or newer \
+                 (found {driver} on {name}). Update your NVIDIA driver to continue."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Windows CUDA preflight (sc-5561). SceneWorks generation off-Mac is CUDA-only —
+/// no CPU/AMD fallback — so a machine without an NVIDIA GPU + an adequate driver
+/// can run neither candle nor the Python torch worker's cu128 wheels. Probe
+/// `nvidia-smi` for a GPU + driver version and return a clear, actionable error so
+/// the app says "requires an NVIDIA GPU" up front instead of provisioning a venv and
+/// then dead-polling jobs it can never run. `Ok(())` when a usable GPU is present.
+#[cfg(target_os = "windows")]
+fn cuda_preflight() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let mut command = std::process::Command::new("nvidia-smi");
+    command.args([
+        "--query-gpu=name,driver_version",
+        "--format=csv,noheader,nounits",
+    ]);
+    // Don't flash a console window when probing from the GUI app.
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let stdout = match command.output() {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        // Missing (no NVIDIA driver) or errored → treat as no usable GPU.
+        _ => return Err(CUDA_REQUIREMENT.to_owned()),
+    };
+    evaluate_nvidia_preflight(Some(&stdout))
+}
+
 async fn run_startup(app: AppHandle) {
     // Provide the builtin model catalog the rust-api/worker expect before they
     // start, so Model Manager is populated and native video resources resolve.
@@ -1527,6 +1794,19 @@ async fn run_startup(app: AppHandle) {
     if let Err(error) = seed_builtin_manifests() {
         emit(&app, "error", format!("Setup failed: {error}"), true);
         return;
+    }
+    // CUDA-only on Windows (sc-5561): fail fast with a clear requirement message on a
+    // machine with no NVIDIA GPU / too-old driver, before the slow venv provisioning,
+    // rather than silently failing or dead-polling a job later. The setup page renders
+    // this `error` event (apps/desktop/ui/index.html). Gated on the candle backend being
+    // bundled (the same signal that turns candle on) so the 576.02 floor only binds the
+    // shipping CUDA desktop, not a hypothetical plain/dev build without the redist DLLs.
+    #[cfg(target_os = "windows")]
+    if resolve_bundled_cuda_dir(&app).is_some() {
+        if let Err(error) = cuda_preflight() {
+            emit(&app, "error", error, true);
+            return;
+        }
     }
     // macOS is MLX-only (epic 3482, sc-3492/sc-3493): no Python venv is bundled or
     // bootstrapped — skip provisioning entirely so first run starts straight on the
@@ -1586,4 +1866,37 @@ pub async fn start_setup(app: AppHandle) {
     app.state::<Managed>()
         .running
         .store(false, Ordering::SeqCst);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod preflight_tests {
+    use super::{evaluate_nvidia_preflight, MIN_NVIDIA_DRIVER};
+
+    #[test]
+    fn no_nvidia_smi_output_requires_an_nvidia_gpu() {
+        // nvidia-smi missing/failed (None) or empty output → requirement error.
+        assert!(evaluate_nvidia_preflight(None).is_err());
+        assert!(evaluate_nvidia_preflight(Some("")).is_err());
+        assert!(evaluate_nvidia_preflight(Some("   \n")).is_err());
+    }
+
+    #[test]
+    fn adequate_driver_passes() {
+        assert!(evaluate_nvidia_preflight(Some("NVIDIA RTX PRO 6000, 576.02\n")).is_ok());
+        assert!(evaluate_nvidia_preflight(Some("NVIDIA GeForce RTX 4090, 597.36")).is_ok());
+    }
+
+    #[test]
+    fn too_old_driver_is_rejected_with_the_floor() {
+        let verdict = evaluate_nvidia_preflight(Some("NVIDIA GeForce RTX 3090, 560.94"));
+        let message = verdict.expect_err("a sub-576.02 driver must fail preflight");
+        assert!(message.contains(&MIN_NVIDIA_DRIVER.to_string()));
+        assert!(message.contains("560.94"));
+    }
+
+    #[test]
+    fn unparseable_driver_does_not_block_a_present_gpu() {
+        // The GPU is present; an odd version string shouldn't hard-block startup.
+        assert!(evaluate_nvidia_preflight(Some("NVIDIA RTX, not-a-version")).is_ok());
+    }
 }
