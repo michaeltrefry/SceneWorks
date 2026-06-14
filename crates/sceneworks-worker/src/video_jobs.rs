@@ -59,6 +59,11 @@ use mlx_gen_seedvr2 as _;
 use mlx_gen_svd as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_wan as _;
+// Bernini (epic 4699): the full planner+renderer `Generator` registers under `bernini` via
+// `inventory::submit!`; force-link so the registration survives the linker (reached only through
+// `gen_core::load("bernini")`, no direct type contact — the "no generator registered" trap).
+#[cfg(target_os = "macos")]
+use mlx_gen_bernini as _;
 // Candle (Windows/CUDA) video providers (sc-5097) — force-link anchors so their `inventory::submit!`
 // registrations (`wan2_2_ti2v_5b` / `ltx_2_3_distilled`) survive the MSVC release linker, mirroring
 // the image providers in image_jobs.rs.
@@ -281,6 +286,27 @@ pub(crate) async fn run_video_generate_job(
             .await?,
             SVD_ADAPTER,
             svd_raw_settings(&request),
+            None,
+        )
+    } else if let Some(engine_id) =
+        bernini_engine_id(&request.model).filter(|_| bernini_available(&request, settings))
+    {
+        // Bernini (epic 4699 / sc-4707): the full Qwen2.5-VL planner + Wan2.2-T2V-A14B renderer.
+        // text_to_video only for now (the routing gate admits only that mode); the editing/reference
+        // video modes (v2v/mv2v/ads2v/r2v/rv2v) + the t2i/i2i image companion land in sc-4703.
+        (
+            generate_bernini(
+                api,
+                settings,
+                job,
+                &request,
+                &project_path,
+                engine_id,
+                backend,
+            )
+            .await?,
+            BERNINI_ADAPTER,
+            bernini_raw_settings(&request),
             None,
         )
     } else {
@@ -1412,6 +1438,9 @@ pub(crate) fn ensure_video_engine_weights(
             ));
         }
         resolve_svd_model_dir(settings)?;
+    }
+    if bernini_engine_id(&request.model).is_some() {
+        resolve_bernini_model_dir(settings)?;
     }
     Ok(())
 }
@@ -2661,6 +2690,117 @@ async fn generate_wan(
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,
+        ..VideoGenInput::default()
+    };
+    generate_video(api, settings, job, backend, input).await
+}
+
+// ---------------------------------------------------------------------------
+// Real MLX Bernini generation (macOS, via mlx-gen-bernini, epic 4699 / sc-4707): the full
+// Qwen2.5-VL semantic planner + Wan2.2-T2V-A14B dual-expert renderer. text_to_video only for now
+// (no source media; sc-4703 adds the editing/reference modes + t2i/i2i image companion). Q4 default
+// / Q8 opt-in at load. The turnkey `SceneWorks/bernini-mlx` snapshot is self-contained, so this is a
+// thin `VideoGenInput` → `generate_video` wrapper like generate_wan.
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real MLX Bernini asset.
+#[cfg(target_os = "macos")]
+const BERNINI_ADAPTER: &str = "mlx_bernini";
+
+/// SceneWorks Bernini model id → mlx-gen registry id, or `None` if `model` is not the Bernini family.
+#[cfg(target_os = "macos")]
+fn bernini_engine_id(model: &str) -> Option<&'static str> {
+    (model == "bernini").then_some("bernini")
+}
+
+/// Whether the linked Bernini engine can serve this request now (resolvable weights).
+#[cfg(target_os = "macos")]
+fn bernini_available(_request: &VideoRequest, settings: &Settings) -> bool {
+    resolve_bernini_model_dir(settings).is_ok()
+}
+
+/// Resolve the Bernini MLX snapshot dir: env override (`SCENEWORKS_MLX_BERNINI_DIR`) → app-managed
+/// `<data>/models/mlx/bernini` → the turnkey download-on-first-use `SceneWorks/bernini-mlx` snapshot
+/// (mirrors `resolve_wan_model_dir`). Errors clearly if none is present (no stub fallback).
+#[cfg(target_os = "macos")]
+fn resolve_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Some(dir) = local_mlx_dir(settings, "SCENEWORKS_MLX_BERNINI_DIR", "bernini") {
+        return Ok(dir);
+    }
+    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, "SceneWorks/bernini-mlx") {
+        return Ok(dir);
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "bernini: no MLX weights found. Download the turnkey SceneWorks/bernini-mlx snapshot via the \
+         Model Manager, set $SCENEWORKS_MLX_BERNINI_DIR, or place a converted snapshot at {}.",
+        settings
+            .data_dir
+            .join("models")
+            .join("mlx")
+            .join("bernini")
+            .display(),
+    )))
+}
+
+/// MLX quantization for a Bernini load: Q4 default (the validated 128 GB-fitting tier, sc-4709 ~44 GB
+/// peak), Q8 opt-in via the advanced `mlxQuantize: 8` control, explicit `<= 0` ⇒ bf16 (power users
+/// with ample RAM). Never defaults to bf16 — the snapshot is ~93 GB at bf16.
+#[cfg(target_os = "macos")]
+fn resolve_bernini_quant(request: &VideoRequest) -> Option<Quant> {
+    match request.advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    }) {
+        Some(bits) if bits <= 0 => None,
+        Some(bits) if bits <= 4 => Some(Quant::Q4),
+        Some(_) => Some(Quant::Q8),
+        None => Some(Quant::Q4),
+    }
+}
+
+/// Raw-settings recorded on a real MLX Bernini asset (mirrors `wan_raw_settings`).
+#[cfg(target_os = "macos")]
+fn bernini_raw_settings(request: &VideoRequest) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
+    raw.insert("fps".to_owned(), json!(request.fps));
+    Value::Object(raw)
+}
+
+/// Real MLX Bernini text-to-video (epic 4699 / sc-4707): build the `VideoGenInput` and run the shared
+/// `generate_video` path. No source conditioning or LoRA (the engine reports `supports_lora=false`);
+/// `video_mode:"t2v"` selects the renderer's T2vApg guidance; steps/guidance stay at the engine
+/// defaults (40 / omega 4.0). Frame count uses the Wan 1-mod-4 stride coercion (the renderer is Wan).
+#[cfg(target_os = "macos")]
+async fn generate_bernini(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    _project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<DecodedVideo> {
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let input = VideoGenInput {
+        engine_id,
+        model_dir: resolve_bernini_model_dir(settings)?,
+        quant: resolve_bernini_quant(request),
+        conditioning: Vec::new(),
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        seed: resolve_video_seed(request) as u64,
+        video_mode: Some("t2v".to_owned()),
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
@@ -4859,6 +4999,76 @@ mod tests {
         assert!(decoded.fps >= 1);
         assert!(decoded.audio.is_none(), "Wan-VACE emits no audio");
         assert!(steps > 0, "denoise progress streamed");
+        assert!(decoded
+            .frames
+            .iter()
+            .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
+    }
+
+    /// A Bernini MLX snapshot dir if present: env override (`SCENEWORKS_MLX_BERNINI_DIR`), then the
+    /// bring-up staging / cache dirs, then the app-managed default. `None` ⇒ the smoke skips.
+    #[cfg(target_os = "macos")]
+    fn bernini_dir() -> Option<PathBuf> {
+        if let Ok(dir) = std::env::var("SCENEWORKS_MLX_BERNINI_DIR") {
+            let path = PathBuf::from(dir.trim());
+            if path.join("config.json").is_file() {
+                return Some(path);
+            }
+        }
+        let home = std::env::var("HOME").ok()?;
+        for rel in [
+            ".cache/mlx-gen-models/bernini-mlx-upload",
+            ".cache/mlx-gen-models/bernini_full_mlx_bf16",
+            "Library/Application Support/SceneWorks/data/models/mlx/bernini",
+        ] {
+            let path = PathBuf::from(&home).join(rel);
+            if path.join("config.json").is_file() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Real in-process Bernini text-to-video through the WORKER registry path (epic 4699 / sc-4707):
+    /// `gen_core::load("bernini")` (proves the `mlx_gen_bernini` force-link survived in the worker
+    /// binary — the "no generator registered" trap) → Q4 → a tiny t2v clip, asserting RGB8 frames
+    /// stream back with denoise progress. Also confirms the lean published `SceneWorks/bernini-mlx`
+    /// snapshot loads. `#[ignore]` — weights live outside CI; run on a Mac with the snapshot present.
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Bernini snapshot; run manually on a Mac with SceneWorks/bernini-mlx present"]
+    #[test]
+    fn bernini_t2v_real_weights() {
+        let Some(model_dir) = bernini_dir() else {
+            eprintln!("skipping bernini_t2v_real_weights: no Bernini MLX snapshot found");
+            return;
+        };
+        let (w, h) = (832u32, 480u32);
+        let input = VideoGenInput {
+            engine_id: "bernini",
+            model_dir,
+            quant: Some(Quant::Q4),
+            prompt: "a golden retriever puppy running across a sunlit meadow, cinematic".to_owned(),
+            width: w,
+            height: h,
+            frames: 17,
+            fps: 16,
+            steps: Some(20),
+            seed: 7,
+            video_mode: Some("t2v".to_owned()),
+            ..VideoGenInput::default()
+        };
+        let cancel = CancelFlag::new();
+        let mut steps = 0u32;
+        let mut on_progress = |progress: Progress| {
+            if let Progress::Step { .. } = progress {
+                steps += 1;
+            }
+        };
+        let decoded =
+            run_video_generation(input, &cancel, &mut on_progress).expect("bernini t2v generation");
+        assert!(decoded.fps >= 1);
+        assert!(steps > 0, "denoise progress streamed");
+        assert!(!decoded.frames.is_empty(), "frames returned");
         assert!(decoded
             .frames
             .iter()

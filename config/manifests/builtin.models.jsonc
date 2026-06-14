@@ -2241,6 +2241,98 @@
         }
       }
     },
+    // Bernini (epic 4699): ByteDance's full pipeline — a Qwen2.5-VL-7B semantic
+    // planner (Latent Semantic Planning / MAR loop) driving a Wan2.2-T2V-A14B
+    // dual-expert renderer. macOS-only native MLX (mlx-gen-bernini, engine id
+    // "bernini"); no Torch path. Distributed the SceneWorks/*-mlx way (YOLO11 /
+    // SAM2 / SAM3 pattern): the full 179 GB diffusers package is converted ONCE
+    // (`assemble_bernini_snapshot`, ~93 GB bf16) and published as the turnkey
+    // `SceneWorks/bernini-mlx` repo, downloaded on first use (no in-app conversion
+    // — engine quantizes to Q8 at load). This entry covers text_to_video; the
+    // video-editing (v2v/mv2v/ads2v), reference-driven (r2v/rv2v), and t2i/i2i
+    // image modes land in sc-4703.
+    {
+      "id": "bernini",
+      "name": "Bernini",
+      "family": "bernini",
+      "type": "video",
+      "adapter": "bernini",
+      "capabilities": ["text_to_video"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "files": [],
+          "platforms": ["macos"],
+          // Pre-converted MLX snapshot (planner + dual-expert renderer + stock
+          // Wan2.2 UMT5/VAE/tokenizer), bf16 ≈ 82 GiB (lean — the diffusers-format
+          // t5_text_encoder/t5_tokenizer/vae/scheduler dirs the engine never loads
+          // are excluded). Self-contained — no Wan base or diffusers source needed
+          // at runtime. Q4 default / Q8 opt-in applied at load.
+          "estimatedSizeBytes": 88046829568
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/bernini-mlx"
+      },
+      "defaults": {
+        "duration": 5,
+        "fps": 16,
+        "resolution": "848x480",
+        "quality": "balanced",
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        "durations": [3, 4, 5],
+        "recommendedMaxDuration": 5,
+        "hardMaxDuration": 5,
+        "fps": [16],
+        // Renderer aligns W×H to the patch stride (16); engine max_size 1280.
+        "resolutions": ["848x480", "480x848", "1280x720", "720x1280"],
+        // MLX path is default-only (UniPC flow). Sampler/scheduler menus are
+        // pinned on mlx.limits to mirror the other native-MLX video models.
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        // The engine descriptor reports supports_lora: false for Bernini.
+        "families": ["bernini"],
+        "types": []
+      },
+      "mlx": {
+        // Turnkey pre-converted MLX repo (no requiresConversion). The worker resolves
+        // env override (SCENEWORKS_MLX_BERNINI_DIR) → local <data>/models/mlx/bernini →
+        // this download-on-first-use snapshot, mirroring wan_2_2_t2v_14b's AITRADER path.
+        // minMemoryGb + quant from a real-weight Mac smoke (sc-4709): t2i 512² AND a
+        // t2v 832×480/20-frame clip BOTH peaked ~44 GB at Q4 — the footprint is
+        // weight-bound, not resolution/frame-bound. Q4 is the default (fits 64 GB-class
+        // Macs, faster); Q8 (~58 GB est. peak, higher quality) is opt-in via the advanced
+        // `mlxQuantize: 8` control. Note: bernini video is minutes-per-clip (the 7B planner
+        // runs up front, then dual-14B denoise) — slow by design, not a bug.
+        "minMemoryGb": 64,
+        "repo": "SceneWorks/bernini-mlx",
+        "quantize": 4,
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
+      "ui": {
+        "label": "Bernini",
+        "description": "ByteDance Bernini full pipeline: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B text-to-video renderer. Highest-quality, planner-guided generation — but very large (≈179 GB) and slow (the 7B planner runs many passes per clip). macOS native MLX only; needs ample unified memory.",
+        "recommendedFor": ["text_to_video"],
+        "durationHint": "Heavy planner + dual 14B experts — keep clips at 5s or less. Generates at 16fps.",
+        "promptGuide": {
+          "title": "Bernini Prompt Guide",
+          "path": "/prompt-guides/bernini.md",
+          "sources": [
+            { "label": "Bernini full model card", "url": "https://huggingface.co/ByteDance/Bernini-Diffusers" },
+            { "label": "Bernini GitHub repo", "url": "https://github.com/bytedance/Bernini" }
+          ]
+        }
+      }
+    },
     {
       "id": "real_esrgan",
       "name": "Real-ESRGAN Upscaler",

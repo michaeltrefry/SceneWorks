@@ -2377,6 +2377,28 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
             .get("first_last_frame"),
         Some(&false)
     );
+    // Bernini (epic 4699) is MLX-routed text-to-video only. Its renderer is
+    // Wan2.2-T2V, so still-image-to-video is off; the editing/reference video
+    // modes are net-new vocabulary (sc-4703), off until then.
+    let bernini = model_mac_support("bernini", "video");
+    assert!(bernini.supported, "bernini should be MLX-supported");
+    assert!(bernini.reason.is_none());
+    assert_eq!(
+        bernini.features.video_modes.get("text_to_video"),
+        Some(&true)
+    );
+    assert_eq!(
+        bernini.features.video_modes.get("image_to_video"),
+        Some(&false)
+    );
+    assert_eq!(
+        bernini.features.video_modes.get("first_last_frame"),
+        Some(&false)
+    );
+    assert_eq!(
+        bernini.features.video_modes.get("replace_person"),
+        Some(&false)
+    );
 }
 
 #[test]

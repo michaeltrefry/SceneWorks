@@ -224,6 +224,10 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
         "svd" => Some("svd_video"),
+        // Bernini is macOS-only native MLX (epic 4699): there is no Torch/diffusers
+        // adapter. This label is recorded in recipe/lineage only; on Mac the job is
+        // MLX-routed by engine id, never instantiated through a Torch adapter.
+        "bernini" => Some("bernini"),
         _ => None,
     }
 }
@@ -263,6 +267,13 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // Stable Video Diffusion is image-conditioned only (no text prompt) and
         // does not support the timeline/replacement modes.
         ("video", "svd") => vec!["image_to_video"],
+        // Bernini (epic 4699) is a Wan2.2-T2V-A14B renderer + Qwen2.5-VL semantic
+        // planner. `text_to_video` is the only task that maps onto the existing
+        // capability vocabulary. Its richer surface — video editing (v2v/mv2v/ads2v)
+        // and reference-driven video (r2v/rv2v), plus the t2i/i2i image companion —
+        // needs net-new capability strings + UI and lands in sc-4703. Bernini has no
+        // classic still-image-to-video (its renderer is T2V, not I2V).
+        ("video", "bernini") => vec!["text_to_video"],
         _ => Vec::new(),
     }
 }
@@ -1362,6 +1373,17 @@ mod tests {
         assert_eq!(
             model_capabilities_for_type_and_family("video", "svd"),
             vec!["image_to_video"],
+        );
+    }
+
+    #[test]
+    fn bernini_family_maps_to_bernini_adapter_and_text_to_video_only() {
+        assert_eq!(model_adapter_for_family("bernini"), Some("bernini"));
+        // Slice A (sc-4701) declares only the cleanly-mapped capability. The video
+        // editing / reference-driven modes are net-new vocabulary added in sc-4703.
+        assert_eq!(
+            model_capabilities_for_type_and_family("video", "bernini"),
+            vec!["text_to_video"],
         );
     }
 

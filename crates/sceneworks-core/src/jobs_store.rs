@@ -3524,6 +3524,11 @@ const VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
     "wan_2_2_t2v_14b",
     "wan_2_2_i2v_14b",
     "svd",
+    // Bernini (epic 4699 / sc-4707): full Qwen2.5-VL planner + Wan2.2-T2V-A14B
+    // renderer, native MLX (engine id "bernini"). Slice A serves text_to_video
+    // only; the editing/reference video modes (v2v/mv2v/r2v/rv2v/ads2v) are
+    // net-new UI vocabulary tracked under sc-4703.
+    "bernini",
 ];
 
 /// Epic 3018 routing (sc-3036, the video sibling of [`image_job_is_mlx_eligible`]):
@@ -3603,6 +3608,13 @@ fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "svd" {
         return mode == "image_to_video";
+    }
+    // Bernini's renderer is Wan2.2-T2V (text-conditioned) — it has no
+    // still-image-to-video. Slice A (sc-4707) serves text_to_video exclusively;
+    // its video-editing (v2v/mv2v/ads2v) and reference-driven (r2v/rv2v) modes
+    // need net-new SceneWorks mode vocabulary and land in sc-4703.
+    if model == "bernini" {
+        return mode == "text_to_video";
     }
     match mode {
         "text_to_video" | "image_to_video" => true,
@@ -4979,10 +4991,15 @@ mod mlx_routing_tests {
 
     #[test]
     fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
-        // image_to_video is MLX on every routed model; text_to_video on every routed model
+        // image_to_video is MLX on every routed model EXCEPT Bernini (text_to_video only — its
+        // renderer is Wan2.2-T2V, no still-image-to-video); text_to_video on every routed model
         // EXCEPT SVD (image-conditioned only, sc-3523).
         for model in VIDEO_MLX_ROUTED_MODELS {
-            assert!(video_mode_is_mlx_eligible(model, "image_to_video"));
+            assert_eq!(
+                video_mode_is_mlx_eligible(model, "image_to_video"),
+                *model != "bernini",
+                "image_to_video eligibility for {model}"
+            );
             assert_eq!(
                 video_mode_is_mlx_eligible(model, "text_to_video"),
                 *model != "svd",
@@ -4998,6 +5015,17 @@ mod mlx_routing_tests {
             "nonsense",
         ] {
             assert!(!video_mode_is_mlx_eligible("svd", mode));
+        }
+        // Bernini serves text_to_video ONLY — its renderer is Wan2.2-T2V (no i2v/FLF/etc.). The
+        // editing/reference modes (v2v/r2v/...) are net-new and land in sc-4703.
+        assert!(video_mode_is_mlx_eligible("bernini", "text_to_video"));
+        for mode in [
+            "image_to_video",
+            "first_last_frame",
+            "replace_person",
+            "nonsense",
+        ] {
+            assert!(!video_mode_is_mlx_eligible("bernini", mode));
         }
         // first_last_frame: MLX on LTX (base + eros) + Wan TI2V-5B (sc-3055 cutover).
         assert!(video_mode_is_mlx_eligible("ltx_2_3", "first_last_frame"));
