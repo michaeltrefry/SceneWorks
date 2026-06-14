@@ -490,3 +490,143 @@ describe("VideoStudio Bernini task modes", () => {
     expect(container.textContent).toContain("does not support this mode");
   });
 });
+
+describe("VideoStudio SCAIL-2 character animation + replacement backend", () => {
+  let container;
+  let root;
+
+  const SCAIL2 = {
+    id: "scail2_14b",
+    name: "SCAIL-2",
+    type: "video",
+    family: "scail2",
+    capabilities: ["animate_character", "replace_person"],
+    defaults: { duration: 5, resolution: "832x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+  // A Wan-VACE-style replace-capable model — the default replacement backend SCAIL-2 augments.
+  const WAN = {
+    id: "wan_2_2",
+    name: "Wan 2.2",
+    type: "video",
+    family: "wan-video",
+    capabilities: ["image_to_video", "text_to_video", "replace_person"],
+    defaults: { duration: 5, resolution: "832x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  const clip = { id: "vid_src", type: "video", projectId: "project_1", displayName: "Driving Clip" };
+  const character = { id: "img_ref_a", type: "image", projectId: "project_1", displayName: "Character A" };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const pickerLabels = () =>
+    [...(container.querySelector(".studio-source-band")?.querySelectorAll(".asset-picker-label") ?? [])].map(
+      (el) => el.textContent,
+    );
+  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
+
+  it("shows the driving video + reference character slots for animate_character", async () => {
+    const context = baseContext({ videoModels: [SCAIL2], assets: [clip, character] });
+    await render(context);
+    await click(modeButton("Animate character"));
+
+    expect(pickerLabels()).toEqual(expect.arrayContaining(["Driving video", "Reference character"]));
+  });
+
+  it("submits the driving clip + reference character for animate_character", async () => {
+    const context = baseContext({ videoModels: [SCAIL2], assets: [clip, character] });
+    await render(context);
+    await click(modeButton("Animate character"));
+
+    // Both inputs required → Render stays disabled until selected.
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+
+    await click(buttonWithText(container, "Select clip"));
+    let modal = document.querySelector(".asset-picker-modal");
+    await doubleClick(
+      [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Driving Clip")),
+    );
+
+    await click(buttonWithText(container, "Select image"));
+    modal = document.querySelector(".asset-picker-modal");
+    await doubleClick(
+      [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Character A")),
+    );
+
+    expect(buttonWithText(container, "Render clip").disabled).toBe(false);
+    await click(buttonWithText(container, "Render clip"));
+
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      mode: "animate_character",
+      model: "scail2_14b",
+      sourceClipAssetId: "vid_src",
+    });
+    expect(payload.referenceAssetIds).toEqual(["img_ref_a"]);
+  });
+
+  it("offers SCAIL-2 as a replacement engine when 2+ backends can replace", async () => {
+    const context = baseContext({ videoModels: [WAN, SCAIL2], assets: [clip] });
+    await render(context);
+    await click(modeButton("Replace person"));
+
+    const engineLabel = [...container.querySelectorAll("label")].find((el) =>
+      el.textContent.includes("Replacement engine"),
+    );
+    expect(engineLabel).toBeTruthy();
+    const engineSelect = engineLabel.querySelector("select");
+    expect([...engineSelect.options].map((o) => o.value)).toEqual(
+      expect.arrayContaining(["wan_2_2", "scail2_14b"]),
+    );
+
+    // Choosing SCAIL-2 switches the active model and surfaces the full-character note.
+    const setSelect = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
+    await act(async () => {
+      setSelect.call(engineSelect, "scail2_14b");
+      engineSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("SCAIL-2 full-character replacement");
+  });
+
+  it("hides the replacement engine picker when only one backend can replace", async () => {
+    const context = baseContext({ videoModels: [WAN], assets: [clip] });
+    await render(context);
+    await click(modeButton("Replace person"));
+
+    const engineLabel = [...container.querySelectorAll("label")].find((el) =>
+      el.textContent.includes("Replacement engine"),
+    );
+    expect(engineLabel).toBeFalsy();
+  });
+});

@@ -286,6 +286,7 @@ export function VideoStudio() {
     "reference_video_to_video",
     "multi_video_to_video",
     "ads2v",
+    "animate_character",
   ].includes(mode);
   const {
     availablePresets,
@@ -513,6 +514,19 @@ export function VideoStudio() {
     }
   }, [mode, supportsMode, videoModels]);
 
+  // SCAIL-2 character animation (sc-5449): like replace_person, animate_character runs only on the
+  // model that advertises the capability (scail2_14b). Auto-switch to it when the user picks the
+  // mode on a model that can't serve it, so the mode is usable without first hunting for the model.
+  useEffect(() => {
+    if (mode !== "animate_character" || supportsMode) {
+      return;
+    }
+    const animateModel = videoModels.find((item) => item.capabilities?.includes("animate_character"));
+    if (animateModel) {
+      setModel(animateModel.id);
+    }
+  }, [mode, supportsMode, videoModels]);
+
   // When restoring a snapshot, the saved length/fps/quality/resolution/negativePrompt
   // already reflect the user's last state — skip the one preset-default pass that fires
   // as the restored preset resolves so it doesn't overwrite them. "None" applies no
@@ -628,6 +642,10 @@ export function VideoStudio() {
     ["reference_video_to_video", "Reference + Video"],
     ["multi_video_to_video", "Multi-Clip → Video"],
     ["ads2v", "Clip + Ref Video"],
+    // SCAIL-2 character animation (epic 5439 / sc-5449): a reference character image + a driving
+    // video → the character animated with the driving motion. Enabled only on the model whose
+    // capabilities include it (today: scail2_14b); the same per-model gating as the others.
+    ["animate_character", "Animate character"],
   ];
   // Mac UI gating (sc-3486, sc-3773): every video mode is disabled per-model via the selected
   // model's `macSupport.features.videoModes` — FLF on the non-Keyframe Wan MoE engines,
@@ -665,7 +683,9 @@ export function VideoStudio() {
     // Bernini multi-source modes (sc-5425): mv2v needs >=2 clips; ads2v needs a source
     // clip, a reference video, and >=1 reference image.
     (mode === "multi_video_to_video" && sourceClipAssetIds.length >= 2) ||
-    (mode === "ads2v" && sourceClipAssetId && referenceClipAssetId && referenceAssetIds.length > 0);
+    (mode === "ads2v" && sourceClipAssetId && referenceClipAssetId && referenceAssetIds.length > 0) ||
+    // SCAIL-2 character animation (sc-5449): a driving video + a reference character image.
+    (mode === "animate_character" && sourceClipAssetId && referenceAssetIds.length > 0);
   // Don't let Replace Person queue a job the readiness endpoint says no live
   // worker can run — that would sit unclaimable instead of honoring the gate.
   const replaceReady = mode !== "replace_person" || personReadiness?.replace?.ready !== false;
@@ -737,14 +757,22 @@ export function VideoStudio() {
           "video_to_video",
           "reference_video_to_video",
           "ads2v",
+          // SCAIL-2 character animation (sc-5449): the driving video.
+          "animate_character",
         ].includes(mode)
           ? sourceClipAssetId || null
           : null,
         // Bernini multi-source clips (sc-5425) — only mv2v carries the array.
         sourceClipAssetIds: mode === "multi_video_to_video" ? sourceClipAssetIds : [],
         bridgeRightClipAssetId: mode === "video_bridge" ? bridgeRightClipAssetId || null : null,
-        // Bernini subject references (sc-4703 / sc-5425) — the reference-driven modes + ads2v carry them.
-        referenceAssetIds: ["reference_to_video", "reference_video_to_video", "ads2v"].includes(mode)
+        // Bernini subject references (sc-4703 / sc-5425) — the reference-driven modes + ads2v carry
+        // them; SCAIL-2 character animation (sc-5449) carries the reference character image.
+        referenceAssetIds: [
+          "reference_to_video",
+          "reference_video_to_video",
+          "ads2v",
+          "animate_character",
+        ].includes(mode)
           ? referenceAssetIds
           : [],
         // Bernini ads2v reference video (sc-5425).
@@ -1020,6 +1048,30 @@ export function VideoStudio() {
               />
             ) : null}
 
+            {mode === "animate_character" ? (
+              <>
+                <AssetPickerField
+                  assets={videoAssets}
+                  buttonLabel="Select clip"
+                  emptyLabel="No driving video selected"
+                  label="Driving video"
+                  onChange={setSourceClipAssetId}
+                  value={sourceClipAssetId}
+                />
+                {/* One character today; the worker reads the first reference. Multi-reference is
+                    experimental and tracked separately (sc-5583), so this stays a single image. */}
+                <AssetPickerField
+                  assets={imageAssets}
+                  buttonLabel="Select image"
+                  changeLabel="Change character"
+                  emptyLabel="No reference character selected"
+                  label="Reference character"
+                  onChange={(id) => setReferenceAssetIds(id ? [id] : [])}
+                  value={referenceAssetIds[0] ?? ""}
+                />
+              </>
+            ) : null}
+
             {mode === "replace_person" ? (
               <ReplacePersonPanel
                 createPersonDetectionJob={createPersonDetectionJob}
@@ -1041,6 +1093,9 @@ export function VideoStudio() {
                 sourceClipAssetId={sourceClipAssetId}
                 trackName={trackName}
                 videoAssets={videoAssets}
+                videoModels={videoModels}
+                model={model}
+                setModel={setModel}
               />
             ) : null}
           </div>

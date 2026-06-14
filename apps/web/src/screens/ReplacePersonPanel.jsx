@@ -349,8 +349,18 @@ export function ReplacePersonPanel({
   replacementMode,
   saveTrackCorrections,
   videoAssets,
+  videoModels = [],
+  model,
+  setModel,
   personReadiness = {},
 }) {
+  // The replacement backend = the replace-capable video models. The user picks one here (it drives
+  // the job's `model`); SCAIL-2 (scail2_14b) is the native cross-identity engine, the others inpaint
+  // the masked region via Wan-VACE (sc-5449 / sc-5452).
+  const replacementModels = useMemo(
+    () => videoModels.filter((item) => item.capabilities?.includes("replace_person")),
+    [videoModels],
+  );
   // Default-open: only gate when readiness explicitly reports a backend missing.
   const detectReady = personReadiness?.detect?.ready !== false;
   const trackReady = personReadiness?.track?.ready !== false;
@@ -480,6 +490,29 @@ export function ReplacePersonPanel({
           sourceClip={selectedTrackSourceClip}
           track={selectedTrack}
         />
+      ) : null}
+
+      {replacementModels.length > 1 && setModel ? (
+        <label>
+          Replacement engine
+          <select onChange={(event) => setModel(event.target.value)} value={model}>
+            {replacementModels.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      {model === "scail2_14b" ? (
+        <div className="guidance-strip">
+          <strong>SCAIL-2 full-character replacement</strong>
+          <span>
+            SCAIL-2 re-renders the whole tracked person from the character reference, so the
+            Replacement mode below (face-only / keep-outfit) does not apply.
+          </span>
+        </div>
       ) : null}
 
       <label>
