@@ -409,6 +409,24 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // (legacy payloads) preserves that default.
         gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
         trigger_word: config.trigger_word.clone(),
+        // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
+        // set `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`; the submit derives `samplePrompts`
+        // from the trigger word), but the engine config is built field-by-field (no `..Default`), so
+        // they must be mapped explicitly or the family trainer never samples. Absent `sampleEvery`
+        // (legacy payloads) → 0 → sampling stays off, exactly as before this fix.
+        sample_every: advanced_u32(advanced, "sampleEvery", 0),
+        sample_steps: advanced_u32(advanced, "sampleSteps", 20),
+        sample_guidance_scale: advanced_f32(advanced, "sampleGuidanceScale", 1.0),
+        sample_prompts: advanced
+            .get("samplePrompts")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -605,6 +623,32 @@ async fn consume_training_events(
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
+
+    // sc-5637 — preview-sample plumbing. The engine streams `TrainingProgress::Sample` events
+    // carrying a decoded RGB bitmap at the configured cadence; the worker persists each as a PNG
+    // project asset and accumulates the records the Training Studio renders (`trainingSamples` =
+    // cumulative, `latestTrainingSamples` = this cadence). All best-effort: a persistence hiccup
+    // must never fail the training run. `output_dir`/`project_root` are resolved leniently (already
+    // validated upstream in `run_training_execution`); if either is unavailable, samples simply
+    // don't render but training is unaffected.
+    let sample_cfg = map_training_config(&plan.config);
+    let sample_output_dir =
+        resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir").ok();
+    let sample_project_root = job.project_id.as_ref().and_then(|project_id| {
+        ProjectStore::new(settings.data_dir.clone(), "worker")
+            .get_project(project_id)
+            .ok()
+            .map(|project| PathBuf::from(project.path))
+    });
+    let sample_stem = Path::new(&plan.output.file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("lora")
+        .to_owned();
+    let mut all_samples: Vec<Value> = Vec::new();
+    let mut latest_step: u32 = 0;
+    let mut latest_samples: Vec<Value> = Vec::new();
+
     while let Some(event) = rx.recv().await {
         if canceled {
             continue; // drain remaining events so the blocking sender never blocks.
@@ -625,6 +669,65 @@ async fn consume_training_events(
                 if let TrainingProgress::Checkpoint { step } = progress {
                     checkpoints.push(json!({ "step": step }));
                 }
+                // sc-5637 — a preview sample: persist it as a project asset and stream the updated
+                // sample lists (cumulative + this-cadence) so Training Studio shows it live. Handled
+                // here (not in `map_training_progress`) because it writes a file + carries a result
+                // payload. Best-effort: a write failure logs and is skipped, never failing the run.
+                if let TrainingProgress::Sample {
+                    step,
+                    index,
+                    total,
+                    prompt,
+                    image,
+                } = progress
+                {
+                    match write_training_sample(
+                        sample_output_dir.as_deref(),
+                        sample_project_root.as_deref(),
+                        &sample_stem,
+                        step,
+                        index,
+                        &prompt,
+                        &image,
+                        sample_cfg.sample_steps,
+                        sample_cfg.sample_guidance_scale,
+                    ) {
+                        Ok(record) => {
+                            let record = Value::Object(record);
+                            if step != latest_step {
+                                latest_step = step;
+                                latest_samples.clear();
+                            }
+                            all_samples.push(record.clone());
+                            latest_samples.push(record);
+                            let result = training_samples_result(
+                                &all_samples,
+                                &latest_samples,
+                                &sample_cfg.sample_prompts,
+                                sample_cfg.sample_steps,
+                                sample_cfg.sample_guidance_scale,
+                            );
+                            update_job(
+                                api,
+                                &job.id,
+                                training_progress(
+                                    JobStatus::Running,
+                                    ProgressStage::Training,
+                                    train_fraction(step, total_steps.max(step)),
+                                    &format!("Rendered preview {index}/{total} at step {step}."),
+                                    Some(result),
+                                    backend,
+                                ),
+                            )
+                            .await?;
+                        }
+                        Err(error) => eprintln!(
+                            "[sc-5637] worker failed to persist training preview at step {step} \
+                             (index {index}): {error} — skipping, training continues"
+                        ),
+                    }
+                    continue;
+                }
                 let (status, stage, fraction, message) =
                     map_training_progress(progress, total_steps);
                 update_job(
@@ -636,7 +739,15 @@ async fn consume_training_events(
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
             }
             TrainEvent::Done(output) => {
-                let result = training_result(plan, &output, &checkpoints);
+                let result = training_result(
+                    plan,
+                    &output,
+                    &checkpoints,
+                    &all_samples,
+                    &sample_cfg.sample_prompts,
+                    sample_cfg.sample_steps,
+                    sample_cfg.sample_guidance_scale,
+                );
                 update_job(
                     api,
                     &job.id,
@@ -729,6 +840,12 @@ fn map_training_progress(
             train_fraction(step, total_steps.max(step)),
             format!("Saved checkpoint at step {step}."),
         ),
+        // sc-5637 — Sample events are intercepted in `consume_training_events` (they write a project
+        // asset + stream the sample list) and never reach this mapper; the arm exists only to keep the
+        // match exhaustive against the additive contract variant.
+        TrainingProgress::Sample { .. } => {
+            unreachable!("TrainingProgress::Sample is handled before map_training_progress")
+        }
         TrainingProgress::Saving => (
             JobStatus::Running,
             ProgressStage::Saving,
@@ -751,11 +868,98 @@ fn train_fraction(step: u32, total: u32) -> f64 {
 /// trainer's `_result`). LoRA registration is driven by the staged `manifestEntry` +
 /// the on-disk adapter (apps/rust-api `register_trained_lora`), not this result, so
 /// this is informational/UI metadata.
+/// Build the `result` payload carrying the accumulated preview samples (sc-5637). Streamed on each
+/// rendered preview and folded into the final completion result, in the exact shape the Training
+/// Studio reads: `trainingSamples` (cumulative), `latestTrainingSamples` (this cadence),
+/// `samplePrompts` (for labels), and `sampleSettings` (steps + guidance + source). Mirrors the
+/// Python trainer's `_result` sample keys.
 #[cfg(target_os = "macos")]
+fn training_samples_result(
+    all_samples: &[Value],
+    latest_samples: &[Value],
+    sample_prompts: &[String],
+    sample_steps: u32,
+    sample_guidance_scale: f32,
+) -> JsonObject {
+    let mut result = JsonObject::new();
+    result.insert("trainingSamples".to_owned(), json!(all_samples));
+    result.insert("latestTrainingSamples".to_owned(), json!(latest_samples));
+    result.insert("samplePrompts".to_owned(), json!(sample_prompts));
+    result.insert(
+        "sampleSettings".to_owned(),
+        json!({
+            "numInferenceSteps": sample_steps,
+            "guidanceScale": sample_guidance_scale,
+            "sampleSource": "live_adapter",
+        }),
+    );
+    result
+}
+
+/// Persist one preview sample (sc-5637) as a PNG project asset and return the record the Training
+/// Studio renders. The on-disk layout mirrors the Python trainer:
+/// `<output_dir>/samples/step-NNNNNN/<stem>-stepNNNNNN-<index>.png`. `relativePath` is project-root-
+/// relative (the UI resolves it as `/api/v1/projects/<id>/files/<relativePath>`); it is omitted when
+/// the project root is unknown (the absolute `path` is still recorded for debugging). PNG encoding +
+/// the atomic temp-then-rename mirror `image_jobs::write_image_asset`.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn write_training_sample(
+    output_dir: Option<&Path>,
+    project_root: Option<&Path>,
+    stem: &str,
+    step: u32,
+    index: u32,
+    prompt: &str,
+    image: &gen_core::Image,
+    sample_steps: u32,
+    sample_guidance_scale: f32,
+) -> WorkerResult<JsonObject> {
+    let output_dir = output_dir.ok_or_else(|| {
+        WorkerError::Engine("training preview: output directory is unavailable".to_owned())
+    })?;
+    let dir = output_dir.join("samples").join(format!("step-{step:06}"));
+    std::fs::create_dir_all(&dir)?;
+    let filename = format!("{stem}-step{step:06}-{index}.png");
+    let path = dir.join(&filename);
+    let rgb = image::RgbImage::from_raw(image.width, image.height, image.pixels.clone())
+        .ok_or_else(|| {
+            WorkerError::Engine("training preview: image buffer size mismatch".into())
+        })?;
+    let temp_path = path.with_extension("tmp.png");
+    rgb.save_with_format(&temp_path, image::ImageFormat::Png)
+        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
+    std::fs::rename(&temp_path, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })?;
+
+    let mut record = JsonObject::new();
+    record.insert("step".to_owned(), json!(step));
+    record.insert("prompt".to_owned(), json!(prompt));
+    record.insert("path".to_owned(), json!(path.display().to_string()));
+    if let Some(relative) = project_root.and_then(|root| path.strip_prefix(root).ok()) {
+        record.insert(
+            "relativePath".to_owned(),
+            json!(relative.to_string_lossy().replace('\\', "/")),
+        );
+    }
+    record.insert("sampleSource".to_owned(), json!("live_adapter"));
+    record.insert("numInferenceSteps".to_owned(), json!(sample_steps));
+    record.insert("guidanceScale".to_owned(), json!(sample_guidance_scale));
+    record.insert("createdAt".to_owned(), json!(now_rfc3339()));
+    Ok(record)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn training_result(
     plan: &TrainingPlan,
     output: &TrainingOutput,
     checkpoints: &[Value],
+    all_samples: &[Value],
+    sample_prompts: &[String],
+    sample_steps: u32,
+    sample_guidance_scale: f32,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("mode".to_owned(), json!("train"));
@@ -789,6 +993,18 @@ fn training_result(
     result.insert("triggerWords".to_owned(), json!(plan.output.trigger_words));
     result.insert("planVersion".to_owned(), json!(plan.plan_version));
     result.insert("backend".to_owned(), json!("mlx"));
+    // sc-5637 — fold the preview samples into the final result so they persist on the completed job
+    // (the streamed updates are transient). `latestTrainingSamples` is left empty on completion (the
+    // UI unions `trainingSamples` + `latestTrainingSamples`, so the cumulative list is sufficient).
+    for (key, value) in training_samples_result(
+        all_samples,
+        &[],
+        sample_prompts,
+        sample_steps,
+        sample_guidance_scale,
+    ) {
+        result.insert(key, value);
+    }
     result
 }
 
@@ -1342,6 +1558,101 @@ mod tests {
         assert!(cfg.lora_target_modules.is_empty());
         assert_eq!(cfg.timestep_type, "sigmoid");
         assert_eq!(cfg.loss_type, "mse");
+        // sc-5637 — absent sample keys ⇒ sampling OFF (sample_every 0), so a legacy plan that omits
+        // them trains exactly as before (no previews) rather than erroring.
+        assert_eq!(cfg.sample_every, 0);
+        assert!(cfg.sample_prompts.is_empty());
+    }
+
+    /// sc-5637 — the preview-sample config must reach the engine. The mapping builds the engine config
+    /// field-by-field (no `..Default`), so a dropped sample field silently disables previews — exactly
+    /// the gap this story fixes. Asserts `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`/`samplePrompts`
+    /// flow through from the plan's `advanced` bag.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn map_training_config_wires_sample_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        );
+        value["config"]["advanced"]["sampleEvery"] = json!(250);
+        value["config"]["advanced"]["sampleSteps"] = json!(8);
+        value["config"]["advanced"]["sampleGuidanceScale"] = json!(1.5);
+        value["config"]["advanced"]["samplePrompts"] =
+            json!(["mychar, studio portrait", "mychar, full body"]);
+        let cfg = map_training_config(&parse(value).config);
+        assert_eq!(cfg.sample_every, 250);
+        assert_eq!(cfg.sample_steps, 8);
+        assert!((cfg.sample_guidance_scale - 1.5).abs() < 1e-6);
+        assert_eq!(
+            cfg.sample_prompts,
+            vec![
+                "mychar, studio portrait".to_owned(),
+                "mychar, full body".to_owned()
+            ]
+        );
+    }
+
+    /// sc-5637 — `write_training_sample` must persist the PNG under
+    /// `<output_dir>/samples/step-NNNNNN/<stem>-stepNNNNNN-<index>.png` and return a record carrying
+    /// the exact shape the Training Studio reads (`step`/`prompt`/`relativePath`/`numInferenceSteps`/
+    /// `guidanceScale`/`sampleSource`), with `relativePath` resolved against the project root. Validates
+    /// the worker persistence deterministically (no model weights), so the chain engine→worker→UI shape
+    /// is covered without a real-weight run.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_training_sample_writes_png_and_project_relative_record() {
+        let project_root = tempfile::tempdir().expect("project root tempdir");
+        let output_dir = project_root
+            .path()
+            .join("training")
+            .join("loras")
+            .join("lora-1");
+        // A 4×2 solid-red RGB bitmap (pixels.len() == 4*2*3).
+        let image = gen_core::Image {
+            width: 4,
+            height: 2,
+            pixels: vec![255u8, 0, 0]
+                .into_iter()
+                .cycle()
+                .take(4 * 2 * 3)
+                .collect(),
+        };
+        let record = write_training_sample(
+            Some(output_dir.as_path()),
+            Some(project_root.path()),
+            "mychar",
+            250,
+            2,
+            "mychar, studio portrait",
+            &image,
+            8,
+            1.5,
+        )
+        .expect("sample persists");
+
+        let png = output_dir
+            .join("samples")
+            .join("step-000250")
+            .join("mychar-step000250-2.png");
+        assert!(png.exists(), "preview PNG written to {}", png.display());
+        assert_eq!(record.get("step").unwrap(), 250);
+        assert_eq!(record.get("prompt").unwrap(), "mychar, studio portrait");
+        assert_eq!(record.get("sampleSource").unwrap(), "live_adapter");
+        assert_eq!(record.get("numInferenceSteps").unwrap(), 8);
+        assert!((record.get("guidanceScale").unwrap().as_f64().unwrap() - 1.5).abs() < 1e-6);
+        assert_eq!(
+            record.get("relativePath").unwrap(),
+            "training/loras/lora-1/samples/step-000250/mychar-step000250-2.png"
+        );
+        // The PNG must decode back to the source dimensions.
+        let decoded = image::open(&png).expect("re-open png").to_rgb8();
+        assert_eq!((decoded.width(), decoded.height()), (4, 2));
     }
 
     /// Real-weights smoke (sc-4732 + sc-4764): load the Kolors trainer from the installed
@@ -1402,6 +1713,10 @@ mod tests {
             timestep_bias: "balanced".to_owned(),
             loss_type: "mse".to_owned(),
             trigger_word: None,
+            sample_every: 0,
+            sample_prompts: Vec::new(),
+            sample_steps: 20,
+            sample_guidance_scale: 1.0,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -1501,6 +1816,10 @@ mod tests {
             timestep_bias: "balanced".to_owned(),
             loss_type: "mse".to_owned(),
             trigger_word: None,
+            sample_every: 0,
+            sample_prompts: Vec::new(),
+            sample_steps: 20,
+            sample_guidance_scale: 1.0,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -1604,6 +1923,10 @@ mod tests {
             timestep_bias: "balanced".to_owned(),
             loss_type: "mse".to_owned(),
             trigger_word: None,
+            sample_every: 0,
+            sample_prompts: Vec::new(),
+            sample_steps: 20,
+            sample_guidance_scale: 1.0,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
