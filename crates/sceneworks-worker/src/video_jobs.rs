@@ -6086,6 +6086,300 @@ mod tests {
         }
     }
 
+    // ===================== SCAIL-2 validation (epic 5439 / sc-5450) =====================
+
+    /// Only the `scail2_14b` catalog id routes to the SCAIL-2 engine (sc-5448). Every other video
+    /// family (Wan/LTX/SVD/Bernini/image ids) is `None`, so they keep their own routing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_engine_id_maps_only_the_scail2_family() {
+        assert_eq!(scail2_engine_id("scail2_14b"), Some("scail2_14b"));
+        assert_eq!(scail2_engine_id("bernini"), None);
+        assert_eq!(scail2_engine_id("wan_2_2"), None);
+        assert_eq!(scail2_engine_id("ltx_2_3"), None);
+        assert_eq!(scail2_engine_id("scail2"), None);
+        assert_eq!(scail2_engine_id(""), None);
+    }
+
+    /// SCAIL-2 load quantization (sc-5450): Q4 is the default (the validated ~16 GB tier),
+    /// `mlxQuantize` opts up to Q8 or down to bf16 (`<= 0`), parsing a JSON number or string. The
+    /// bf16 snapshot is ~47 GB so a missing control NEVER means bf16. Mirrors the Bernini quant test.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_resolve_quant_defaults_q4_and_honors_override() {
+        let quant = |advanced: Value| {
+            resolve_scail2_quant(&request(json!({ "projectId": "p", "advanced": advanced })))
+        };
+        assert!(matches!(quant(json!({})), Some(Quant::Q4)));
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": 4 })),
+            Some(Quant::Q4)
+        ));
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": 8 })),
+            Some(Quant::Q8)
+        ));
+        assert!(quant(json!({ "mlxQuantize": 0 })).is_none());
+        assert!(quant(json!({ "mlxQuantize": -1 })).is_none());
+        // String forms parse the same; a tier between 4 and 8 rounds up to Q8.
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": "8" })),
+            Some(Quant::Q8)
+        ));
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": " 4 " })),
+            Some(Quant::Q4)
+        ));
+        assert!(quant(json!({ "mlxQuantize": "0" })).is_none());
+        assert!(matches!(
+            quant(json!({ "mlxQuantize": 6 })),
+            Some(Quant::Q8)
+        ));
+    }
+
+    /// Raw-settings lineage on a real SCAIL-2 asset (sc-5450): the real-inference marker, the catalog
+    /// model id, the produced frame count / fps, the resolved engine task (`scail2Task`), and a
+    /// pass-through of the user's advanced controls. `replace_person` → "replacement",
+    /// `animate_character` → "animation".
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_raw_settings_capture_lineage_and_task() {
+        let raw_for = |mode: &str| {
+            let req = request(json!({
+                "projectId": "p",
+                "model": "scail2_14b",
+                "mode": mode,
+                "duration": 5,
+                "fps": 16,
+                "advanced": { "mlxQuantize": 4, "userKnob": "keep-me" }
+            }));
+            let raw = scail2_raw_settings(&req);
+            (raw, req)
+        };
+        let (raw, req) = raw_for("animate_character");
+        let raw = raw.as_object().expect("raw settings is an object");
+        assert_eq!(raw["realModelInference"], json!(true));
+        assert_eq!(raw["model"], json!("scail2_14b"));
+        assert_eq!(raw["fps"], json!(req.fps));
+        assert_eq!(raw["frameCount"], json!(req.frame_count()));
+        assert_eq!(raw["scail2Task"], json!("animation"));
+        assert_eq!(raw["userKnob"], json!("keep-me"));
+        // replace_person resolves to the replacement task (flips the engine replace_flag).
+        let (raw_replace, _) = raw_for("replace_person");
+        assert_eq!(raw_replace["scail2Task"], json!("replacement"));
+    }
+
+    /// SCAIL-2 conditioning resolution fails loudly BEFORE any IO when its required media is missing
+    /// (sc-5450 — defense in depth behind the API-side validation): `animate_character` needs a
+    /// reference character image, and the integrated `replace_person` backend needs a person track.
+    /// Both guards fire before touching the api / job / disk, so a minimal job suffices.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn scail2_conditioning_guards_fire_before_io() {
+        let settings = Settings::from_env();
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-scail2-1",
+            "type": "video_generate",
+            "status": "preparing",
+            "projectId": "p",
+            "projectName": "P",
+            "payload": {},
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": null,
+            "progress": 0,
+            "stage": "preparing",
+            "message": "",
+            "error": null,
+            "etaSeconds": null,
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-14T00:00:00Z",
+            "updatedAt": "2026-06-14T00:00:00Z"
+        }))
+        .expect("job snapshot");
+
+        // animate_character with no reference image / source asset → reference guard.
+        let animate_req = request(json!({
+            "projectId": "p", "model": "scail2_14b", "mode": "animate_character", "prompt": "go"
+        }));
+        let animate_err =
+            resolve_scail2_conditioning(&api, &settings, &job, &animate_req, Path::new("/tmp/p"))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            animate_err.contains("reference character image"),
+            "animate missing-reference error: {animate_err}"
+        );
+
+        // replace_person with no person track → person-track guard.
+        let replace_req = request(json!({
+            "projectId": "p", "model": "scail2_14b", "mode": "replace_person", "prompt": "go"
+        }));
+        let replace_err = resolve_scail2_replace_conditioning(
+            &api,
+            &settings,
+            &job,
+            &replace_req,
+            Path::new("/tmp/p"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            replace_err.contains("person track"),
+            "replace missing-track error: {replace_err}"
+        );
+    }
+
+    /// A SCAIL-2 MLX snapshot dir if present: env override (`SCENEWORKS_MLX_SCAIL2_DIR`), then the
+    /// bring-up convert/staging dirs, then the app-managed default. `None` ⇒ the smoke skips.
+    #[cfg(target_os = "macos")]
+    fn scail2_dir() -> Option<PathBuf> {
+        if let Ok(dir) = std::env::var("SCENEWORKS_MLX_SCAIL2_DIR") {
+            let path = PathBuf::from(dir.trim());
+            if path.join("config.json").is_file() {
+                return Some(path);
+            }
+        }
+        let home = std::env::var("HOME").ok()?;
+        for rel in [
+            ".cache/scail2-mlx-convert",
+            ".cache/mlx-gen-models/scail2-mlx-upload",
+            "Library/Application Support/SceneWorks/data/models/mlx/scail2",
+        ] {
+            let path = PathBuf::from(&home).join(rel);
+            if path.join("config.json").is_file() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// A synthetic SCAIL-2 color-coded mask: a centered blue rectangle (person 0) on a solid `bg`,
+    /// matching the engine's 7-class color scheme (only the chromatic channels matter, not the exact
+    /// silhouette — the smoke proves the engine consumes the shape and streams frames, not parity).
+    #[cfg(target_os = "macos")]
+    fn scail2_smoke_color_mask(w: u32, h: u32, bg: [u8; 3]) -> Image {
+        let (wu, hu) = (w as usize, h as usize);
+        let mut px = vec![0u8; wu * hu * 3];
+        for chunk in px.chunks_exact_mut(3) {
+            chunk.copy_from_slice(&bg);
+        }
+        for y in (hu / 4)..(3 * hu / 4) {
+            for x in (wu / 4)..(3 * wu / 4) {
+                let o = (y * wu + x) * 3;
+                px[o..o + 3].copy_from_slice(&crate::scail2_masks::PALETTE[0]);
+            }
+        }
+        Image {
+            width: w,
+            height: h,
+            pixels: px,
+        }
+    }
+
+    /// Real in-process SCAIL-2 through the WORKER registry path (epic 5439 / sc-5450): drive both
+    /// engine tasks — `animation` (standalone `animate_character`) and `replacement` (cross-identity
+    /// `replace_person`) — with a synthetic reference + color mask + driving clip + per-frame color
+    /// masks, asserting each `video_mode` loads via `gen_core::load("scail2_14b")` (proving the
+    /// `mlx_gen_scail2` force-link survived in the worker binary — the "no generator registered"
+    /// trap), consumes the conditioning, and streams RGB8 frames with denoise progress. The driving
+    /// background follows the replacement convention (animation → black, replacement → white).
+    /// `#[ignore]` — the ~47 GB snapshot lives outside CI; run manually on a Mac where it is present
+    /// (Q4 ≈ 16 GB peak). The bg conventions mirror `scail2_masks` (sc-5448 / sc-5452).
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real SCAIL-2 snapshot (~47 GB); run manually on a Mac where the scail2 weights are present"]
+    #[test]
+    fn scail2_animation_and_replacement_real_weights() {
+        let Some(model_dir) = scail2_dir() else {
+            eprintln!("skipping scail2_animation_and_replacement_real_weights: no snapshot found");
+            return;
+        };
+        let (w, h) = (256u32, 256u32);
+        let frame = |shade: u8| Image {
+            width: w,
+            height: h,
+            pixels: vec![shade; (w * h * 3) as usize],
+        };
+        // 5 driving frames → one clean VAE-aligned segment (the engine keeps ((T-1)/4)*4 + 1).
+        let driving: Vec<Image> = (0..5).map(|i| frame(50 + i * 20)).collect();
+        let reference = frame(160);
+
+        // animation keeps the reference's world (driving bg black, ref bg white); cross-identity
+        // replacement keeps the driving's world (driving bg white, ref bg black) — sc-5448 / sc-5452.
+        for (task, driving_bg, reference_bg) in [
+            (
+                "animation",
+                crate::scail2_masks::BG_BLACK,
+                crate::scail2_masks::BG_WHITE,
+            ),
+            (
+                "replacement",
+                crate::scail2_masks::BG_WHITE,
+                crate::scail2_masks::BG_BLACK,
+            ),
+        ] {
+            let reference_mask = scail2_smoke_color_mask(w, h, reference_bg);
+            let driving_masks: Vec<Image> = driving
+                .iter()
+                .map(|_| scail2_smoke_color_mask(w, h, driving_bg))
+                .collect();
+            let conditioning = vec![
+                Conditioning::Reference {
+                    image: reference.clone(),
+                    strength: None,
+                },
+                Conditioning::Mask {
+                    image: reference_mask,
+                },
+                Conditioning::ControlClip {
+                    frames: driving.clone(),
+                    mask: driving_masks,
+                    masking_strength: 1.0,
+                    start_frame: 0,
+                    mode: ReplacementMode::default(),
+                },
+            ];
+            let input = VideoGenInput {
+                engine_id: "scail2_14b",
+                model_dir: model_dir.clone(),
+                quant: Some(Quant::Q4),
+                conditioning,
+                prompt: "the character walks forward, cinematic".to_owned(),
+                width: w,
+                height: h,
+                frames: 5,
+                fps: 16,
+                steps: Some(8),
+                seed: 11,
+                video_mode: Some(task.to_owned()),
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut steps = 0u32;
+            let mut on_progress = |progress: Progress| {
+                if let Progress::Step { .. } = progress {
+                    steps += 1;
+                }
+            };
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|error| panic!("scail2 {task} generation: {error}"));
+            assert!(steps > 0, "{task}: denoise progress streamed");
+            assert!(!decoded.frames.is_empty(), "{task}: frames returned");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{task}: frames are RGB8-sized"
+            );
+        }
+    }
+
     /// Real in-process Wan-VACE extend/bridge through the engine (sc-3812): build the tier-C
     /// control clip (real anchor frames pinned + a neutral generated span, no references) and run
     /// the assembled snapshot, asserting RGB8 frames stream back. `#[ignore]` — the weights live
