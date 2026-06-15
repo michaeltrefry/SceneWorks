@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from worker_runtime_shared import *
 
+@pytest.fixture(autouse=True)
+def managed_lora_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(tmp_path))
+
+
 def test_cpu_worker_does_not_advertise_lora_train():
     capabilities = worker_capabilities({"id": "cpu", "name": "CPU", "capabilities": ["placeholder", "cpu"]})
 
@@ -504,6 +509,16 @@ def test_lora_specs_fail_before_inference_for_missing_or_excess_loras(tmp_path):
     many = [{"id": f"lora_{index}", "installedPath": str(missing)} for index in range(4)]
     with pytest.raises(RuntimeError, match="at most 3 LoRAs"):
         normalize_lora_specs(many)
+
+
+def test_lora_specs_reject_outside_app_managed_root(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside" / "evil.safetensors"
+    outside.parent.mkdir()
+    outside.write_bytes(b"lora")
+
+    with pytest.raises(RuntimeError, match="inside an app-managed directory"):
+        normalize_lora_specs([{"id": "evil", "installedPath": str(outside)}])
+
 
 def test_lora_specs_resolve_installed_directory_to_safetensors_file(tmp_path):
     # Installed LoRAs are stored as a directory and the Rust API reports the
@@ -1053,4 +1068,3 @@ def test_wan_backend_save_lora_lokr_routes_to_write_lokr_adapter(tmp_path, monke
     assert captured["file_name"] == "motion.safetensors"
     assert captured["kwargs"] == save_kwargs
     assert output_path == str(tmp_path / "motion.safetensors")
-

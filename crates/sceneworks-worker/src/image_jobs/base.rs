@@ -345,7 +345,7 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     target_os = "macos",
     all(target_os = "windows", feature = "backend-candle")
 ))]
-fn resolve_adapters(request: &ImageRequest) -> WorkerResult<Vec<AdapterSpec>> {
+fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
@@ -353,9 +353,12 @@ fn resolve_adapters(request: &ImageRequest) -> WorkerResult<Vec<AdapterSpec>> {
     }
     let mut specs = Vec::with_capacity(request.loras.len());
     for lora in &request.loras {
-        let path = lora_path(lora).ok_or_else(|| {
+        let raw = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
+        // The path is attacker-controllable payload; confine it to an app-managed
+        // root before any on-disk use (sc-5723 / WKA-002).
+        let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
         let file = if path.is_dir() {
             first_safetensors_path(&path).ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
@@ -818,7 +821,7 @@ async fn generate_stream(
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);
-    let adapters = resolve_adapters(request)?;
+    let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &model);
     let raw_settings = mlx_raw_settings(
         request,
@@ -1094,7 +1097,7 @@ async fn generate_candle_stream(
         (None, None)
     };
     let adapters = if model.supports_adapters() {
-        resolve_adapters(request)?
+        resolve_adapters(request, settings)?
     } else {
         Vec::new()
     };

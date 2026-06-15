@@ -324,7 +324,7 @@ async fn generate_kolors_control_stream(
     let control_scale = kolors_pose_control_scale(request);
     let ip_scale =
         advanced::f32_clamped(&request.advanced, "ipAdapterScale", KOLORS_IP_SCALE, 0.0..=1.0);
-    let adapters = resolve_adapters(request)?;
+    let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &kolors);
     let poses = parse_poses(request);
     let count = poses.len();

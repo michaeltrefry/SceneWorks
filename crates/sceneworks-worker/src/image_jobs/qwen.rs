@@ -154,7 +154,7 @@ async fn generate_qwen_control_stream(
     let guidance = resolve_guidance(request, &qwen).unwrap_or(qwen.default_guidance());
     let negative_prompt = resolve_negative_prompt(request, &qwen);
     let control_scale = resolve_control_scale(request);
-    let adapters = resolve_adapters(request)?;
+    let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &qwen);
     let poses = parse_poses(request);
     let count = poses.len();
@@ -533,7 +533,7 @@ async fn generate_qwen_edit_stream(
             ensure_distill_lora_cached(api, settings, job, distill.repo, distill.file).await?;
         adapters.push(AdapterSpec::new(path, 1.0, AdapterKind::Lora));
     }
-    adapters.extend(resolve_adapters(request)?);
+    adapters.extend(resolve_adapters(request, settings)?);
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
 

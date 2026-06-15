@@ -5,10 +5,11 @@ use super::workers::person_readiness_from_workers;
 use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
     inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
-    safe_download_dir, serialize_job_lora, should_warn_open_bind, strip_jsonc_comments,
-    sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before, Settings, WorkerCapability,
-    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE,
-    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    open_bind_override_enabled, safe_download_dir, serialize_job_lora, should_warn_open_bind,
+    strip_jsonc_comments, sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before,
+    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
+    DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
+    TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -37,6 +38,21 @@ fn warns_only_on_open_bind_without_token() {
     assert!(!should_warn_open_bind("secret", v4("0.0.0.0")));
     assert!(!should_warn_open_bind("", v4("127.0.0.1")));
     assert!(!should_warn_open_bind("", "::1".parse().unwrap()));
+}
+
+#[test]
+fn open_bind_override_only_for_explicit_optin() {
+    // sc-5720 (API-001): the override that lets an unauthenticated open bind start
+    // must require an explicit affirmative value; anything else keeps the refusal.
+    for value in ["1", "true", "TRUE", "yes", "YES", " 1 "] {
+        assert!(open_bind_override_enabled(value), "{value:?} should opt in");
+    }
+    for value in ["", "0", "false", "no", "off", "2", "enable"] {
+        assert!(
+            !open_bind_override_enabled(value),
+            "{value:?} must not opt in"
+        );
+    }
 }
 
 #[test]

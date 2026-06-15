@@ -368,7 +368,7 @@ pub(crate) async fn run_video_generate_job(
             scail2_raw_settings(
                 &request,
                 scail2_adapters_have_lightning(
-                    &resolve_scail2_adapters(&request).unwrap_or_default(),
+                    &resolve_scail2_adapters(settings, &request).unwrap_or_default(),
                 ),
             ),
             None,
@@ -1645,8 +1645,11 @@ fn wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
 }
 
 /// Resolve a LoRA spec's file (a directory → its first `.safetensors`), verifying it exists.
+/// The `path` originates from attacker-controllable job payload, so it is first confined to an
+/// app-managed root (sc-5723 / WKA-002) before any on-disk use.
 #[cfg(target_os = "macos")]
-fn resolve_lora_file(path: PathBuf) -> WorkerResult<PathBuf> {
+fn resolve_lora_file(settings: &Settings, path: PathBuf) -> WorkerResult<PathBuf> {
+    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
     let file = if path.is_dir() {
         first_safetensors_path(&path).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -1711,7 +1714,7 @@ fn resolve_wan_adapters(
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(path)?;
+        let file = resolve_lora_file(settings, path)?;
         let kind = classify_adapter(&file)?;
         let scale = lora_scale(lora);
         match (is_moe, wan_moe_low_noise_sibling(&file)) {
@@ -1754,7 +1757,10 @@ fn moe_adapter(path: PathBuf, scale: f32, kind: AdapterKind, expert: MoeExpert) 
 /// tags SceneWorks peft LoKr as `Lokr` and everything else (incl. third-party LyCORIS LoHa / non-peft
 /// LoKr) as `Lora`, which the engine then detects + merges by key sniff (epic 3641).
 #[cfg(target_os = "macos")]
-fn resolve_wan_vace_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>> {
+fn resolve_wan_vace_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
@@ -1765,7 +1771,7 @@ fn resolve_wan_vace_adapters(request: &VideoRequest) -> WorkerResult<Vec<Adapter
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(path)?;
+        let file = resolve_lora_file(settings, path)?;
         let kind = classify_adapter(&file)?;
         specs.push(AdapterSpec {
             path: file,
@@ -1788,7 +1794,10 @@ fn resolve_wan_vace_adapters(request: &VideoRequest) -> WorkerResult<Vec<Adapter
 /// "lightning" LoRA installs via the engine's in-place diff-patch merge (sc-5684); selecting it makes
 /// the worker apply the step-distill recipe (`scail2_sampling`, sc-5700).
 #[cfg(target_os = "macos")]
-fn resolve_scail2_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>> {
+fn resolve_scail2_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
@@ -1799,7 +1808,7 @@ fn resolve_scail2_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSp
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(path)?;
+        let file = resolve_lora_file(settings, path)?;
         let kind = classify_adapter(&file)?;
         specs.push(AdapterSpec {
             path: file,
@@ -3408,7 +3417,7 @@ async fn generate_scail2(
     // Selecting a lightx2v diff-patch "lightning" LoRA flips the worker to the step-distill recipe
     // (8 steps, CFG off, shift 1.0) so the toggle yields the speedup; otherwise steps/guidance/shift
     // stay `None` and the engine's quality defaults stand (sc-5700).
-    let adapters = resolve_scail2_adapters(request)?;
+    let adapters = resolve_scail2_adapters(settings, request)?;
     let (steps, guidance, scheduler_shift) =
         scail2_sampling(request, scail2_adapters_have_lightning(&adapters));
     let input = VideoGenInput {
@@ -3799,7 +3808,10 @@ async fn ensure_ltx_q8_present(
 /// per-stage schedule is parity-plus). No distill/Lightning prepend — the 2-stage distill
 /// is baked into the checkpoint. peft LoKr allowed (engine residual), LyCORIS rejected.
 #[cfg(target_os = "macos")]
-fn resolve_ltx_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>> {
+fn resolve_ltx_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
@@ -3810,7 +3822,7 @@ fn resolve_ltx_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(path)?;
+        let file = resolve_lora_file(settings, path)?;
         let kind = classify_adapter(&file)?;
         specs.push(AdapterSpec::new(file, lora_scale(lora), kind));
     }
@@ -4273,7 +4285,7 @@ async fn generate_ltx(
         engine_id,
         model_dir,
         quant: None,
-        adapters: resolve_ltx_adapters(request)?,
+        adapters: resolve_ltx_adapters(settings, request)?,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt: None,
@@ -4710,7 +4722,7 @@ async fn load_source_video_frames(
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!("source clip {asset_id} has no media path"))
         })?;
-    let media_path = project_path.join(rel);
+    let media_path = crate::safe_project_path(project_path, rel)?;
     if !tokio::fs::try_exists(&media_path).await? {
         return Err(WorkerError::InvalidPayload(format!(
             "source clip file is missing: {}",
@@ -5001,7 +5013,7 @@ async fn generate_wan_vace(
         engine_id: "wan_vace",
         model_dir,
         quant: resolve_wan_quant(request),
-        adapters: resolve_wan_vace_adapters(request)?,
+        adapters: resolve_wan_vace_adapters(settings, request)?,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -5372,7 +5384,7 @@ async fn generate_wan_vace_extend_bridge(
         engine_id: "wan_vace",
         model_dir,
         quant: resolve_wan_quant(request),
-        adapters: resolve_wan_vace_adapters(request)?,
+        adapters: resolve_wan_vace_adapters(settings, request)?,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -6824,7 +6836,13 @@ mod tests {
                 { "path": lokr.to_string_lossy(), "weight": 0.9 },
             ],
         }));
-        let specs = resolve_wan_vace_adapters(&req).expect("resolve vace adapters");
+        // sc-5723: LoRA paths are confined to the app data dir, so point data_dir at
+        // the fixture dir the temp LoRAs live in.
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+        let specs = resolve_wan_vace_adapters(&settings, &req).expect("resolve vace adapters");
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].path, plain);
         assert_eq!(specs[0].kind, AdapterKind::Lora);
@@ -6841,10 +6859,47 @@ mod tests {
             .collect();
         let over = request(json!({ "projectId": "p", "loras": many }));
         assert!(matches!(
-            resolve_wan_vace_adapters(&over),
+            resolve_wan_vace_adapters(&settings, &over),
             Err(WorkerError::InvalidPayload(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sc-5723 (WKA-002): a LoRA path from the (attacker-controllable) payload that
+    /// resolves outside every app-managed root is rejected before the file is opened —
+    /// the worker must not be pointed at an arbitrary host `.safetensors`. The fixture
+    /// lives in a sibling temp dir that is NOT under the configured `data_dir`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lora_path_outside_app_managed_root_is_rejected() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sw_lora_data_{}", Uuid::new_v4().simple()));
+        let outside =
+            std::env::temp_dir().join(format!("sw_lora_evil_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let evil = outside.join("evil.safetensors");
+        write_lora_fixture(&evil, None);
+
+        let settings = Settings {
+            data_dir: data_dir.clone(),
+            ..Settings::from_env()
+        };
+        let req = request(json!({
+            "projectId": "p",
+            "loras": [ { "path": evil.to_string_lossy(), "weight": 0.5 } ],
+        }));
+        // The HF cache roots are env-derived; this temp path is under neither, so it
+        // must be refused. (Guard against the host's real HF cache happening to be a
+        // parent — vanishingly unlikely for a fresh uuid temp dir.)
+        let result = resolve_wan_vace_adapters(&settings, &req);
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(_))),
+            "expected out-of-root LoRA to be rejected, got {result:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     /// SCAIL-2 is single-dense like Wan-VACE (sc-5451/sc-5686): each user LoRA/LoKr (and the bundled
@@ -6868,7 +6923,13 @@ mod tests {
                 { "path": lokr.to_string_lossy(), "weight": 0.7 },
             ],
         }));
-        let specs = resolve_scail2_adapters(&req).expect("resolve scail2 adapters");
+        // sc-5723: LoRA paths are confined to the app data dir, so point data_dir at
+        // the fixture dir the temp LoRAs live in.
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+        let specs = resolve_scail2_adapters(&settings, &req).expect("resolve scail2 adapters");
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].path, plain);
         assert_eq!(specs[0].kind, AdapterKind::Lora);
@@ -6884,7 +6945,7 @@ mod tests {
             .collect();
         let over = request(json!({ "projectId": "p", "loras": many }));
         assert!(matches!(
-            resolve_scail2_adapters(&over),
+            resolve_scail2_adapters(&settings, &over),
             Err(WorkerError::InvalidPayload(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -7379,7 +7440,8 @@ mod tests {
         assert!(advanced::bool(&req.advanced, "enhancePrompt"));
         assert!(!advanced::bool(&req.advanced, "useUncensoredEnhancer"));
         // LTX adapters: a plain user LoRA is uniform (no per-pass schedule, no moe tag).
-        let none = resolve_ltx_adapters(&req).unwrap();
+        let settings = Settings::from_env();
+        let none = resolve_ltx_adapters(&settings, &req).unwrap();
         assert!(none.is_empty());
     }
 

@@ -2083,6 +2083,38 @@ fn model_destinations_are_constrained_to_data_models() {
     assert!(convert_error.to_string().contains("data/models"));
 }
 
+#[cfg(unix)]
+#[test]
+fn lora_paths_resolve_symlinks_before_root_check() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let lora_dir = data_dir.join("loras");
+    let outside_dir = temp.path().join("outside");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    std::fs::create_dir_all(&outside_dir).expect("outside dir creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir.clone();
+
+    let safe = lora_dir.join("safe.safetensors");
+    std::fs::write(&safe, b"safe").expect("safe lora writes");
+    let normalized =
+        super::normalize_app_managed_lora_path(&settings, &safe).expect("safe lora accepted");
+    assert_eq!(
+        normalized,
+        safe.canonicalize().expect("safe lora canonicalizes")
+    );
+
+    let outside = outside_dir.join("escape.safetensors");
+    std::fs::write(&outside, b"outside").expect("outside lora writes");
+    let link = lora_dir.join("escape-link.safetensors");
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink creates");
+
+    let error = super::normalize_app_managed_lora_path(&settings, &link)
+        .expect_err("symlink target outside managed roots rejects");
+    assert!(error.to_string().contains("LoRA path must be inside"));
+}
+
 #[tokio::test]
 async fn ffmpeg_runner_surfaces_bounded_stderr_from_failing_process() {
     let args = if cfg!(windows) {

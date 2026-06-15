@@ -1262,6 +1262,16 @@ impl ProjectStore {
             .ok_or_else(|| {
                 ProjectStoreError::BadRequest("generated asset fact missing mediaPath".to_owned())
             })?;
+        // mediaPath comes from the worker result fact and is joined into the project
+        // path below for sidecar/dir writes; reject traversal/absolute paths before any
+        // create_dir_all/write so the worker->API boundary can't write outside the
+        // project root (sc-5721 / CORE-002->F). Mirrors the is_safe_relative_path guard
+        // used at every other path-from-outside site in this store.
+        if !is_safe_relative_path(media_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid media path".to_owned(),
+            ));
+        }
         let asset_id = fact.get("assetId").and_then(Value::as_str).ok_or_else(|| {
             ProjectStoreError::BadRequest("generated asset fact missing assetId".to_owned())
         })?;
@@ -3818,6 +3828,78 @@ mod tests {
             json!(false)
         );
         assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
+    }
+
+    /// sc-5721 (CORE-002→F): `persist_generated_asset` joins the worker-supplied
+    /// `mediaPath` into the project tree and `create_dir_all`/`write`s a sidecar there,
+    /// so a traversal or absolute path must be rejected before any filesystem write —
+    /// the worker→API boundary must not write outside the project root. A normal
+    /// relative path is still accepted.
+    #[test]
+    fn persist_generated_asset_rejects_unsafe_media_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Boundary").expect("project creates");
+
+        let fact_with = |media_path: &str| {
+            json!({
+                "assetId": "asset_safe1",
+                "mediaPath": media_path,
+                "mimeType": "image/png",
+                "width": 64,
+                "height": 64,
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "x",
+                "loras": [],
+            })
+        };
+
+        for unsafe_path in [
+            "../../../../tmp/escape.png",
+            "/etc/passwd",
+            "assets/../../escape.png",
+        ] {
+            let result = store.persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_x",
+                &fact_with(unsafe_path),
+            );
+            assert!(
+                matches!(result, Err(ProjectStoreError::BadRequest(_))),
+                "expected {unsafe_path:?} to be rejected, got {result:?}"
+            );
+        }
+
+        // A normal project-relative path is still accepted and written under the project.
+        let safe_fact = json!({
+            "assetId": "asset_safe1",
+            "mediaPath": "assets/images/genset_x/asset_safe1.png",
+            "mimeType": "image/png",
+            "width": 64,
+            "height": 64,
+            "normalizedWidth": 64,
+            "normalizedHeight": 64,
+            "count": 1,
+            "family": "z-image",
+            "seed": 1,
+            "index": 0,
+            "displayName": "safe #1",
+            "createdAt": "2026-06-15T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "x",
+            "negativePrompt": "",
+            "loras": [],
+            "stylePreset": "none",
+            "rawAdapterSettings": {"steps": 8},
+        });
+        let safe = store
+            .persist_generated_asset(&project.id, "job-1", "genset_x", &safe_fact)
+            .expect("safe media path persists");
+        assert_eq!(safe["id"], json!("asset_safe1"));
     }
 
     #[test]

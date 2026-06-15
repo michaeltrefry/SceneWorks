@@ -1334,6 +1334,42 @@ fn normalize_app_managed_model_path(
     ensure_path_under(path, &[data_dir, hf_cache], label)
 }
 
+/// Confine a LoRA adapter path taken from a job payload to an app-managed root
+/// (sc-5723 / WKA-002). The path arrives untrusted (`installedPath`/`sourcePath`/
+/// `path`/`source.path` on a LoRA spec) and is loaded as adapter weights, so —
+/// like every other on-disk model input — it must resolve under the app data dir
+/// or the shared Hugging Face hub cache (installed LoRAs live in `<data>/loras` or
+/// a project tree under `<data>`; HF-cached adapters live in the hub cache).
+/// Without this a crafted payload could point a LoRA at any `.safetensors` on the
+/// host, giving the worker an arbitrary-file read primitive across the API boundary.
+/// Mirrors `normalize_app_managed_model_path` (model weights share the same roots).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn normalize_app_managed_lora_path(
+    settings: &Settings,
+    path: &Path,
+) -> WorkerResult<PathBuf> {
+    let data_dir = normalized_data_dir(settings)?;
+    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
+    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let canonical_hf_cache =
+        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let normalized = normalize_absolute_path(path)?;
+    let resolved = normalize_existing_or_absolute(&normalized)?;
+    ensure_path_under(
+        resolved,
+        &[data_dir, canonical_data_dir, hf_cache, canonical_hf_cache],
+        "LoRA path",
+    )
+}
+
+fn normalize_existing_or_absolute(path: &Path) -> WorkerResult<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => normalize_absolute_path(&canonical),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => normalize_absolute_path(path),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn looks_like_huggingface_repo(value: &str) -> bool {
     let value = value.trim();

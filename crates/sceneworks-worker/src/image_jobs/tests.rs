@@ -1694,7 +1694,7 @@ fn sc3031_ab_dump_txt2img() {
     let weights = resolve_weights_dir(&req, &settings)
         .expect("weights resolve")
         .expect("weights in HF cache");
-    let adapters = resolve_adapters(&req).expect("adapters");
+    let adapters = resolve_adapters(&req, &settings).expect("adapters");
     let seed = resolve_seed(&req, 0);
     let generator = load_engine(model.engine_id(), weights, quant, adapters, None).expect("load");
 
@@ -1751,7 +1751,7 @@ fn sc3031_ab_dump_pose() {
     let zimage = mlx_model("z_image_turbo").expect("z-image model row");
     let steps = resolve_steps(&req, &zimage);
     let control_scale = resolve_control_scale(&req);
-    let adapters = resolve_adapters(&req).expect("adapters");
+    let adapters = resolve_adapters(&req, &settings).expect("adapters");
     let seed = resolve_seed(&req, 0);
 
     let pose = parse_poses(&req)

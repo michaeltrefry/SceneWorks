@@ -217,7 +217,7 @@ async fn generate_sdxl_advanced_stream(
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);
-    let adapters = resolve_adapters(request)?;
+    let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
     let (width, height) = (request.width, request.height);

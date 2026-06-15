@@ -215,7 +215,7 @@ async fn generate_zimage_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("z-image model row missing".to_owned()))?;
     let steps = resolve_steps(request, &zimage);
     let control_scale = resolve_control_scale(request);
-    let adapters = resolve_adapters(request)?;
+    let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &zimage);
     let poses = parse_poses(request);
     let count = poses.len();

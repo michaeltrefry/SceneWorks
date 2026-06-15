@@ -4,11 +4,12 @@ from dataclasses import dataclass
 import hashlib
 import importlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
-from .hf_cache import huggingface_repo_cache_path
+from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 
 
 # Keep in sync with packages/schemas/recipe-preset.schema.json and the Rust
@@ -680,12 +681,59 @@ def set_adapter_weights_on_module(
         raise
 
 
+def _lora_allowed_roots() -> list[Path]:
+    """App-managed roots a payload-supplied LoRA path may resolve under (sc-5723 /
+    WKA-002): the app data dir plus every Hugging Face hub cache root. Installed
+    LoRAs live under ``<data>/...`` and HF-cached adapters under a hub cache; a
+    payload path outside all of these is rejected so the worker can't be pointed at
+    an arbitrary host file. Resolved from the environment (``SCENEWORKS_DATA_DIR`` +
+    ``huggingface_cache_roots``) since this chokepoint has no ``settings`` handle."""
+
+    roots: list[Path] = []
+    data_dir = os.getenv("SCENEWORKS_DATA_DIR", "data")
+    try:
+        roots.append(Path(data_dir).expanduser().resolve())
+    except OSError:
+        pass
+    for root in huggingface_cache_roots(None):
+        try:
+            roots.append(Path(root).expanduser().resolve())
+        except OSError:
+            continue
+    return roots
+
+
+def _confine_lora_path(path: Path) -> Path:
+    """Reject a payload-supplied LoRA path that escapes every app-managed root
+    (sc-5723 / WKA-002). ``resolve()`` collapses ``..`` and symlinks first so the
+    containment check can't be bypassed."""
+
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError as exc:
+        raise RuntimeError(f"Invalid LoRA path: {path}") from exc
+    roots = _lora_allowed_roots()
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    allowed = ", ".join(str(root) for root in roots)
+    raise RuntimeError(
+        f"LoRA path must be inside an app-managed directory ({allowed}): {path}"
+    )
+
+
 def lora_path(lora: dict[str, Any]) -> Path | None:
     source = lora.get("source") if isinstance(lora.get("source"), dict) else {}
     value = lora.get("installedPath") or lora.get("sourcePath") or lora.get("path") or source.get("path")
     if not value:
         return huggingface_cached_lora_path(lora)
-    path = Path(str(value)).expanduser()
+    # The path is attacker-controllable payload; confine it to an app-managed root
+    # before any on-disk use (sc-5723 / WKA-002). The HF-cache fallback below is
+    # already root-confined by huggingface_repo_cache_path.
+    path = _confine_lora_path(Path(str(value)))
     if path.exists():
         return resolve_lora_file(path, lora)
     return huggingface_cached_lora_path(lora) or path

@@ -269,6 +269,13 @@ fn should_warn_open_bind(access_token: &str, ip: std::net::IpAddr) -> bool {
     access_token.trim().is_empty() && !ip.is_loopback()
 }
 
+// sc-5720 (API-001): an operator may knowingly opt into an unauthenticated wider
+// bind (e.g. a trusted-network deployment that fronts its own auth) by setting
+// `SCENEWORKS_ALLOW_OPEN_BIND=1`. Pure + tested alongside `should_warn_open_bind`.
+fn open_bind_override_enabled(value: &str) -> bool {
+    matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES")
+}
+
 fn json_rejection_response(rejection: JsonRejection) -> Response {
     let detail = match rejection {
         JsonRejection::JsonDataError(error) => error.body_text(),
@@ -302,16 +309,28 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let settings = Settings::from_env();
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
-    // sc-4201 (F-API-1): a non-loopback bind with no access token serves every
-    // endpoint — file reads, credential writes, job creation, large uploads — to the
-    // whole network without authentication. The default is now loopback; warn loudly
-    // when an operator opts into a wider bind (e.g. Docker's 0.0.0.0) without a token.
+    // sc-4201 (F-API-1) / sc-5720 (API-001): a non-loopback bind with no access token
+    // serves every endpoint — file reads, credential writes, job creation, large
+    // uploads — to the whole network without authentication. The default is loopback;
+    // refuse to start on an open bind without a token unless the operator explicitly
+    // opts in with SCENEWORKS_ALLOW_OPEN_BIND=1 (then warn loudly instead).
     if should_warn_open_bind(&settings.access_token, address.ip()) {
-        eprintln!(
-            "WARNING: SceneWorks API is binding to {address} with no SCENEWORKS_ACCESS_TOKEN set — \
-             every endpoint is reachable without authentication from the network. Set \
-             SCENEWORKS_ACCESS_TOKEN, or bind to 127.0.0.1, before exposing this beyond a trusted host."
-        );
+        let override_raw = std::env::var("SCENEWORKS_ALLOW_OPEN_BIND").unwrap_or_default();
+        if open_bind_override_enabled(&override_raw) {
+            eprintln!(
+                "WARNING: SceneWorks API is binding to {address} with no SCENEWORKS_ACCESS_TOKEN set — \
+                 every endpoint is reachable without authentication from the network. Proceeding \
+                 because SCENEWORKS_ALLOW_OPEN_BIND is set; ensure this host is on a trusted network."
+            );
+        } else {
+            return Err(format!(
+                "Refusing to bind to {address} with no SCENEWORKS_ACCESS_TOKEN set: every endpoint \
+                 would be reachable without authentication from the network. Set \
+                 SCENEWORKS_ACCESS_TOKEN, bind to 127.0.0.1, or set SCENEWORKS_ALLOW_OPEN_BIND=1 to \
+                 override (only on a trusted network)."
+            )
+            .into());
+        }
     }
     let run_utility_inprocess = settings.run_utility_inprocess;
     let app = create_app(settings)?;
