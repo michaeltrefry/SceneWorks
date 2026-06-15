@@ -2539,8 +2539,10 @@
         // supports_lora/supports_lokr and installs a standard lora_down/up adapter as a
         // forward-time residual over the Q4 base; the worker routes request.loras via
         // resolve_scail2_adapters (sc-5686). Covers the bundled Bias-Aware DPO quality
-        // (enhance) LoRA and user scail2-family LoRAs. (A lightx2v diff-patch "lightning"
-        // LoRA is rejected by the engine today — sc-5684.)
+        // (enhance) LoRA and user scail2-family LoRAs. The lightx2v diff-patch "lightning"
+        // LoRA (sc-5684, mlx-gen #465) installs via the engine's in-place diff-patch merge
+        // and is bundled as the `scail2_lightning` speed toggle (sc-5700, builtin.loras.jsonc)
+        // — selecting it auto-applies the 8-step / CFG-off recipe.
         "families": ["scail2"],
         "types": ["style", "motion", "character", "enhance"]
       },
