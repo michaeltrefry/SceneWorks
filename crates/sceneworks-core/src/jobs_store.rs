@@ -3265,6 +3265,13 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if matches!(model, "sdxl" | "realvisxl") && sdxl_ipadapter_candle_eligible(&job.payload) {
         return true;
     }
+    // Kolors IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): the `kolors` family with a
+    // reference image is the same bespoke candle lane (`generate_candle_kolors_ipadapter_stream`), NOT
+    // txt2img — branch it out before the gate (which rejects `referenceAssetId`). Pure IP only;
+    // img2img/edit shapes stay on torch (sc-5487). Mirrors the worker's `kolors_ipadapter_available`.
+    if model == "kolors" && kolors_ipadapter_candle_eligible(&job.payload) {
+        return true;
+    }
     image_request_candle_eligible(model, &job.payload)
 }
 
@@ -3460,6 +3467,26 @@ fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// MLX `IpAdapterSdxl` (the MLX SDXL IP path is the registry `SdxlSubMode::Ip`), so this has no
 /// `*_mlx_eligible` sibling.
 fn sdxl_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let non_empty = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
+}
+
+/// Kolors IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterKolors`
+/// provider serves PURE reference (image-prompt) conditioning on the `kolors` family — the same payload
+/// shape as the SDXL IP lane: a `referenceAssetId` with NO img2img source / inpaint mask and NOT an
+/// `edit_image` (those advanced Kolors shapes are sc-5487, still torch). Mirrors the worker's
+/// `kolors_ipadapter_available` gate (minus the local weight-resolve check) so the router and worker
+/// agree on the lane boundary. Candle-only — the macOS Kolors IP path is the registry `Reference` route,
+/// not a separate candle-eligible gate.
+fn kolors_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
@@ -5161,6 +5188,29 @@ mod candle_routing_tests {
         }))));
         assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
             "model": "sdxl", "referenceAssetId": "a", "maskAssetId": "m"
+        }))));
+    }
+
+    #[test]
+    fn kolors_ipadapter_reference_jobs_route_to_candle() {
+        // A pure Kolors reference (IP-Adapter) job routes to the candle lane (sc-5488) via the bespoke
+        // branch, NOT the txt2img `image_request_candle_eligible` gate (which rejects `referenceAssetId`).
+        let payload = json!({ "model": "kolors", "referenceAssetId": "asset_1" });
+        assert!(kolors_ipadapter_candle_eligible(&object(payload.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        // No reference → plain txt2img routes via the txt2img gate instead.
+        assert!(!kolors_ipadapter_candle_eligible(&object(
+            json!({ "model": "kolors" })
+        )));
+        // img2img / inpaint / edit shapes are NOT this lane (those are sc-5487, still torch).
+        assert!(!kolors_ipadapter_candle_eligible(&object(json!({
+            "model": "kolors", "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "s"
+        }))));
+        assert!(!kolors_ipadapter_candle_eligible(&object(json!({
+            "model": "kolors", "referenceAssetId": "a", "sourceAssetId": "s"
+        }))));
+        assert!(!kolors_ipadapter_candle_eligible(&object(json!({
+            "model": "kolors", "referenceAssetId": "a", "maskAssetId": "m"
         }))));
     }
 }
