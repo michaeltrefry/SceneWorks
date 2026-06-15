@@ -61,6 +61,23 @@
         "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
         "file": "ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors"
       }
+    },
+    {
+      // SCAIL-2 Bias-Aware DPO refinement LoRA (sc-5451 / sc-5686). A plain rank-128 low-rank LoRA
+      // (NOT an IC-LoRA) converted from zai-org's DeepSpeed/SAT `bias-aware-dpo-lora.pt` to the
+      // inference module names via scripts/convert_scail2_dpo_lora.py; the engine installs it as a
+      // forward-time residual over the Q4 base. Downloaded on demand when selected for a scail2 job.
+      "id": "scail2_dpo_quality",
+      "name": "SCAIL-2 Bias-Aware DPO (quality)",
+      "family": "scail2",
+      "triggerWords": [],
+      "compatibility": { "families": ["scail2"] },
+      "defaultWeight": 1.0,
+      "source": {
+        "provider": "huggingface",
+        "repo": "SceneWorks/scail2-dpo-lora",
+        "file": "scail2-dpo-lora.safetensors"
+      }
     }
   ]
 }
