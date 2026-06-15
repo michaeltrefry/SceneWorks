@@ -47,10 +47,16 @@ use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
     LoadSpec, Precision, Progress, Quant, WeightsSource,
 };
-// MLX-only contract types (LoRA classification, MoE experts, ControlNet/VACE conditioning, Wan-VACE
-// replacement) — the candle txt2video first slice uses none of these.
+// MLX-only contract types (LoRA classification, MoE experts) — the candle video lane uses none of these.
 #[cfg(target_os = "macos")]
-use gen_core::{AdapterKind, Image, MoeExpert, ReplacementMode};
+use gen_core::{AdapterKind, MoeExpert};
+// VACE conditioning + replacement types are shared by the MLX Wan-VACE path and the candle Wan-VACE
+// lane (sc-5494), so they are available on both the macos and windows+backend-candle builds.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
+use gen_core::{Image, ReplacementMode};
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
 #[cfg(target_os = "macos")]
@@ -78,7 +84,10 @@ use candle_gen_ltx as _;
 use candle_gen_svd as _;
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_wan as _;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use sceneworks_core::character_store::CharacterStore;
 // Frame-count stride coercion (Wan needs frames ≡ 1 mod 4; LTX snaps to 8k+1) — used by the MLX path
 // and the candle entry (sc-5097).
@@ -395,19 +404,53 @@ pub(crate) async fn run_video_generate_job(
     // off → routing unchanged until parity). Conditioning shapes never reach here — the router's
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
     #[cfg(all(target_os = "windows", feature = "backend-candle"))]
-    let (decoded, adapter, raw_settings, replacement_status) =
-        if settings.backend_candle_enabled && is_candle_video_engine(&request.model) {
-            let (decoded, adapter, raw_settings) =
-                generate_candle_video(api, settings, job, &request, &project_path, backend).await?;
-            (decoded, adapter, raw_settings, None::<Value>)
-        } else {
-            (
-                generate_stub_video(&request, seed),
-                STUB_ADAPTER,
-                stub_raw_settings(&request),
-                None::<Value>,
-            )
-        };
+    let (decoded, adapter, raw_settings, replacement_status) = if settings.backend_candle_enabled
+        && request.mode == "replace_person"
+    {
+        // Candle Wan-VACE person replacement (sc-5494) — the candle equivalent of the MLX `wan_vace`
+        // path. The router (`video_request_candle_eligible`) already confirmed the candle-VACE model +
+        // the source clip + person track before this job reached the candle worker; `generate_candle_
+        // wan_vace` resolves-or-errors loudly (a person-replace must never silently degrade to a stub).
+        let (decoded, status) =
+            generate_candle_wan_vace(api, settings, job, &request, &project_path, backend).await?;
+        (
+            decoded,
+            CANDLE_WAN_VACE_ADAPTER,
+            wan_vace_raw_settings(&request),
+            Some(status),
+        )
+    } else if settings.backend_candle_enabled
+        && matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
+    {
+        // Candle Wan-VACE extend/bridge (sc-5494): real source frames pinned at the kept positions +
+        // a generated span (the candle equivalent of the MLX `generate_wan_vace_extend_bridge`).
+        let decoded = generate_candle_wan_vace_extend_bridge(
+            api,
+            settings,
+            job,
+            &request,
+            &project_path,
+            backend,
+        )
+        .await?;
+        (
+            decoded,
+            CANDLE_WAN_VACE_ADAPTER,
+            wan_vace_extend_raw_settings(&request),
+            None::<Value>,
+        )
+    } else if settings.backend_candle_enabled && is_candle_video_engine(&request.model) {
+        let (decoded, adapter, raw_settings) =
+            generate_candle_video(api, settings, job, &request, &project_path, backend).await?;
+        (decoded, adapter, raw_settings, None::<Value>)
+    } else {
+        (
+            generate_stub_video(&request, seed),
+            STUB_ADAPTER,
+            stub_raw_settings(&request),
+            None::<Value>,
+        )
+    };
     #[cfg(not(any(
         target_os = "macos",
         all(target_os = "windows", feature = "backend-candle")
@@ -1869,7 +1912,10 @@ fn resolve_wan_conditioning(
 }
 
 /// Which boundary frame of a source clip to extract for Wan-native clip conditioning (sc-3357).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ClipFramePosition {
     /// The clip's first decoded frame (the right-side clip's head for `video_bridge`).
@@ -2663,6 +2709,17 @@ const CANDLE_LTX_REPO: &str = "Lightricks/LTX-2.3";
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 
+/// Per-asset adapter id for the candle Wan-VACE controllable-video lane (sc-5494) — the candle sibling
+/// of the MLX `mlx_wan_vace` label.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_WAN_VACE_ADAPTER: &str = "candle_wan_vace";
+
+/// The diffusers Wan2.1-VACE-14B snapshot the candle `wan_vace` provider reads (`transformer/` +
+/// `text_encoder/` + `vae/` + `tokenizer/`). Overridable via `SCENEWORKS_CANDLE_WAN_VACE_DIR`. The 14B
+/// repo matches the provider's `WanVaceConfig::vace_14b` dims (dim 5120, 40 layers).
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_WAN_VACE_REPO: &str = "Wan-AI/Wan2.1-VACE-14B-diffusers";
+
 /// SceneWorks video model id → candle registry engine id, or `None` for an id the candle video lane
 /// does not serve. Note ltx maps to `ltx_2_3_distilled` (the candle provider's id), not the MLX
 /// `ltx_2_3`. Covers the base txt2video ids (5B + ltx) plus the Wan2.2 **14B** dual-expert MoE pair
@@ -2909,6 +2966,196 @@ async fn generate_candle_video(
     let raw_settings = candle_video_raw_settings(request, &repo);
     let decoded = generate_video(api, settings, job, backend, input).await?;
     Ok((decoded, adapter, raw_settings))
+}
+
+/// Resolve the candle Wan-VACE diffusers snapshot dir (sc-5494): `SCENEWORKS_CANDLE_WAN_VACE_DIR`
+/// override (when it holds a `transformer/config.json`), else the HF [`CANDLE_WAN_VACE_REPO`] snapshot.
+/// Errors loudly when absent (no stub fallback — a missing VACE checkpoint surfaces a re-download error).
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+fn resolve_candle_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_WAN_VACE_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if path.join("transformer").join("config.json").is_file() {
+            return Ok(path);
+        }
+    }
+    candle_video_snapshot_dir(settings, CANDLE_WAN_VACE_REPO)
+}
+
+/// Windows/CUDA candle Wan-VACE `replace_person` (sc-5494): the candle sibling of the MLX
+/// [`generate_wan_vace`]. Resolves the diffusers VACE snapshot, extracts the source-clip control frames,
+/// builds the per-frame person mask from the saved track + the character references, and runs the
+/// `wan_vace` engine. Person detect/track/segment stays upstream (the masks are pre-saved); the
+/// conditioning builders are shared with the MLX path. No quant / LoRA (the candle VACE provider rejects
+/// them). Returns the decoded clip + the honest `replacementStatus`.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+async fn generate_candle_wan_vace(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    let model_dir = resolve_candle_wan_vace_model_dir(settings)?;
+    let track_id = request.person_track_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "replace_person requires a person track (personTrackId).".to_owned(),
+        )
+    })?;
+    let track = ProjectStore::new(settings.data_dir.clone(), "worker")
+        .get_person_track(&request.project_id, track_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("person track {track_id}: {error}"))
+        })?;
+
+    let frame_count = wan_frame_count(request.raw_frame_count()) as usize;
+    let frames =
+        load_source_video_frames(api, settings, job, request, project_path, frame_count).await?;
+    let (masks, mask_mode) = crate::person_replace::person_track_masks(
+        project_path,
+        &track,
+        request.width,
+        request.height,
+        frames.len(),
+    )?;
+    let references = resolve_character_references(settings, request, project_path)?;
+    let reference_count = references.len();
+    let frame_total = frames.len();
+
+    let masking_strength = advanced::f32(&request.advanced, "maskingStrength", 1.0);
+    let conditioning = build_vace_conditioning(
+        frames,
+        masks,
+        references,
+        masking_strength,
+        replacement_mode_from(&request.replacement_mode),
+    )?;
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let input = VideoGenInput {
+        engine_id: "wan_vace",
+        model_dir,
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: frame_count as u32,
+        fps: request.fps,
+        steps: advanced_opt_u32(request, "steps"),
+        guidance: advanced_opt_f32(request, "guidanceScale"),
+        seed: resolve_video_seed(request) as u64,
+        control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
+        ..VideoGenInput::default()
+    };
+    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let status = replacement_status_value(
+        &track,
+        track_id,
+        mask_mode,
+        masking_strength,
+        reference_count,
+        frame_total,
+        CANDLE_WAN_VACE_ADAPTER,
+    );
+    Ok((decoded, status))
+}
+
+/// Windows/CUDA candle Wan-VACE `extend_clip` / `video_bridge` (sc-5494): the candle sibling of the MLX
+/// [`generate_wan_vace_extend_bridge`]. Loads the real source-clip anchor frames (the left clip's tail
+/// for extend; both clips' boundaries for bridge), builds the source-at-kept-positions + generated-span
+/// ControlClip, and runs the `wan_vace` engine. No reference images, no quant / LoRA.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+async fn generate_candle_wan_vace_extend_bridge(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+) -> WorkerResult<DecodedVideo> {
+    let model_dir = resolve_candle_wan_vace_model_dir(settings)?;
+    let frame_count = wan_frame_count(request.raw_frame_count()) as usize;
+    let anchor = extend_anchor_frames(request, frame_count);
+    let left_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{} requires a source clip (sourceClipAssetId).",
+            request.mode.replace('_', " ")
+        ))
+    })?;
+    let left_anchor = load_clip_anchor_frames(
+        api,
+        settings,
+        job,
+        &request.project_id,
+        project_path,
+        left_id,
+        request.width,
+        request.height,
+        anchor,
+        ClipFramePosition::Last,
+    )
+    .await?;
+    let right_anchor = if request.mode == "video_bridge" {
+        let right_id = request
+            .bridge_right_clip_asset_id
+            .as_deref()
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "video_bridge requires a right-side source clip (bridgeRightClipAssetId)."
+                        .to_owned(),
+                )
+            })?;
+        Some(
+            load_clip_anchor_frames(
+                api,
+                settings,
+                job,
+                &request.project_id,
+                project_path,
+                right_id,
+                request.width,
+                request.height,
+                anchor,
+                ClipFramePosition::First,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let conditioning = build_extend_bridge_vace_conditioning(
+        request,
+        request.width,
+        request.height,
+        frame_count,
+        left_anchor,
+        right_anchor,
+    )?;
+    let negative_prompt = {
+        let trimmed = request.negative_prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    let input = VideoGenInput {
+        engine_id: "wan_vace",
+        model_dir,
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: frame_count as u32,
+        fps: request.fps,
+        steps: advanced_opt_u32(request, "steps"),
+        guidance: advanced_opt_f32(request, "guidanceScale"),
+        seed: resolve_video_seed(request) as u64,
+        control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
+        ..VideoGenInput::default()
+    };
+    generate_video(api, settings, job, backend, input).await
 }
 
 /// Resolve a Wan request into a [`VideoGenInput`] and run it (sc-3034).
@@ -4077,7 +4324,10 @@ fn build_video_clip_conditioning(
 /// Resolve an asset id to its on-disk media file path (the source clip mp4), mirroring the asset
 /// lookup in [`load_reference_image`] but returning the path for ffmpeg frame extraction (the
 /// Rust equivalent of the torch `source_asset_media_path`).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_clip_media_path(
     settings: &Settings,
     project_id: &str,
@@ -4656,12 +4906,18 @@ const WAN_VACE_ADAPTER: &str = "mlx_wan_vace";
 /// background (`0x12110f` = RGB 18,17,15) so the box masks (rasterized from the same
 /// normalized boxes at W×H) stay aligned with the control frames through the engine's
 /// identity-resize preprocess.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const FRAME_PAD_COLOR: &str = "0x12110f";
 
 /// Raw-settings recorded on a real Wan-VACE asset (`advanced` knobs + the real-inference
 /// markers; the engine id is `wan_vace`, not the user-picked replace-capable model).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn wan_vace_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -4679,7 +4935,10 @@ fn wan_vace_raw_settings(request: &VideoRequest) -> Value {
 }
 
 /// SceneWorks `replacementMode` string → engine [`ReplacementMode`] (default FaceOnly).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn replacement_mode_from(value: &str) -> ReplacementMode {
     match value {
         "full_person_keep_outfit" => ReplacementMode::FullPersonKeepOutfit,
@@ -4759,7 +5018,10 @@ fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 /// `FRAME_PAD_COLOR`), evenly resampled across the clip — the new shared frame-extraction
 /// helper (Python `load_source_video_frames`; also the seam extend/bridge will reuse). The
 /// frames are the (un-neutralized) Wan-VACE control video; the engine masks them.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 async fn load_source_video_frames(
     api: &ApiClient,
     settings: &Settings,
@@ -4829,7 +5091,10 @@ async fn load_source_video_frames(
 /// Collect the extracted PNG frames in `work_dir`, resample them to `count` evenly-spaced
 /// indices (Python `evenly_spaced_indices` — the same arithmetic as the mask resample), and
 /// decode the selected frames to engine [`Image`]s. Blocking IO/decoding runs off the runtime.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResult<Vec<Image>> {
     tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
@@ -4856,7 +5121,10 @@ async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResul
 /// `character_reference_images`): the selected look's `approvedReferenceIds`, else the
 /// character's approved `references`. Errors when none are readable (the torch
 /// `_validate_inputs` parity). The engine cover-fits each to the output size.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn resolve_character_references(
     settings: &Settings,
     request: &VideoRequest,
@@ -4919,7 +5187,10 @@ fn resolve_character_references(
 }
 
 /// Convert an `image::RgbImage` (the rasterized mask) to an engine [`Image`].
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn rgb_image_to_engine(image: image::RgbImage) -> Image {
     Image {
         width: image.width(),
@@ -4931,7 +5202,10 @@ fn rgb_image_to_engine(image: image::RgbImage) -> Image {
 /// Build the Wan-VACE conditioning: one [`Conditioning::ControlClip`] (source frames + the
 /// per-frame person mask; the engine neutralizes the masked region) plus one
 /// [`Conditioning::Reference`] per character reference image.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn build_vace_conditioning(
     frames: Vec<Image>,
     masks: Vec<image::RgbImage>,
@@ -4966,7 +5240,10 @@ fn build_vace_conditioning(
 
 /// The honest `replacementStatus` recorded on the asset fact (mirrors the torch
 /// `replacement_status`); the API folds it into the video sidecar's normalizedSettings.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn replacement_status_value(
     track: &Value,
     track_id: &str,
@@ -5119,7 +5396,10 @@ async fn generate_wan_vace(
 /// Mid-gray (≈0 after the engine's `2·x/255 − 1` normalization) control frame for the
 /// to-generate span: a neutral `reactive = video·mask` signal so the masked region is generated
 /// freely from the kept frames + prompt, never biased toward a frozen filler image.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn neutral_control_frame(width: u32, height: u32) -> Image {
     Image {
         width,
@@ -5130,7 +5410,10 @@ fn neutral_control_frame(width: u32, height: u32) -> Image {
 
 /// A solid W×H mask (`0` = keep the control frame, `255` = regenerate; the engine binarizes at
 /// 0.5), matching the `image::RgbImage` form `person_track_masks` produces for replace_person.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn solid_mask(width: u32, height: u32, value: u8) -> image::RgbImage {
     image::RgbImage::from_pixel(width, height, image::Rgb([value, value, value]))
 }
@@ -5139,7 +5422,10 @@ fn solid_mask(width: u32, height: u32, value: u8) -> image::RgbImage {
 /// truer continuity but fewer freely-generated frames. Overridable via advanced `motionAnchorFrames`
 /// (per side); defaults to ~⅓ of the output budget (split across the two boundaries for bridge), and
 /// is clamped so at least 5 frames (one z16 chunk) are left to generate.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn extend_anchor_frames(request: &VideoRequest, frame_count: usize) -> usize {
     let per_side = if request.mode == "video_bridge" { 2 } else { 1 };
     let max_total = frame_count.saturating_sub(5).max(1);
@@ -5162,7 +5448,10 @@ fn extend_anchor_frames(request: &VideoRequest, frame_count: usize) -> usize {
 /// engine [`Image`]s, in temporal order (sc-3812). Unlike [`load_source_video_frames`] — which
 /// resamples the *whole* clip evenly — this keeps *consecutive* real frames so the model sees the
 /// clip's actual motion velocity at the boundary. Decodes only the kept subset (`decode_png_image`).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
 async fn load_clip_anchor_frames(
     api: &ApiClient,
@@ -5215,7 +5504,10 @@ async fn load_clip_anchor_frames(
 
 /// Pick the head/tail `count` consecutive PNGs from `work_dir` (sorted) and decode them to engine
 /// [`Image`]s, preserving temporal order. Fewer available than `count` ⇒ all of them (short clip).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 async fn select_anchor_frames(
     work_dir: PathBuf,
     count: usize,
@@ -5244,7 +5536,10 @@ async fn select_anchor_frames(
 }
 
 /// Decode one RGB PNG into an engine [`Image`] (shared by the resample + anchor frame selectors).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn decode_png_image(path: &Path) -> WorkerResult<Image> {
     let decoded = image::open(path)
         .map_err(|error| {
@@ -5265,7 +5560,10 @@ fn decode_png_image(path: &Path) -> WorkerResult<Image> {
 /// control clip is `frame_count` long (`1 + 4·k`, the engine's z16-chunk constraint) with no
 /// reference images. `masking_strength`/`mode` are inert in the WanVACE mask math (carried for the
 /// shared [`Conditioning::ControlClip`] contract), so they take the neutral defaults.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn build_extend_bridge_vace_conditioning(
     request: &VideoRequest,
     width: u32,
@@ -5337,7 +5635,10 @@ fn build_extend_bridge_vace_conditioning(
 /// markers, recording the actual engine (`wan_vace`) and `fidelityTier` so the substitution under the
 /// user's `wan_2_2` pick is an inspectable fact (sc-3812). Unlike [`wan_vace_raw_settings`] there is
 /// no `replacementMode` (these modes are not person-replacement).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn wan_vace_extend_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));

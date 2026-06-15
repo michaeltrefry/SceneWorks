@@ -3370,22 +3370,26 @@ const CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
 /// `sourceAssetId` — the inverse of the txt2video-only gate the 5B / T2V-14B / ltx ids use.
 const CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
 
-/// Does this video job belong on the candle video lane (sc-5097 txt2video; sc-5175 adds the Wan2.2
-/// 14B I2V image→video)? The candle wan/ltx providers drive plain text-to-video, plus the 14B I2V's
-/// single source-image conditioning — but no first-last-frame / extend / bridge / replace (the
-/// advanced job types), no reference/mask conditioning, and no LoRAs. Every other shape must fall back
-/// to the Python torch worker, so the candle worker refuses it here. The per-model shape gate is
-/// [`video_request_candle_eligible`].
+/// Does this video job belong on the candle video lane? The candle wan/ltx providers drive plain
+/// text-to-video, the 14B I2V's single source-image conditioning (sc-5175), SVD image→video (sc-5493),
+/// **and** the Wan-VACE advanced modes — replace_person / extend / bridge (sc-5494, the `PersonReplace`
+/// / `VideoExtend` / `VideoBridge` job types → the candle `wan_vace` engine). Every other shape
+/// (reference/mask/first-last-frame conditioning, LoRAs, SCAIL-2 replace) must fall back to the Python
+/// torch worker, so the candle worker refuses it here. The per-model shape gates are
+/// [`video_request_candle_eligible`] (base) and [`video_request_candle_vace_eligible`] (VACE modes).
 fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    // Only the base `video_generate` job type — the advanced types (VideoExtend/VideoBridge/
-    // PersonReplace) are conditioned modes the candle lane doesn't serve.
-    if !matches!(job.job_type, JobType::VideoGenerate) {
-        return false;
-    }
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    video_request_candle_eligible(model, &job.payload)
+    match job.job_type {
+        // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493).
+        JobType::VideoGenerate => video_request_candle_eligible(model, &job.payload),
+        // The Wan-VACE advanced modes (sc-5494): replace_person / extend_clip / video_bridge.
+        JobType::PersonReplace | JobType::VideoExtend | JobType::VideoBridge => {
+            video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
+        }
+        _ => false,
+    }
 }
 
 /// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
@@ -3434,6 +3438,68 @@ fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
         return false;
     }
     // On-the-fly quantization → torch (the candle video providers are dense; sc-5099).
+    if candle_request_wants_quant(payload) {
+        return false;
+    }
+    true
+}
+
+/// The candle video models eligible for the Wan-VACE advanced modes (sc-5494). These route to the
+/// single candle `wan_vace` engine regardless of the user's wan pick. The SCAIL-2 person-replace
+/// backend is MLX-only, so `scail2_*` is deliberately absent (those stay on the torch / mac worker).
+const CANDLE_VIDEO_VACE_MODELS: &[&str] = &["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"];
+
+/// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
+/// (replace_person), `VideoExtend` (extend_clip), `VideoBridge` (video_bridge). Routes to the candle
+/// `wan_vace` engine when the model is VACE-capable and the per-mode source assets are present. LoRA /
+/// on-the-fly quant are not in the candle video lane (the VACE provider rejects them). Factored out so
+/// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
+fn video_request_candle_vace_eligible(
+    model: &str,
+    payload: &Map<String, Value>,
+    job_type: &JobType,
+) -> bool {
+    if !CANDLE_VIDEO_VACE_MODELS.contains(&model) {
+        return false;
+    }
+    let has_nonempty_id = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    match job_type {
+        // replace_person: the source control clip + the tracked person + the character references.
+        JobType::PersonReplace => {
+            if !has_nonempty_id("sourceClipAssetId")
+                || !has_nonempty_id("personTrackId")
+                || !has_nonempty_id("characterId")
+            {
+                return false;
+            }
+        }
+        // extend_clip: the source clip whose tail anchors the continuation.
+        JobType::VideoExtend => {
+            if !has_nonempty_id("sourceClipAssetId") {
+                return false;
+            }
+        }
+        // video_bridge: both clips (the left tail + the right head) are pinned around the gap.
+        JobType::VideoBridge => {
+            if !has_nonempty_id("sourceClipAssetId") || !has_nonempty_id("bridgeRightClipAssetId") {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    // LoRAs / on-the-fly quant are not in the candle video lane (the VACE provider rejects them).
+    if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty())
+    {
+        return false;
+    }
     if candle_request_wants_quant(payload) {
         return false;
     }
@@ -4897,6 +4963,70 @@ mod candle_routing_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn candle_vace_modes_eligible_with_required_assets() {
+        // replace_person (PersonReplace): needs the source clip + person track + character.
+        assert!(video_request_candle_vace_eligible(
+            "wan_2_2",
+            &object(json!({
+                "sourceClipAssetId": "clip_1",
+                "personTrackId": "track_1",
+                "characterId": "char_1"
+            })),
+            &JobType::PersonReplace
+        ));
+        // extend_clip (VideoExtend): needs a source clip.
+        assert!(video_request_candle_vace_eligible(
+            "wan_2_2_t2v_14b",
+            &object(json!({ "sourceClipAssetId": "clip_1" })),
+            &JobType::VideoExtend
+        ));
+        // video_bridge (VideoBridge): needs both clips.
+        assert!(video_request_candle_vace_eligible(
+            "wan_2_2_i2v_14b",
+            &object(json!({ "sourceClipAssetId": "l", "bridgeRightClipAssetId": "r" })),
+            &JobType::VideoBridge
+        ));
+    }
+
+    #[test]
+    fn candle_vace_modes_fall_back_without_assets_or_for_unsupported_models() {
+        // Missing required assets → torch.
+        assert!(!video_request_candle_vace_eligible(
+            "wan_2_2",
+            &object(json!({ "sourceClipAssetId": "clip_1" })), // no personTrackId / characterId
+            &JobType::PersonReplace
+        ));
+        assert!(!video_request_candle_vace_eligible(
+            "wan_2_2",
+            &object(json!({ "sourceClipAssetId": "l" })), // bridge needs the right clip too
+            &JobType::VideoBridge
+        ));
+        // SCAIL-2 (MLX-only) is not a candle VACE model → torch.
+        assert!(!video_request_candle_vace_eligible(
+            "scail2_14b",
+            &object(json!({ "sourceClipAssetId": "c", "personTrackId": "t", "characterId": "ch" })),
+            &JobType::PersonReplace
+        ));
+        // A LoRA shape → torch (the candle VACE provider advertises no adapters).
+        assert!(!video_request_candle_vace_eligible(
+            "wan_2_2",
+            &object(json!({
+                "sourceClipAssetId": "c",
+                "personTrackId": "t",
+                "characterId": "ch",
+                "loras": [{ "name": "x" }]
+            })),
+            &JobType::PersonReplace
+        ));
+        // A non-VACE job type is never VACE-eligible (the base txt2video gate handles VideoGenerate).
+        assert!(!video_request_candle_vace_eligible(
+            "wan_2_2",
+            &object(json!({ "sourceClipAssetId": "c", "personTrackId": "t", "characterId": "ch" })),
+            &JobType::VideoGenerate
+        ));
     }
 
     #[test]
