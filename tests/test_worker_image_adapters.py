@@ -1401,8 +1401,8 @@ def test_chroma_model_target_defaults():
     assert base["steps"] == 40
     assert base["guidanceScale"] == 3.0
     assert base["repo"] == "lodestones/Chroma1-Base"
-    # Flash: CFG baked off (~8 steps, guidance 1.0).
-    assert flash["steps"] == 8
+    # Flash: CFG baked off (~12 Heun steps, guidance 1.0).
+    assert flash["steps"] == 12
     assert flash["guidanceScale"] == 1.0
     assert flash["repo"] == "lodestones/Chroma1-Flash"
 
@@ -1424,7 +1424,7 @@ def test_chroma_num_inference_steps_default_and_override():
     flash = MODEL_TARGETS["chroma1_flash"]
     # Defaults come straight from the model target.
     assert adapter._num_inference_steps(SimpleNamespace(advanced={}), hd) == 40
-    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), flash) == 8
+    assert adapter._num_inference_steps(SimpleNamespace(advanced={}), flash) == 12
     # Explicit override is honored and clamped to [1, 80].
     assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 20}), hd) == 20
     assert adapter._num_inference_steps(SimpleNamespace(advanced={"steps": 999}), flash) == 80

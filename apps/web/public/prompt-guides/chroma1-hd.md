@@ -8,7 +8,7 @@ High-resolution, detail-rich text-to-image: photography, illustration, concept a
 
 - **Chroma1-HD** — the default. Best fidelity and the high-resolution sweet spot. Use it for finished images.
 - **Chroma1-Base** — the neutral foundation the family is finetuned from. Same engine and prompt shape as HD; pick it when you want a clean base (e.g. for LoRA training) or a slightly less HD-biased look.
-- **Chroma1-Flash** — the fast, CFG-baked variant (~8 steps, no negative prompt). Use it for quick drafts and iteration.
+- **Chroma1-Flash** — the fast, CFG-baked variant (~12 Heun steps, no negative prompt). Use it for quick drafts and iteration.
 
 HD, Base, and Flash share one worker adapter and the same prompt structure — only step count and guidance differ.
 

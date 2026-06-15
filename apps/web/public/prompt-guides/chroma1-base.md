@@ -8,7 +8,7 @@ A neutral, general-purpose text-to-image foundation and the recommended starting
 
 - **Chroma1-Base** — the neutral foundation. Pick it when you want a clean, un-opinionated base (e.g. as a LoRA training base) or general text-to-image without HD's high-resolution bias.
 - **Chroma1-HD** — the high-resolution tune. Best fidelity for finished images; the default for most generation.
-- **Chroma1-Flash** — the fast, CFG-baked variant (~8 steps, no negative prompt) for quick drafts.
+- **Chroma1-Flash** — the fast, CFG-baked variant (~12 Heun steps, no negative prompt) for quick drafts.
 
 All three share one worker adapter and the same prompt structure — only step count and guidance differ.
 
