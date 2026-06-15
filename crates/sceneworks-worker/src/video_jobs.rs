@@ -1770,6 +1770,39 @@ fn resolve_wan_vace_adapters(request: &VideoRequest) -> WorkerResult<Vec<Adapter
     Ok(specs)
 }
 
+/// Build the adapter specs for a SCAIL-2 generation (sc-5451 inference LoRA path, mlx-gen #462).
+/// SCAIL-2 is a single **dense** Wan2.1-14B-I2V transformer — like Wan-VACE, no Lightning distill and
+/// no MoE high/low experts — so every LoRA is applied shared with `moe_expert: None`. The engine
+/// installs a standard `lora_down/up` (PEFT/diffusers/kohya/LoKr) adapter as a forward-time residual
+/// over the (Q4/Q8) base; `classify_adapter` tags SceneWorks peft LoKr as `Lokr` and everything else
+/// (incl. third-party LyCORIS) as `Lora`. This carries both a user-selected SCAIL-2 LoRA and the
+/// bundled Bias-Aware DPO quality LoRA (both surface through `request.loras`). A lightx2v diff-patch
+/// "lightning" LoRA is rejected by the engine today (sc-5684).
+#[cfg(target_os = "macos")]
+fn resolve_scail2_adapters(request: &VideoRequest) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let mut specs: Vec<AdapterSpec> = Vec::new();
+    for lora in &request.loras {
+        let path = lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = resolve_lora_file(path)?;
+        let kind = classify_adapter(&file)?;
+        specs.push(AdapterSpec {
+            path: file,
+            scale: lora_scale(lora),
+            kind,
+            pass_scales: None,
+            moe_expert: None,
+        });
+    }
+    Ok(specs)
+}
+
 /// The first-frame conditioning for a Wan generation: required for I2V-14B, optional for
 /// the TI2V-5B (present → image-conditioned mask-blend, absent → pure T2V), and ignored
 /// by the T2V-14B (text-only). Loads `source_asset_id` to an in-memory RGB8 image.
@@ -3279,8 +3312,10 @@ async fn resolve_scail2_conditioning(
 /// Real MLX SCAIL-2 generation (epic 5439 / sc-5448): build the `VideoGenInput` and run the shared
 /// `generate_video` path. The SceneWorks mode resolves to the engine `video_mode` task
 /// ([`scail2_engine_video_mode`]) and the source media into the SAM3-painted conditioning
-/// ([`resolve_scail2_conditioning`]). No LoRA (the engine reports `supports_lora=false`, sc-5451);
-/// steps/guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4 stride coercion (the
+/// ([`resolve_scail2_conditioning`]). A user-selected SCAIL-2 LoRA and the bundled Bias-Aware DPO
+/// quality LoRA install as forward-time residuals over the Q4 base ([`resolve_scail2_adapters`],
+/// sc-5451 / mlx-gen #462); steps/guidance stay at the engine defaults. Frame count uses the Wan
+/// 1-mod-4 stride coercion (the
 /// renderer is Wan2.1); the engine stitches > 81-frame clips into overlapping segments internally.
 #[cfg(target_os = "macos")]
 async fn generate_scail2(
@@ -3311,6 +3346,7 @@ async fn generate_scail2(
         fps: request.fps,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
+        adapters: resolve_scail2_adapters(request)?,
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
@@ -6631,6 +6667,49 @@ mod tests {
         let over = request(json!({ "projectId": "p", "loras": many }));
         assert!(matches!(
             resolve_wan_vace_adapters(&over),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SCAIL-2 is single-dense like Wan-VACE (sc-5451/sc-5686): each user LoRA/LoKr (and the bundled
+    /// Bias-Aware DPO LoRA, which arrives the same way) resolves to one shared spec with
+    /// `moe_expert: None` and no `pass_scales`, the kind set by the file's metadata, scale from
+    /// `weight`; over the per-job cap is a clear payload error.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_adapters_are_single_dense() {
+        let dir = std::env::temp_dir().join(format!("sw_scail2_lora_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("dpo.safetensors");
+        let lokr = dir.join("char.safetensors");
+        write_lora_fixture(&plain, None);
+        write_lora_fixture(&lokr, Some("lokr"));
+
+        let req = request(json!({
+            "projectId": "p",
+            "loras": [
+                { "path": plain.to_string_lossy(), "weight": 1.0 },
+                { "path": lokr.to_string_lossy(), "weight": 0.7 },
+            ],
+        }));
+        let specs = resolve_scail2_adapters(&req).expect("resolve scail2 adapters");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].path, plain);
+        assert_eq!(specs[0].kind, AdapterKind::Lora);
+        assert!((specs[0].scale - 1.0).abs() < 1e-6);
+        assert!(specs[0].moe_expert.is_none(), "SCAIL-2 is single-dense");
+        assert!(specs[0].pass_scales.is_none());
+        assert_eq!(specs[1].kind, AdapterKind::Lokr);
+        assert!((specs[1].scale - 0.7).abs() < 1e-6);
+        assert!(specs[1].moe_expert.is_none());
+
+        let many: Vec<Value> = (0..MAX_JOB_LORAS + 1)
+            .map(|_| json!({ "path": plain.to_string_lossy() }))
+            .collect();
+        let over = request(json!({ "projectId": "p", "loras": many }));
+        assert!(matches!(
+            resolve_scail2_adapters(&over),
             Err(WorkerError::InvalidPayload(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);

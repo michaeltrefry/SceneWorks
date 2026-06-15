@@ -2533,10 +2533,14 @@
         "schedulers": ["default"]
       },
       "loraCompatibility": {
-        // The Bias-Aware DPO refinement LoRA + general LoRA are wired in sc-5451; the
-        // engine descriptor currently reports supports_lora: false.
+        // SCAIL-2 LoRA is wired (sc-5451, mlx-gen #462): the engine descriptor reports
+        // supports_lora/supports_lokr and installs a standard lora_down/up adapter as a
+        // forward-time residual over the Q4 base; the worker routes request.loras via
+        // resolve_scail2_adapters (sc-5686). Covers the bundled Bias-Aware DPO quality
+        // (enhance) LoRA and user scail2-family LoRAs. (A lightx2v diff-patch "lightning"
+        // LoRA is rejected by the engine today — sc-5684.)
         "families": ["scail2"],
-        "types": []
+        "types": ["style", "motion", "character", "enhance"]
       },
       "mlx": {
         // Turnkey pre-converted MLX repo (no requiresConversion). The worker resolves
