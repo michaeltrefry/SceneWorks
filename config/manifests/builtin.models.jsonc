@@ -1683,12 +1683,14 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          "files": [],
+          // Lean default (sc-5679): LTX-2.3 MLX `q4/` (~20.5 GB) + the `gemma/` gemma-3-12b-it-bf16
+          // text encoder (~26.4 GB). The `q8/` subdir (~29.7 GB, higher quality) is NOT pulled here;
+          // the worker fetches it on demand the first time a job opts into Q8 (advanced
+          // mlxQuantize: 8) — see ensure_ltx_q8_present / resolve_ltx_model_dir in video_jobs.rs.
+          // No separate gemma download — the worker points the engine at gemma/ via $LTX_GEMMA_DIR.
+          "files": ["q4/*", "gemma/*"],
           "platforms": ["macos"],
-          // Self-contained bundle: LTX-2.3 MLX `q4/` (default, ~20.5 GB) + `q8/` (opt-in via
-          // advanced mlxQuantize: 8, ~29.7 GB) + the `gemma/` gemma-3-12b-it-bf16 text encoder
-          // (~26.4 GB). No separate gemma download — the worker points the engine at gemma/.
-          "estimatedSizeBytes": 76624310084
+          "estimatedSizeBytes": 46895585378
         },
         {
           "provider": "huggingface",

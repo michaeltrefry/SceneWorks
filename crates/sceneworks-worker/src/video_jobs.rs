@@ -3563,6 +3563,18 @@ fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
+/// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
+/// accepted as int or string). The default is Q4 (sc-5608).
+#[cfg(target_os = "macos")]
+fn ltx_wants_q8(request: &VideoRequest) -> bool {
+    request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .map(|bits| bits >= 8)
+        .unwrap_or(false)
+}
+
 /// Pick the engine-complete `q4/`/`q8/` checkpoint subdir of a SceneWorks LTX bundle `root`,
 /// preferring the requested quant (sc-5608). Returns the first **complete** ([`ltx_dir_is_complete`])
 /// subdir — so a partially-downloaded bundle falls through rather than half-loading — or `None`.
@@ -3599,12 +3611,7 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
             return Ok(path);
         }
     }
-    let wants_q8 = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .map(|bits| bits >= 8)
-        .unwrap_or(false);
+    let wants_q8 = ltx_wants_q8(request);
     let candidates: &[&str] = if eros {
         &["ltx_2_3_eros"]
     } else if wants_q8 {
@@ -3660,6 +3667,50 @@ fn ensure_bundled_ltx_gemma_dir(model_dir: &Path) {
     if let Some(gemma) = bundled_ltx_gemma_dir(model_dir) {
         std::env::set_var("LTX_GEMMA_DIR", gemma);
     }
+}
+
+/// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
+/// (`q4/` + `gemma/`); when a job opts into Q8 ([`ltx_wants_q8`]) and the bundle's `q8/` isn't already
+/// complete, pull just `q8/*` from [`LTX_BUNDLE_REPO`] into the HF cache so [`resolve_ltx_model_dir`]
+/// can load it. Base model only (eros has its own single-dir conversion). No-op when Q8 isn't
+/// requested, the bundle snapshot isn't downloaded yet (resolve surfaces the clear "download the
+/// bundle" error), or `q8/` is already present. Fails loud on a real download error — fast, before
+/// any compute; a missing `hf` CLI leaves `q8/` absent so resolve gracefully falls back to Q4.
+/// Mirrors the eros [`ensure_ltx_upscaler_cached`] on-demand fetch.
+#[cfg(target_os = "macos")]
+async fn ensure_ltx_q8_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model == "ltx_2_3_eros" || !ltx_wants_q8(request) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
+        return Ok(());
+    };
+    if ltx_dir_is_complete(&root.join("q8")) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ltx-q8-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec!["q8/*".to_owned()];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        "main",
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
 }
 
 /// User LoRAs for an LTX generation (sc-3035): each at a uniform per-pass strength
@@ -4130,6 +4181,9 @@ async fn generate_ltx(
         }
         _ => resolve_ltx_conditioning(settings, request, project_path)?,
     };
+    // The macOS default download is lean (q4 + gemma); a Q8 job fetches the bundle's q8/ on demand
+    // before resolving (sc-5679). No-op unless Q8 is requested and q8/ is absent.
+    ensure_ltx_q8_present(api, settings, job, request).await?;
     let model_dir = resolve_ltx_model_dir(settings, request)?;
     // When the resolved dir is the SceneWorks bundle subdir, its sibling `gemma/` is the text
     // encoder — point the engine at it (sc-5608) before load. No-op for legacy/local conversions.
@@ -6943,6 +6997,22 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// Q8 opt-in detection (sc-5679): `advanced.mlxQuantize: 8` (int or string) → true; absent / Q4
+    /// → false. Drives both the resolve quant preference and the on-demand q8 fetch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_wants_q8_reads_mlx_quantize() {
+        let with = |adv: Value| {
+            request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": adv }))
+        };
+        assert!(ltx_wants_q8(&with(json!({ "mlxQuantize": 8 }))));
+        assert!(ltx_wants_q8(&with(json!({ "mlxQuantize": "8" }))));
+        assert!(!ltx_wants_q8(&with(json!({ "mlxQuantize": 4 }))));
+        assert!(!ltx_wants_q8(&request(
+            json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x" })
+        )));
     }
 
     #[cfg(target_os = "macos")]
