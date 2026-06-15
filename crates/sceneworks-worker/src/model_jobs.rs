@@ -886,6 +886,9 @@ fn validate_hf_repo_id(repo: &str) -> WorkerResult<()> {
 }
 
 fn validate_hf_revision(revision: &str) -> WorkerResult<()> {
+    // Shared guard for both HF CLI (`--revision` is arg-isolated) and direct HTTP
+    // download (`downloads::quote_path` percent-encodes the revision in URLs).
+    // Keep leading slash / traversal rejection here so both paths fail closed.
     let parts = safe_hf_path_parts(revision, "Hugging Face revision")?;
     if !revision.chars().all(|character| {
         character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')

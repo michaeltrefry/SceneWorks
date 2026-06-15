@@ -103,7 +103,8 @@ impl SessionLog {
             }
             let seq = guard.next_seq;
             guard.next_seq = guard.next_seq.saturating_add(1);
-            let entry = classify(source, line, seq);
+            let line = redact_secrets(line);
+            let entry = classify(source, &line, seq);
             guard.entries.push_back(entry);
             let capacity = guard.capacity;
             while guard.entries.len() > capacity {
@@ -151,6 +152,57 @@ impl SessionLog {
     pub fn next_seq(&self) -> u64 {
         self.inner.lock().expect("session log lock").next_seq
     }
+}
+
+fn redact_secrets(line: &str) -> String {
+    let line = redact_marker_value(
+        line.to_owned(),
+        "token=",
+        &['&', '"', '\'', ' ', '\t', '<', '>'],
+    );
+    let line = redact_marker_value(
+        line,
+        "access_token=",
+        &['&', '"', '\'', ' ', '\t', '<', '>'],
+    );
+    let line = redact_marker_value(line, "api_key=", &['&', '"', '\'', ' ', '\t', '<', '>']);
+    let line = redact_marker_value(line, "bearer ", &['"', '\'', ' ', '\t', '<', '>']);
+    redact_authorization_header(line)
+}
+
+fn redact_marker_value(mut output: String, marker: &str, terminators: &[char]) -> String {
+    let mut search_from = 0;
+    loop {
+        let lowered = output.to_ascii_lowercase();
+        let Some(relative_start) = lowered[search_from..].find(marker) else {
+            return output;
+        };
+        let start = search_from + relative_start;
+        let value_start = start + marker.len();
+        let value_end = output[value_start..]
+            .char_indices()
+            .find_map(|(index, character)| {
+                terminators
+                    .contains(&character)
+                    .then_some(value_start + index)
+            })
+            .unwrap_or(output.len());
+        if value_end == value_start {
+            return output;
+        }
+        output.replace_range(value_start..value_end, "[REDACTED]");
+        search_from = value_start + "[REDACTED]".len();
+    }
+}
+
+fn redact_authorization_header(mut output: String) -> String {
+    let lowered = output.to_ascii_lowercase();
+    let Some(start) = lowered.find("authorization:") else {
+        return output;
+    };
+    let value_start = start + "authorization:".len();
+    output.replace_range(value_start.., " [REDACTED]");
+    output
 }
 
 fn classify(source: &str, line: &str, seq: u64) -> LogEntry {
@@ -307,6 +359,39 @@ mod tests {
         assert_eq!(entries[1].raw, "second");
         assert_eq!(entries[0].seq, 0);
         assert_eq!(entries[1].seq, 1);
+    }
+
+    #[test]
+    fn redacts_secret_shapes_on_ingest() {
+        let log = SessionLog::with_capacity(16);
+        log.push_line(
+            "worker",
+            "fetch https://example.test/model?token=secret-value&x=1 Authorization: Bearer abc123",
+        );
+        log.push_line(
+            "api",
+            &json!({
+                "event": "download_started",
+                "url": "https://example.test/file?access_token=hidden",
+                "authorization": "Bearer nested-secret"
+            })
+            .to_string(),
+        );
+
+        let entries = log.query(&LogQuery::default());
+        assert!(entries[0].raw.contains("token=[REDACTED]&x=1"));
+        assert!(entries[0].raw.contains("Authorization: [REDACTED]"));
+        assert!(!entries[0].raw.contains("secret-value"));
+        assert!(entries[1].raw.contains("access_token=[REDACTED]"));
+        assert!(!entries[1].raw.contains("nested-secret"));
+        assert_eq!(
+            entries[1]
+                .event
+                .as_ref()
+                .and_then(|event| event.get("url"))
+                .and_then(Value::as_str),
+            Some("https://example.test/file?access_token=[REDACTED]")
+        );
     }
 
     #[test]

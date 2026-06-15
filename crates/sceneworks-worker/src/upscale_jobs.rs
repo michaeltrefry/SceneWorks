@@ -56,6 +56,9 @@ use sceneworks_core::project_store::ProjectStore;
 
 const TILE_SIZE: usize = 512;
 const TILE_PAD: usize = 16;
+const MAX_UPSCALE_TARGET_DIMENSION: u32 = 8192;
+const MAX_UPSCALE_TARGET_PIXELS: u64 =
+    MAX_UPSCALE_TARGET_DIMENSION as u64 * MAX_UPSCALE_TARGET_DIMENSION as u64;
 const CANCEL_MESSAGE: &str = "Image upscale canceled by user.";
 
 /// SceneWorks-owned HuggingFace repo hosting the pre-exported ONNX (reproducible from
@@ -131,6 +134,19 @@ fn crop_to_chw(
     (data, cw, ch)
 }
 
+fn validate_upscale_target_dimensions(width: u32, height: u32) -> WorkerResult<()> {
+    let pixels = u64::from(width) * u64::from(height);
+    if width > MAX_UPSCALE_TARGET_DIMENSION
+        || height > MAX_UPSCALE_TARGET_DIMENSION
+        || pixels > MAX_UPSCALE_TARGET_PIXELS
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Upscale target {width}x{height} exceeds the {MAX_UPSCALE_TARGET_DIMENSION}px side / {MAX_UPSCALE_TARGET_PIXELS} pixel limit."
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // onnxruntime upscaler (cached per-factor process-wide, like pose_jobs::DETECTOR)
 // ---------------------------------------------------------------------------
@@ -182,7 +198,17 @@ impl Upscaler {
         cancel: &CancelFlag,
     ) -> WorkerResult<RgbImage> {
         let (w, h) = (img.width() as usize, img.height() as usize);
-        let (ow, oh) = (w * factor, h * factor);
+        let ow = w
+            .checked_mul(factor)
+            .ok_or_else(|| WorkerError::InvalidPayload("upscale width overflow".to_owned()))?;
+        let oh = h
+            .checked_mul(factor)
+            .ok_or_else(|| WorkerError::InvalidPayload("upscale height overflow".to_owned()))?;
+        let ow_u32 = u32::try_from(ow)
+            .map_err(|_| WorkerError::InvalidPayload("upscale width overflow".to_owned()))?;
+        let oh_u32 = u32::try_from(oh)
+            .map_err(|_| WorkerError::InvalidPayload("upscale height overflow".to_owned()))?;
+        validate_upscale_target_dimensions(ow_u32, oh_u32)?;
         let mut output = vec![0u8; ow * oh * 3];
         for tl in tile_slices(w, h, TILE_SIZE) {
             if cancel.is_cancelled() {
@@ -449,6 +475,7 @@ async fn run_seedvr2_upscale(
     let (src_w, src_h) = (source.width(), source.height());
     let target_w = round_to_16(src_w.saturating_mul(u32::from(factor)));
     let target_h = round_to_16(src_h.saturating_mul(u32::from(factor)));
+    validate_upscale_target_dimensions(target_w, target_h)?;
     let image = GenImage {
         width: src_w,
         height: src_h,

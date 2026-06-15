@@ -43,11 +43,12 @@ use super::supervisor::{
 use super::{
     allow_pattern_matches, bounded_tail, cancel_requested_peek, cleanup_uploaded_import_source,
     copy_lora_source, fresh_asset_id, import_lora_source_file_as, import_lora_source_path,
-    now_rfc3339, parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
-    safe_download_dir, safe_project_path, value_f64, wan_moe_pair_filenames,
-    write_model_install_marker, CredentialScheme, JsonObject, SafetensorsHeaderError, Settings,
-    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER,
+    normalize_app_managed_cache_path, now_rfc3339, parse_credentials_env,
+    resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
+    safe_project_path, value_f64, wan_moe_pair_filenames, write_model_install_marker,
+    CredentialScheme, JsonObject, SafetensorsHeaderError, Settings, WorkerCredential, WorkerError,
+    DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
+    INSTALL_MARKER,
 };
 
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
@@ -149,10 +150,58 @@ fn hf_cli_download_inputs_reject_traversal_and_absolute_patterns() {
         assert!(matches!(error, WorkerError::InvalidPayload(_)));
     }
 
-    for revision in ["../main", "refs/heads/../main"] {
+    for revision in ["../main", "refs/heads/../main", "/refs/main"] {
         let error =
             validate_hf_cli_download_inputs("owner/model", revision, &["*.safetensors".to_owned()])
                 .expect_err("unsafe revision rejected");
+        assert!(matches!(error, WorkerError::InvalidPayload(_)));
+    }
+}
+
+#[test]
+fn app_managed_cache_path_rejects_escape_and_symlink_escape() {
+    let temp = tempdir().expect("temp dir");
+    let mut settings = Settings::from_env();
+    settings.data_dir = temp.path().join("data");
+    let uploads = settings.data_dir.join("cache").join("pose-uploads");
+    std::fs::create_dir_all(&uploads).expect("uploads dir");
+    let staged = uploads.join("upload.png");
+    std::fs::write(&staged, b"image").expect("staged file");
+
+    let accepted = normalize_app_managed_cache_path(
+        &settings,
+        staged.to_str().unwrap(),
+        "pose-uploads",
+        "sourcePath",
+    )
+    .expect("staged path accepted");
+    assert_eq!(
+        accepted,
+        staged.canonicalize().expect("canonical staged path")
+    );
+
+    let outside = temp.path().join("outside.png");
+    std::fs::write(&outside, b"not staged").expect("outside file");
+    let error = normalize_app_managed_cache_path(
+        &settings,
+        outside.to_str().unwrap(),
+        "pose-uploads",
+        "sourcePath",
+    )
+    .expect_err("outside path rejected");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)));
+
+    #[cfg(unix)]
+    {
+        let link = uploads.join("link.png");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+        let error = normalize_app_managed_cache_path(
+            &settings,
+            link.to_str().unwrap(),
+            "pose-uploads",
+            "sourcePath",
+        )
+        .expect_err("symlink escape rejected");
         assert!(matches!(error, WorkerError::InvalidPayload(_)));
     }
 }

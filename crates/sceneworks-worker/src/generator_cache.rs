@@ -114,13 +114,12 @@ impl GeneratorCache {
             });
         }
 
-        let generator = self
-            .entry
-            .as_ref()
-            .expect("cache entry populated")
-            .generator
-            .as_ref();
-        run(generator)
+        let Some(entry) = self.entry.as_ref() else {
+            return Err(WorkerError::Engine(
+                "Generator cache entry missing after load.".to_owned(),
+            ));
+        };
+        run(entry.generator.as_ref())
     }
 }
 

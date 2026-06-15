@@ -248,8 +248,7 @@ pub(crate) async fn run_video_generate_job(
                 None,
             ),
             Err(_) => {
-                let engine_id =
-                    wan_engine_id(&request.model).expect("checked wan2_2_ti2v_5b above");
+                let engine_id = "wan2_2_ti2v_5b";
                 (
                     generate_wan(
                         api,

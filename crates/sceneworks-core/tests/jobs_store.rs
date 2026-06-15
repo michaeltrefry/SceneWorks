@@ -87,7 +87,7 @@ fn job_lifecycle_create_claim_complete() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
-                worker_id: None,
+                worker_id: Some("worker-1".to_owned()),
             },
         )
         .expect("progress updates");
@@ -124,7 +124,7 @@ fn progress_keeps_running_max_for_peak_gpu_meters() {
             peak_gpu_memory_pct: memory,
             peak_gpu_load_pct: load,
             backend: None,
-            worker_id: None,
+            worker_id: Some("worker-1".to_owned()),
         }
     }
 
@@ -218,7 +218,7 @@ fn progress_leaves_peaks_null_when_no_samples_arrive() {
         peak_gpu_memory_pct: None,
         peak_gpu_load_pct: None,
         backend: None,
-        worker_id: None,
+        worker_id: Some("worker-1".to_owned()),
     };
     for _ in 0..3 {
         store
@@ -1528,6 +1528,7 @@ fn image_edit_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
 }
 
 fn complete_job(store: &JobsStore, job_id: &str) {
+    let worker_id = store.get_job(job_id).expect("job loads").worker_id;
     store
         .update_job_progress(
             job_id,
@@ -1542,7 +1543,7 @@ fn complete_job(store: &JobsStore, job_id: &str) {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
-                worker_id: None,
+                worker_id,
             },
         )
         .expect("job completes");
@@ -3895,7 +3896,7 @@ fn qwen_txt2img_and_strict_pose_route_to_mlx() {
                 peak_gpu_memory_pct: None,
                 peak_gpu_load_pct: None,
                 backend: None,
-                worker_id: None,
+                worker_id: Some("worker-mlx".to_owned()),
             },
         )
         .expect("txt2img job completes");
@@ -3966,7 +3967,7 @@ fn flux2_klein_variants_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("worker-mlx".to_owned()),
                 },
             )
             .expect("complete job");
@@ -4044,7 +4045,7 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("worker-mlx".to_owned()),
                 },
             )
             .expect("complete job");
@@ -4088,7 +4089,7 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("worker-mlx".to_owned()),
                 },
             )
             .expect("complete job");
@@ -4167,7 +4168,7 @@ fn image_detail_routes_to_mlx_worker() {
                     peak_gpu_memory_pct: None,
                     peak_gpu_load_pct: None,
                     backend: None,
-                    worker_id: None,
+                    worker_id: Some("worker-mlx".to_owned()),
                 },
             )
             .expect("complete detail job");
@@ -4366,7 +4367,7 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
                                 peak_gpu_memory_pct: None,
                                 peak_gpu_load_pct: None,
                                 backend: None,
-                                worker_id: None,
+                                worker_id: Some(worker_id.clone()),
                             },
                         ) {
                             errors.lock().unwrap().push(error.to_string());
@@ -4484,9 +4485,7 @@ fn progress_cannot_resurrect_terminal_jobs() {
     assert_eq!(job.worker_id, None);
 }
 
-/// sc-4172 — a progress report that names a worker other than the job's owner
-/// is rejected; the owner's reports (and legacy reports with no worker id)
-/// still land.
+/// sc-4172 / sc-5751 — progress reports must name the claimed job's owner.
 #[test]
 fn progress_from_non_owner_worker_is_rejected() {
     fn running(worker_id: Option<&str>) -> ProgressUpdate {
@@ -4531,8 +4530,8 @@ fn progress_from_non_owner_worker_is_rejected() {
         .expect("owner report lands");
     assert_eq!(job.status, JobStatus::Running);
 
-    let job = store
+    let error = store
         .update_job_progress(&created.id, running(None))
-        .expect("legacy report without a worker id still lands");
-    assert_eq!(job.status, JobStatus::Running);
+        .expect_err("ownerless report on an owned job is rejected");
+    assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
 }

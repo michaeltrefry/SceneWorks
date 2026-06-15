@@ -163,6 +163,19 @@ fn round_to_16_rounds_up_floored_at_16() {
 }
 
 #[test]
+fn upscale_target_dimensions_are_bounded_before_allocation() {
+    validate_upscale_target_dimensions(8192, 8192).expect("8k square accepted");
+    assert!(matches!(
+        validate_upscale_target_dimensions(8193, 1024),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+    assert!(matches!(
+        validate_upscale_target_dimensions(8192, 8193),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+}
+
+#[test]
 fn manifest_seedvr2_resource_extracts_overrides_and_defaults() {
     let entry = json!({
         "resources": {

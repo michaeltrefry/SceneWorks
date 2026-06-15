@@ -1505,6 +1505,7 @@ def test_job_state_transition_contracts(contract_runtimes):
                 "stage": "canceled",
                 "progress": 1,
                 "message": "Worker canceled the job before completion.",
+                "workerId": "parity-worker",
             },
         )
         for runtime in contract_runtimes

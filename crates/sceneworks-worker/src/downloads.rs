@@ -54,6 +54,9 @@ pub(crate) async fn ensure_cached_file(
     all(target_os = "windows", feature = "backend-candle")
 ))]
 async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerResult<Option<u64>> {
+    // `url` is built from trusted operator/runtime configuration
+    // (`Settings::huggingface_base_url`) plus validated HF path pieces. User-provided source URLs
+    // use the separate `download_source_url` path with SSRF checks.
     let response = match client.head(url).send().await {
         Ok(response) => response,
         Err(_) => return Ok(None),
@@ -184,6 +187,8 @@ pub(crate) fn snapshot_file_from_entry(
         download_url: format!(
             "{base_url}/{}/resolve/{}/{}",
             quote_path(repo),
+            // Revisions are pre-validated by `model_jobs::validate_hf_revision`;
+            // quote_path is the direct-download path's final URL-segment guard.
             quote_path(revision),
             quote_path(path)
         ),

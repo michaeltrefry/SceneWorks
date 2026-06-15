@@ -1116,8 +1116,10 @@ impl JobsStore {
                 status: current.status.as_str().to_owned(),
             });
         }
-        if let Some(reporter) = update.worker_id.as_deref() {
-            if current.worker_id.as_deref() != Some(reporter) {
+        match (update.worker_id.as_deref(), current.worker_id.as_deref()) {
+            (Some(reporter), Some(owner)) if reporter == owner => {}
+            (None, None) => {}
+            _ => {
                 return Err(JobsStoreError::NotJobOwner {
                     job_id: job_id.to_owned(),
                 });

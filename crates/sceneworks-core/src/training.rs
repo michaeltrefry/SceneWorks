@@ -27,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
 
 use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
+use crate::store_util::is_safe_relative_path;
 
 /// Schema version stamped on persisted training contracts.
 pub const TRAINING_CONTRACT_SCHEMA_VERSION: u32 = 1;
@@ -1632,17 +1633,19 @@ pub fn build_training_plan(
         .dataset
         .items
         .iter()
-        .map(|item| TrainingPlanItem {
-            image_path: resolve_item_path(input.dataset_root, &item.path),
-            caption: caption_with_trigger_words(
-                &item.caption.text,
-                &combined_trigger_words(&item.caption.trigger_words, &trigger_words),
-            ),
-            width: item.width,
-            height: item.height,
-            extra: ExtraFields::new(),
+        .map(|item| {
+            Ok(TrainingPlanItem {
+                image_path: resolve_item_path(input.dataset_root, &item.path)?,
+                caption: caption_with_trigger_words(
+                    &item.caption.text,
+                    &combined_trigger_words(&item.caption.trigger_words, &trigger_words),
+                ),
+                width: item.width,
+                height: item.height,
+                extra: ExtraFields::new(),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, TrainingPlanError>>()?;
 
     let config_snapshot = match serde_json::to_value(&input.config) {
         Ok(Value::Object(map)) => map,
@@ -1739,12 +1742,20 @@ fn caption_with_trigger_words(caption: &str, trigger_words: &[String]) -> String
 /// using the host's path separator. Dataset item paths are stored POSIX-style
 /// (the store forbids backslashes), so joining the whole string would leave
 /// mixed separators on Windows; pushing each component normalizes them.
-fn resolve_item_path(dataset_root: &Path, relative_path: &str) -> String {
+fn resolve_item_path(
+    dataset_root: &Path,
+    relative_path: &str,
+) -> Result<String, TrainingPlanError> {
+    if !is_safe_relative_path(relative_path) {
+        return Err(TrainingPlanError::InvalidConfig(
+            "Dataset item path must be relative to the dataset root.".to_owned(),
+        ));
+    }
     let mut path = dataset_root.to_path_buf();
     for component in Path::new(relative_path).components() {
         path.push(component);
     }
-    path.display().to_string()
+    Ok(path.display().to_string())
 }
 
 fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
@@ -1812,4 +1823,27 @@ fn validate_lr_scheduler(config: &TrainingConfig) -> Result<(), TrainingPlanErro
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_item_path_rejects_paths_outside_dataset_root() {
+        let root = Path::new("/dataset");
+
+        assert!(matches!(
+            resolve_item_path(root, "../outside.png"),
+            Err(TrainingPlanError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            resolve_item_path(root, "/absolute.png"),
+            Err(TrainingPlanError::InvalidConfig(_))
+        ));
+        assert_eq!(
+            resolve_item_path(root, "images/photo.png").expect("safe path"),
+            "/dataset/images/photo.png"
+        );
+    }
 }

@@ -201,6 +201,38 @@ fn pulid_weights_env_preset() -> Option<PulidWeights> {
     })
 }
 
+struct EnvRestore {
+    values: [(&'static str, Option<std::ffi::OsString>); 3],
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (key, value) in &self.values {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+fn set_pulid_weight_env(weights: &PulidWeights) -> EnvRestore {
+    let guard = EnvRestore {
+        values: [
+            ("PULID_FLUX_WEIGHTS", std::env::var_os("PULID_FLUX_WEIGHTS")),
+            ("PULID_EVA_WEIGHTS", std::env::var_os("PULID_EVA_WEIGHTS")),
+            (
+                "PULID_FACE_WEIGHTS_DIR",
+                std::env::var_os("PULID_FACE_WEIGHTS_DIR"),
+            ),
+        ],
+    };
+    std::env::set_var("PULID_FLUX_WEIGHTS", &weights.adapter);
+    std::env::set_var("PULID_EVA_WEIGHTS", &weights.eva);
+    std::env::set_var("PULID_FACE_WEIGHTS_DIR", &weights.face_dir);
+    guard
+}
+
 /// Resolve all PuLID-FLUX engine weight inputs, downloading the converted bundle + the PuLID
 /// adapter + the shared face stack on first use into ONE bundle dir (so it doubles as the engine's
 /// `PULID_FACE_WEIGHTS_DIR`). Resolution order: a fully-set env preset → a `SCENEWORKS_PULID_WEIGHTS`
@@ -315,12 +347,10 @@ async fn generate_pulid_flux_stream(
 
     let weights = ensure_pulid_weights(api, settings, job).await?;
     // Feed the engine's weight seam from the resolved cache paths (the `pulid_flux` loader resolves
-    // the PuLID adapter + EVA + face stack from these env vars). Stable per-worker paths, set right
-    // before the cached load; the generator cache serializes loads on its own thread, so the
-    // process-global vars are race-free for this single-threaded MLX path.
-    std::env::set_var("PULID_FLUX_WEIGHTS", &weights.adapter);
-    std::env::set_var("PULID_EVA_WEIGHTS", &weights.eva);
-    std::env::set_var("PULID_FACE_WEIGHTS_DIR", &weights.face_dir);
+    // the PuLID adapter + EVA + face stack from these env vars). Keep them scoped to this async job:
+    // the generator load happens inside the spawned stream task, so they must stay live through
+    // `consume_gen_events`, then `EnvRestore` removes/restores them before the next job.
+    let _pulid_env = set_pulid_weight_env(&weights);
 
     let steps = pulid_steps(request);
     let guidance = pulid_guidance(request);

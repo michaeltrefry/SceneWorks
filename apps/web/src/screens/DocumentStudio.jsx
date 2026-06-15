@@ -27,6 +27,14 @@ function documentSegments(job) {
   return Array.isArray(segments) && segments.length ? segments : null;
 }
 
+function clampMaxImages(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return MAX_IMAGES_DEFAULT;
+  }
+  return Math.min(MAX_IMAGES_LIMIT, Math.max(1, Math.floor(parsed)));
+}
+
 export function DocumentStudio() {
   const {
     activeProject,
@@ -84,7 +92,7 @@ export function DocumentStudio() {
     const job = await createInterleaveJob({
       prompt: prompt.trim(),
       model: model || undefined,
-      maxImages: Number(maxImages) || MAX_IMAGES_DEFAULT,
+      maxImages: clampMaxImages(maxImages),
       width,
       height,
       sourceAssetIds,

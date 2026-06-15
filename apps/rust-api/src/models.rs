@@ -9,6 +9,25 @@ const MODEL_SIZE_CACHE_LIMIT: usize = 64;
 // TTL window instead of one per catalog load (sc-4169).
 const MODEL_SIZE_NEGATIVE_TTL: Duration = Duration::from_secs(300);
 
+fn validate_huggingface_repo(repo: &str) -> Result<(), ApiError> {
+    let parts: Vec<_> = repo.trim().split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || part.starts_with('.')
+                || part.ends_with('.')
+                || !part.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+                })
+        })
+    {
+        return Err(ApiError::bad_request(
+            "Hugging Face repo must be in owner/name form",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ModelSizeCache {
     entries: HashMap<ModelSizeCacheKey, CachedSizeEstimate>,
@@ -432,6 +451,9 @@ pub(crate) async fn queue_model_import_job(
     }
     if let Some(source_url) = payload.source_url.as_deref() {
         validate_source_url(source_url)?;
+    }
+    if let Some(repo) = payload.repo.as_deref() {
+        validate_huggingface_repo(repo)?;
     }
     let model_type = match payload.model_type.as_deref().map(str::trim) {
         Some(value) if !value.is_empty() => {

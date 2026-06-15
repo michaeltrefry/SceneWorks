@@ -51,7 +51,7 @@ _KEY = re.compile(
 
 
 def convert(src_pt: str, out_safetensors: str) -> None:
-    ckpt = torch.load(src_pt, map_location="cpu", weights_only=False)
+    ckpt = torch.load(src_pt, map_location="cpu", weights_only=True)
     # DeepSpeed wraps the trained params under "module"; tolerate a bare state dict too.
     sd = ckpt["module"] if isinstance(ckpt, dict) and "module" in ckpt else ckpt
 

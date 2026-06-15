@@ -6,7 +6,12 @@ export function assetUrl(asset) {
     return API_BASE_URL + asset.url;
   }
   if (asset?.projectId && asset?.file?.path) {
-    const normalizedPath = String(asset.file.path).replaceAll("\\", "/");
+    const normalizedPath = String(asset.file.path)
+      .replaceAll("\\", "/")
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
     return `${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${normalizedPath}`;
   }
   return "";

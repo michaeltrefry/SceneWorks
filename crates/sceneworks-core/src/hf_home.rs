@@ -12,6 +12,9 @@
 //! Compose already inject `HF_HOME`, so this only changes the env-less case.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static DEFAULT_HF_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// The OS Hugging Face home, `~/.cache/huggingface` (the literal `~/.cache`, not
 /// the platform cache dir — matching huggingface_hub and `Path.home()/.cache/
@@ -43,6 +46,12 @@ pub fn default_huggingface_home(
 /// path it set, or `None` when it left the environment unchanged. Call once at
 /// binary startup, before any cache resolution or worker spawn.
 pub fn ensure_default_huggingface_home() -> Option<PathBuf> {
+    DEFAULT_HF_HOME
+        .get_or_init(default_huggingface_home_from_env)
+        .clone()
+}
+
+fn default_huggingface_home_from_env() -> Option<PathBuf> {
     let read = |key: &str| std::env::var(key).ok();
     let chosen = default_huggingface_home(
         read("HF_HUB_CACHE").as_deref(),

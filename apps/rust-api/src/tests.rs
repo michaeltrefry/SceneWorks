@@ -713,6 +713,7 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
             "stage": "completed",
             "progress": 1,
             "message": "Done",
+            "workerId": "worker-1",
             "result": { "assetIds": ["asset-1"] }
         }),
     )
@@ -773,7 +774,7 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
         app.clone(),
         "POST",
         &format!("/api/v1/jobs/{job_id}/progress"),
-        json!({ "status": "running", "stage": "running", "progress": 0.2, "message": "step" }),
+        json!({ "status": "running", "stage": "running", "progress": 0.2, "message": "step", "workerId": "worker-1" }),
     )
     .await;
 
@@ -785,7 +786,7 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
         app.clone(),
         "POST",
         &format!("/api/v1/jobs/{job_id}/progress"),
-        json!({ "status": "running", "stage": "running", "progress": 0.6, "message": "step" }),
+        json!({ "status": "running", "stage": "running", "progress": 0.6, "message": "step", "workerId": "worker-1" }),
     )
     .await;
     let tick_events = drain_event_names(&mut events).await;
@@ -803,7 +804,7 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
         app.clone(),
         "POST",
         &format!("/api/v1/jobs/{job_id}/progress"),
-        json!({ "status": "completed", "stage": "completed", "progress": 1, "message": "done" }),
+        json!({ "status": "completed", "stage": "completed", "progress": 1, "message": "done", "workerId": "worker-1" }),
     )
     .await;
     let done_events = drain_event_names(&mut events).await;
@@ -3096,6 +3097,22 @@ async fn bernini_video_modes_validate_required_media() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    // Reference id lists are bounded before the worker has to encode them.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances",
+            "referenceAssetIds": ["ref-1", "ref-2", "ref-3", "ref-4", "ref-5", "ref-6", "ref-7", "ref-8", "ref-9"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     // A complete video_to_video request creates a base video_generate job that
     // carries the source clip.
     let (status, v2v_job) = request(
@@ -3165,6 +3182,22 @@ async fn bernini_video_modes_validate_required_media() {
             "mode": "multi_video_to_video",
             "prompt": "blend the takes",
             "sourceClipAssetIds": ["clip-a", "  "]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Source clip lists are bounded before worker-side video conditioning.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "multi_video_to_video",
+            "prompt": "blend the takes",
+            "sourceClipAssetIds": ["clip-1", "clip-2", "clip-3", "clip-4", "clip-5", "clip-6", "clip-7", "clip-8", "clip-9"]
         }),
     )
     .await;
@@ -4609,6 +4642,25 @@ async fn model_import_routes_handle_url_upload_and_family_detection() {
         .is_some_and(|value| value.contains("models/imports/custom_model")
             || value.contains("models\\imports\\custom_model")));
     assert!(url_job["payload"]["manifestEntry"].get("family").is_none());
+
+    // Repo imports must be owner/name, not arbitrary path-like strings.
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (bad_repo_status, bad_repo_error) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "repo": "owner/nested/model",
+            "name": "Bad Repo",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(bad_repo_status, StatusCode::BAD_REQUEST);
+    assert!(bad_repo_error["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("owner/name"));
 
     // Duplicate id is rejected with an actionable error.
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

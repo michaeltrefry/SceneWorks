@@ -1328,6 +1328,25 @@ fn normalize_app_managed_path(
     ensure_path_under(path, &[data_dir], label)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn normalize_app_managed_cache_path(
+    settings: &Settings,
+    raw_path: &str,
+    cache_dir: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let root = settings.data_dir.join("cache").join(cache_dir);
+    let normalized_root = normalize_absolute_path(&root)?;
+    let canonical_root = normalize_existing_or_absolute(&root)?;
+    let normalized = normalize_absolute_path(Path::new(raw_path))?;
+    let resolved = normalize_existing_or_absolute(&normalized)?;
+    ensure_path_under(resolved, &[normalized_root, canonical_root], label)
+}
+
 /// A model's weights are a read-only source the rust-api resolves (e.g.
 /// `resolve_base_model_path`) from either the app data dir *or* the shared
 /// Hugging Face hub cache — the default `HF_HOME` the desktop injects points the

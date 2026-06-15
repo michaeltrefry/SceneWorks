@@ -1851,6 +1851,11 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             "referenceAssetIds must not contain blank ids",
         ));
     }
+    if payload.reference_asset_ids.len() > MAX_VIDEO_REFERENCE_ASSET_IDS {
+        return Err(ApiError::bad_request(format!(
+            "referenceAssetIds must contain at most {MAX_VIDEO_REFERENCE_ASSET_IDS} ids"
+        )));
+    }
     if payload
         .source_clip_asset_ids
         .iter()
@@ -1859,6 +1864,11 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         return Err(ApiError::bad_request(
             "sourceClipAssetIds must not contain blank ids",
         ));
+    }
+    if payload.source_clip_asset_ids.len() > MAX_VIDEO_SOURCE_CLIP_ASSET_IDS {
+        return Err(ApiError::bad_request(format!(
+            "sourceClipAssetIds must contain at most {MAX_VIDEO_SOURCE_CLIP_ASSET_IDS} ids"
+        )));
     }
     let duration = payload
         .duration
@@ -1945,6 +1955,8 @@ const MAX_IMAGE_DIMENSION: u32 = 4096;
 /// Upper bound for video width/height — a lower backstop than images, matching
 /// the cap enforced when validating a video job request.
 const MAX_VIDEO_DIMENSION: u32 = 1920;
+const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 8;
+const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
     if !(256..=max).contains(&value) {

@@ -27,8 +27,8 @@ use serde_json::{json, Value};
 
 use crate::image_jobs::{ensure_scrfd_weights, load_reference_image};
 use crate::{
-    heartbeat, progress_payload, task_join_error, update_job, ApiClient, Settings, WorkerError,
-    WorkerResult,
+    heartbeat, normalize_app_managed_cache_path, progress_payload, task_join_error, update_job,
+    ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -194,7 +194,9 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
         // (the API's generic temp-file writer keeps no extension), so `image::open` — which
         // picks the codec from the extension — would reject a perfectly valid JPEG/PNG. Read
         // the bytes and let `load_from_memory` sniff the format from the magic bytes.
-        let bytes = std::fs::read(path).map_err(|error| {
+        let source_path =
+            normalize_app_managed_cache_path(settings, path, "pose-uploads", "kps sourcePath")?;
+        let bytes = std::fs::read(&source_path).map_err(|error| {
             WorkerError::InvalidPayload(format!("kps extraction source {path}: {error}"))
         })?;
         let decoded = image::load_from_memory(&bytes)

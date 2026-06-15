@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::store_util::random_hex;
+
 /// Filename of the credential store within the config dir. Shared so the rust-api
 /// (writer) and the worker (reader) never drift.
 pub const CREDENTIALS_FILENAME: &str = "credentials.json";
@@ -114,7 +116,13 @@ impl CredentialFileStore {
         // the temp is created 0600 up front, closing the window where the token
         // was briefly world/group-readable between a plain write and the chmod
         // (sc-4268 / F-CORE-8).
-        let tmp_path = self.path.with_extension("json.tmp");
+        let extension = self
+            .path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("json");
+        let token = random_hex(8).map_err(io::Error::other)?;
+        let tmp_path = self.path.with_extension(format!("{extension}.{token}.tmp"));
         write_secret_file(&tmp_path, body.as_bytes())?;
         std::fs::rename(&tmp_path, &self.path)?;
         // Backstop: re-assert 0600 on the final path in case it already existed

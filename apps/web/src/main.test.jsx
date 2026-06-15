@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, ErrorBoundary, eventUrl } from "./main.jsx";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
+import { assetUrl } from "./components/assetMedia.jsx";
 import { AssetDetail, FullscreenPreview } from "./components/assetPanels.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
 import { dropUpscaledVariants, foldUpscaledAssetVariants, restrictFoldedToScope } from "./assetVariants.js";
@@ -395,6 +396,17 @@ describe("SceneWorks app shell", () => {
     });
     container.remove();
     vi.restoreAllMocks();
+  });
+
+  it("encodes fallback asset file path segments", () => {
+    const url = assetUrl({
+      projectId: "project-1",
+      file: { path: "assets\\images/final image #1?.png" },
+    });
+
+    expect(url).toBe(
+      "http://localhost:8000/api/v1/projects/project-1/files/assets/images/final%20image%20%231%3F.png",
+    );
   });
 
   it("shows a fallback instead of a blank screen when rendering fails", async () => {
@@ -9175,17 +9187,18 @@ describe("SceneWorks app shell", () => {
 
     // Submitting composes an interleave job with prompt, model, size, and max images.
     await changeField(container.querySelector("textarea"), "An illustrated guide to brewing tea");
+    await changeField(container.querySelector("input[type='number']"), "999");
     const submit = [...container.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Compose document"),
     );
     await act(async () => {
-      submit.click();
+      submit.closest("form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(createInterleaveJob).toHaveBeenCalledTimes(1);
     const payload = createInterleaveJob.mock.calls[0][0];
     expect(payload.prompt).toBe("An illustrated guide to brewing tea");
     expect(payload.model).toBe("sensenova_u1_8b");
-    expect(payload.maxImages).toBe(6);
+    expect(payload.maxImages).toBe(10);
     expect(payload.width).toBe(2048);
     expect(payload.height).toBe(1152);
     // Unedited system prompt is not sent (worker uses its own default).

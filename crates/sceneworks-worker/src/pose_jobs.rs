@@ -33,8 +33,8 @@ use serde_json::{json, Value};
 
 use crate::openpose_skeleton::{body_stickwidth, draw_wholebody, Keypoint};
 use crate::{
-    heartbeat, optional_payload_string, progress_payload, task_join_error, update_job, ApiClient,
-    Settings, WorkerError, WorkerResult,
+    heartbeat, normalize_app_managed_cache_path, optional_payload_string, progress_payload,
+    task_join_error, update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -661,9 +661,10 @@ fn normalize_sources(payload: &JsonObject) -> Vec<JsonObject> {
 fn resolve_source(
     src: &JsonObject,
     store: &ProjectStore,
+    settings: &Settings,
     project_id: Option<&str>,
     project_path: Option<&Path>,
-) -> PoseSource {
+) -> WorkerResult<PoseSource> {
     let asset_id = src
         .get("assetId")
         .and_then(Value::as_str)
@@ -675,47 +676,57 @@ fn resolve_source(
     let temp = src.get("temp").and_then(Value::as_bool).unwrap_or(false);
     let raw = src.get("path").and_then(Value::as_str);
 
-    // explicit absolute path wins (spike/tests)
+    // Staged upload path, confined to the same pose-uploads cache cleaned up below.
     if let Some(raw) = raw {
         let abs = Path::new(raw);
-        if abs.is_absolute() && abs.exists() {
-            return PoseSource {
+        if abs.is_absolute() {
+            let path =
+                normalize_app_managed_cache_path(settings, raw, "pose-uploads", "pose sourcePath")?;
+            if path.exists() {
+                return Ok(PoseSource {
+                    asset_id,
+                    display_name,
+                    temp,
+                    path: Some(path),
+                });
+            }
+            return Ok(PoseSource {
                 asset_id,
                 display_name,
                 temp,
-                path: Some(abs.to_path_buf()),
-            };
+                path: None,
+            });
         }
     }
     // asset id resolved against the originating project (Create tab sends ids)
     if let (Some(id), Some(pid), Some(proj)) = (&asset_id, project_id, project_path) {
         if let Some(path) = resolve_asset_path(store, pid, id, proj) {
-            return PoseSource {
+            return Ok(PoseSource {
                 asset_id,
                 display_name,
                 temp,
                 path: Some(path),
-            };
+            });
         }
     }
     // project-relative path
     if let (Some(raw), Some(proj)) = (raw, project_path) {
         let candidate = proj.join(raw);
         if candidate.exists() {
-            return PoseSource {
+            return Ok(PoseSource {
                 asset_id,
                 display_name,
                 temp,
                 path: Some(candidate),
-            };
+            });
         }
     }
-    PoseSource {
+    Ok(PoseSource {
         asset_id,
         display_name,
         temp,
         path: raw.map(PathBuf::from),
-    }
+    })
 }
 
 fn resolve_asset_path(
@@ -787,8 +798,8 @@ pub(crate) async fn run_pose_detect_job(
 
     let resolved: Vec<PoseSource> = sources
         .iter()
-        .map(|s| resolve_source(s, &store, project_id, project_path.as_deref()))
-        .collect();
+        .map(|s| resolve_source(s, &store, settings, project_id, project_path.as_deref()))
+        .collect::<WorkerResult<_>>()?;
 
     update_job(
         api,
