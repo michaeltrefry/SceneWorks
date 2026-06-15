@@ -36,8 +36,13 @@ use super::model_jobs::{
     overlay_kolors_tokenizer, validate_hf_cli_download_inputs, DownloadFamilyCheck,
     HF_CLI_UTF8_ENV,
 };
+// `terminating_signal` is only exercised by a `#[cfg(unix)]` test (signal-death
+// attribution is uncatchable and only observable on Unix), so gate the import to
+// match — otherwise it is an unused import on Windows builds.
+#[cfg(unix)]
+use super::supervisor::terminating_signal;
 use super::supervisor::{
-    auto_worker_specs, child_environment, restart_exited_children_with_spawner, terminating_signal,
+    auto_worker_specs, child_environment, restart_exited_children_with_spawner,
     utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
