@@ -3218,6 +3218,14 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "instantid_realvisxl" {
         return instantid_candle_eligible(&job.payload);
     }
+    // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
+    // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
+    // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
+    // (pure IP only; img2img/inpaint/edit shapes stay on torch — those are sc-5487). Mirrors the
+    // worker's `sdxl_ipadapter_available` gate.
+    if matches!(model, "sdxl" | "realvisxl") && sdxl_ipadapter_candle_eligible(&job.payload) {
+        return true;
+    }
     image_request_candle_eligible(model, &job.payload)
 }
 
@@ -3403,6 +3411,26 @@ fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// Mirrors the candle worker's `instantid_available` gate so the router and worker agree.
 fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
     instantid_mlx_eligible(payload)
+}
+
+/// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
+/// provider serves PURE reference (image-prompt) conditioning on the sdxl family: a `referenceAssetId`
+/// with NO img2img source / inpaint mask and NOT an `edit_image` (those advanced SDXL shapes are
+/// sc-5487, still torch). Mirrors the worker's `sdxl_ipadapter_available` gate (minus the local
+/// weight-resolve check) so the router and worker agree on the lane boundary. Candle-only — there is no
+/// MLX `IpAdapterSdxl` (the MLX SDXL IP path is the registry `SdxlSubMode::Ip`), so this has no
+/// `*_mlx_eligible` sibling.
+fn sdxl_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    let non_empty = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
 }
 
 /// PuLID-FLUX (`pulid_flux_dev`) MLX-routing conditions (sc-3344). The native `mlx-gen-pulid`
@@ -5006,6 +5034,32 @@ mod candle_routing_tests {
             "model": "instantid_realvisxl",
             "mode": "text_to_image",
             "referenceAssetId": "asset_1"
+        }))));
+    }
+
+    #[test]
+    fn sdxl_ipadapter_reference_jobs_route_to_candle() {
+        // A pure SDXL/RealVisXL reference (IP-Adapter) job routes to the candle lane (sc-5488) via the
+        // bespoke branch, NOT the txt2img `image_request_candle_eligible` gate (which rejects
+        // `referenceAssetId`).
+        for model in ["sdxl", "realvisxl"] {
+            let payload = json!({ "model": model, "referenceAssetId": "asset_1" });
+            assert!(sdxl_ipadapter_candle_eligible(&object(payload.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        }
+        // No reference → not an IP-Adapter job (plain txt2img routes via the txt2img gate instead).
+        assert!(!sdxl_ipadapter_candle_eligible(&object(
+            json!({ "model": "sdxl" })
+        )));
+        // img2img / inpaint / edit shapes are NOT this lane (those are sc-5487, still torch).
+        assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
+            "model": "sdxl", "mode": "edit_image", "referenceAssetId": "a", "sourceAssetId": "s"
+        }))));
+        assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
+            "model": "sdxl", "referenceAssetId": "a", "sourceAssetId": "s"
+        }))));
+        assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
+            "model": "sdxl", "referenceAssetId": "a", "maskAssetId": "m"
         }))));
     }
 }

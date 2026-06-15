@@ -147,6 +147,14 @@ use mlx_gen_instantid::{
 use candle_gen_instantid::{
     BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,
 };
+// SDXL IP-Adapter-Plus reference provider (sc-5488, epic 5480) — the candle (Windows/CUDA) reference-
+// conditioning sibling of the InstantID lane, living in `candle-gen-sdxl` (it composes that crate's
+// IP-Adapter Resampler + the new CLIP ViT-H image encoder + a pure-IP denoise). Candle-only: macOS keeps
+// the MLX SDXL IP path (the registry `SdxlSubMode::Ip`), so these named types resolve only off-Mac.
+// `candle_gen_sdxl` is already force-link anchored above (the registered txt2img `sdxl`); this is the
+// named-type import the bespoke reference route (`image_jobs/sdxl_ipadapter.rs`) drives.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_sdxl::{IpAdapterSdxl, IpAdapterSdxlPaths, IpAdapterSdxlRequest};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -425,6 +433,21 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(all(target_os = "windows", feature = "backend-candle"))]
     let handled = if settings.backend_candle_enabled && instantid_available(&request, settings) {
         generate_instantid_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && sdxl_ipadapter_available(&request, settings) {
+        // SDXL IP-Adapter-Plus reference conditioning (sc-5488) — checked BEFORE `is_candle_engine`
+        // because `sdxl`/`realvisxl` ARE candle txt2img ids, so without this a reference job would be
+        // caught by the txt2img branch and silently drop the reference.
+        generate_candle_sdxl_ipadapter_stream(
             api,
             settings,
             job,
@@ -910,6 +933,11 @@ include!("image_jobs/kolors.rs");
     all(target_os = "windows", feature = "backend-candle")
 ))]
 include!("image_jobs/instantid.rs");
+// SDXL IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS keeps
+// the MLX SDXL IP path (sdxl.rs `SdxlSubMode::Ip`); there is no MLX `IpAdapterSdxl`, so this is
+// candle-exclusive.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+include!("image_jobs/sdxl_ipadapter.rs");
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");
