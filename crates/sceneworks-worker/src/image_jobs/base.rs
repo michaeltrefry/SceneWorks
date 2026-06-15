@@ -1164,6 +1164,12 @@ async fn generate_candle_stream(
                     negative_prompt.clone(),
                     None,
                     true_cfg,
+                    // The candle txt2img families don't advertise sampler/scheduler selection (each uses
+                    // its family default), so no override is forwarded — matching this path's behavior
+                    // before sc-5392 added those params to `generate_one` for the macOS Chroma path.
+                    None,
+                    None,
+                    None,
                     &cancel,
                     on_progress,
                 )?;
