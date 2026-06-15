@@ -587,30 +587,42 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "891b
 # #57 moved its `sceneworks-gen-core` `fa0f75b` -> `d3ec5e5`, so this worker's mlx-gen + gen-core pins
 # are bumped to `d3ec5e5` in LOCKSTEP (above) to keep the candle lane on ONE gen-core rev. ALL candle
 # deps MUST share this rev.
+#
+# sc-5491 bumps the candle pin `89b28dd` -> `0c8b9ac` (candle-gen main HEAD, #65): picks up the candle
+# InstantID CFG-inference FIXES that Phase 5 real-weight GPU validation surfaced — (1) the dual-CLIP
+# conditioner ran candle's STOCK `ClipTextTransformer` on a batch-2 `[neg, prompt]` tensor, but candle's
+# CLIP causal mask only broadcasts onto the per-head scores at batch 1; (2) the IP-Adapter K/V install
+# walked down->mid->up instead of the diffusers `attn_processors` order down->up->mid, dropping a 640-dim
+# K/V pair onto a 1280-dim block. Both made EVERY CFG InstantID generation crash, so the candle InstantID
+# provider wired below (#61) was runtime-broken from #61 until #65. candle-gen #65 KEEPS
+# `sceneworks-gen-core` at `891bee4` (== this worker's mlx-gen pin), so there is NO mlx-gen bump and the
+# `--features backend-candle` graph still resolves exactly ONE gen-core rev. ALL candle deps MUST share
+# this rev. Re-validated on RTX PRO 6000 against gen-core 891bee4: ArcFace identity cosine 0.87 / angle
+# 0.89 / pose 0.58, pre- + mid-denoise cancel honored.
 [target.'cfg(target_os = "windows")'.dependencies]
-candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
 # `image_jobs.rs` (`use candle_gen_<x> as _;`) so the MSVC release linker keeps the registration.
 # Same git rev as `candle-gen-sdxl` so candle builds once and the gen-core pin stays single.
-candle-gen-z-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
-candle-gen-flux = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
-candle-gen-flux2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
-candle-gen-qwen-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-z-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
+candle-gen-flux = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
+candle-gen-flux2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
+candle-gen-qwen-image = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle Chroma provider (sc-5484, epic 3692) — Windows/CUDA sibling of mlx-gen-chroma. Self-registers
 # THREE T2I ids: `chroma1_hd` / `chroma1_base` / `chroma1_flash` (FLUX.1-schnell-derived DiT, distilled-
 # guidance Approximator, T5-only conditioning, true-CFG). Force-linked in `image_jobs.rs`
 # (`use candle_gen_chroma as _;`). Same rev as the others (one candle build, single gen-core pin).
-candle-gen-chroma = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-chroma = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle VIDEO providers (sc-5097) — Windows/CUDA siblings of mlx-gen-wan / mlx-gen-ltx. wan registers
 # `wan2_2_ti2v_5b`; ltx registers `ltx_2_3_distilled` (txt2video first slice — no conditioning/audio/
 # LoRA/quant). Force-linked in video_jobs.rs (`use candle_gen_<x> as _;`). Same rev as the others.
-candle-gen-wan = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
-candle-gen-ltx = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-wan = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
+candle-gen-ltx = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle JoyCaption captioner (sc-5098) — Windows/CUDA sibling of mlx-gen-joycaption. Registers the
 # captioner id `fancyfeast/llama-joycaption-beta-one-hf-llava` (image->text). Force-linked in
 # caption_jobs.rs (`use candle_gen_joycaption as _;`). Same rev as the others.
-candle-gen-joycaption = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-joycaption = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle Lens / Lens-Turbo provider (epic 5107 / sc-5126) — Windows/CUDA sibling of mlx-gen-lens.
 # Self-registers TWO ids: `lens` (base, 20-step/CFG 5.0) + `lens_turbo` (distilled, 4-step/g 1.0).
 # gpt-oss-20b MoE text encoder + 48-layer dual-stream MMDiT + the Flux.2 VAE; pure T2I (no
@@ -619,19 +631,19 @@ candle-gen-joycaption = { git = "https://github.com/michaeltrefry/candle-gen", r
 # `generate_candle_stream`. Force-linked in image_jobs.rs (`use candle_gen_lens as _;`) so the MSVC
 # release linker keeps the `inventory::submit!` registrations. Same rev as the others (one candle build,
 # single gen-core pin). Retires the Python `/opt/lens-venv` transformers-5 inference sidecar off-Mac.
-candle-gen-lens = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-lens = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle prompt-refine LLM provider (sc-5500 phase 2 / sc-5525) — Windows/CUDA sibling with NO mlx
 # twin (greenfield). Self-registers the `prompt_refine` `TextLlm` (Llama-3.2-3B-Instruct, the gen-core
 # `TextLlm` contract from sc-5500) into the shared inventory registry; the worker resolves it via
 # `gen_core::load_textllm("prompt_refine", …)`. Force-linked in prompt_refine_jobs.rs
 # (`use candle_gen_prompt_refine as _;`). Same rev as the other candle crates (one candle build,
 # single gen-core pin == the mlx-gen pin fa0f75b).
-candle-gen-prompt-refine = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-prompt-refine = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle Kolors provider (sc-5576, epic 3692) — Windows/CUDA sibling of mlx-gen-kolors. Self-registers
 # the `kolors` T2I id (SDXL UNet with the SDXL `add_embedding` + the Kolors `encoder_hid_proj`, driven
 # by a from-scratch ChatGLM3-6B text encoder). Pure T2I (edit / IP-reference / pose-control stay on the
 # Python worker). Force-linked in image_jobs.rs (`use candle_gen_kolors as _;`). Same rev as the others.
-candle-gen-kolors = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-kolors = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle SenseNova-U1 NEO-Unify provider (sc-5576, epic 3692) — Windows/CUDA sibling of
 # mlx-gen-sensenova. Self-registers TWO T2I ids: `sensenova_u1_8b` (50 NFE / CFG 4.0) + the 8-step
 # distilled `sensenova_u1_8b_fast` (CFG 1.0; the loader merges the distill LoRA on CPU per candle-gen
@@ -640,20 +652,20 @@ candle-gen-kolors = { git = "https://github.com/michaeltrefry/candle-gen", rev =
 # driven OFF the registry via the concrete `T2iModel::{vqa, interleave_gen}` in `sensenova_jobs.rs`
 # (text / text+image output the neutral `Generator` contract can't express), retiring the off-Mac
 # torch path. Force-linked in image_jobs.rs (`use candle_gen_sensenova as _;`). Same rev.
-candle-gen-sensenova = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen-sensenova = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # candle-gen core (sc-5501): a direct dep so `sensenova_jobs.rs` can build the `[3,H,W]` understanding
 # input tensors for VQA / interleave (`candle_gen::candle_core::Tensor` + `default_device`). Same git
 # rev as every candle-gen provider above, so the `--features backend-candle` graph still resolves ONE
 # candle-gen / gen-core build (the skew gate stays single-rev).
-candle-gen = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+candle-gen = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 # Candle InstantID identity-preserving SDXL provider (sc-5491, epic 5480) — the Windows/CUDA sibling
 # of `mlx-gen-instantid`, retiring the Python `_vendor/instantid` off-Mac. A BESPOKE provider (not an
 # inventory-registered `Generator`): referenced by name (`InstantId::load`) from the worker's
 # `generate_instantid_stream`, composing candle-gen-sdxl (the IP-Adapter / IdentityNet ControlNet /
 # euler-ancestral / denoise blocks) + candle-gen-face (SCRFD + ArcFace). Same git rev as every
 # candle-gen provider above, so `--features backend-candle` still resolves ONE candle-gen / gen-core
-# build (the sc-4482 skew gate stays single-rev — this rev pins gen-core 24c89c9, matching mlx-gen).
-candle-gen-instantid = { git = "https://github.com/michaeltrefry/candle-gen", rev = "89b28dd5f499ff61d44e51d3260e4b8cb225f834", features = ["cuda"], optional = true }
+# build (the sc-4482 skew gate stays single-rev — this rev pins gen-core 891bee4, matching mlx-gen).
+candle-gen-instantid = { git = "https://github.com/michaeltrefry/candle-gen", rev = "0c8b9ac87fc993f4dab2263e0628d2742bf0b012", features = ["cuda"], optional = true }
 
 [lints]
 workspace = true
