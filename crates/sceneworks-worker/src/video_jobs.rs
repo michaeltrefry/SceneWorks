@@ -69,11 +69,13 @@ use mlx_gen_bernini as _;
 // `gen_core::load("scail2_14b")`, no direct type contact — the "no generator registered" trap).
 #[cfg(target_os = "macos")]
 use mlx_gen_scail2 as _;
-// Candle (Windows/CUDA) video providers (sc-5097) — force-link anchors so their `inventory::submit!`
-// registrations (`wan2_2_ti2v_5b` / `ltx_2_3_distilled`) survive the MSVC release linker, mirroring
-// the image providers in image_jobs.rs.
+// Candle (Windows/CUDA) video providers (sc-5097; sc-5493 adds svd) — force-link anchors so their
+// `inventory::submit!` registrations (`wan2_2_ti2v_5b` / `ltx_2_3_distilled` / `svd_xt`) survive the
+// MSVC release linker, mirroring the image providers in image_jobs.rs.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_ltx as _;
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_svd as _;
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_wan as _;
 #[cfg(target_os = "macos")]
@@ -2582,6 +2584,8 @@ async fn generate_video(
 const CANDLE_WAN_ADAPTER: &str = "candle_wan";
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 const CANDLE_LTX_ADAPTER: &str = "candle_ltx";
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_SVD_ADAPTER: &str = "candle_svd";
 
 /// Default HuggingFace repos the candle video providers load (overridable via the manifest `repo`).
 /// The candle wan providers read a Wan2.2 diffusers snapshot — the TI2V-5B, or the T2V-A14B /
@@ -2601,8 +2605,8 @@ const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 /// SceneWorks video model id → candle registry engine id, or `None` for an id the candle video lane
 /// does not serve. Note ltx maps to `ltx_2_3_distilled` (the candle provider's id), not the MLX
 /// `ltx_2_3`. Covers the base txt2video ids (5B + ltx) plus the Wan2.2 **14B** dual-expert MoE pair
-/// (sc-5174 / sc-5175): `wan_2_2_t2v_14b` (text→video) and `wan_2_2_i2v_14b` (image→video). SVD and
-/// `ltx_2_3_eros` have no candle provider and stay on torch.
+/// (sc-5174 / sc-5175): `wan_2_2_t2v_14b` (text→video) and `wan_2_2_i2v_14b` (image→video), plus `svd`
+/// (image→video, sc-5493 / epic 5481). `ltx_2_3_eros` has no candle provider yet and stays on torch.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 fn candle_video_engine_id(model: &str) -> Option<&'static str> {
     match model {
@@ -2610,6 +2614,8 @@ fn candle_video_engine_id(model: &str) -> Option<&'static str> {
         "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
         "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
         "ltx_2_3" => Some("ltx_2_3_distilled"),
+        // SVD-XT image→video (sc-5493 / epic 5481): the candle-gen-svd provider's `svd_xt` engine.
+        "svd" => Some("svd_xt"),
         _ => None,
     }
 }
@@ -2622,10 +2628,10 @@ fn is_candle_video_engine(model: &str) -> bool {
 
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 fn candle_video_adapter_label(engine_id: &str) -> &'static str {
-    if engine_id == "ltx_2_3_distilled" {
-        CANDLE_LTX_ADAPTER
-    } else {
-        CANDLE_WAN_ADAPTER
+    match engine_id {
+        "ltx_2_3_distilled" => CANDLE_LTX_ADAPTER,
+        "svd_xt" => CANDLE_SVD_ADAPTER,
+        _ => CANDLE_WAN_ADAPTER,
     }
 }
 
@@ -2635,6 +2641,7 @@ fn candle_video_adapter_label(engine_id: &str) -> &'static str {
 fn candle_video_default_repo(engine_id: &str) -> &'static str {
     match engine_id {
         "ltx_2_3_distilled" => CANDLE_LTX_REPO,
+        "svd_xt" => SVD_REPO,
         "wan2_2_t2v_14b" => CANDLE_WAN_T2V_14B_REPO,
         "wan2_2_i2v_14b" => CANDLE_WAN_I2V_14B_REPO,
         // `wan2_2_ti2v_5b` (and any other wan id) → the 5B TI2V snapshot.
@@ -2695,10 +2702,11 @@ fn candle_video_raw_settings(request: &VideoRequest, repo: &str) -> Value {
     Value::Object(raw)
 }
 
-/// Per-request conditioning for a candle video generation. Only the Wan2.2 **14B I2V** engine is
-/// conditioned (sc-5174 / sc-5175): it requires a source image, loaded to a single
-/// [`Conditioning::Reference`] — the channel-concat first frame the provider VAE-encodes into its
-/// `y` (`in_dim=36`). The candle analog of the MLX Wan i2v conditioning ([`resolve_wan_conditioning`]).
+/// Per-request conditioning for a candle video generation. The Wan2.2 **14B I2V** engine
+/// (sc-5174 / sc-5175) and **SVD-XT** (sc-5493) are conditioned: each requires a source image, loaded
+/// to a single [`Conditioning::Reference`] — for Wan, the channel-concat first frame the provider
+/// VAE-encodes into its `y` (`in_dim=36`); for SVD, the CLIP-encoded + noise-aug VAE-encoded driving
+/// frame. The candle analog of the MLX i2v / SVD conditioning ([`resolve_wan_conditioning`]).
 /// Every other candle video engine (5B, T2V-14B, ltx) is txt2video-only, so this returns an empty set.
 /// The router's `video_request_candle_eligible` already guarantees the i2v shape carries a source and
 /// the txt2video ids do not, but the source is required here too so a mis-routed job fails clearly.
@@ -2709,7 +2717,9 @@ fn resolve_candle_video_conditioning(
     project_path: &Path,
     engine_id: &str,
 ) -> WorkerResult<Vec<Conditioning>> {
-    if engine_id != "wan2_2_i2v_14b" {
+    // The Wan2.2 14B I2V engine (sc-5175) and SVD-XT (sc-5493) condition on a single source image; every
+    // other candle video engine (5B, T2V-14B, ltx) is txt2video-only (empty conditioning).
+    if engine_id != "wan2_2_i2v_14b" && engine_id != "svd_xt" {
         return Ok(Vec::new());
     }
     let asset_id = request
@@ -2718,10 +2728,9 @@ fn resolve_candle_video_conditioning(
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "wan_2_2_i2v_14b: image-to-video requires a source image (sourceAssetId)."
-                    .to_owned(),
-            )
+            WorkerError::InvalidPayload(format!(
+                "{engine_id}: image-to-video requires a source image (sourceAssetId)."
+            ))
         })?;
     let image = crate::image_jobs::load_reference_image(
         &settings.data_dir,
@@ -2763,6 +2772,46 @@ async fn generate_candle_video(
     // engine is txt2video-only (empty conditioning).
     let conditioning =
         resolve_candle_video_conditioning(settings, request, project_path, engine_id)?;
+
+    // SVD-XT (sc-5493): image→video only — no prompt / negative / guidance (the engine uses its
+    // frame-wise CFG ramp), a model-fixed burst (≤25 frames), the user `fps` as the playback cadence,
+    // and the motion micro-conditioning knobs (motion_bucket_id / noise_aug_strength / decode_chunk /
+    // conditioning_fps). Mirrors the MLX `generate_svd`; the conditioning is the source `Reference`
+    // resolved above.
+    if engine_id == "svd_xt" {
+        let input = VideoGenInput {
+            engine_id,
+            model_dir,
+            conditioning,
+            width: request.width,
+            height: request.height,
+            frames: svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32,
+            fps: request.fps,
+            steps: Some(svd_steps(request)),
+            seed: resolve_video_seed(request) as u64,
+            motion_bucket_id: Some(
+                svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
+            ),
+            noise_aug_strength: Some(svd_f32(
+                request,
+                "noiseAugStrength",
+                "noiseAugStrength",
+                0.02,
+            )),
+            decode_chunk_size: Some(
+                svd_i32(request, "decodeChunkSize", "decodeChunkSize", 8, 1, 64) as u32,
+            ),
+            conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
+            ..VideoGenInput::default()
+        };
+        let mut raw_settings = svd_raw_settings(request);
+        if let Value::Object(map) = &mut raw_settings {
+            map.insert("repo".to_owned(), Value::String(repo.clone()));
+        }
+        let decoded = generate_video(api, settings, job, backend, input).await?;
+        return Ok((decoded, adapter, raw_settings));
+    }
+
     // Descriptor-narrowed sampling surface: wan (5B + 14B) takes guidance + a negative prompt; the
     // distilled ltx takes neither (single-stage, no CFG). Steps/guidance default to the provider's own
     // constants when the request omits them.
@@ -4236,7 +4285,11 @@ async fn generate_ltx(
 const SVD_ADAPTER: &str = "svd_video";
 
 /// The diffusers SVD-XT repo the engine loads directly (fp16 `vae/` + `unet/` + `image_encoder/`).
-#[cfg(target_os = "macos")]
+/// Shared by the MLX (macOS) lane and the candle (Windows/CUDA) lane (sc-5493).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const SVD_REPO: &str = "stabilityai/stable-video-diffusion-img2vid-xt";
 
 /// SceneWorks model id → mlx-gen registry id for the SVD family (only `svd` → `svd_xt`), or `None`.
@@ -4294,7 +4347,10 @@ fn resolve_svd_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 /// then clamp to `[min, max]`. Mirrors the torch `safe_int(advanced.get(adv_key),
 /// target.get(manifest_key, default), min, max)` (advanced overrides the manifest, which overrides
 /// the builtin default; the resolved value is clamped).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn svd_i32(
     request: &VideoRequest,
     adv_key: &str,
@@ -4315,7 +4371,10 @@ fn svd_i32(
 
 /// Read an SVD float knob: `advanced[adv_key]` → `modelManifestEntry[manifest_key]` → `default`
 /// (no clamp). Mirrors the torch `float(advanced.get(adv_key, target.get(manifest_key, default)))`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn svd_f32(request: &VideoRequest, adv_key: &str, manifest_key: &str, default: f32) -> f32 {
     request
         .advanced
@@ -4329,7 +4388,10 @@ fn svd_f32(request: &VideoRequest, adv_key: &str, manifest_key: &str, default: f
 /// Inference steps for an SVD request: `advanced.steps` → `modelManifestEntry.steps[quality]` (else
 /// its `balanced`) → the builtin quality ladder (fast 15 / balanced 25 / best 30), clamped 1..=80.
 /// Mirrors the torch `_num_inference_steps` for the `svd_video` adapter.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn svd_steps(request: &VideoRequest) -> u32 {
     let builtin = match request.quality.as_str() {
         "fast" => 15,
@@ -4383,8 +4445,12 @@ fn resolve_svd_conditioning(
     }])
 }
 
-/// Raw-settings recorded on a real MLX SVD asset (the resolved knobs + real-inference markers).
-#[cfg(target_os = "macos")]
+/// Raw-settings recorded on a real SVD asset (the resolved knobs + real-inference markers). Shared by
+/// the MLX (macOS) and candle (Windows/CUDA, sc-5493) lanes.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn svd_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -7730,12 +7796,18 @@ mod candle_video_label_tests {
         );
         // ltx maps to the candle distilled id, not the MLX `ltx_2_3`.
         assert_eq!(candle_video_engine_id("ltx_2_3"), Some("ltx_2_3_distilled"));
-        // SVD and the eros LTX have no candle provider.
-        for model in ["svd", "ltx_2_3_eros"] {
-            assert_eq!(candle_video_engine_id(model), None, "{model}");
-            assert!(!is_candle_video_engine(model));
-        }
-        for model in ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "ltx_2_3"] {
+        // SVD maps to the candle `svd_xt` engine (sc-5493).
+        assert_eq!(candle_video_engine_id("svd"), Some("svd_xt"));
+        // The eros LTX still has no candle provider.
+        assert_eq!(candle_video_engine_id("ltx_2_3_eros"), None);
+        assert!(!is_candle_video_engine("ltx_2_3_eros"));
+        for model in [
+            "wan_2_2",
+            "wan_2_2_t2v_14b",
+            "wan_2_2_i2v_14b",
+            "ltx_2_3",
+            "svd",
+        ] {
             assert!(is_candle_video_engine(model), "{model}");
         }
     }
@@ -7754,6 +7826,7 @@ mod candle_video_label_tests {
             candle_video_adapter_label("ltx_2_3_distilled"),
             "candle_ltx"
         );
+        assert_eq!(candle_video_adapter_label("svd_xt"), "candle_svd");
     }
 
     #[test]
@@ -7774,6 +7847,17 @@ mod candle_video_label_tests {
             candle_video_default_repo("ltx_2_3_distilled"),
             "Lightricks/LTX-2.3"
         );
+        // SVD-XT loads the stock diffusers img2vid-xt snapshot directly (sc-5493).
+        assert_eq!(
+            candle_video_default_repo("svd_xt"),
+            "stabilityai/stable-video-diffusion-img2vid-xt"
+        );
+    }
+
+    #[test]
+    fn candle_video_engine_ids_map_svd() {
+        assert_eq!(candle_video_engine_id("svd"), Some("svd_xt"));
+        assert!(is_candle_video_engine("svd"));
     }
 
     #[test]
@@ -7792,18 +7876,16 @@ mod candle_video_label_tests {
                 "{engine_id} must be txt2video-only"
             );
         }
-        // The 14B I2V requires a source image — a request without one errors before touching disk.
-        let payload = json!({ "mode": "image_to_video" });
-        let no_source = VideoRequest::from_payload(payload.as_object().expect("object"));
-        assert!(
-            resolve_candle_video_conditioning(
-                &settings,
-                &no_source,
-                project_path,
-                "wan2_2_i2v_14b"
-            )
-            .is_err(),
-            "i2v without a source image must error"
-        );
+        // The 14B I2V + SVD-XT require a source image — a request without one errors before touching
+        // disk (sc-5175 / sc-5493).
+        for engine_id in ["wan2_2_i2v_14b", "svd_xt"] {
+            let payload = json!({ "mode": "image_to_video" });
+            let no_source = VideoRequest::from_payload(payload.as_object().expect("object"));
+            assert!(
+                resolve_candle_video_conditioning(&settings, &no_source, project_path, engine_id)
+                    .is_err(),
+                "{engine_id} without a source image must error"
+            );
+        }
     }
 }
