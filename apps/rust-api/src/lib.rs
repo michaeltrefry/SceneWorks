@@ -332,6 +332,26 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
+    // The credential store is created 0600 and the API never returns tokens over
+    // HTTP, but a sysadmin or restore could leave the on-disk file group/world
+    // readable. Warn (don't fail) at startup so the secret's only at-rest
+    // protection — its file mode — is visibly broken instead of silently so.
+    #[cfg(unix)]
+    {
+        let creds_path = settings
+            .config_dir
+            .join(sceneworks_core::credentials::CREDENTIALS_FILENAME);
+        if let Some(mode) = sceneworks_core::credentials::loose_credentials_mode(&creds_path) {
+            eprintln!(
+                "WARNING: credentials file {} is mode {:o} — group/world accessible. It \
+                 holds download tokens that should be owner-only. Run `chmod 600 {}` to \
+                 restrict it.",
+                creds_path.display(),
+                mode,
+                creds_path.display()
+            );
+        }
+    }
     let run_utility_inprocess = settings.run_utility_inprocess;
     let app = create_app(settings)?;
     let listener = tokio::net::TcpListener::bind(address).await?;

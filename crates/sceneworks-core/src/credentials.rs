@@ -189,6 +189,26 @@ fn restrict_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// True when a Unix file mode grants any access to the group or "other" classes,
+/// i.e. it is looser than the `0600` we write. Pure so the security decision is
+/// unit-tested without touching the filesystem. The permission bits live in the
+/// low 9 bits; `0o077` is the group + other read/write/execute mask.
+pub fn mode_is_group_or_world_accessible(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+/// If the credentials file at `path` exists and its mode is looser than `0600`
+/// (group- or world-accessible), return the offending permission bits so the
+/// caller can warn the operator to `chmod 600` it. Returns `None` when the file
+/// is absent, unreadable, or already restricted. Unix-only: other platforms keep
+/// secrets in the OS keychain rather than this file (see module docs).
+#[cfg(unix)]
+pub fn loose_credentials_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path).ok()?.permissions().mode() & 0o777;
+    mode_is_group_or_world_accessible(mode).then_some(mode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +291,41 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn mode_predicate_flags_only_group_or_world_access() {
+        // The 0600 we write is fine; so is the even tighter 0400/0000.
+        assert!(!mode_is_group_or_world_accessible(0o600));
+        assert!(!mode_is_group_or_world_accessible(0o400));
+        assert!(!mode_is_group_or_world_accessible(0o000));
+        // Any group or other bit (read, write, or execute) is too loose.
+        assert!(mode_is_group_or_world_accessible(0o640)); // group read
+        assert!(mode_is_group_or_world_accessible(0o604)); // other read
+        assert!(mode_is_group_or_world_accessible(0o660)); // group write
+        assert!(mode_is_group_or_world_accessible(0o644)); // typical umask leak
+        assert!(mode_is_group_or_world_accessible(0o777));
+    }
+
+    /// The startup-warning probe must fire only for a present, too-loose file and
+    /// stay silent when the file is absent or already 0600.
+    #[cfg(unix)]
+    #[test]
+    fn loose_mode_reports_only_present_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialFileStore::new(dir.path());
+
+        // Absent file → nothing to warn about.
+        assert_eq!(loose_credentials_mode(store.path()), None);
+
+        // Present and properly restricted (0600) → no warning.
+        store.set("example.com", "", "bearer", "tok").expect("set");
+        assert_eq!(loose_credentials_mode(store.path()), None);
+
+        // Loosened to 0644 → report the offending mode for the operator message.
+        std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o644))
+            .expect("loosen");
+        assert_eq!(loose_credentials_mode(store.path()), Some(0o644));
     }
 }
