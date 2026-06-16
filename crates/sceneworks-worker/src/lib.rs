@@ -112,10 +112,15 @@ mod pose_jobs;
 // path stays the Windows/Linux backend.
 #[cfg(target_os = "macos")]
 mod kps_jobs;
-// Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via `ort`/CoreML,
-// reusing the same bundled onnxruntime sc-3487 ships. macOS-only; the Python torch
-// Real-ESRGAN / AuraSR path stays the Windows/Linux backend.
-#[cfg(target_os = "macos")]
+// Image upscaling: Real-ESRGAN (epic 3482, sc-3489) RRDBNet x2/x4 via `ort`/CoreML on Mac, plus the
+// SeedVR2 one-step diffusion upscaler — native MLX on Mac (sc-4815) and the candle CUDA backend on
+// Windows (sc-5928). So the module compiles on Mac AND the Windows/CUDA candle lane; the ort/CoreML
+// Real-ESRGAN path inside stays Mac-gated (the Python torch Real-ESRGAN / AuraSR path is the
+// Windows/Linux backend), while the SeedVR2 path is backend-neutral (`gen_core::load("seedvr2")`).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 mod upscale_jobs;
 // YOLO11 person detection via onnxruntime/CoreML (epic 3482, sc-3488/sc-3633).
 // macOS-only like pose_jobs: the `ort` engine + CoreML EP only mean anything on
@@ -145,7 +150,10 @@ use downloads::*;
 use kps_jobs::*;
 #[cfg(target_os = "macos")]
 use pose_jobs::*;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use upscale_jobs::*;
 
 const INSTALL_MARKER: &str = ".sceneworks-download-complete.json";
@@ -749,22 +757,28 @@ async fn run_utility_job(
         JobType::KpsExtract => run_kps_extract_job(api, settings, &job)
             .await
             .map_err(|error| ("Keypoint extraction failed.", error)),
-        // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
-        // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
-        // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool
-        // works on a Python-free Mac. macOS-only; off macOS `ImageUpscale` is never
-        // advertised by the Rust worker, so this falls to the `_` arm (Python path).
-        // The routing oracle keeps `engine=aura-sr` on the Python worker.
-        #[cfg(target_os = "macos")]
+        // Image upscaling, served in-process by `upscale_jobs::run_image_upscale_job`: Real-ESRGAN
+        // RRDBNet x2/x4 via onnxruntime/CoreML (epic 3482, sc-3489, Mac) + SeedVR2 one-step diffusion
+        // (native MLX on Mac sc-4815 / candle CUDA on Windows sc-5928). Available on Mac AND the
+        // Windows/CUDA candle lane; on a plain Windows/Linux box `ImageUpscale` is never advertised by
+        // the Rust worker, so it falls to the `_` arm (Python Real-ESRGAN/AuraSR). The routing oracle
+        // refuses `engine=seedvr2` on torch and `engine=real-esrgan`/`aura-sr` on the candle worker.
+        #[cfg(any(
+            target_os = "macos",
+            all(target_os = "windows", feature = "backend-candle")
+        ))]
         JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Image upscale failed.", error)),
-        // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
-        // (`mlx-gen-seedvr2`) — SceneWorks' first video upscaler. Decodes the source clip,
-        // runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio
-        // through. macOS-only; off macOS `VideoUpscale` is never advertised by any worker (no
-        // torch path), so this falls to the `_` arm and the routing oracle reports it unsupported.
-        #[cfg(target_os = "macos")]
+        // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
+        // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
+        // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
+        // Available on Mac + the Windows/CUDA candle lane; elsewhere `VideoUpscale` is never advertised
+        // (no torch path), so it falls to the `_` arm and the routing oracle reports it unsupported.
+        #[cfg(any(
+            target_os = "macos",
+            all(target_os = "windows", feature = "backend-candle")
+        ))]
         JobType::VideoUpscale => run_video_upscale_job(api, settings, &job)
             .await
             .map_err(|error| ("Video upscale failed.", error)),

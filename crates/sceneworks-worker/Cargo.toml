@@ -202,6 +202,12 @@ backend-candle = [
     # bespoke provider referenced by name (`PulidFlux::load`), NOT inventory-registered, so the worker
     # `generate_candle_pulid_stream` path calls it directly off-Mac — retiring the torch PuLID adapter.
     "dep:candle-gen-pulid",
+    # sc-5928 (epic 4811 / epic 5482): the candle SeedVR2 one-step diffusion upscaler — the Windows/CUDA
+    # sibling of `mlx-gen-seedvr2`. Self-registers `seedvr2` / `seedvr2_3b` / `seedvr2_7b` (image upscale
+    # + the net-new video upscale) into the shared gen_core inventory; the worker reaches it via
+    # `gen_core::load` from upscale_jobs.rs (image) + video_jobs.rs (video). Real-ESRGAN stays the fast
+    # default; SeedVR2 is the additional high-fidelity / video choice.
+    "dep:candle-gen-seedvr2",
 ]
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -808,6 +814,15 @@ candle-gen-instantid = { git = "https://github.com/michaeltrefry/candle-gen", re
 # candle-gen provider above, so `--features backend-candle` still resolves ONE candle-gen / gen-core
 # build (the sc-4482 skew gate stays single-rev — this rev pins gen-core 154af37, matching mlx-gen).
 candle-gen-pulid = { git = "https://github.com/michaeltrefry/candle-gen", rev = "b005cf72b57af42a27fc2c7965b0df9ea0ca73d1", features = ["cuda"], optional = true }
+# Candle SeedVR2 one-step diffusion super-resolution upscaler (sc-5928, epic 4811 / epic 5482) — the
+# Windows/CUDA sibling of `mlx-gen-seedvr2`. Self-registers the upscaler ids `seedvr2` / `seedvr2_3b` /
+# `seedvr2_7b` (`Modality::Both`: image upscale via Reference + video upscale via VideoClip; int8/int4
+# quant + the 7B variant from sc-5927) into the shared gen_core inventory. The worker reaches it via
+# `gen_core::load("seedvr2")` / `"seedvr2_3b"` from `upscale_jobs::run_seedvr2_upscale` (image) and
+# `video_jobs::run_video_upscale_job` (video). Force-linked in image_jobs.rs + video_jobs.rs
+# (`use candle_gen_seedvr2 as _;`). Same git rev as every other candle-gen provider (one candle build,
+# single gen-core pin == the mlx-gen pin 154af37; carries sc-5157/5926/5927 from candle-gen #80/81/82).
+candle-gen-seedvr2 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "b005cf72b57af42a27fc2c7965b0df9ea0ca73d1", features = ["cuda"], optional = true }
 
 [lints]
 workspace = true

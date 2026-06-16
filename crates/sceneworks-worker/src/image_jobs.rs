@@ -117,6 +117,13 @@ use candle_gen_z_image as _;
 // keeps the `inventory::submit!` (the dead-strip trap that bit Kolors on MLX).
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_lens as _;
+// Candle SeedVR2 upscaler (sc-5928, epic 4811 / epic 5482) — the Windows/CUDA sibling of the Mac
+// `mlx_gen_seedvr2` anchor above. Self-registers the upscaler ids `seedvr2` / `seedvr2_3b` /
+// `seedvr2_7b` into the shared gen_core inventory; the image upscale path reaches it via
+// `gen_core::load("seedvr2")` from `upscale_jobs::run_seedvr2_upscale`. Force-linked so the MSVC
+// release linker keeps the `inventory::submit!` registrations.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_seedvr2 as _;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by FaceEmbedder in Phase 3.
 // InstantID (sc-3345) is a bespoke provider, not an inventory-registered `Generator`, so it is
 // referenced by name (`InstantId::load`) rather than anchored with `as _;` — and the native face

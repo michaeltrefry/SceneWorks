@@ -84,6 +84,12 @@ use candle_gen_ltx as _;
 use candle_gen_svd as _;
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_wan as _;
+// Candle SeedVR2 video upscaler (sc-5928, epic 4811 / epic 5482) — the Windows/CUDA sibling of the
+// Mac `mlx_gen_seedvr2` anchor above. Self-registers `seedvr2_3b` (+ `seedvr2` / `seedvr2_7b`) into
+// the shared gen_core inventory; the `video_upscale` path reaches it via `gen_core::load` from
+// `run_video_upscale_job`. Force-linked so the MSVC release linker keeps the `inventory::submit!`.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_seedvr2 as _;
 #[cfg(any(
     target_os = "macos",
     all(target_os = "windows", feature = "backend-candle")
@@ -1036,24 +1042,48 @@ fn video_progress(
 
 /// HF repo hosting the raw SeedVR2 checkpoint (`numz/SeedVR2_comfyUI`); the engine converts it
 /// in-memory at load (no Python). Override the staged dir with `SCENEWORKS_SEEDVR2_DIR`.
-#[cfg(target_os = "macos")]
+// SeedVR2 video upscale runs on Mac (native MLX) AND the Windows/CUDA candle lane (sc-5928); these
+// constants/helpers are backend-neutral (gen_core + ffmpeg + the shared streaming driver).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const SEEDVR2_DIT_3B_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
-/// The engine registry id wired for video upscale (3B; 7B = sc-5197).
-#[cfg(target_os = "macos")]
+/// The engine registry id wired for video upscale (3B; 7B = sc-5197 / sc-5927).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const SEEDVR2_ENGINE_ID: &str = "seedvr2_3b";
-/// Adapter id recorded on the result asset (mirrors the other `mlx_*` video adapters).
-#[cfg(target_os = "macos")]
+/// Adapter id recorded on the result asset for provenance (mirrors the other `mlx_*` video adapters;
+/// SeedVR2 itself takes no LoRA — this is metadata only).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const SEEDVR2_ADAPTER: &str = "mlx_seedvr2";
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 const SEEDVR2_CANCEL_MESSAGE: &str = "Video upscale canceled by user.";
 
 /// Snap a dimension to the SeedVR2 VAE/patch stride (a multiple of 16, the engine's hard
 /// requirement), rounding to nearest and clamping to the engine's `[16, 4096]` size range.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn snap_seedvr2_dim(value: u32) -> u32 {
     let rounded = value.saturating_add(8) / 16 * 16;
     rounded.clamp(16, 4096)
@@ -1061,7 +1091,10 @@ fn snap_seedvr2_dim(value: u32) -> u32 {
 
 /// Resolve a project-relative asset path safely under `project_path` (reject `..` / absolute
 /// components — same guard as `upscale_jobs::resolve_source`).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
     let mut path = project_path.to_path_buf();
     for component in Path::new(rel).components() {
@@ -1076,7 +1109,10 @@ fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
 /// Provision the SeedVR2 checkpoint dir: an env-pinned dir (pre-staged for local validation) wins,
 /// else the app cache (download the VAE + 3B DiT from `numz/SeedVR2_comfyUI` on first use). Returns
 /// the dir to hand the engine as `WeightsSource::Dir`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 async fn ensure_seedvr2_weights(
     api: &ApiClient,
     settings: &Settings,
@@ -1110,7 +1146,10 @@ async fn ensure_seedvr2_weights(
 /// Decode every frame of `source` to an engine [`Image`] sequence (native resolution — the engine
 /// bicubic-upscales internally to the target). Uses the bundled ffmpeg (`run_ffmpeg`) into PNGs in a
 /// temp dir, then loads them in order. `-fps_mode passthrough` keeps the exact source frame count.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 async fn decode_seedvr2_source_frames(
     api: &ApiClient,
     settings: &Settings,
@@ -1171,9 +1210,13 @@ async fn decode_seedvr2_source_frames(
     Ok(frames)
 }
 
-/// Dispatch handler for `JobType::VideoUpscale`: decode the source clip, run the native-MLX SeedVR2
-/// upscaler, re-encode, pass the source audio through, and stream a single upscaled video asset.
-#[cfg(target_os = "macos")]
+/// Dispatch handler for `JobType::VideoUpscale`: decode the source clip, run the SeedVR2 upscaler
+/// (native MLX on Mac / candle CUDA on Windows, sc-5928), re-encode, pass the source audio through,
+/// and stream a single upscaled video asset.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 pub(crate) async fn run_video_upscale_job(
     api: &ApiClient,
     settings: &Settings,
