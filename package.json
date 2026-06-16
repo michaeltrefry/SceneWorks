@@ -23,7 +23,8 @@
     "api:build:embedded": "npm run web:build && cargo build -p sceneworks-rust-api --release --features embed-web",
     "api:build:embedded:candle": "npm run web:build && cargo build -p sceneworks-rust-api --release --features embed-web,backend-candle",
     "tauri:dev": "npm --prefix apps/desktop run dev",
-    "tauri:build": "npm --prefix apps/desktop run build"
+    "tauri:build": "npm --prefix apps/desktop run build",
+    "version": "node scripts/sync-version.mjs && git add apps/desktop/tauri.conf.json apps/desktop/package.json apps/desktop/package-lock.json apps/web/package.json apps/web/package-lock.json"
   },
   "engines": {
     "node": ">=20"
