@@ -627,6 +627,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-seedvr2"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=b005cf72b57af42a27fc2c7965b0df9ea0ca73d1#b005cf72b57af42a27fc2c7965b0df9ea0ca73d1"
+dependencies = [
+ "candle-gen",
+ "inventory",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+]
+
+[[package]]
 name = "candle-gen-sensenova"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/candle-gen?rev=b005cf72b57af42a27fc2c7965b0df9ea0ca73d1#b005cf72b57af42a27fc2c7965b0df9ea0ca73d1"
@@ -5213,6 +5224,7 @@ dependencies = [
  "candle-gen-pulid",
  "candle-gen-qwen-image",
  "candle-gen-sdxl",
+ "candle-gen-seedvr2",
  "candle-gen-sensenova",
  "candle-gen-svd",
  "candle-gen-wan",
@@ -7371,7 +7383,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

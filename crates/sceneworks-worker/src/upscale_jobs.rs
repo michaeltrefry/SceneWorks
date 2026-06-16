@@ -30,8 +30,11 @@
 //!    (clamped to image bounds); inner (unpadded) region copied back at factor scale.
 //!  - input RGB f32 CHW in `[0,1]`; output clamp `[0,1]` → round → u8.
 
+// `HashMap`/`Mutex`/`OnceLock` back the Real-ESRGAN per-factor session cache (Mac-only `ort` path).
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
@@ -41,8 +44,13 @@ use gen_core::{
     WeightsSource,
 };
 use image::RgbImage;
+// Real-ESRGAN runs via `ort` + the CoreML execution provider — Mac-only (the candle Windows lane
+// serves SeedVR2, not Real-ESRGAN; Real-ESRGAN/AuraSR stay on the Python torch worker off-Mac).
+#[cfg(target_os = "macos")]
 use ort::execution_providers::CoreMLExecutionProvider;
+#[cfg(target_os = "macos")]
 use ort::session::Session;
+#[cfg(target_os = "macos")]
 use ort::value::Tensor;
 use serde_json::{json, Value};
 
@@ -54,7 +62,10 @@ use crate::{
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
 
+// Real-ESRGAN tiling (Mac-only `ort`/CoreML path).
+#[cfg(target_os = "macos")]
 const TILE_SIZE: usize = 512;
+#[cfg(target_os = "macos")]
 const TILE_PAD: usize = 16;
 const MAX_UPSCALE_TARGET_DIMENSION: u32 = 8192;
 const MAX_UPSCALE_TARGET_PIXELS: u64 =
@@ -65,16 +76,19 @@ const CANCEL_MESSAGE: &str = "Image upscale canceled by user.";
 /// `scripts/spikes/sc3489_export_reference.py`). Public; downloaded on first use,
 /// parity with sc-3487's rtmlib weights. Overridable via the manifest `onnx` resource
 /// or the env pin `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
+#[cfg(target_os = "macos")]
 const ONNX_REPO: &str = "SceneWorks/real-esrgan-onnx";
 
+#[cfg(target_os = "macos")]
 fn onnx_file(factor: u8) -> String {
     format!("real_esrgan_x{factor}.onnx")
 }
 
 // ---------------------------------------------------------------------------
-// pure tiling math (ported from upscalers.py; unit-tested without weights)
+// pure tiling math (ported from upscalers.py; unit-tested without weights) — Real-ESRGAN, Mac-only
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tile {
     x0: usize,
@@ -84,6 +98,7 @@ struct Tile {
 }
 
 /// `upscalers.py:tile_slices` — single tile if the image fits, else a row-major grid.
+#[cfg(target_os = "macos")]
 fn tile_slices(w: usize, h: usize, tile: usize) -> Vec<Tile> {
     if tile == 0 || tile >= w.max(h) {
         return vec![Tile {
@@ -112,6 +127,7 @@ fn tile_slices(w: usize, h: usize, tile: usize) -> Vec<Tile> {
 }
 
 /// CHW f32 `[0,1]` for the crop region `[x0,x1) × [y0,y1)` of an RGB image.
+#[cfg(target_os = "macos")]
 fn crop_to_chw(
     img: &RgbImage,
     x0: usize,
@@ -148,21 +164,26 @@ fn validate_upscale_target_dimensions(width: u32, height: u32) -> WorkerResult<(
 }
 
 // ---------------------------------------------------------------------------
-// onnxruntime upscaler (cached per-factor process-wide, like pose_jobs::DETECTOR)
+// onnxruntime upscaler (cached per-factor process-wide, like pose_jobs::DETECTOR) — Real-ESRGAN,
+// Mac-only (`ort`/CoreML). The candle Windows lane serves SeedVR2 (below), not Real-ESRGAN.
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "macos")]
 struct Upscaler {
     session: Session,
     #[allow(dead_code)]
     device: &'static str,
 }
 
+#[cfg(target_os = "macos")]
 static UPSCALERS: OnceLock<Mutex<HashMap<u8, Upscaler>>> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
     WorkerError::Engine(format!("onnxruntime: {e}"))
 }
 
+#[cfg(target_os = "macos")]
 fn build_session(path: &Path, coreml: bool) -> WorkerResult<Session> {
     let mut b = Session::builder().map_err(ort_err)?;
     if coreml {
@@ -173,6 +194,7 @@ fn build_session(path: &Path, coreml: bool) -> WorkerResult<Session> {
     b.commit_from_file(path).map_err(ort_err)
 }
 
+#[cfg(target_os = "macos")]
 impl Upscaler {
     /// Load the session, preferring CoreML and falling back to CPU if the provider
     /// can't initialise (mirrors `pose_jobs::Detector::load`).
@@ -251,6 +273,7 @@ impl Upscaler {
 /// Blocking upscale: load+cache the factor's session (amortising the CoreML graph
 /// compile across a batch), run it. All `ort` objects live inside this closure and
 /// never cross an await (mirrors `pose_jobs::detect_batch`).
+#[cfg(target_os = "macos")]
 fn upscale_blocking(
     onnx_path: PathBuf,
     factor: u8,
@@ -283,6 +306,7 @@ fn upscale_blocking(
 /// (`SCENEWORKS_REALESRGAN_X{factor}_ONNX`, then `SCENEWORKS_REALESRGAN_ONNX`), then the
 /// app cache `<data_dir>/cache/upscale/`, then a manifest `onnx` resource if the job
 /// carried one, else download from the default HF repo.
+#[cfg(target_os = "macos")]
 async fn ensure_onnx(
     api: &ApiClient,
     settings: &Settings,
@@ -336,6 +360,7 @@ async fn ensure_onnx(
 
 /// Pull a `{repo,file}` ONNX resource out of a job's `modelManifestEntry` if present:
 /// `resources.imageUpscalers.real-esrgan.x{factor}.onnx`.
+#[cfg(target_os = "macos")]
 fn manifest_onnx_resource(manifest_entry: &Value, factor: u8) -> Option<(String, String)> {
     let onnx = manifest_entry
         .get("resources")?
@@ -744,48 +769,62 @@ pub(crate) async fn run_image_upscale_job(
         )
         .await?
     } else {
-        update_job(
-            api,
-            &job.id,
-            progress_payload(
-                JobStatus::Running,
-                ProgressStage::Downloading,
-                0.25,
-                "Loading Real-ESRGAN weights.",
-                None,
-                None,
-                None,
-            ),
-        )
-        .await?;
-        let onnx_path =
-            ensure_onnx(api, settings, http_client, job, factor, &manifest_entry).await?;
+        // Real-ESRGAN runs via `ort`/CoreML — Mac-only. Off-Mac the candle worker serves only
+        // `engine=seedvr2` (the routing oracle refuses Real-ESRGAN here, sending it to the Python
+        // torch worker), so this branch is unreachable on the candle lane; keep it a clear error so
+        // the function compiles and a misroute fails loudly rather than silently.
+        #[cfg(target_os = "macos")]
+        {
+            update_job(
+                api,
+                &job.id,
+                progress_payload(
+                    JobStatus::Running,
+                    ProgressStage::Downloading,
+                    0.25,
+                    "Loading Real-ESRGAN weights.",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await?;
+            let onnx_path =
+                ensure_onnx(api, settings, http_client, job, factor, &manifest_entry).await?;
 
-        update_job(
-            api,
-            &job.id,
-            progress_payload(
-                JobStatus::Running,
-                ProgressStage::Running,
-                0.45,
-                &format!("Upscaling {factor}x with Real-ESRGAN."),
-                None,
-                None,
-                None,
-            ),
-        )
-        .await?;
-        let cancel = CancelFlag::new();
-        run_upscale_with_heartbeat(
-            api,
-            settings,
-            &job.id,
-            cancel.clone(),
-            tokio::task::spawn_blocking(move || {
-                upscale_blocking(onnx_path, factor, source_image, cancel)
-            }),
-        )
-        .await?
+            update_job(
+                api,
+                &job.id,
+                progress_payload(
+                    JobStatus::Running,
+                    ProgressStage::Running,
+                    0.45,
+                    &format!("Upscaling {factor}x with Real-ESRGAN."),
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await?;
+            let cancel = CancelFlag::new();
+            run_upscale_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                cancel.clone(),
+                tokio::task::spawn_blocking(move || {
+                    upscale_blocking(onnx_path, factor, source_image, cancel)
+                }),
+            )
+            .await?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "engine={engine_id} is not served by the candle worker (it serves engine=seedvr2); \
+                 Real-ESRGAN / AuraSR run on the Python torch worker off-Mac"
+            )));
+        }
     };
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 

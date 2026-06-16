@@ -2402,6 +2402,9 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
     // accept the legacy `"darwin"` alias defensively. Drives the platform-intrinsic engine flags
     // (e.g. `imageUpscaleSeedvr2`, which is Mac-only) rather than the gating-rollout flag.
     let is_mac = matches!(platform, "macos" | "darwin");
+    // SeedVR2 has a backend on Mac (native MLX) and Windows (the candle CUDA port, sc-5928); Linux
+    // candle enablement is sc-5160. Drives the platform-intrinsic `imageUpscaleSeedvr2` flag.
+    let seedvr2_supported = is_mac || matches!(platform, "windows");
     let mut features = BTreeMap::new();
     // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641:
     // core loader sc-3642/3643 + SDXL/Wan/LTX sc-3671), so it is no longer a Mac feature gap — the
@@ -2435,24 +2438,26 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
-        // SeedVR2 (`engine=seedvr2`) is the native-MLX one-step diffusion upscaler (epic 4811 /
-        // sc-4815) — the INVERSE of AuraSR: it is supported on Mac (in-process `mlx-gen-seedvr2`)
-        // and NOT yet available on Windows/Linux, where the backend is a separate Candle port
-        // (sc-5157). This flag is platform-intrinsic (true only on Mac, regardless of the gating
-        // rollout flag) so the web upscale picker can offer SeedVR2 on Mac and hide it elsewhere —
-        // contrast the other entries here, which describe Mac torch-only gaps the UI hides only
-        // under active gating.
+        // SeedVR2 (`engine=seedvr2`) is the one-step diffusion super-resolution upscaler — native MLX
+        // on Mac (epic 4811 / sc-4815, in-process `mlx-gen-seedvr2`) and the candle CUDA port on
+        // Windows (sc-5928 / epic 5482, `candle-gen-seedvr2`). Both back the same `engine=seedvr2`
+        // image upscale + the net-new `video_upscale`. This flag is platform-intrinsic (a backend
+        // exists, regardless of the gating rollout flag) so the web upscale picker offers SeedVR2 on
+        // Mac AND Windows and hides it only where there is no backend yet. Linux candle enablement is
+        // sc-5160 — until then SeedVR2 stays hidden on Linux (contrast AuraSR, which the UI hides only
+        // under active gating). Must agree with the routing oracle (mlx OR candle claims seedvr2; a
+        // plain torch worker refuses it).
         "imageUpscaleSeedvr2".to_owned(),
         MacFeatureSupport {
-            supported: is_mac,
-            reason: if is_mac {
+            supported: seedvr2_supported,
+            reason: if seedvr2_supported {
                 None
             } else {
                 Some(UnsupportedReason::new(
                     None,
                     "image_upscale (SeedVR2)",
-                    "SeedVR2 is a Mac-only native-MLX upscaler; Windows/Linux support is a separate Candle backend port.",
-                    Some("sc-5157"),
+                    "SeedVR2 runs on Mac (native MLX) and Windows (the candle CUDA backend); Linux candle enablement is in progress.",
+                    Some("sc-5160"),
                 ))
             },
         },
@@ -4222,6 +4227,35 @@ fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b")
 }
 
+/// Whether an `image_upscale` job explicitly requests the SeedVR2 engine (`engine=seedvr2`, the id the
+/// web sends and the worker accepts). SeedVR2 has no torch backend — it runs on MLX (Mac) or candle
+/// (Windows/Linux) — so this also drives the torch worker's refusal (the inverse of the AuraSR gate).
+/// The image default engine is Real-ESRGAN, so an absent engine is NOT SeedVR2.
+fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
+    matches!(job.job_type, JobType::ImageUpscale)
+        && job
+            .payload
+            .get("engine")
+            .and_then(Value::as_str)
+            .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
+}
+
+/// Whether an `image_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
+/// SeedVR2 provider (`candle-gen-seedvr2`) serves `engine=seedvr2` off-Mac. Unlike the mlx gate, the
+/// default (`real-esrgan`) engine is NOT candle-eligible — only an explicit SeedVR2 request routes to
+/// the candle worker; Real-ESRGAN / AuraSR have no candle path and stay on the Python torch worker.
+fn upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    upscale_job_requests_seedvr2(job)
+}
+
+/// Whether a `video_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
+/// SeedVR2 provider is the off-Mac video upscaler. Mirrors `video_upscale_job_is_mlx_eligible`
+/// exactly (same engine set the worker's `run_video_upscale_job` accepts) — the engine defaults to
+/// `seedvr2` when the payload omits it.
+fn video_upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    video_upscale_job_is_mlx_eligible(job)
+}
+
 /// Training kernels with NO non-Rust fallback — only the in-process Rust mlx worker
 /// can run them. `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049)
 /// retired that Python trainer, leaving the native Rust LTX trainer as the sole path,
@@ -4401,6 +4435,32 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         {
             return false;
         }
+        // Image upscale (sc-5928, epic 4811 / epic 5482): the candle worker serves SeedVR2 image
+        // upscaling (`candle-gen-seedvr2`, the Windows/CUDA sibling of mlx-gen-seedvr2). Real-ESRGAN
+        // (the default engine) / AuraSR have no candle path, so a non-SeedVR2 engine is refused and
+        // stays on the Python torch worker.
+        if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_candle_eligible(job) {
+            return false;
+        }
+        // Video upscale (sc-5928): the candle worker serves the net-new SeedVR2 video upscaler. A
+        // non-SeedVR2 engine is refused (no other video-upscale backend exists off-Mac).
+        if matches!(job.job_type, JobType::VideoUpscale)
+            && !video_upscale_job_is_candle_eligible(job)
+        {
+            return false;
+        }
+    }
+    // SeedVR2 upscaling has NO torch backend — it runs on the native MLX worker (Mac) or the candle
+    // worker (Windows/Linux). A plain torch GPU/CPU worker (neither `mlx` nor candle) must refuse a
+    // SeedVR2 `image_upscale` job so it stays queued for the mlx/candle worker instead of being
+    // claimed and failing with "no generator registered". This is the inverse of the AuraSR gate
+    // (torch-only → mlx/candle refuse it). `video_upscale` is candle/mlx-only by capability (a torch
+    // worker never advertises it), so it needs no torch guard here.
+    if !worker.gpu_id.eq_ignore_ascii_case("mlx")
+        && !worker_is_candle(worker)
+        && upscale_job_requests_seedvr2(job)
+    {
+        return false;
     }
     let advertises = |capability: &str| {
         worker
@@ -5524,6 +5584,86 @@ mod candle_routing_tests {
             json!({ "sourceAssetId": "a", "engine": "aura-sr" })
         ))
         .is_err());
+    }
+
+    // ---- Candle SeedVR2 upscale lane (sc-5928) ----
+
+    /// A queued `image_upscale` job carrying `payload`.
+    fn image_upscale_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_iu",
+            "type": "image_upscale",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// sc-5928: the candle worker claims `engine=seedvr2` image upscale (the candle-gen-seedvr2
+    /// provider) but refuses Real-ESRGAN (the default), which stays on the Python torch worker.
+    #[test]
+    fn candle_worker_claims_seedvr2_image_upscale_refuses_real_esrgan() {
+        let candle = gpu_worker(&["gpu", "image_upscale", "candle"]);
+        assert!(worker_supports_job(
+            &candle,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
+        ));
+        // Real-ESRGAN (the default engine) has no candle path → refused → stays on the torch worker.
+        assert!(!worker_supports_job(
+            &candle,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "real-esrgan" }))
+        ));
+        assert!(!worker_supports_job(
+            &candle,
+            &image_upscale_job(json!({ "sourceAssetId": "a" })) // default = real-esrgan
+        ));
+    }
+
+    /// sc-5928: the candle worker claims the net-new SeedVR2 `video_upscale` (default/seedvr2 ids) and
+    /// refuses other engines, exactly like the mlx worker (the engine set is shared).
+    #[test]
+    fn candle_worker_claims_seedvr2_video_upscale_and_refuses_other_engines() {
+        let candle = gpu_worker(&["gpu", "video_upscale", "candle"]);
+        for engine in [json!("seedvr2"), json!("seedvr2_3b"), Value::Null] {
+            let payload = if engine.is_null() {
+                json!({ "sourceAssetId": "a" })
+            } else {
+                json!({ "sourceAssetId": "a", "engine": engine })
+            };
+            assert!(
+                worker_supports_job(&candle, &video_upscale_job(payload.clone())),
+                "candle should claim video_upscale for {payload}"
+            );
+        }
+        assert!(!worker_supports_job(
+            &candle,
+            &video_upscale_job(json!({ "sourceAssetId": "a", "engine": "aura-sr" }))
+        ));
+    }
+
+    /// sc-5928: SeedVR2 has no torch backend, so a plain torch GPU worker (neither `mlx` nor candle)
+    /// REFUSES a `seedvr2` image upscale — it stays queued for the mlx/candle worker instead of being
+    /// claimed and failing. Real-ESRGAN (the torch engine) is still claimed. The inverse of AuraSR.
+    #[test]
+    fn torch_worker_refuses_seedvr2_image_upscale_but_claims_real_esrgan() {
+        let torch = gpu_worker(&["gpu", "image_upscale"]); // no candle marker, gpu_id != "mlx"
+        assert!(!worker_supports_job(
+            &torch,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
+        ));
+        assert!(worker_supports_job(
+            &torch,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "real-esrgan" }))
+        ));
     }
 
     // ---- Candle caption lane (sc-5098) ----

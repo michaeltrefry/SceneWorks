@@ -2,9 +2,16 @@
 //! needed — these lock the tiling/crop/manifest logic against `upscalers.py`.
 
 use super::*;
+// `Rgb`/`RgbImage` back the Real-ESRGAN tiling/crop tests (Mac-only ort path) AND the SeedVR2
+// real-weight smoke (Mac MLX + the Windows/CUDA candle lane).
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 use image::{Rgb, RgbImage};
 use serde_json::json;
 
+#[cfg(target_os = "macos")]
 #[test]
 fn tile_slices_single_when_image_fits() {
     // tile >= max(w,h) → one tile covering the whole image (upscalers.py).
@@ -22,6 +29,7 @@ fn tile_slices_single_when_image_fits() {
     assert_eq!(tile_slices(512, 512, 512).len(), 1);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn tile_slices_grid_row_major_clamped() {
     // 768x768 @ tile 512 → 2x2 grid, edge tiles clamped to bounds.
@@ -68,11 +76,13 @@ fn tile_slices_grid_row_major_clamped() {
     assert_eq!(covered, 768 * 768);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn tile_slices_zero_tile_is_single() {
     assert_eq!(tile_slices(100, 50, 0).len(), 1);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn crop_to_chw_layout_and_normalization() {
     let mut img = RgbImage::new(3, 2);
@@ -97,6 +107,7 @@ fn crop_to_chw_layout_and_normalization() {
     assert!((data[g_plane - 1] - 1.0).abs() < 1e-6); // R(2,1)=255 last in R plane
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn crop_to_chw_subregion() {
     let mut img = RgbImage::new(4, 4);
@@ -114,12 +125,14 @@ fn crop_to_chw_subregion() {
     assert!((data[g + 3] - 20.0 / 255.0).abs() < 1e-6);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn onnx_filename_per_factor() {
     assert_eq!(onnx_file(2), "real_esrgan_x2.onnx");
     assert_eq!(onnx_file(4), "real_esrgan_x4.onnx");
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn manifest_onnx_resource_extracts_repo_file() {
     let entry = json!({
@@ -209,7 +222,10 @@ fn manifest_seedvr2_resource_extracts_overrides_and_defaults() {
 
 /// Resolve the locally-cached `numz/SeedVR2_comfyUI` checkpoint dir (env override or the HF cache),
 /// so the smoke below can run on real weights without a download. `None` ⇒ skip.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
     if let Ok(pinned) = std::env::var("SCENEWORKS_SEEDVR2_CHECKPOINT") {
         let dir = std::path::PathBuf::from(pinned);
@@ -223,15 +239,21 @@ fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
     (snap.join(SEEDVR2_DIT_FILE).exists() && snap.join(SEEDVR2_VAE_FILE).exists()).then_some(snap)
 }
 
-/// Real-weight smoke for the SceneWorks SeedVR2 integration (sc-4815): drives the exact worker
-/// dispatch path — `with_cached_generator("seedvr2", …)` → registry → `generate` — on the cached
-/// 3B checkpoint, asserting (a) the factor→`round_to_16` target dims and (b) that the new `softness`
-/// request field actually reaches the engine (a softened run differs from a faithful one). Gated on
-/// the checkpoint being present (skips in CI, which has no weights), mirroring the family worker E2E
-/// smokes. Run with `cargo test -p sceneworks-worker -- --ignored seedvr2_upscale_real_weight_smoke`.
-#[cfg(target_os = "macos")]
+/// Real-weight smoke for the SceneWorks SeedVR2 integration (sc-4815 Mac / sc-5928 candle): drives the
+/// exact worker dispatch path — `with_cached_generator("seedvr2", …)` → registry → `generate` — on the
+/// cached 3B checkpoint, asserting (a) the factor→`round_to_16` target dims and (b) that the `softness`
+/// request field actually reaches the engine (a softened run differs from a faithful one). On Mac this
+/// resolves to the MLX provider; on the Windows/CUDA candle build it resolves to `candle-gen-seedvr2`
+/// (the sc-5928 worker-path validation that the force-link + routing reach the candle engine end-to-
+/// end). Gated on the checkpoint being present (skips in CI, which has no weights), mirroring the
+/// family worker E2E smokes. Set `SCENEWORKS_SEEDVR2_CHECKPOINT` to the ckpt dir and run with
+/// `cargo test -p sceneworks-worker --features backend-candle -- --ignored seedvr2_upscale_real_weight_smoke`.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "backend-candle")
+))]
 #[tokio::test]
-#[ignore = "real-weight: needs the cached numz/SeedVR2_comfyUI checkpoint (~7 GB); Mac/MLX only"]
+#[ignore = "real-weight: needs the cached numz/SeedVR2_comfyUI checkpoint (~7 GB) + the seedvr2 backend (MLX on Mac / candle on Windows)"]
 async fn seedvr2_upscale_real_weight_smoke() {
     let Some(dir) = cached_seedvr2_checkpoint() else {
         eprintln!("SKIP: SeedVR2 checkpoint not cached (numz/SeedVR2_comfyUI)");
