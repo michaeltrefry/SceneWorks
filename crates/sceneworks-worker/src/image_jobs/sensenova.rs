@@ -243,6 +243,11 @@ async fn generate_sensenova_edit_stream(
         raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
     }
 
+    // No user adapters by design (sc-6038): SenseNova-U1 is an 8B MoT autoregressive model with no
+    // diffusion-LoRA merge path, and its manifest declares `loraCompatibility.families:
+    // ["sensenova-u1"]` (its own family — no LoRA declares it), so the picker offers none. The empty
+    // adapter list is intentional, not a dropped wiring (contrast `instantid.rs`, which DOES apply
+    // user SDXL LoRAs).
     let spec = load_spec(weights_dir, quant, Vec::new(), None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
