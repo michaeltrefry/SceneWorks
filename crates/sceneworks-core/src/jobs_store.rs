@@ -3693,6 +3693,49 @@ fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|poses| !poses.is_empty())
 }
 
+/// Candle-routed image models that HAVE a candle strict-pose lane (sc-5489). A `advanced.poses` job on
+/// any OTHER candle-routed model has no pose path on candle (plain-SDXL pose ships via InstantID,
+/// `instantid_realvisxl`, not `sdxl`).
+fn model_has_candle_pose_lane(model: &str) -> bool {
+    matches!(model, "qwen_image" | "kolors" | "z_image_turbo")
+}
+
+/// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —
+/// `sdxl` / `realvisxl` / `chroma*` / `flux*` / `lens*` / `sensenova*` (everything but the three wired
+/// pose families), not `edit_image` (sc-5968, epic 5483). Neither candle nor the co-resident torch
+/// worker has a pose path for these models off-Mac (the torch `sdxl` adapter's OpenPose lives only in
+/// the `instantid_realvisxl` adapter), so torch would silently drop the poses → an unconditioned T2I
+/// image. The candle worker therefore CLAIMS these (`worker_supports_job`) to REJECT them with a typed
+/// error in the handler, and the co-resident torch worker DECLINES them (below) so candle reliably wins
+/// and nothing silently mis-serves them. **Mac is unaffected:** `sdxl + poses` is MLX-served there
+/// (`model_mac_support("sdxl").features.pose`), so the MLX worker claims it and only the torch/`mps`
+/// worker declines. Pairs with the worker's `candle_unsupported_pose_reject` dispatch guard.
+fn image_request_candle_pose_reject(model: &str, payload: &Map<String, Value>) -> bool {
+    if !CANDLE_ROUTED_MODELS.contains(&model) || model_has_candle_pose_lane(model) {
+        return false;
+    }
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+}
+
+/// [`image_request_candle_pose_reject`] on a [`JobSnapshot`].
+fn image_job_candle_pose_reject(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::ImageGenerate) {
+        return false;
+    }
+    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+        return false;
+    };
+    image_request_candle_pose_reject(model, &job.payload)
+}
+
 /// PuLID-FLUX (`pulid_flux_dev`) MLX-routing conditions (sc-3344). The native `mlx-gen-pulid`
 /// registry generator serves the single surface PuLID-FLUX has: a `character_image` job with a
 /// reference face (no plain text-to-image, no `edit_image` — the engine requires the face it
@@ -4273,6 +4316,18 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             return false;
         }
     }
+    // No-silent-T2I / no-torch-fallback (sc-5968, epic 5483): the co-resident Python torch worker (a
+    // non-candle, non-mlx GPU worker) must DECLINE the unsupported-pose shapes the candle worker
+    // owns-to-reject (a `advanced.poses` job on a candle model with no pose lane, e.g. sdxl) — so torch
+    // can't claim + silently render an unconditioned T2I image, and the candle worker reliably wins
+    // them (then rejects with a typed error). Mac is unaffected: those shapes are MLX-served there
+    // (model_mac_support pose), so the `mlx` worker still claims them and only torch/`mps` declines.
+    if !worker_is_candle(worker)
+        && !worker.gpu_id.eq_ignore_ascii_case("mlx")
+        && image_job_candle_pose_reject(job)
+    {
+        return false;
+    }
     // Candle (Windows/CUDA) lane (epic 3672 image sc-3678; epic 5095 image families sc-5096 + video
     // sc-5097): the candle worker advertises `image_generate` (+ `video_generate` once video engines
     // are wired) and serves gated, narrow **txt2img / txt2video-only** lanes. It must refuse every
@@ -4282,7 +4337,14 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // which is a real CUDA index here). When candle is disabled the marker is absent and this is inert,
     // so production routing is unchanged until the lane is turned on.
     if worker_is_candle(worker) {
-        if matches!(job.job_type, JobType::ImageGenerate) && !image_job_is_candle_eligible(job) {
+        // ImageGenerate: claim the candle-served shapes AND the unsupported-pose shapes the candle
+        // worker must OWN to reject (a `advanced.poses` job on a candle model with no pose lane, e.g.
+        // sdxl) — so those fail loudly on candle instead of falling back to torch + silently rendering
+        // an unconditioned T2I image (sc-5968, the no-torch-fallback / no-silent-T2I directive). Every
+        // other shape candle declines, staying on the co-resident torch worker.
+        if matches!(job.job_type, JobType::ImageGenerate)
+            && !(image_job_is_candle_eligible(job) || image_job_candle_pose_reject(job))
+        {
             return false;
         }
         // The candle worker advertises only the base `video_generate` (txt2video); refuse the
@@ -4967,15 +5029,19 @@ mod candle_routing_tests {
             ),
             "candle worker should claim z_image_turbo strict-pose (sc-5489)"
         );
-        // Plain `sdxl` + poses still defers to torch — there is no plain-SDXL pose product route (the
-        // SDXL identity-pose surface ships via the InstantID lane, `instantid_realvisxl`, not here).
-        assert!(!worker_supports_job(
+        // sc-5968: plain `sdxl` + poses has NO candle pose lane (SDXL pose ships via InstantID), and
+        // the torch `sdxl` adapter has no pose path either — so the candle worker CLAIMS it (to reject
+        // with a typed error in the handler) rather than declining → torch silently rendering an
+        // unconditioned T2I image. `worker_supports_job` is therefore TRUE here (candle owns it to fail
+        // it loudly); the handler's `candle_unsupported_pose_reject` guard does the rejecting.
+        assert!(worker_supports_job(
             &candle,
             &image_generate_job(json!({
                 "model": "sdxl",
                 "advanced": { "poses": [{ "id": "pose_1" }] }
             }))
         ));
+        // …but a plain SDXL edit (img2img) still declines on candle → torch (real edit route, sc-5487).
         assert!(!worker_supports_job(
             &candle,
             &image_generate_job(json!({
@@ -4989,7 +5055,9 @@ mod candle_routing_tests {
     #[test]
     fn torch_worker_claims_everything_the_candle_worker_defers() {
         // The co-resident Python torch worker (no `candle` marker) is ungated here: it claims the
-        // shapes the candle worker refused, so nothing is stranded.
+        // shapes the candle worker refused, so nothing is stranded — EXCEPT the unsupported-pose shapes
+        // the candle worker now owns-to-reject (sc-5968, asserted at the end of this test): torch
+        // declines those so it can't silently render an unconditioned T2I image.
         let torch = gpu_worker(TORCH_CAPS);
         // A family with no candle provider, and a conditioning shape on a wired family.
         assert!(worker_supports_job(
@@ -5018,6 +5086,69 @@ mod candle_routing_tests {
                 "mode": "edit_image",
                 "sourceAssetId": "asset_1"
             }))
+        ));
+        // sc-5968: but torch DECLINES the unsupported-pose shape the candle worker owns-to-reject
+        // (sdxl + poses) — so it can't silently render an unconditioned T2I; only candle takes it (and
+        // rejects). On Mac the same shape is MLX-served, so the `mlx` worker still claims it (asserted
+        // in `unsupported_pose_is_owned_by_candle_declined_by_torch_served_by_mlx`).
+        assert!(!worker_supports_job(
+            &torch,
+            &image_generate_job(json!({
+                "model": "sdxl",
+                "advanced": { "poses": [{ "id": "pose_1" }] }
+            }))
+        ));
+    }
+
+    /// sc-5968: the unsupported-pose routing across the three GPU workers — candle OWNS it (to reject),
+    /// torch DECLINES it (no silent T2I), and the Mac `mlx` worker still SERVES it (no Mac regression,
+    /// `sdxl_mlx_eligible` is unconditional). Plus: the wired candle pose families are unaffected, and
+    /// `image_job_is_candle_eligible` still reports sdxl+poses as NOT candle-*served* (it's owned only
+    /// to reject — the distinction the worker's dispatch guard keys on).
+    #[test]
+    fn unsupported_pose_is_owned_by_candle_declined_by_torch_served_by_mlx() {
+        let candle = gpu_worker(CANDLE_CAPS);
+        let torch = gpu_worker(TORCH_CAPS);
+        let mlx: WorkerSnapshot = serde_json::from_value(json!({
+            "id": "worker_mlx",
+            "gpuId": "mlx",
+            "status": "idle",
+            "capabilities": ["gpu", "image_generate"],
+            "loadedModels": [],
+            "registeredAt": "2026-06-16T00:00:00Z",
+            "lastSeenAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid WorkerSnapshot");
+        let sdxl_pose = image_generate_job(
+            json!({ "model": "sdxl", "advanced": { "poses": [{ "id": "p" }] } }),
+        );
+
+        assert!(image_request_candle_pose_reject(
+            "sdxl",
+            &object(json!({ "advanced": { "poses": [{ "id": "p" }] } }))
+        ));
+        assert!(worker_supports_job(&candle, &sdxl_pose), "candle owns it");
+        assert!(
+            !worker_supports_job(&torch, &sdxl_pose),
+            "torch declines it"
+        );
+        assert!(worker_supports_job(&mlx, &sdxl_pose), "mlx still serves it");
+        // It is NOT candle-*served* (only owned-to-reject); the worker's dispatch guard rejects it.
+        assert!(!image_job_is_candle_eligible(&sdxl_pose));
+
+        // A wired candle pose family is NOT a reject shape, and edit_image is never a reject shape.
+        assert!(!image_request_candle_pose_reject(
+            "qwen_image",
+            &object(json!({ "advanced": { "poses": [{ "id": "p" }] } }))
+        ));
+        assert!(!image_request_candle_pose_reject(
+            "sdxl",
+            &object(json!({ "mode": "edit_image", "advanced": { "poses": [{ "id": "p" }] } }))
+        ));
+        // No poses → not a reject shape (plain txt2img stays candle-eligible).
+        assert!(!image_request_candle_pose_reject(
+            "sdxl",
+            &object(json!({ "prompt": "a fox" }))
         ));
     }
 
@@ -5590,9 +5721,11 @@ mod candle_routing_tests {
         assert!(!qwen_control_candle_eligible(&object(json!({
             "model": "qwen_image", "mode": "edit_image", "advanced": { "poses": [{}] }
         }))));
-        // Plain `sdxl` + poses still defers to torch (no plain-SDXL pose product route — SDXL pose ships
-        // via the InstantID lane) — the qwen branch is specific; the txt2img gate's has_poses deferral
-        // applies. (z_image_turbo + poses IS a candle lane now — see `zimage_control_pose_jobs_*`.)
+        // Plain `sdxl` + poses is NOT candle-*served* (no plain-SDXL pose lane — SDXL pose ships via
+        // InstantID): the qwen branch is specific and the txt2img gate's has_poses check rejects it, so
+        // `image_job_is_candle_eligible` is false. (It is, however, candle-*owned-to-reject* at the
+        // worker layer per sc-5968 — see `unsupported_pose_is_owned_by_candle_*`; that claim lives in
+        // `worker_supports_job`, not here. z_image_turbo + poses IS a candle lane — `zimage_control_*`.)
         assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
             "model": "sdxl", "advanced": { "poses": [{}] }
         }))));

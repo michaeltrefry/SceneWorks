@@ -575,6 +575,27 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
         true
+    } else if settings.backend_candle_enabled
+        && is_candle_engine(&request.model)
+        && !matches!(
+            request.model.as_str(),
+            "qwen_image" | "kolors" | "z_image_turbo"
+        )
+        && request.mode != "edit_image"
+        && !pose_entries(&request).is_empty()
+    {
+        // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g. sdxl)
+        // must be REJECTED with a clear error, not silently rendered as plain txt2img (poses dropped)
+        // and not bounced to torch. The candle worker CLAIMS these (jobs_store
+        // `image_job_candle_pose_reject`) precisely to fail them loudly here, checked BEFORE the
+        // `is_candle_engine` txt2img branch below. SDXL identity-pose ships via InstantID; the wired
+        // candle pose families are qwen_image / kolors / z_image_turbo.
+        return Err(WorkerError::InvalidPayload(format!(
+            "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
+             refusing rather than silently generating an unconditioned image (wired candle pose \
+             families: qwen_image, kolors, z_image_turbo; SDXL identity-pose runs via InstantID)",
+            request.model
+        )));
     } else if settings.backend_candle_enabled && is_candle_engine(&request.model) {
         generate_candle_stream(
             api,
