@@ -4070,7 +4070,9 @@ mod tests {
     fn list_assets_auto_reindexes_pre_migration_project_with_sidecars_on_disk() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
-        let project = store.create_project("Pre-migration").expect("project creates");
+        let project = store
+            .create_project("Pre-migration")
+            .expect("project creates");
 
         let fact = json!({
             "assetId": "asset_legacy",
