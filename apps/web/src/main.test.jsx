@@ -439,6 +439,7 @@ describe("SceneWorks app shell", () => {
       id: "z_image_turbo",
       name: "Z-Image-Turbo",
       type: "image",
+      recommended: true,
       downloadable: true,
       installState: "missing",
       downloadSizeLabel: "30.6 GB",
@@ -471,6 +472,8 @@ describe("SceneWorks app shell", () => {
       id: "ltx_2_3",
       name: "LTX-2.3",
       type: "video",
+      recommended: true,
+      autoDownload: false,
       downloadable: true,
       installState: "missing",
       downloadSizeLabel: "146 GB",
@@ -508,16 +511,16 @@ describe("SceneWorks app shell", () => {
 
     const checkboxes = [...container.querySelectorAll("input[type=checkbox]")];
     // DOM order: image group (z_image_turbo, qwen_image[installed]), then video (wan_2_2, ltx_2_3).
-    expect(checkboxes[0].checked).toBe(true); // z_image_turbo — recommended, small enough to auto-select
+    expect(checkboxes[0].checked).toBe(true); // z_image_turbo — recommended, autoDownload not disabled
     expect(checkboxes[1].disabled).toBe(true); // qwen_image — installed, not selectable
     expect(checkboxes[2].checked).toBe(false); // wan_2_2 — not recommended
-    expect(checkboxes[3].checked).toBe(false); // ltx_2_3 — recommended but too large to auto-select (~146 GB)
+    expect(checkboxes[3].checked).toBe(false); // ltx_2_3 — recommended but autoDownload:false (~146 GB)
     // LTX-2.3 is still surfaced as recommended (badge) and shows its size so the choice is informed.
     expect(container.textContent).toContain("146 GB");
     expect(container.querySelectorAll(".setup-wizard-tag").length).toBe(2); // z_image_turbo + ltx_2_3
   });
 
-  it("auto-selects only the small recommended model, leaving huge ones opt-in", async () => {
+  it("auto-selects recommended models, leaving autoDownload:false ones opt-in", async () => {
     const props = renderWizard();
     await act(async () => {
       root.render(<SetupWizard {...props} />);
@@ -3721,6 +3724,37 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("No analysis yet");
   });
 
+  it("gates Image Studio behind a model download when no image model is present", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          purgeAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [],
+          latestAssets: [],
+          localJobs: [],
+          loras: [],
+          onPreview: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+    // The studio form is replaced by the availability gate.
+    expect(container.textContent).toContain("Image Studio needs an image model");
+    expect(container.querySelector(".model-availability-gate")).not.toBeNull();
+    expect(container.querySelector(".studio-shell")).toBeNull();
+  });
+
   it("keeps image generation in the studio and shows local progress", async () => {
     const createdJobs = [];
     global.fetch.mockImplementation((url, options = {}) => {
@@ -5036,7 +5070,7 @@ describe("SceneWorks app shell", () => {
     expect(field(panel(), "Name").value).toBe("");
     expect(container.textContent).toContain("LoRA imports");
     expect(container.textContent).toContain("detail_lora_1");
-    expect(container.textContent).not.toContain("No LoRAs in this view");
+    expect(container.textContent).not.toContain("No user LoRAs");
 
     await changeField(field(panel(), "Source URL"), "https://example.com/loras/two.safetensors");
     await act(async () => {
@@ -5124,7 +5158,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("LoRA imports");
     expect(container.textContent).toContain("broken_detail");
     expect(container.textContent).toContain("Adapter crashed");
-    expect(container.textContent).not.toContain("No LoRAs in this view");
+    expect(container.textContent).not.toContain("No user LoRAs");
   });
 
   it("hides failed Models LoRA imports superseded by a completed retry", async () => {
@@ -5165,7 +5199,7 @@ describe("SceneWorks app shell", () => {
 
     expect(container.textContent).not.toContain("LoRA manifestPath must target");
     expect(container.textContent).not.toContain("LoRA imports");
-    expect(container.textContent).toContain("No LoRAs in this view");
+    expect(container.textContent).toContain("No user LoRAs yet");
   });
 
   it("shows Models page LoRA import errors and resets the queueing state", async () => {
@@ -9151,6 +9185,35 @@ describe("SceneWorks app shell", () => {
     expect(purgeAsset).toHaveBeenCalledWith(trashedB);
     expect(purgeAsset).not.toHaveBeenCalledWith(active);
     confirm.mockRestore();
+  });
+
+  it("gates Document Studio behind a model download when no interleave model is present", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            createInterleaveJob: () => {},
+            documentLocalJobs: [],
+            gpuOptions: ["auto"],
+            imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", capabilities: ["text_to_image"] }],
+            jobAction: () => {},
+            rememberLocalGenerationJob: () => {},
+            setActiveView: () => {},
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+          },
+          <DocumentStudio />,
+        ),
+      );
+    });
+    await settle();
+    // An image model without interleave doesn't satisfy Document Studio → gate shows.
+    expect(container.textContent).toContain("Document Studio needs an interleave-capable model");
+    expect(container.querySelector(".model-availability-gate")).not.toBeNull();
+    expect(container.querySelector(".studio-form")).toBeNull();
   });
 
   it("DocumentStudio renders an interleaved document and submits a compose job", async () => {

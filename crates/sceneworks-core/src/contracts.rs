@@ -252,6 +252,10 @@ string_enum! {
         ModelImport => "model_import",
         ModelConvert => "model_convert",
         LoraImport => "lora_import",
+        // Explicit download of a built-in catalog LoRA into the Hugging Face cache
+        // (Models page, sc-5944) — mirrors model_download. Non-GPU; flips the catalog
+        // entry's installState to "installed" once the HF files land.
+        LoraDownload => "lora_download",
         LoraTrain => "lora_train",
         TrainingCaption => "training_caption",
         PromptRefine => "prompt_refine",
@@ -367,6 +371,9 @@ string_enum! {
         ModelImport => "model_import",
         ModelConvert => "model_convert",
         LoraImport => "lora_import",
+        // Built-in LoRA explicit download capability (sc-5944), advertised by the CPU
+        // utility worker alongside model_download / lora_import.
+        LoraDownload => "lora_download",
         LoraTrain => "lora_train",
         TrainingCaption => "training_caption",
         // Real (non-dry-run) LoRA training execution. Advertised separately from

@@ -343,18 +343,27 @@ describe("ModelManagerScreen type-grouped layout", () => {
     vi.restoreAllMocks();
   });
 
-  async function render({ models = [], loras = [], createModelDownloadJob = () => {} } = {}) {
+  async function render({
+    models = [],
+    loras = [],
+    jobs = [],
+    createModelDownloadJob = () => {},
+    createLoraDownloadJob = () => {},
+  } = {}) {
     const value = {
       activeProject: null,
-      jobs: [],
+      jobs,
       loras,
       models,
       presets: [],
+      workersById: new Map(),
+      visibleWorkers: [],
       jobAction: () => {},
       setActiveView: () => {},
       deleteLora: () => {},
       deleteModel: () => {},
       createModelDownloadJob,
+      createLoraDownloadJob,
       createModelConvertJob: () => {},
       createLoraImportJob: () => {},
       createModelImportJob: () => {},
@@ -394,6 +403,34 @@ describe("ModelManagerScreen type-grouped layout", () => {
   it("omits a type section when no model has that type", async () => {
     await render({ models: [MODELS[0]] });
     expect(groupHeadings()).toEqual(["Image Models"]);
+  });
+
+  it("splits a type into Recommended and a collapsed Additional Supported when both exist", async () => {
+    await render({
+      models: [
+        { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image"], installState: "missing", recommended: true },
+        { id: "flux_dev", name: "FLUX.1 [dev]", type: "image", family: "flux", capabilities: ["text_to_image"], installState: "missing" },
+      ],
+    });
+    const imageGroup = container.querySelector(".model-type-group");
+    const recommendedGrid = imageGroup.querySelector(".model-subgroup .model-grid");
+    expect(imageGroup.textContent).toContain("Recommended Models");
+    expect(recommendedGrid.querySelectorAll(".model-card").length).toBe(1);
+    expect(recommendedGrid.textContent).toContain("Z-Image-Turbo");
+    const additional = imageGroup.querySelector(".model-subgroup-additional");
+    expect(additional.tagName).toBe("DETAILS");
+    expect(additional.open).toBe(false); // collapsed by default to cut clutter
+    expect(additional.textContent).toContain("Additional Supported Models");
+    expect(additional.querySelectorAll(".model-card").length).toBe(1);
+    expect(additional.textContent).toContain("FLUX.1 [dev]");
+  });
+
+  it("shows a single grid (no Recommended/Additional split) when a type has no recommended model", async () => {
+    await render({ models: [MODELS[0]] }); // fixture has no recommended flag
+    const imageGroup = container.querySelector(".model-type-group");
+    expect(imageGroup.textContent).not.toContain("Recommended Models");
+    expect(imageGroup.querySelector(".model-subgroup-additional")).toBeNull();
+    expect(imageGroup.querySelectorAll(".model-card").length).toBe(1);
   });
 
   it("describes each model's capabilities as chips on the card", async () => {
@@ -474,11 +511,104 @@ describe("ModelManagerScreen type-grouped layout", () => {
     await render({
       models: MODELS,
       loras: [
-        { id: "a", name: "Flux A", family: "flux", installState: "installed" },
-        { id: "x", name: "Loose", installState: "installed" },
+        { id: "a", name: "Flux A", family: "flux", scope: "global", installState: "installed" },
+        { id: "x", name: "Loose", scope: "global", installState: "installed" },
       ],
     });
     const families = [...container.querySelectorAll(".lora-family-group-heading h3")].map((h) => h.textContent);
     expect(families).toEqual(["flux", "Other / compatible"]);
+  });
+
+  it("separates built-in LoRAs from user LoRAs into their own sections", async () => {
+    await render({
+      models: MODELS,
+      loras: [
+        { id: "ltx_ic", name: "LTX IC", family: "ltx-video", scope: "builtin", installState: "missing" },
+        { id: "u1", name: "My LoRA", family: "flux", scope: "global", installState: "installed" },
+      ],
+    });
+    const scopeHeadings = [...container.querySelectorAll(".lora-scope-group-heading h3")].map((h) => h.textContent);
+    expect(scopeHeadings).toEqual(["Built-In LoRAs", "User LoRAs"]);
+    const builtin = [...container.querySelectorAll(".lora-scope-group")].find((group) =>
+      group.querySelector("h3")?.textContent === "Built-In LoRAs",
+    );
+    expect(builtin.querySelectorAll(".lora-row").length).toBe(1);
+    expect(builtin.textContent).toContain("LTX IC");
+    expect(builtin.textContent).not.toContain("My LoRA");
+    // The user LoRA is family-grouped inside the User section only.
+    const families = [...container.querySelectorAll(".lora-family-group-heading h3")].map((h) => h.textContent);
+    expect(families).toEqual(["flux"]);
+  });
+
+  function builtinSection() {
+    return [...container.querySelectorAll(".lora-scope-group")].find(
+      (group) => group.querySelector("h3")?.textContent === "Built-In LoRAs",
+    );
+  }
+
+  it("offers a Download button on a built-in HF LoRA and queues a download", async () => {
+    const createLoraDownloadJob = vi.fn();
+    await render({
+      models: MODELS,
+      createLoraDownloadJob,
+      loras: [
+        {
+          id: "ltx_ic",
+          name: "LTX IC",
+          family: "ltx-video",
+          scope: "builtin",
+          installState: "missing",
+          source: { provider: "huggingface", repo: "Lightricks/LTX-2.3-IC", file: "ic.safetensors" },
+        },
+      ],
+    });
+    const downloadButton = [...builtinSection().querySelectorAll(".lora-row-actions button")].find(
+      (button) => button.textContent === "Download",
+    );
+    expect(downloadButton).toBeTruthy();
+    await click(downloadButton);
+    expect(createLoraDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "ltx_ic" }));
+  });
+
+  it("shows progress and disables the button while a built-in LoRA download runs", async () => {
+    await render({
+      models: MODELS,
+      loras: [
+        {
+          id: "ltx_ic",
+          name: "LTX IC",
+          family: "ltx-video",
+          scope: "builtin",
+          installState: "missing",
+          source: { provider: "huggingface", repo: "r", file: "f" },
+        },
+      ],
+      jobs: [{ id: "j1", type: "lora_download", status: "downloading", progress: 0.4, payload: { loraId: "ltx_ic" } }],
+    });
+    const actionButton = builtinSection().querySelector(".lora-row-actions button");
+    expect(actionButton.disabled).toBe(true);
+    expect(actionButton.textContent).toBe("downloading");
+    expect(builtinSection().querySelector(".lora-row-progress")).toBeTruthy();
+  });
+
+  it("does not offer Download on a built-in LoRA without a Hugging Face source", async () => {
+    await render({
+      models: MODELS,
+      createLoraDownloadJob: vi.fn(),
+      loras: [
+        {
+          id: "local_builtin",
+          name: "Local Builtin",
+          family: "z-image",
+          scope: "builtin",
+          installState: "missing",
+          source: { provider: "local", path: "loras/x.safetensors" },
+        },
+      ],
+    });
+    const downloadButton = [...builtinSection().querySelectorAll(".lora-row-actions button")].find(
+      (button) => button.textContent === "Download",
+    );
+    expect(downloadButton).toBeUndefined();
   });
 });

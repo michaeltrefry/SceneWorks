@@ -3,21 +3,21 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
 
-// Models flagged "Recommended" in the wizard: the fast image target and LTX-2.3
-// as the headline video model. Anything not present in the live catalog is
-// silently ignored, so this stays correct as the catalog evolves.
-const RECOMMENDED_MODEL_IDS = new Set(["z_image_turbo", "ltx_2_3"]);
-// Recommended models are pre-checked — except very large ones (e.g. LTX-2.3 is
-// ~146 GB). Those stay recommended but unchecked so a new user opts into the big
-// download deliberately instead of having it auto-queued on first launch.
-const AUTO_SELECT_MAX_BYTES = 50 * 1024 * 1024 * 1024;
+// The curated "getting started" set is catalog-driven: a model is recommended when
+// its manifest entry carries `recommended: true` (config/manifests/builtin.models.jsonc).
+// Recommended models are pre-checked for download — unless the entry sets
+// `autoDownload: false` (e.g. LTX-2.3, ~146 GB), which keeps it badged-but-unchecked so
+// a new user opts into the big download deliberately instead of having it auto-queued.
+function isRecommended(model) {
+  return model.recommended === true;
+}
+
+function autoDownloadDisabled(model) {
+  return model.autoDownload === false;
+}
 
 function isDownloadable(model) {
   return model.downloadable !== false && Boolean(model.downloads?.[0]?.repo ?? model.repo);
-}
-
-function isHugeDownload(model) {
-  return typeof model.downloadSizeBytes === "number" && model.downloadSizeBytes > AUTO_SELECT_MAX_BYTES;
 }
 
 function downloadSizeText(model) {
@@ -34,14 +34,14 @@ function defaultSelection(models) {
         (model) =>
           isDownloadable(model) &&
           model.installState !== "installed" &&
-          RECOMMENDED_MODEL_IDS.has(model.id) &&
-          !isHugeDownload(model),
+          isRecommended(model) &&
+          !autoDownloadDisabled(model),
       )
       .map((model) => model.id),
   );
 }
 
-const TYPE_LABELS = { image: "Image models", video: "Video models" };
+const TYPE_LABELS = { image: "Image models", video: "Video models", utility: "Utility models" };
 
 export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, onComplete, onOpenQueue }) {
   const [step, setStep] = useState("models");
@@ -149,7 +149,7 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
                     {items.map((model) => {
                       const installed = model.installState === "installed";
                       const downloading = started.has(model.id) && !installed;
-                      const recommended = RECOMMENDED_MODEL_IDS.has(model.id);
+                      const recommended = isRecommended(model);
                       return (
                         <label className={`setup-wizard-model${installed ? " installed" : ""}`} key={model.id}>
                           <input

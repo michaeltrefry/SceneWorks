@@ -684,6 +684,7 @@ export function App() {
     createModelImportJob,
     createLoraImportJob,
     createModelDownloadJob,
+    createLoraDownloadJob,
     createModelConvertJob,
   } = useModelsAndLoras({
     token,
@@ -1033,6 +1034,11 @@ export function App() {
       }
       if (job.status === "completed" && job.type === "model_download") {
         refreshDataRef.current?.();
+      }
+      // A completed built-in LoRA download (sc-5944) flips the catalog entry to
+      // installed; refresh models+loras so the Models row and any Studio gate update.
+      if (job.status === "completed" && job.type === "lora_download") {
+        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_import") {
         dismissNoticeKind("lora-import");
@@ -1765,6 +1771,7 @@ export function App() {
     deleteLora,
     deleteModel,
     createModelDownloadJob,
+    createLoraDownloadJob,
     createModelConvertJob,
     createLoraImportJob,
     createModelImportJob,
@@ -1833,7 +1840,7 @@ export function App() {
     recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
     rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,
-    loras, deleteLora, deleteModel, createModelDownloadJob, createModelConvertJob,
+    loras, deleteLora, deleteModel, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
     createLoraImportJob, createModelImportJob, gpuOptions, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,

@@ -43,6 +43,7 @@ pub const NON_GPU_JOB_TYPES: &[&str] = &[
     "model_import",
     "model_convert",
     "lora_import",
+    "lora_download",
 ];
 pub const MAX_JOB_ATTEMPTS: u32 = 5;
 
@@ -1573,6 +1574,14 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 Some(format!("LoRA Import — {subject}"))
             }
         }
+        JobType::LoraDownload => {
+            let subject = first_str(payload, &["loraName", "loraId", "repo"]).unwrap_or("");
+            if subject.is_empty() {
+                Some("LoRA Download".to_owned())
+            } else {
+                Some(format!("LoRA Download — {subject}"))
+            }
+        }
         JobType::PromptRefine => {
             let prompt = first_str(payload, &["prompt"]).unwrap_or("(empty prompt)");
             Some(format!("Prompt Refine — {}", truncate_prompt(prompt, 60)))
@@ -2016,6 +2025,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::ModelDownload
         | JobType::ModelImport
         | JobType::LoraImport
+        | JobType::LoraDownload
         | JobType::FrameExtract
         | JobType::TimelineExport
         | JobType::PromptRefine => Ok(()),

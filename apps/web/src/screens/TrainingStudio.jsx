@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
+import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { downloadOffersFor } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { API_BASE_URL } from "../api.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
@@ -458,6 +460,29 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // Mac UI gating (sc-3486): a target whose kernel has no native mlx-gen Rust trainer
   // (kolors_lora / lens_lora) can't train on a gated Mac — disable it and snap off it.
   const macTargetBlocked = (target) => macTrainingKernelBlocked(macCapabilities, target?.kernel);
+  // Model-availability gate (sc-5947): training needs a trainable target whose base model is
+  // downloaded. A target's base counts as missing only when it's present in the catalog AND
+  // installState === "missing" (so a thin test context with no `models` stays ready, and a real
+  // install reads the true state). Only gated when targets exist but every trainable base is
+  // missing — a target-registry error keeps its own "registry unavailable" message.
+  const usableTrainingTargets = trainingTargets.filter((target) => !macTargetBlocked(target));
+  const trainingBaseMissing = (target) => {
+    const base = models.find((item) => item.id === target?.baseModel);
+    return Boolean(base) && base.installState === "missing";
+  };
+  const trainingReady =
+    usableTrainingTargets.length === 0 ||
+    usableTrainingTargets.some((target) => !trainingBaseMissing(target));
+  const trainingBaseIds = new Set(usableTrainingTargets.map((target) => target.baseModel).filter(Boolean));
+  const trainingOffers = useMemo(
+    () => downloadOffersFor(models, (item) => trainingBaseIds.has(item.id), macCapabilities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [models, macCapabilities, [...trainingBaseIds].join("|")],
+  );
+  const trainingDownloadJobs = useMemo(
+    () => (jobs ?? []).filter((job) => job.type === "model_download"),
+    [jobs],
+  );
   const selectedTarget = useMemo(
     () => trainingTargets.find((target) => target.id === selectedTargetId) ?? firstTarget,
     [firstTarget, selectedTargetId, trainingTargets],
@@ -1031,6 +1056,16 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }
 
   return (
+    <ModelAvailabilityGate
+      ready={trainingReady}
+      title="Training needs a trainable base model"
+      description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
+      offers={trainingOffers}
+      downloadJobs={trainingDownloadJobs}
+      onDownload={createModelDownloadJob}
+      onOpenModels={() => setActiveView("Models")}
+      onOpenQueue={() => setActiveView("Queue")}
+    >
     <section className="main-surface training-studio">
       <div className="training-studio-shell">
         <div className="training-summary-band">
@@ -1215,5 +1250,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
         )}
       </div>
     </section>
+    </ModelAvailabilityGate>
   );
 }

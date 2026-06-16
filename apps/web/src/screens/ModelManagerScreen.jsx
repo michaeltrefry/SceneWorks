@@ -114,6 +114,13 @@ function capabilityLabel(capability) {
   return CAPABILITY_LABELS[capability] ?? String(capability).replaceAll("_", " ");
 }
 
+// Curated "getting started" models, flagged `recommended: true` in the catalog
+// (config/manifests/builtin.models.jsonc). Within each type section these float to a
+// "Recommended" subgroup; the rest collapse under "Additional Supported".
+function isRecommendedModel(model) {
+  return model.recommended === true;
+}
+
 // Group key for the family-organized LoRA list. A LoRA can list several compatible
 // families; we group under its primary one and bucket family-less entries under a
 // trailing "compatible" group.
@@ -198,6 +205,7 @@ export function ModelManagerScreen() {
     deleteLora: deleteLoraAction,
     deleteModel: deleteModelAction,
     createModelDownloadJob,
+    createLoraDownloadJob,
     createModelConvertJob,
     createLoraImportJob,
     createModelImportJob,
@@ -213,6 +221,7 @@ export function ModelManagerScreen() {
   const onDeleteLora = deleteLoraAction;
   const onDeleteModel = deleteModelAction;
   const onDownloadModel = createModelDownloadJob;
+  const onDownloadLora = createLoraDownloadJob;
   const onImportLora = createLoraImportJob;
   const onImportModel = createModelImportJob;
   const onOpenQueue = () => setActiveView("Queue");
@@ -334,6 +343,10 @@ export function ModelManagerScreen() {
 
   function convertJobsFor(model) {
     return jobs.filter((job) => job.type === "model_convert" && job.payload?.modelId === model.id);
+  }
+
+  function loraDownloadJobsFor(lora) {
+    return jobs.filter((job) => job.type === "lora_download" && job.payload?.loraId === lora.id);
   }
 
   async function importLora(event) {
@@ -491,11 +504,17 @@ export function ModelManagerScreen() {
     { type: "other", label: "Other Models", items: models.filter((model) => !knownModelTypes.has(model.type)) },
   ].filter((group) => group.items.length > 0);
 
-  // Visible LoRAs grouped by family for the family-organized list. The family
+  // LoRAs split into Built-In (catalog `scope: "builtin"`) and User (global/project)
+  // containers. Built-in entries are a flat list with a Download affordance; user
+  // entries keep the family-organized grouping below.
+  const builtinLoras = visibleLoras.filter((lora) => lora.scope === "builtin");
+  const userLoras = visibleLoras.filter((lora) => lora.scope !== "builtin");
+
+  // Visible user LoRAs grouped by family for the family-organized list. The family
   // dropdown still narrows `visibleLoras` upstream; when a specific family is
   // selected this collapses to a single group.
   const loraGroupMap = new Map();
-  visibleLoras.forEach((lora) => {
+  userLoras.forEach((lora) => {
     const key = loraGroupKey(lora) || "compatible";
     if (!loraGroupMap.has(key)) {
       loraGroupMap.set(key, []);
@@ -658,6 +677,11 @@ export function ModelManagerScreen() {
     const missing = lora.installState === "missing";
     const statusText = missing ? "unavailable" : installed ? "installed" : "pending";
     const deleteKey = `lora:${lora.scope ?? "global"}:${lora.id}`;
+    // Built-in LoRAs with a Hugging Face source can be fetched on demand (sc-5944) —
+    // user LoRAs are installed via the import form, so they get no Download affordance.
+    const hfSource = (lora.source?.provider ?? lora.provider) === "huggingface";
+    const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && !installed && hfSource;
+    const downloadJob = loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status));
     return (
       <article className={missing ? "lora-row warning" : "lora-row"} key={lora.id ?? lora.name}>
         <span>
@@ -665,14 +689,26 @@ export function ModelManagerScreen() {
           <small>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</small>
         </span>
         <span className={installed ? "status-badge installed" : "status-badge"}>{statusText}</span>
-        <button
-          className="danger-action"
-          disabled={!onDeleteLora || lora.removable === false || deletingItem === deleteKey}
-          onClick={() => deleteLora(lora)}
-          type="button"
-        >
-          {lora.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
-        </button>
+        <span className="lora-row-actions">
+          {canDownload ? (
+            <button disabled={Boolean(downloadJob)} onClick={() => onDownloadLora(lora)} type="button">
+              {downloadJob ? downloadJob.status : "Download"}
+            </button>
+          ) : null}
+          <button
+            className="danger-action"
+            disabled={!onDeleteLora || lora.removable === false || deletingItem === deleteKey}
+            onClick={() => deleteLora(lora)}
+            type="button"
+          >
+            {lora.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
+          </button>
+        </span>
+        {downloadJob ? (
+          <div className="lora-row-progress">
+            <WorkerProgressCard job={downloadJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+          </div>
+        ) : null}
       </article>
     );
   }
@@ -697,15 +733,41 @@ export function ModelManagerScreen() {
         </label>
       </div>
 
-      {modelGroups.map((group) => (
-        <section className="model-type-group" key={group.type}>
-          <div className="model-type-group-heading">
-            <h3>{group.label}</h3>
-            <span>{group.items.length}</span>
-          </div>
-          <div className="model-grid">{group.items.map((model) => renderModelCard(model))}</div>
-        </section>
-      ))}
+      {modelGroups.map((group) => {
+        const recommended = group.items.filter(isRecommendedModel);
+        const additional = group.items.filter((model) => !isRecommendedModel(model));
+        // Only split into Recommended / Additional Supported when both buckets exist;
+        // otherwise show a single grid so we never render an empty or redundant header.
+        const split = recommended.length > 0 && additional.length > 0;
+        return (
+          <details className="model-type-group" key={group.type} open>
+            <summary className="model-type-group-heading">
+              <h3>{group.label}</h3>
+              <span>{group.items.length}</span>
+            </summary>
+            {split ? (
+              <>
+                <div className="model-subgroup">
+                  <div className="model-subgroup-heading">
+                    <h4>Recommended Models</h4>
+                    <span>{recommended.length}</span>
+                  </div>
+                  <div className="model-grid">{recommended.map((model) => renderModelCard(model))}</div>
+                </div>
+                <details className="model-subgroup model-subgroup-additional">
+                  <summary className="model-subgroup-heading">
+                    <h4>Additional Supported Models</h4>
+                    <span>{additional.length}</span>
+                  </summary>
+                  <div className="model-grid">{additional.map((model) => renderModelCard(model))}</div>
+                </details>
+              </>
+            ) : (
+              <div className="model-grid">{group.items.map((model) => renderModelCard(model))}</div>
+            )}
+          </details>
+        );
+      })}
       {deleteMessage.text ? <p className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}>{deleteMessage.text}</p> : null}
 
       <section className="model-import-panel-section">
@@ -831,6 +893,22 @@ export function ModelManagerScreen() {
           </div>
           <span>{loraCountText}</span>
         </div>
+
+        {builtinLoras.length ? (
+          <details className="lora-scope-group" open>
+            <summary className="lora-scope-group-heading">
+              <h3>Built-In LoRAs</h3>
+              <span>{builtinLoras.length}</span>
+            </summary>
+            <div className="lora-list">{builtinLoras.map((lora) => renderLoraRow(lora))}</div>
+          </details>
+        ) : null}
+
+        <details className="lora-scope-group" open>
+        <summary className="lora-scope-group-heading">
+          <h3>User LoRAs</h3>
+          <span>{userLoras.length}</span>
+        </summary>
         <form className="lora-import-panel models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
           <div>
             <strong>Import LoRA</strong>
@@ -993,7 +1071,7 @@ export function ModelManagerScreen() {
           </div>
         ) : null}
         {hiddenImportCount ? <p className="helper-copy">{hiddenImportCount} LoRA import{hiddenImportCount === 1 ? " is" : "s are"} hidden by this family filter.</p> : null}
-        {visibleLoras.length ? (
+        {userLoras.length ? (
           <div className="lora-family-groups">
             {loraGroups.map((group) => (
               <div className="lora-family-group" key={group.family}>
@@ -1006,10 +1084,11 @@ export function ModelManagerScreen() {
             ))}
           </div>
         ) : localLoraImportJobs.length ? null : loras.length && familyFilter !== "all" ? (
-          <div className="empty-panel compact-panel">No LoRAs match {familyFilter}</div>
+          <div className="empty-panel compact-panel">No user LoRAs match {familyFilter}</div>
         ) : (
-          <div className="empty-panel compact-panel">No LoRAs in this view</div>
+          <div className="empty-panel compact-panel">No user LoRAs yet — import one above.</div>
         )}
+        </details>
       </section>
     </section>
   );

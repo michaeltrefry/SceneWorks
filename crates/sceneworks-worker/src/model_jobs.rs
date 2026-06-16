@@ -188,6 +188,138 @@ pub(crate) async fn run_model_download_job(
     Ok(())
 }
 
+/// Download a built-in catalog LoRA's Hugging Face repo/file into the shared HF cache
+/// (sc-5944). Mirrors the `run_model_download_job` cache path but skips the model-only
+/// steps (family reconciliation, tokenizer overlay, install marker): a LoRA is a single
+/// adapter file. Landing it in the HF cache is exactly what the API's install-state probe
+/// (`lora_huggingface_cached_file`) and the engine's on-demand generation-time fetch read,
+/// so the catalog entry flips to "installed" on the next `/api/v1/loras` refresh.
+pub(crate) async fn run_lora_download_job(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let repo = match required_payload_string(&job.payload, "repo") {
+        Ok(repo) => repo,
+        Err(error) => {
+            fail_job(
+                api,
+                &job.id,
+                "LoRA download is missing a repository.",
+                Some(error.to_string()),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let files = payload_string_array(&job.payload, "files");
+    let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Downloading,
+            ProgressStage::Downloading,
+            0.1,
+            &format!("Downloading LoRA {repo}: estimating size."),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(
+        api,
+        &job.id,
+        "LoRA download canceled before transfer started.",
+    )
+    .await?;
+
+    let repo_dir = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Unable to resolve Hugging Face cache path for {repo}."
+        ))
+    })?;
+    let snapshot =
+        HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
+    if let Some(total_bytes) = snapshot.total_bytes() {
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Downloading,
+                ProgressStage::Downloading,
+                0.1,
+                &format!(
+                    "Downloading LoRA {repo}: 0 B of {}.",
+                    format_bytes(total_bytes)
+                ),
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+    }
+
+    let mut progress = DownloadProgress::new(
+        repo,
+        directory_size(&repo_dir.join("blobs")).await,
+        snapshot.total_bytes(),
+        progress_report_interval(settings),
+    );
+    download_snapshot_into_cache(
+        &DownloadContext {
+            api,
+            client: http_client,
+            settings,
+            job_id: &job.id,
+            cancel_message: "LoRA download canceled by user.",
+            fresh_download: false,
+        },
+        &repo_dir,
+        revision,
+        &snapshot,
+        &mut progress,
+    )
+    .await?;
+    let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir);
+
+    let mut result = JsonObject::new();
+    result.insert(
+        "loraId".to_owned(),
+        job.payload.get("loraId").cloned().unwrap_or(Value::Null),
+    );
+    result.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    result.insert(
+        "path".to_owned(),
+        Value::String(cache_path.display().to_string()),
+    );
+    result.insert(
+        "storage".to_owned(),
+        Value::String("huggingface_cache".to_owned()),
+    );
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "LoRA download completed in the Hugging Face cache.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Canonical upstream Kolors repo. Its snapshot ships only the ChatGLM3 **slow** SentencePiece
 /// tokenizer (`tokenizer.model`), NOT the fast `tokenizer.json` that the in-process Rust Kolors
 /// generator (sc-3875) and LoRA/LoKr trainer (sc-4732) require — both construct via

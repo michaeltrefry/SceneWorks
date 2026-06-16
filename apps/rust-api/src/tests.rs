@@ -3754,6 +3754,77 @@ async fn video_jobs_expand_recipe_presets_server_side() {
 }
 
 #[tokio::test]
+async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
+    // sc-5944: built-in LoRAs gain an explicit Download (mirrors model download). A
+    // catalog LoRA with a Hugging Face source queues a `lora_download` job carrying the
+    // repo/file the worker fetches into the HF cache; a non-HF source or already-installed
+    // LoRA is rejected, and an unknown id is 404.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "loras": [
+                {
+                  "id": "ltx_ic_union",
+                  "name": "LTX IC Union",
+                  "family": "ltx-video",
+                  "compatibility": { "families": ["ltx-video"] },
+                  "source": {
+                    "provider": "huggingface",
+                    "repo": "Lightricks/LTX-2.3-IC",
+                    "file": "ic-union.safetensors"
+                  }
+                },
+                {
+                  "id": "local_only",
+                  "name": "Local Only",
+                  "family": "z-image",
+                  "compatibility": { "families": ["z-image"] },
+                  "source": { "provider": "local", "path": "loras/local.safetensors" }
+                }
+              ]
+            }
+            "#,
+    )
+    .expect("builtin loras writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/ltx_ic_union/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["type"], "lora_download");
+    assert_eq!(job["payload"]["loraId"], "ltx_ic_union");
+    assert_eq!(job["payload"]["loraName"], "LTX IC Union");
+    assert_eq!(job["payload"]["provider"], "huggingface");
+    assert_eq!(job["payload"]["repo"], "Lightricks/LTX-2.3-IC");
+    assert_eq!(job["payload"]["files"][0], "ic-union.safetensors");
+    assert_eq!(job["payload"]["family"], "ltx-video");
+
+    // A LoRA whose source is not a Hugging Face repo can't be fetched this way.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/local_only/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // An unknown LoRA id is a 404.
+    let (status, _) = request(app, "POST", "/api/v1/loras/missing/download", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn model_and_lora_routes_match_manifest_behavior() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

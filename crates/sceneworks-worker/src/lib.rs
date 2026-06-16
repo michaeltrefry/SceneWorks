@@ -715,6 +715,9 @@ async fn run_utility_job(
         JobType::LoraImport => run_lora_import_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("LoRA import failed.", error)),
+        JobType::LoraDownload => run_lora_download_job(api, settings, http_client, &job)
+            .await
+            .map_err(|error| ("LoRA download failed.", error)),
         JobType::ModelImport => run_model_import_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Model import failed.", error)),

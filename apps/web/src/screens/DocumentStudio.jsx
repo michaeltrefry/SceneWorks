@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { DocumentView } from "../components/DocumentView.jsx";
+import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import {
   DEFAULT_INTERLEAVE_RESOLUTION,
@@ -8,6 +9,8 @@ import {
   INTERLEAVE_RESOLUTION_OPTIONS,
 } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
+import { DEFAULT_MAC_CAPABILITIES } from "../macGating.js";
+import { documentModelUsable, downloadOffersFor } from "../modelEligibility.js";
 import { selectStackedJobs } from "./generationStudio.jsx";
 
 const MAX_IMAGES_DEFAULT = 6;
@@ -40,10 +43,14 @@ export function DocumentStudio() {
     activeProject,
     assets,
     createInterleaveJob,
+    createModelDownloadJob,
     documentLocalJobs = [],
     gpuOptions,
     imageModels,
+    jobs = [],
     jobAction,
+    macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    models = [],
     rememberLocalGenerationJob,
     setActiveView,
     requestedGpu,
@@ -54,6 +61,17 @@ export function DocumentStudio() {
   const interleaveModels = useMemo(
     () => (imageModels ?? []).filter(modelSupportsInterleave),
     [imageModels],
+  );
+  // Model-availability gate (sc-5947): when no interleave-capable model is present, show the
+  // recommended downloads (SenseNova-U1) instead of the compose form. Offers are mac-aware.
+  const modelReady = interleaveModels.length > 0;
+  const modelOffers = useMemo(
+    () => downloadOffersFor(models, documentModelUsable, macCapabilities),
+    [models, macCapabilities],
+  );
+  const modelDownloadJobs = useMemo(
+    () => (jobs ?? []).filter((job) => job.type === "model_download"),
+    [jobs],
   );
   const [model, setModel] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -112,13 +130,19 @@ export function DocumentStudio() {
   }
 
   return (
+    <ModelAvailabilityGate
+      ready={modelReady}
+      title="Document Studio needs an interleave-capable model"
+      description="Interleaved text-image documents need a model like SenseNova-U1. Download one to get started."
+      offers={modelOffers}
+      downloadJobs={modelDownloadJobs}
+      onDownload={createModelDownloadJob}
+      onOpenModels={() => setActiveView("Models")}
+      onOpenQueue={onOpenQueue}
+      onCancelJob={onCancelJob}
+    >
     <section className="main-surface document-studio">
       <form className="studio-form" onSubmit={submit}>
-        {interleaveModels.length ? null : (
-          <p className="empty-panel compact-panel">
-            Install a SenseNova-U1 model to generate interleaved text-image documents.
-          </p>
-        )}
         <label className="field">
           <span>Prompt</span>
           <textarea
@@ -230,5 +254,6 @@ export function DocumentStudio() {
         )}
       </section>
     </section>
+    </ModelAvailabilityGate>
   );
 }

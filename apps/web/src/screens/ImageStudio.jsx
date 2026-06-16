@@ -83,6 +83,8 @@ import {
   useGenerationStudio,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { downloadOffersFor, imageModelUsable } from "../modelEligibility.js";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -237,6 +239,7 @@ export function ImageStudio() {
     gpuOptions,
     imageModels,
     models = [],
+    jobs = [],
     importAsset,
     latestImageAssets,
     recentImageAssets,
@@ -484,6 +487,19 @@ export function ImageStudio() {
     [mode, modelsForMode],
   );
   const pickerModels = mode === "text_to_image" && availableModels.length === 0 ? macImageModels : availableModels;
+  // Model-availability gate (sc-5947): when the user has no mac-available image model at all,
+  // show recommended image-model downloads instead of the studio. `ready` matches the picker
+  // (which falls back to all macImageModels for the text tab); offers come from the full catalog
+  // via imageModelUsable, recommended-first.
+  const modelReady = macImageModels.length > 0;
+  const modelOffers = useMemo(
+    () => downloadOffersFor(models, imageModelUsable, macCapabilities),
+    [models, macCapabilities],
+  );
+  const modelDownloadJobs = useMemo(
+    () => (jobs ?? []).filter((job) => job.type === "model_download"),
+    [jobs],
+  );
   // When the mode change filters out the current model (e.g. Lens-Turbo is the
   // text default but isn't edit-capable), snap to the first available model so
   // the dropdown's displayed option matches the value actually submitted.
@@ -1053,6 +1069,17 @@ export function ImageStudio() {
     !selectedLoraValidationResult.ok;
 
   return (
+    <ModelAvailabilityGate
+      ready={modelReady}
+      title="Image Studio needs an image model"
+      description="Download a recommended image model to start generating."
+      offers={modelOffers}
+      downloadJobs={modelDownloadJobs}
+      onDownload={createModelDownloadJob}
+      onOpenModels={() => setActiveView("Models")}
+      onOpenQueue={onOpenQueue}
+      onCancelJob={onCancelJob}
+    >
     <section className="main-surface image-studio">
       <form className="studio-shell" onSubmit={submit}>
         <div className="surface-header hero studio-prompt-hero">
@@ -1612,5 +1639,6 @@ export function ImageStudio() {
         <PromptGuideModal guide={promptGuide} modelName={selectedModel?.name} onClose={() => setGuideOpen(false)} />
       ) : null}
     </section>
+    </ModelAvailabilityGate>
   );
 }

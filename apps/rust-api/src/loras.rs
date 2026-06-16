@@ -15,6 +15,111 @@ pub(crate) async fn list_loras(
     Ok(Json(items))
 }
 
+/// Explicitly download a catalog LoRA (built-in or user-global) whose source is a
+/// Hugging Face repo into the shared HF cache (sc-5944). Mirrors the model-download
+/// endpoint: the worker fetches the adapter file(s) into the cache the install-state
+/// probe (`lora_huggingface_cached_file`) reads, so the catalog row flips to
+/// "installed". Built-in LoRAs previously had no way to be fetched from the UI — they
+/// were only pulled on-demand at first generation.
+pub(crate) async fn create_lora_download_job(
+    State(state): State<AppState>,
+    Path(lora_id): Path<String>,
+    ApiJson(payload): ApiJson<ModelDownloadRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let lora = lora_catalog(&state, None)
+        .await?
+        .into_iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(lora_id.as_str()))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "LoRA not found".to_owned(),
+        })?;
+    if lora.get("installState").and_then(Value::as_str) == Some("installed") {
+        return Err(ApiError::bad_request("LoRA is already installed"));
+    }
+    let source = lora.get("source").and_then(Value::as_object);
+    let provider = source
+        .and_then(|source| source.get("provider"))
+        .or_else(|| lora.get("provider"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if provider != Some("huggingface") {
+        return Err(ApiError::bad_request(
+            "LoRA does not define a Hugging Face download source",
+        ));
+    }
+    let repo = source
+        .and_then(|source| source.get("repo"))
+        .or_else(|| lora.get("repo"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request("LoRA download source is missing a repo"))?
+        .to_owned();
+    // A single `file` or an explicit `files` list narrows the snapshot to the adapter
+    // weights; an empty list lets the worker fetch the (small) repo.
+    let mut files: Vec<String> = Vec::new();
+    if let Some(file) = source
+        .and_then(|source| source.get("file"))
+        .or_else(|| lora.get("file"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        files.push(file.to_owned());
+    }
+    if files.is_empty() {
+        if let Some(list) = source
+            .and_then(|source| source.get("files"))
+            .or_else(|| lora.get("files"))
+            .and_then(Value::as_array)
+        {
+            files.extend(
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+    }
+
+    let mut job_payload = JsonObject::new();
+    job_payload.insert("loraId".to_owned(), Value::String(lora_id.clone()));
+    job_payload.insert(
+        "loraName".to_owned(),
+        Value::String(
+            lora.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&lora_id)
+                .to_owned(),
+        ),
+    );
+    job_payload.insert(
+        "provider".to_owned(),
+        Value::String("huggingface".to_owned()),
+    );
+    job_payload.insert("repo".to_owned(), Value::String(repo));
+    job_payload.insert("files".to_owned(), json!(files));
+    if let Some(family) = lora.get("family").and_then(Value::as_str) {
+        if !family.trim().is_empty() {
+            job_payload.insert("family".to_owned(), Value::String(family.to_owned()));
+        }
+    }
+
+    let job = create_generation_job(
+        state,
+        JobType::LoraDownload,
+        None,
+        None,
+        job_payload,
+        requested_gpu_or_auto(payload.requested_gpu),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
 pub(crate) async fn delete_lora(
     State(state): State<AppState>,
     Path(lora_id): Path<String>,

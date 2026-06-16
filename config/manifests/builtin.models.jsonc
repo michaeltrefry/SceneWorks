@@ -4,6 +4,11 @@
   "models": [
     {
       "id": "z_image_turbo",
+      // `recommended` flags the curated "getting started" set surfaced in the Setup
+      // Wizard, the Models page Recommended section, and per-Studio availability gates.
+      // `autoDownload: false` keeps a recommended model badged-but-unchecked in the
+      // wizard (used for very large downloads); absent => pre-checked.
+      "recommended": true,
       "name": "Z-Image-Turbo",
       "family": "z-image",
       "type": "image",
@@ -510,6 +515,7 @@
     },
     {
       "id": "sensenova_u1_8b",
+      "recommended": true,
       "name": "SenseNova-U1 8B",
       "family": "sensenova-u1",
       "type": "image",
@@ -1324,6 +1330,7 @@
     },
     {
       "id": "sdxl",
+      "recommended": true,
       "name": "Stable Diffusion XL",
       "family": "sdxl",
       "type": "image",
@@ -1468,6 +1475,7 @@
     },
     {
       "id": "instantid_realvisxl",
+      "recommended": true,
       "name": "InstantID (RealVisXL)",
       "family": "sdxl",
       "type": "image",
@@ -1675,6 +1683,10 @@
     },
     {
       "id": "ltx_2_3",
+      // Recommended headline video model, but ~146 GB — keep it badged yet unchecked in
+      // the wizard so the big download is a deliberate opt-in.
+      "recommended": true,
+      "autoDownload": false,
       "name": "LTX-2.3",
       "family": "ltx-video",
       "type": "video",
@@ -2587,6 +2599,7 @@
     },
     {
       "id": "real_esrgan",
+      "recommended": true,
       "name": "Real-ESRGAN Upscaler",
       "family": "real-esrgan",
       "type": "utility",
@@ -2725,6 +2738,7 @@
       // models) does not apply. `files: []` pulls the repo's own LICENSE.txt + USE_POLICY
       // (Llama community license) alongside the weights.
       "id": "prompt_refine_llama_3_2_3b",
+      "recommended": true,
       "name": "Prompt Refiner (Llama-3.2-3B)",
       "family": "prompt-refine",
       "type": "utility",

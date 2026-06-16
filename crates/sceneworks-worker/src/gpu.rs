@@ -550,6 +550,9 @@ pub(crate) fn worker_capabilities_with_utility(
             WorkerCapability::ModelImport,
             WorkerCapability::ModelConvert,
             WorkerCapability::LoraImport,
+            // Explicit built-in LoRA download (sc-5944): fetches the catalog LoRA's HF
+            // repo/file into the shared HF cache, same as model_download.
+            WorkerCapability::LoraDownload,
             // Procedural detection/tracking is a preview only. Real, model-backed
             // PersonDetect/PersonTrack run on the macOS MLX worker (native
             // YOLO11/SAM2, epic 3482) or the Python GPU worker on Windows/Linux;

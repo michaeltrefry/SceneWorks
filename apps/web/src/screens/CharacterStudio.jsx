@@ -15,6 +15,8 @@ import { assetMatchesCharacter } from "../components/DatasetAddDialog.jsx";
 import { extractFamilies } from "../presetUtils.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { useAppContext } from "../context/AppContext.js";
+import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { angleModelUsable, downloadOffersFor, poseModelUsable } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macAvailableModels } from "../macGating.js";
 
 const characterTypes = [
@@ -58,6 +60,7 @@ export function CharacterStudio() {
     detachCharacterLora,
     createCharacterTestJob,
     createImageJob,
+    createModelDownloadJob,
     importAsset,
     imageLocalJobs,
     jobAction,
@@ -66,6 +69,8 @@ export function CharacterStudio() {
     deleteAsset,
     purgeAsset,
     imageModels,
+    models = [],
+    jobs = [],
     latestImageAssets,
     loras,
     setPreviewAsset,
@@ -85,6 +90,24 @@ export function CharacterStudio() {
     [imageModels, macCapabilities],
   );
   const onPreview = setPreviewAsset;
+  // Model-availability gate (sc-5947): the Angle Set and Pose Library generation tabs each
+  // need a model with ui.viewAngles / ui.poseLibrary (e.g. InstantID). Only those two tab
+  // panels are gated — character/asset management works without a generation model — so the
+  // gate shows recommended downloads in place of the panel, not the whole studio. Offers come
+  // from the full catalog (recommended-first); `ready` reads the screen's angle/pose pickers.
+  const angleOffers = useMemo(
+    () => downloadOffersFor(models, angleModelUsable, macCapabilities),
+    [models, macCapabilities],
+  );
+  const poseOffers = useMemo(
+    () => downloadOffersFor(models, poseModelUsable, macCapabilities),
+    [models, macCapabilities],
+  );
+  const modelDownloadJobs = useMemo(
+    () => (jobs ?? []).filter((job) => job.type === "model_download"),
+    [jobs],
+  );
+  const onOpenModels = () => setActiveView("Models");
   // Job callbacks for character generation cards (Angle Set / Pose Library).
   // jobAction may be missing in test contexts that wrap CharacterStudio with a
   // stub provider; guard so the buttons just no-op there.
@@ -576,6 +599,17 @@ export function CharacterStudio() {
               id="character-panel-angles"
               role="tabpanel"
             >
+              <ModelAvailabilityGate
+                ready={angleModels.length > 0}
+                title="Angle Set needs an angle-capable model"
+                description="Generating character angle sets needs a model like InstantID (RealVisXL). Download one to get started."
+                offers={angleOffers}
+                downloadJobs={modelDownloadJobs}
+                onDownload={createModelDownloadJob}
+                onOpenModels={onOpenModels}
+                onOpenQueue={onOpenCharacterJobQueue}
+                onCancelJob={onCancelCharacterJob}
+              >
               <CharacterAngleSet
                 addCharacterReference={addCharacterReference}
                 angleModel={angleModel}
@@ -595,6 +629,7 @@ export function CharacterStudio() {
                 rememberLocalGenerationJob={rememberLocalGenerationJob}
                 selectedCharacter={selectedCharacter}
               />
+              </ModelAvailabilityGate>
             </div>
 
             {/* Poses tab — Pose generation. */}
@@ -605,6 +640,17 @@ export function CharacterStudio() {
               id="character-panel-poses"
               role="tabpanel"
             >
+              <ModelAvailabilityGate
+                ready={poseModels.length > 0}
+                title="Pose Library needs a pose-capable model"
+                description="Generating character poses needs a model like InstantID (RealVisXL). Download one to get started."
+                offers={poseOffers}
+                downloadJobs={modelDownloadJobs}
+                onDownload={createModelDownloadJob}
+                onOpenModels={onOpenModels}
+                onOpenQueue={onOpenCharacterJobQueue}
+                onCancelJob={onCancelCharacterJob}
+              >
               <CharacterPoseLibrary
                 addCharacterReference={addCharacterReference}
                 approvedReferences={approvedReferences}
@@ -624,6 +670,7 @@ export function CharacterStudio() {
                 rememberLocalGenerationJob={rememberLocalGenerationJob}
                 selectedCharacter={selectedCharacter}
               />
+              </ModelAvailabilityGate>
             </div>
 
             {/* Test tab — Test Character form. */}

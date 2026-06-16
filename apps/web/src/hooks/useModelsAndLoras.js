@@ -202,6 +202,27 @@ export function useModelsAndLoras({
     [token, setJobs, setError],
   );
 
+  // Built-in LoRA explicit download (sc-5944): queues a `lora_download` job that fetches
+  // the catalog LoRA's HF files into the cache, flipping its installState to "installed".
+  // Mirrors createModelDownloadJob.
+  const createLoraDownloadJob = useCallback(
+    async (lora) => {
+      try {
+        const job = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}/download`, token, {
+          method: "POST",
+          body: JSON.stringify({ requestedGpu: "auto" }),
+        });
+        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setError("");
+        return job;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      }
+    },
+    [token, setJobs, setError],
+  );
+
   return {
     models,
     setModels,
@@ -213,6 +234,7 @@ export function useModelsAndLoras({
     createModelImportJob,
     createLoraImportJob,
     createModelDownloadJob,
+    createLoraDownloadJob,
     createModelConvertJob,
   };
 }

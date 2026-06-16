@@ -81,6 +81,8 @@ import {
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -214,6 +216,19 @@ export function VideoStudio() {
   const modelServesMode = (item, value) =>
     Boolean(item?.capabilities?.includes(value)) && !macVideoModeBlock(item, macCapabilities, value);
   const modelsForMode = (value) => baseVideoModels.filter((item) => modelServesMode(item, value));
+  // Model-availability gate (sc-5947): when the user has no mac-available video model at all,
+  // show recommended video-model downloads instead of the studio. `ready` matches the picker
+  // (which falls back to all baseVideoModels); offers come from the full catalog via
+  // videoModelUsable, recommended-first.
+  const modelReady = baseVideoModels.length > 0;
+  const modelOffers = useMemo(
+    () => downloadOffersFor(models, videoModelUsable, macCapabilities),
+    [models, macCapabilities],
+  );
+  const modelDownloadJobs = useMemo(
+    () => (jobs ?? []).filter((job) => job.type === "model_download"),
+    [jobs],
+  );
   // Prompt guide for the selected model; fall back to the generic video guide
   // when a model declares none, so the button is always useful (sc-1817).
   const promptGuide = selectedModel?.ui?.promptGuide ?? {
@@ -874,6 +889,17 @@ export function VideoStudio() {
   }
 
   return (
+    <ModelAvailabilityGate
+      ready={modelReady}
+      title="Video Studio needs a video model"
+      description="Download a recommended video model to start generating."
+      offers={modelOffers}
+      downloadJobs={modelDownloadJobs}
+      onDownload={createModelDownloadJob}
+      onOpenModels={() => setActiveView("Models")}
+      onOpenQueue={onOpenQueue}
+      onCancelJob={onCancelJob}
+    >
     <section className="main-surface video-studio">
       <form className="studio-shell" onSubmit={submit}>
         <div className="surface-header hero studio-prompt-hero video-prompt-hero">
@@ -1686,5 +1712,6 @@ export function VideoStudio() {
         <PromptGuideModal guide={promptGuide} modelName={selectedModel?.name} onClose={() => setGuideOpen(false)} />
       ) : null}
     </section>
+    </ModelAvailabilityGate>
   );
 }

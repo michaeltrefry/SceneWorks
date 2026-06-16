@@ -3490,6 +3490,95 @@ label {
   gap: 10px;
 }
 
+/* Collapsible model type sections + LoRA scope sections (sc-5943). The type group,
+   the "Additional Supported" subgroup, and the Built-In/User LoRA sections are native
+   <details>; we hide the default disclosure marker and draw our own rotating caret. */
+details.model-type-group,
+details.lora-scope-group,
+details.model-subgroup-additional {
+  display: grid;
+  gap: 12px;
+}
+
+details.model-type-group > summary,
+details.lora-scope-group > summary,
+details.model-subgroup-additional > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+details.model-type-group > summary::-webkit-details-marker,
+details.lora-scope-group > summary::-webkit-details-marker,
+details.model-subgroup-additional > summary::-webkit-details-marker {
+  display: none;
+}
+
+summary.model-type-group-heading::before,
+summary.lora-scope-group-heading::before,
+.model-subgroup-additional > summary.model-subgroup-heading::before {
+  content: "▸";
+  font-size: 11px;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+
+details[open] > summary.model-type-group-heading::before,
+details[open] > summary.lora-scope-group-heading::before,
+.model-subgroup-additional[open] > summary.model-subgroup-heading::before {
+  transform: rotate(90deg);
+}
+
+.lora-scope-group + .lora-scope-group {
+  margin-top: var(--gap-3);
+}
+
+.lora-scope-group-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.lora-scope-group-heading h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.lora-scope-group-heading > span {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-subgroup {
+  display: grid;
+  gap: 10px;
+}
+
+.model-subgroup-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.model-subgroup-heading h4 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.model-subgroup-heading > span {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 .model-card,
 .lora-panel,
 .lora-row,
@@ -3761,6 +3850,73 @@ label {
   gap: 12px;
   align-items: center;
   padding: 10px 12px;
+}
+
+/* Built-in LoRA Download + Delete share the third column; an active download's
+   progress card spans the full row below (sc-5944). */
+.lora-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lora-row-progress {
+  grid-column: 1 / -1;
+}
+
+/* Per-Studio model-availability gate (sc-5947): shown in place of a Studio body when no
+   installed model supports it, offering the screen's recommended models for download. */
+.model-availability-gate {
+  display: grid;
+  place-items: center;
+  padding: var(--gap-4, 32px) var(--gap-3, 20px);
+  min-height: 320px;
+}
+
+.model-availability-gate-card {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.model-availability-offers {
+  display: grid;
+  gap: 12px;
+}
+
+.model-availability-offer {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2, var(--surface-2));
+}
+
+.model-availability-offer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-availability-offer-head span {
+  display: grid;
+  gap: 2px;
+}
+
+.model-availability-offer-head small {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-availability-browse {
+  justify-self: start;
+  background: transparent;
 }
 
 .lora-row > span:first-child {

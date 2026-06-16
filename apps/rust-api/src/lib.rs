@@ -797,6 +797,10 @@ pub(crate) fn create_app_with_state(
         .route("/api/v1/loras", get(list_loras))
         .route("/api/v1/loras/:lora_id", delete(delete_lora))
         .route(
+            "/api/v1/loras/:lora_id/download",
+            post(create_lora_download_job),
+        )
+        .route(
             "/api/v1/loras/import",
             post(create_lora_import_job)
                 .layer(DefaultBodyLimit::max(MAX_LORA_MULTIPART_BODY_BYTES)),
