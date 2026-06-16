@@ -3369,12 +3369,15 @@ fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
 /// (→ candle `wan2_2_ti2v_5b`) and `ltx_2_3` (→ candle `ltx_2_3_distilled`) (epic 5095, sc-5097),
 /// plus the Wan2.2 **14B** MoE pair `wan_2_2_t2v_14b` (text-only) and `wan_2_2_i2v_14b` (image→video)
 /// (sc-5175), plus `svd` (→ candle `svd_xt`, image→video, sc-5493 / epic 5481). Mirrors the worker's
-/// `video_jobs::candle_video_engine_id`. `ltx_2_3_eros` still has no candle provider; every conditioned
-/// mode (first_last_frame / extend / bridge / replace) + LoRA stays on the Python torch worker. Note
-/// the 14B I2V and SVD are image→video, NOT txt2video — see [`CANDLE_VIDEO_I2V_ROUTED_MODELS`].
+/// `video_jobs::candle_video_engine_id`. `ltx_2_3_eros` (sc-5495) now routes to candle for plain
+/// text-to-video too — it's a full dense LTX-2.3 fine-tune → the same `ltx_2_3_distilled` engine, just
+/// its own weights repo; every conditioned mode (first_last_frame / extend / bridge / replace) + LoRA
+/// still stays on the Python torch worker. Note the 14B I2V and SVD are image→video, NOT txt2video —
+/// see [`CANDLE_VIDEO_I2V_ROUTED_MODELS`].
 const CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
     "wan_2_2",
     "ltx_2_3",
+    "ltx_2_3_eros",
     "wan_2_2_t2v_14b",
     "wan_2_2_i2v_14b",
     "svd",
@@ -4984,14 +4987,30 @@ mod candle_routing_tests {
 
     #[test]
     fn non_candle_video_models_and_conditioned_shapes_fall_back() {
-        // Models with no candle video provider stay on torch even for text_to_video (`ltx_2_3_eros`
-        // is still torch-only; SVD now has a candle provider but is image→video, covered below).
+        // `ltx_2_3_eros` now routes to candle for plain text_to_video (sc-5495 — it's a full dense
+        // LTX-2.3 fine-tune on the `ltx_2_3_distilled` engine), but any conditioned eros shape stays on
+        // the Python torch worker (the candle LTX lane is txt2video-only).
         assert!(
-            !video_request_candle_eligible(
+            video_request_candle_eligible(
                 "ltx_2_3_eros",
                 &object(json!({ "mode": "text_to_video" }))
             ),
-            "ltx_2_3_eros must fall back to the Python worker"
+            "ltx_2_3_eros text_to_video must route to the candle lane"
+        );
+        assert!(
+            !video_request_candle_eligible(
+                "ltx_2_3_eros",
+                &object(json!({ "mode": "first_last_frame" }))
+            ),
+            "a conditioned ltx_2_3_eros shape must fall back to the Python worker"
+        );
+        // A genuinely non-candle video model stays on torch.
+        assert!(
+            !video_request_candle_eligible(
+                "some_unported_model",
+                &object(json!({ "mode": "text_to_video" }))
+            ),
+            "an unported model must fall back to the Python worker"
         );
         // A txt2video model in any conditioned shape (default/i2v mode, a source, or a LoRA) → torch.
         let cases = [
@@ -5124,12 +5143,16 @@ mod candle_routing_tests {
                 "candle worker should claim {model} image_to_video"
             );
         }
-        // Refuses a non-candle video model (ltx_2_3_eros has no candle provider), a conditioned (i2v)
-        // shape on a txt2video model, an image→video model (svd) in a txt2video shape, and the 14B I2V
-        // in a txt2video shape (both are image→video only).
-        assert!(!worker_supports_job(
+        // Claims `ltx_2_3_eros` text_to_video (sc-5495 — the candle LTX engine serves the eros fine-tune
+        // too). Refuses an unported model, a conditioned (i2v) shape on a txt2video model, an image→video
+        // model (svd) in a txt2video shape, and the 14B I2V in a txt2video shape (both image→video only).
+        assert!(worker_supports_job(
             &candle,
             &video_generate_job(json!({ "model": "ltx_2_3_eros", "mode": "text_to_video" }))
+        ));
+        assert!(!worker_supports_job(
+            &candle,
+            &video_generate_job(json!({ "model": "some_unported_model", "mode": "text_to_video" }))
         ));
         assert!(!worker_supports_job(
             &candle,

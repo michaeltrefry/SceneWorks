@@ -2706,6 +2706,10 @@ const CANDLE_WAN_T2V_14B_REPO: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
 const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 const CANDLE_LTX_REPO: &str = "Lightricks/LTX-2.3";
+// The `ltx_2_3_eros` weights repo (sc-5495): a full dense LTX-2.3 fine-tune (the candle provider
+// loads its `10Eros_v1_bf16.safetensors` like the base; same architecture, same Gemma encoder).
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+const CANDLE_LTX_EROS_REPO: &str = "TenStrip/LTX2.3-10Eros";
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 
@@ -2724,14 +2728,17 @@ const CANDLE_WAN_VACE_REPO: &str = "Wan-AI/Wan2.1-VACE-14B-diffusers";
 /// does not serve. Note ltx maps to `ltx_2_3_distilled` (the candle provider's id), not the MLX
 /// `ltx_2_3`. Covers the base txt2video ids (5B + ltx) plus the Wan2.2 **14B** dual-expert MoE pair
 /// (sc-5174 / sc-5175): `wan_2_2_t2v_14b` (text→video) and `wan_2_2_i2v_14b` (image→video), plus `svd`
-/// (image→video, sc-5493 / epic 5481). `ltx_2_3_eros` has no candle provider yet and stays on torch.
+/// (image→video, sc-5493 / epic 5481). `ltx_2_3_eros` (sc-5495) maps to the same `ltx_2_3_distilled`
+/// engine as the base — it's a full dense LTX-2.3 fine-tune — differing only in the weights repo.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 fn candle_video_engine_id(model: &str) -> Option<&'static str> {
     match model {
         "wan_2_2" => Some("wan2_2_ti2v_5b"),
         "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
         "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
-        "ltx_2_3" => Some("ltx_2_3_distilled"),
+        // Base + eros both load the one candle LTX-2.3 engine (the eros merge is a full dense LTX-2.3
+        // checkpoint, sc-5495); they differ only in the weights repo (see `candle_video_repo`).
+        "ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3_distilled"),
         // SVD-XT image→video (sc-5493 / epic 5481): the candle-gen-svd provider's `svd_xt` engine.
         "svd" => Some("svd_xt"),
         _ => None,
@@ -2767,8 +2774,9 @@ fn candle_video_default_repo(engine_id: &str) -> &'static str {
     }
 }
 
-/// The candle weights repo for a video engine: the manifest `repo` wins, else the candle default repo
-/// for the engine.
+/// The candle weights repo for a video engine: the manifest `repo` wins, else `ltx_2_3_eros` selects
+/// its own fine-tune repo (it shares the `ltx_2_3_distilled` engine id with the base), else the candle
+/// default repo for the engine.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
     request
@@ -2777,8 +2785,14 @@ fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| candle_video_default_repo(engine_id))
-        .to_owned()
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if request.model == "ltx_2_3_eros" {
+                CANDLE_LTX_EROS_REPO.to_owned()
+            } else {
+                candle_video_default_repo(engine_id).to_owned()
+            }
+        })
 }
 
 /// Resolve the candle weights snapshot dir for `repo`. Errors loudly (no procedural-stub fallback)
