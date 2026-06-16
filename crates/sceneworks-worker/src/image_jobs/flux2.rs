@@ -433,6 +433,383 @@ async fn generate_flux2_edit_stream(
 }
 
 // ---------------------------------------------------------------------------
+// FLUX.2-dev strict-pose Fun-Controlnet-Union (macOS, sc-6055 / engine sc-2292):
+// the `flux2_dev_control` registry generator — a VACE ControlNet on the dev base.
+// One image per library pose, each conditioned on a DWPose skeleton fed to the
+// `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` branch (TRUE pose lock, not the
+// best-effort `[skeleton, reference]` tier above). FLUX.2 is MLX-only, so this is
+// the only strict-pose path for dev (no candle sibling). Mirrors the Z-Image MLX
+// control path (`generate_zimage_control_stream`).
+// ---------------------------------------------------------------------------
+
+/// The engine registry id for the FLUX.2-dev Fun-Controlnet-Union variant (sc-2292).
+const FLUX2_DEV_CONTROL_ENGINE_ID: &str = "flux2_dev_control";
+/// Default Fun-Controlnet-Union control-weights repo + the `-2602` CFG-distilled variant (the
+/// recommended one — the previous version lost CFG distillation after control training).
+const FLUX2_CONTROL_REPO: &str = "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union";
+const FLUX2_CONTROL_FILE: &str = "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors";
+/// The asset `adapter` id recorded on FLUX.2-dev strict-pose assets (the dev base MLX label).
+const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
+
+/// True when this is a FLUX.2-dev strict-pose job (`flux2_dev` + ≥1 pose, not edit mode) whose base
+/// weights resolve — routed to the Fun-Controlnet-Union control path rather than the best-effort edit
+/// pose tier or plain txt2img. Gated to `flux2_dev` (klein has no control checkpoint). Control-weights
+/// presence is NOT part of the gate: they are fetched on first use in the stream (a missing checkpoint
+/// downloads, then errors loudly only on a real failure — never silently drops the poses).
+fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    request.model == "flux2_dev"
+        && request.mode != "edit_image"
+        && !pose_entries(request).is_empty()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+}
+
+/// The (repo, filename) of the FLUX.2-dev control weights — `advanced.controlWeights.{repo,filename}`
+/// overrides, else the `-2602` Fun-Controlnet-Union default (parity with the Z-Image resolver).
+fn flux2_control_repo_file(request: &ImageRequest) -> (String, String) {
+    let cw = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object);
+    let pick = |key: &str, default: &str| {
+        cw.and_then(|m| m.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(default)
+            .to_owned()
+    };
+    (
+        pick("repo", FLUX2_CONTROL_REPO),
+        pick("filename", FLUX2_CONTROL_FILE),
+    )
+}
+
+/// Resolve the Fun-Controlnet-Union checkpoint the engine loads, downloading on first use. Order: an
+/// env-pinned file (`SCENEWORKS_CONTROLNET_FLUX2`) → a whole-repo HF cache snapshot → download into the
+/// app cache. Mirrors the candle `ensure_zimage_control_weights` / `ensure_kolors_control_weights`. The
+/// 8.2 GB control checkpoint is lazy-fetched only on the first pose job (vs bloating the base download).
+async fn ensure_flux2_control_weights(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &ImageRequest,
+) -> WorkerResult<PathBuf> {
+    let (repo, file) = flux2_control_repo_file(request);
+    if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_FLUX2") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) {
+        let f = snapshot.join(&file);
+        if f.is_file() {
+            return Ok(f);
+        }
+    }
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "FLUX.2-dev strict-pose generation canceled while fetching control weights.",
+        fresh_download: false,
+    };
+    let dst = settings
+        .data_dir
+        .join("cache")
+        .join("controlnet-flux2")
+        .join(&file);
+    crate::downloads::ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await
+}
+
+/// Pose ControlNet lock strength for FLUX.2-dev: `advanced.controlScale` (default 0.75, clamp [0,2]).
+/// The Fun-Controlnet-Union README recommends 0.65–0.80 for the dev branch, so the default sits at the
+/// mid-point (Z-Image's strict-pose default is 0.9; the dev branch over-locks above ~0.8).
+fn flux2_control_scale(request: &ImageRequest) -> f32 {
+    advanced::f32_clamped(&request.advanced, "controlScale", 0.75, 0.0..=2.0)
+}
+
+/// Generate one FLUX.2-dev strict-pose image: the `control` skeleton drives the Fun-Controlnet-Union
+/// pose branch at `control_scale`. dev is guidance-distilled (embedded scalar) — `guidance` rides the
+/// transformer's guidance embedder (no true-CFG). `reference` is the optional identity img2img-init
+/// shared across the pose set (opt-in, off by default).
+#[allow(clippy::too_many_arguments)]
+fn flux2_control_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    control: Image,
+    control_scale: f32,
+    reference: Option<&(Image, f32)>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let mut conditioning = vec![Conditioning::Control {
+        image: control,
+        kind: ControlKind::Pose,
+        scale: control_scale,
+    }];
+    if let Some((image, strength)) = reference {
+        conditioning.push(Conditioning::Reference {
+            image: image.clone(),
+            strength: Some(*strength),
+        });
+    }
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance,
+        conditioning,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator.generate(&request, on_progress).map_err(|error| {
+        WorkerError::Engine(format!("FLUX.2-dev control generation failed: {error}"))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::Engine("FLUX.2-dev control generator produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::Engine(
+            "FLUX.2-dev control generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flux2_control_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: Option<f32>,
+    control_scale: f32,
+    pose_count: usize,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    raw.insert(
+        "guidanceScale".to_owned(),
+        guidance.map(|value| json!(value)).unwrap_or(Value::Null),
+    );
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw.insert("controlScale".to_owned(), json!(control_scale));
+    raw.insert("poseCount".to_owned(), json!(pose_count));
+    raw.insert(
+        "controlEngine".to_owned(),
+        Value::String(FLUX2_DEV_CONTROL_ENGINE_ID.to_owned()),
+    );
+    raw
+}
+
+/// The clamped identity img2img-init strength for the FLUX.2-dev strict-pose set, or `None` for the
+/// pose-only tier (mirrors `zimage_identity_strength`). `Some` iff `advanced.referenceStrength > 0`
+/// AND a non-empty `referenceAssetId` — the dev control engine accepts an optional `Reference` init
+/// next to the required `Control`. Off by default (pose-only is the validated path).
+fn flux2_identity_strength(request: &ImageRequest) -> Option<f32> {
+    let strength = request
+        .advanced
+        .get("referenceStrength")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .filter(|strength| *strength > 0.0)?;
+    let has_asset = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|id| !id.is_empty());
+    has_asset.then(|| (strength as f32).clamp(0.05, 1.0))
+}
+
+/// Resolve the optional identity img2img-init for the FLUX.2-dev strict-pose set: `Some((image,
+/// strength))` when [`flux2_identity_strength`] engages (decoding `referenceAssetId`), else `None`
+/// (the default pose-only tier). The reference is shared across the whole pose set.
+fn resolve_flux2_identity_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    let Some(strength) = flux2_identity_strength(request) else {
+        return Ok(None);
+    };
+    let asset_id = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .expect("flux2_identity_strength guarantees a non-empty referenceAssetId");
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    Ok(Some((image, strength)))
+}
+
+/// Build the FLUX.2-dev control LoadSpec: the base dev snapshot + the Fun-Controlnet-Union overlay
+/// (+ quant + adapters). The dev base loads manifest-aware (a pre-quantized Q4 snapshot loads packed);
+/// the bf16 control overlay loads dense and quantizes in place under `with_quant`.
+fn flux2_control_spec(
+    weights_dir: PathBuf,
+    control_weights: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> LoadSpec {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
+        .with_control(WeightsSource::File(control_weights));
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
+    }
+    spec
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn flux2_control_load(
+    weights_dir: PathBuf,
+    control_weights: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> WorkerResult<Box<dyn Generator>> {
+    let spec = flux2_control_spec(weights_dir, control_weights, quant, adapters);
+    gen_core::load(FLUX2_DEV_CONTROL_ENGINE_ID, &spec)
+        .map_err(|error| WorkerError::Engine(format!("FLUX.2-dev control load failed: {error}")))
+}
+
+/// Real FLUX.2-dev strict-pose generation: one image per pose, each conditioned on a DWPose skeleton
+/// locked by the Fun-Controlnet-Union branch (sc-6055; engine sc-2292). Mirrors
+/// [`generate_zimage_control_stream`] — the control checkpoint is fetched on first use, then the dev
+/// control engine loads once on the blocking thread and renders one image per pose (shared seed so
+/// only the pose changes across the set). dev keeps its embedded guidance (no CFG).
+async fn generate_flux2_dev_control_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    // Optional identity img2img-init (opt-in, off by default — `referenceStrength`-gated), shared
+    // across the pose set. `None` → the pose-only tier (the validated sc-2292 default).
+    let identity_init = resolve_flux2_identity_init(request, settings, project_path)?;
+
+    let weights_dir = resolve_weights_dir(request, settings)?
+        .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2-dev weights not found".to_owned()))?;
+    let control_weights = ensure_flux2_control_weights(api, settings, job, request).await?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let model = mlx_model("flux2_dev")
+        .ok_or_else(|| WorkerError::InvalidPayload("flux2_dev model row missing".to_owned()))?;
+    let steps = resolve_steps(request, &model);
+    let guidance = resolve_guidance(request, &model);
+    let control_scale = flux2_control_scale(request);
+    let adapters = resolve_adapters(request, settings)?;
+    let repo = model_repo(request, &model);
+    let poses = parse_poses(request);
+    let count = poses.len();
+    let raw_settings = flux2_control_raw_settings(
+        request,
+        &repo,
+        steps,
+        quant_bits,
+        guidance,
+        control_scale,
+        count,
+    );
+    // Strict pose shares one seed across the set so noise-derived attributes (hair, wardrobe,
+    // lighting) stay constant while only the pose changes (Z-Image parity).
+    let seed = resolve_seed(request, 0);
+
+    let prompt = request.prompt.clone();
+    let (width, height) = (request.width, request.height);
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+    let adapter_count = adapters.len();
+    let spec = flux2_control_spec(weights_dir, control_weights, quant, adapters);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
+        job.id.clone(),
+        FLUX2_DEV_CONTROL_ENGINE_ID,
+        adapter_count,
+        spec,
+        "FLUX.2-dev control load failed".to_owned(),
+        move |generator, tx, cancel| {
+            let identity_init = identity_init.as_ref();
+            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
+                let skeleton = crate::openpose_skeleton::draw_wholebody(
+                    width,
+                    height,
+                    &pose.keypoints,
+                    pose.hands.as_deref(),
+                    pose.face.as_deref(),
+                    stickwidth,
+                );
+                let control = Image {
+                    width,
+                    height,
+                    pixels: skeleton.into_raw(),
+                };
+                let (out_w, out_h, pixels) = flux2_control_generate_one(
+                    generator,
+                    &prompt,
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
+                    control,
+                    control_scale,
+                    identity_init,
+                    &cancel,
+                    on_progress,
+                )?;
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        FLUX2_CONTROL_ADAPTER_LABEL,
+        &raw_settings,
+        count,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // Qwen-Image strict-pose ControlNet (macOS, epic 3401 / sc-3575): the InstantX
 // `Qwen-Image-ControlNet-Union` variant registered in mlx-gen as `qwen_image_control`.
 // One image per library pose, shared seed, true CFG + character LoRA on the base Qwen model.

@@ -366,6 +366,19 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::Flux2DevControl => {
+                // FLUX.2-dev strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
+                generate_flux2_dev_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::Flux2Edit => {
                 // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
                 generate_flux2_edit_stream(

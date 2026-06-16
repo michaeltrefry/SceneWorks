@@ -631,12 +631,11 @@ async fn generate_instantid_stream(
                 sdxl_base,
                 identitynet: controlnet,
                 ip_adapter,
-                // sc-6038 added a required `adapters` (user LoRA/LoKr) field to the CANDLE
-                // `InstantIdPaths` (candle-gen #86); the macOS mlx `InstantIdPaths` (worker mlx pin
-                // 3714e7b) does not carry it yet, so cfg the field to the candle build to keep BOTH
-                // backends compiling. Empty = no LoRA (the current behavior); populating it from the
-                // request is the candle InstantID-LoRA worker wiring, which is sc-6038's own follow-up.
-                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                // sc-6038 added a required `adapters` (user LoRA/LoKr) field to `InstantIdPaths` on
+                // BOTH backends — candle-gen #86 and now mlx-gen `aeb471b` (pulled in by the worker
+                // mlx pin 19d5522). Empty = no LoRA (the current behavior, a load-time no-op);
+                // populating it from the request is the InstantID-LoRA worker wiring, sc-6038's own
+                // follow-up (independent of the FLUX.2-dev pose work that bumped this pin, sc-6055).
                 adapters: Vec::new(),
             };
             let model = InstantId::load(&paths)

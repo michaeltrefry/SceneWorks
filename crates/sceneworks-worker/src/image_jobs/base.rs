@@ -10,6 +10,7 @@ enum ImageRoute {
     ZImageControl,
     QwenControl,
     KolorsControl,
+    Flux2DevControl,
     Flux2Edit,
     QwenEdit,
     InstantId,
@@ -28,6 +29,11 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::QwenControl)
     } else if kolors_control_available(request, settings) {
         Some(ImageRoute::KolorsControl)
+    } else if flux2_dev_control_available(request, settings) {
+        // FLUX.2-dev strict pose (advanced.poses) → Fun-Controlnet-Union. Wins over the edit/
+        // best-effort pose tier below (`flux2_edit_available` needs a reference; a flux2_dev pose
+        // job is the real ControlNet path, with the reference an opt-in img2img-init).
+        Some(ImageRoute::Flux2DevControl)
     } else if flux2_edit_available(request, settings) {
         Some(ImageRoute::Flux2Edit)
     } else if qwen_edit_available(request, settings) {
@@ -59,7 +65,8 @@ impl ImageRoute {
         match self {
             ImageRoute::ZImageControl
             | ImageRoute::QwenControl
-            | ImageRoute::KolorsControl => pose_entries(request).len() as u32,
+            | ImageRoute::KolorsControl
+            | ImageRoute::Flux2DevControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
             ImageRoute::InstantId => instantid_image_count(request, settings),
             ImageRoute::SensenovaEdit => match flux2_grouping(request) {

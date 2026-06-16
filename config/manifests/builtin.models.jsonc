@@ -1197,13 +1197,19 @@
           { "id": "down_right", "label": "Down · right" },
           { "id": "front", "label": "Front" }
         ],
-        // Best-effort pose library (mirrors klein, sc-2262): no FLUX.2-dev pose
-        // ControlNet exists yet (that is sc-2292) — the worker renders the selected
-        // library pose as an OpenPose skeleton and feeds it as a second edit image
-        // alongside the reference (`MultiReference [skeleton, reference]`) through the
-        // dev edit variant (the engine MultiReference path validated in sc-5919).
-        // Best-effort tier; sc-2292 upgrades this to the real strict-pose ControlNet.
+        // Strict pose tier (sc-2292 engine + sc-6055 wiring): on the macOS MLX backend
+        // the worker renders the selected library pose to an OpenPose skeleton and
+        // conditions the ported FLUX.2-dev Fun-Controlnet-Union branch on it (true pose
+        // lock via the `flux2_dev_control` registry generator, one image per pose), not
+        // the best-effort `MultiReference [skeleton, reference]` edit tier. The control
+        // checkpoint (`alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union`, ~8 GB) is fetched on
+        // the first pose job. A pose job with NO reference is pure pose; a reference is an
+        // opt-in img2img-init (advanced.referenceStrength). Surfaces dev in the Character
+        // Studio pose picker (character_image not required — poseLibrary gates the picker).
         "poseLibrary": true,
+        // Strict ControlNet → expose the pose-lock-strength slider (advanced.controlScale;
+        // the dev Fun-Controlnet-Union README recommends 0.65–0.80, worker default 0.75).
+        "poseControlScale": true,
         "promptGuide": {
           "title": "FLUX.2 [dev] Prompt Guide",
           "path": "/prompt-guides/flux2-dev.md",
