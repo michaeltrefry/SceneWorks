@@ -736,8 +736,17 @@ impl ProjectStore {
                 row.get::<_, i64>(0)
             })?
         };
+        // Pre-migration projects (created before the `sidecar_path` column /
+        // asset index existed) surface as EMPTY libraries even though their
+        // assets are still on disk as `.sceneworks.json` sidecars (V-4). The
+        // first open auto-reindexes from those sidecars so users never see a
+        // silently-empty library. Idempotent: only fires when the table is
+        // empty AND sidecars exist on disk, so a genuinely-empty project does
+        // no work and there is no reindex loop. A failed reindex must not 500
+        // the listing — fail open and return whatever the table currently
+        // holds (possibly empty), which is strictly better than an error.
         if total == 0 && project_has_sidecars(&project_path) {
-            reindex_project_path(&project_path)?;
+            let _ = reindex_project_path(&project_path);
         }
 
         let connection = connect_project_db(&project_path)?;
@@ -3557,11 +3566,12 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_project_migrations, build_generated_asset_sidecar, find_timeline_file,
-        guess_mime_from_filename, index_timeline, is_safe_relative_path, normalize_asset_tags,
-        sniff_image_format, AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore,
-        ProjectStoreError, UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
-        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
+        apply_project_migrations, build_generated_asset_sidecar, connect_project_db,
+        find_timeline_file, guess_mime_from_filename, index_timeline, is_safe_relative_path,
+        normalize_asset_tags, sniff_image_format, AssetScope, CharacterCreateInput,
+        CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset,
+        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
@@ -4048,6 +4058,90 @@ mod tests {
                 "each asset embeds the shared generation set"
             );
         }
+    }
+
+    /// V-4: a pre-migration project surfaces an EMPTY `assets` table even though
+    /// its assets are still on disk as `.sceneworks.json` sidecars (these DBs
+    /// predate the asset index / `sidecar_path` column and were never reindexed).
+    /// `list_assets` must auto-reindex from the on-disk sidecars on first open so
+    /// the library is not silently empty. This reproduces that state by wiping the
+    /// index rows (leaving the sidecar on disk) and asserts the asset comes back.
+    #[test]
+    fn list_assets_auto_reindexes_pre_migration_project_with_sidecars_on_disk() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Pre-migration").expect("project creates");
+
+        let fact = json!({
+            "assetId": "asset_legacy",
+            "mediaPath": "assets/images/genset_legacy/asset_legacy.png",
+            "mimeType": "image/png",
+            "displayName": "legacy #1",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "old",
+        });
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset_legacy", &fact)
+            .expect("asset persists (media + sidecar + index row)");
+
+        // Simulate the pre-migration state: the sidecar is on disk but the index
+        // table is empty (as it would be for a DB created before the asset index
+        // existed and never reindexed).
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        {
+            let connection = connect_project_db(&project_path).expect("open db");
+            connection
+                .execute("delete from assets", [])
+                .expect("clear index");
+            let remaining: i64 = connection
+                .query_row("select count(*) from assets", [], |row| row.get(0))
+                .expect("count");
+            assert_eq!(remaining, 0, "precondition: index table is empty");
+        }
+        assert!(
+            project_path
+                .join("assets/images/genset_legacy/asset_legacy.sceneworks.json")
+                .exists(),
+            "precondition: the asset sidecar is still on disk"
+        );
+
+        // First open: list_assets must rebuild the index from the sidecar.
+        let assets = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("list auto-reindexes instead of returning empty");
+        assert_eq!(
+            assets.len(),
+            1,
+            "the on-disk asset is recovered via auto-reindex, not silently dropped"
+        );
+        assert_eq!(assets[0]["id"], json!("asset_legacy"));
+
+        // Idempotent: the index is now populated, so a second open does not depend
+        // on (or re-run) the reindex and still returns the asset.
+        let again = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("second list");
+        assert_eq!(again.len(), 1, "result is stable on subsequent opens");
+    }
+
+    /// V-4 guard: a genuinely empty project (no sidecars on disk) must NOT trigger
+    /// a reindex and must return an empty list cleanly rather than erroring.
+    #[test]
+    fn list_assets_returns_empty_for_truly_empty_project_without_reindex_loop() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Empty").expect("project creates");
+
+        let assets = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("empty project lists cleanly");
+        assert!(
+            assets.is_empty(),
+            "no sidecars on disk => empty library, no spurious assets"
+        );
     }
 
     #[test]
