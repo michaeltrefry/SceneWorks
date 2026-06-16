@@ -1841,9 +1841,16 @@ mod tests {
             resolve_item_path(root, "/absolute.png"),
             Err(TrainingPlanError::InvalidConfig(_))
         ));
+        // A safe relative path resolves under the dataset root using the host separator (the plan is
+        // built + consumed on the same machine). Build the expectation the same way so the assertion
+        // holds on Windows too — a hardcoded `/dataset/images/photo.png` only matches on `/`-sep hosts.
+        let mut expected = root.to_path_buf();
+        for component in Path::new("images/photo.png").components() {
+            expected.push(component);
+        }
         assert_eq!(
             resolve_item_path(root, "images/photo.png").expect("safe path"),
-            "/dataset/images/photo.png"
+            expected.display().to_string()
         );
     }
 }
