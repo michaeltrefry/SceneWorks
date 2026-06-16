@@ -631,6 +631,13 @@ async fn generate_instantid_stream(
                 sdxl_base,
                 identitynet: controlnet,
                 ip_adapter,
+                // sc-6038 added a required `adapters` (user LoRA/LoKr) field to the CANDLE
+                // `InstantIdPaths` (candle-gen #86); the macOS mlx `InstantIdPaths` (worker mlx pin
+                // 3714e7b) does not carry it yet, so cfg the field to the candle build to keep BOTH
+                // backends compiling. Empty = no LoRA (the current behavior); populating it from the
+                // request is the candle InstantID-LoRA worker wiring, which is sc-6038's own follow-up.
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                adapters: Vec::new(),
             };
             let model = InstantId::load(&paths)
                 .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
@@ -666,18 +673,18 @@ async fn generate_instantid_stream(
                         "InstantID ArcFace weights {arcface_path:?}: {error}"
                     ))
                 })?;
-                model
-                    .with_face(&scrfd, &arcface)
-                    .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?
+                model.with_face(&scrfd, &arcface).map_err(|error| {
+                    WorkerError::Engine(format!("InstantID face stack: {error}"))
+                })?
             };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let model = {
                 let face_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
                 // `arcface_path` is staged in the same dir; `with_face(dir)` resolves it by name.
                 let _ = &arcface_path;
-                model
-                    .with_face(face_dir)
-                    .map_err(|error| WorkerError::Engine(format!("InstantID face stack: {error}")))?
+                model.with_face(face_dir).map_err(|error| {
+                    WorkerError::Engine(format!("InstantID face stack: {error}"))
+                })?
             };
             // Face-restore needs the reference identity embedding (imposed on the re-rendered crop).
             // Detect it once on the raw reference. The candle `largest_face` takes the neutral

@@ -3279,11 +3279,19 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "instantid_realvisxl" {
         return instantid_candle_eligible(&job.payload);
     }
+    // SDXL img2img / inpaint / outpaint edit (sc-5487, epic 5480): an sdxl-family `edit_image` job with
+    // a source image is the bespoke candle `SdxlEdit` lane (`generate_candle_sdxl_edit_stream`), NOT
+    // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
+    // Branch it out first (disjoint from the IP-Adapter lane below, which is reference-only and not
+    // `edit_image`). Mirrors the worker's `sdxl_edit_candle_available` gate.
+    if matches!(model, "sdxl" | "realvisxl") && sdxl_edit_candle_eligible(&job.payload) {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
-    // (pure IP only; img2img/inpaint/edit shapes stay on torch — those are sc-5487). Mirrors the
-    // worker's `sdxl_ipadapter_available` gate.
+    // (pure IP only; img2img/inpaint/edit shapes are the SDXL edit lane above). Mirrors the worker's
+    // `sdxl_ipadapter_available` gate.
     if matches!(model, "sdxl" | "realvisxl") && sdxl_ipadapter_candle_eligible(&job.payload) {
         return true;
     }
@@ -3609,10 +3617,26 @@ fn pulid_flux_candle_eligible(payload: &Map<String, Value>) -> bool {
     pulid_flux_mlx_eligible(payload)
 }
 
+/// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle
+/// `SdxlEdit` provider serves `edit_image` mode with a `sourceAssetId` on the sdxl family: img2img (no
+/// mask), inpaint (+ `maskAssetId`), and outpaint (`fit_mode == "outpaint"`) all route to the one lane.
+/// Disjoint from the IP-Adapter lane (which is `referenceAssetId` and NOT `edit_image`). Mirrors the
+/// worker's `sdxl_edit_candle_available` gate (minus the local weight-resolve check) so the router and
+/// worker agree. Candle-only — macOS keeps the MLX `SdxlSubMode::{Edit,Inpaint,Outpaint}` path.
+fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 /// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
 /// provider serves PURE reference (image-prompt) conditioning on the sdxl family: a `referenceAssetId`
-/// with NO img2img source / inpaint mask and NOT an `edit_image` (those advanced SDXL shapes are
-/// sc-5487, still torch). Mirrors the worker's `sdxl_ipadapter_available` gate (minus the local
+/// with NO img2img source / inpaint mask and NOT an `edit_image` (that advanced SDXL shape is the
+/// sc-5487 `SdxlEdit` lane). Mirrors the worker's `sdxl_ipadapter_available` gate (minus the local
 /// weight-resolve check) so the router and worker agree on the lane boundary. Candle-only — there is no
 /// MLX `IpAdapterSdxl` (the MLX SDXL IP path is the registry `SdxlSubMode::Ip`), so this has no
 /// `*_mlx_eligible` sibling.
@@ -5129,8 +5153,9 @@ mod candle_routing_tests {
                 "advanced": { "poses": [{ "id": "pose_1" }] }
             }))
         ));
-        // …but a plain SDXL edit (img2img) still declines on candle → torch (real edit route, sc-5487).
-        assert!(!worker_supports_job(
+        // sc-5487: a plain SDXL edit (img2img: `edit_image` + a source) is now a candle lane (the
+        // bespoke `SdxlEdit` route), so the candle worker CLAIMS it — it no longer declines → torch.
+        assert!(worker_supports_job(
             &candle,
             &image_generate_job(json!({
                 "model": "sdxl",
@@ -5819,6 +5844,43 @@ mod candle_routing_tests {
         assert!(!sdxl_ipadapter_candle_eligible(&object(json!({
             "model": "sdxl", "referenceAssetId": "a", "maskAssetId": "m"
         }))));
+    }
+
+    #[test]
+    fn sdxl_edit_jobs_route_to_candle() {
+        // SDXL/RealVisXL img2img / inpaint / outpaint edit jobs (sc-5487) route to the bespoke candle
+        // `SdxlEdit` lane via the new branch, NOT the txt2img `image_request_candle_eligible` gate
+        // (which rejects the whole `edit_image` family).
+        for model in ["sdxl", "realvisxl"] {
+            // img2img (source, no mask).
+            let img2img = json!({ "model": model, "mode": "edit_image", "sourceAssetId": "src_1" });
+            assert!(sdxl_edit_candle_eligible(&object(img2img.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(img2img)));
+            // inpaint (source + mask).
+            let inpaint = json!({
+                "model": model, "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "m_1"
+            });
+            assert!(sdxl_edit_candle_eligible(&object(inpaint.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(inpaint)));
+            // outpaint (source + fitMode outpaint).
+            let outpaint = json!({
+                "model": model, "mode": "edit_image", "sourceAssetId": "src_1", "fitMode": "outpaint"
+            });
+            assert!(sdxl_edit_candle_eligible(&object(outpaint.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(outpaint)));
+        }
+        // `edit_image` WITHOUT a source → not this lane (nothing to edit).
+        assert!(!sdxl_edit_candle_eligible(&object(json!({
+            "model": "sdxl", "mode": "edit_image"
+        }))));
+        // A reference (IP-Adapter) job is NOT the edit lane (no source, not `edit_image`) — it's sc-5488.
+        assert!(!sdxl_edit_candle_eligible(&object(json!({
+            "model": "sdxl", "referenceAssetId": "a"
+        }))));
+        // A plain txt2img sdxl job → not the edit lane.
+        assert!(!sdxl_edit_candle_eligible(&object(
+            json!({ "model": "sdxl" })
+        )));
     }
 
     #[test]
