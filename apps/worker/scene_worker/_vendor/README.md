@@ -6,6 +6,10 @@ directory is bundled into both the Docker worker image (via `PYTHONPATH`) and
 the desktop Python sidecar (via `stage-python.mjs`, which copies `scene_worker`
 wholesale).
 
+> **Upstream commit pins** for every package here live in
+> [`VENDOR_PINS.md`](./VENDOR_PINS.md) — the machine-checkable SHA ledger with
+> blob-hash verification steps. Keep the two files in sync when re-vendoring.
+
 ## lens
 
 Minimal inference package for Microsoft's **Lens / Lens-Turbo** text-to-image
@@ -76,11 +80,17 @@ sc-2009 A/B (the only method that held identity AND followed the prompt).
 
 - `pipeline_stable_diffusion_xl_instantid.py`
   - Source: https://github.com/instantX-research/InstantID (`main`, 2026-05-27)
+    — commit `2145b67f9607da6234702063692330185f374486` (see `VENDOR_PINS.md`)
   - License: Apache-2.0 (see `LICENSE`)
-  - Imports clean against `diffusers==0.38.0` (no local patches).
+  - Imports clean against `diffusers==0.38.0`, with one local patch (re-apply on
+    re-vendoring): a `MultiControlNetModel` import shim that imports from
+    `diffusers.models.controlnets.multicontrolnet` and falls back to the legacy
+    `diffusers.pipelines.controlnet.multicontrolnet` path (the old re-export
+    errors on instantiation in diffusers ≥0.34).
 - `ip_adapter/` (`resampler.py`, `utils.py`, `attention_processor.py`; empty
   `__init__.py` to avoid pulling upstream's diffusers-heavy `ip_adapter.py`)
   - Source: https://github.com/tencent-ailab/IP-Adapter (`main`, 2026-05-27)
+    — commit `62e4af9d0c1ac7d5f8dd386a0ccf2211346af1a2` (verbatim; see `VENDOR_PINS.md`)
   - License: Apache-2.0
 - Consumed by: `scene_worker/instantid_adapter.py::InstantIDAdapter`
 - Runs in the MAIN worker venv. Extra deps in `requirements-instantid.txt`
@@ -93,3 +103,21 @@ sc-2009 A/B (the only method that held identity AND followed the prompt).
 
 To update: re-copy both directories from their upstream repos at the desired
 commit and update the dates above.
+
+## kolors
+
+Kolors strict-pose **ControlNet** pipeline + model for Character Studio
+(sc-2264). Provides identity-stable pose conditioning on the Kolors SDXL base.
+
+- `models/controlnet.py`, `pipelines/pipeline_controlnet_xl_kolors_img2img.py`
+  - Source: https://github.com/Kwai-Kolors/Kolors (`master`, files under
+    `controlnet/`, 2026-05-30) — commit
+    `038818d244ed103056abd10f429729a26af4d239` (verbatim; see `VENDOR_PINS.md`)
+  - License: Apache-2.0 (in-file headers only; no `LICENSE` file was vendored —
+    add `kolors/LICENSE` on next re-vendor for redistribution compliance)
+- Consumed by: the Kolors strict-pose ControlNet tier in Character Studio (sc-2264)
+- Models (downloaded on demand): `Kwai-Kolors/Kolors-ControlNet-Pose` and the
+  IP-Adapter-Plus weights.
+
+To update: re-copy `kolors/` from the upstream repo at the desired commit and
+update the commit hash above and in `VENDOR_PINS.md`.
