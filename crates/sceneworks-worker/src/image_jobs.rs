@@ -187,6 +187,14 @@ use candle_gen_qwen_image::{QwenControl, QwenControlPaths, QwenControlRequest};
 // (`image_jobs/kolors_control.rs`) drives.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_kolors::{KolorsControl, KolorsControlPaths, KolorsControlRequest};
+// Z-Image Fun-ControlNet (strict pose) provider (sc-5489, epic 5480) — the candle (Windows/CUDA)
+// Z-Image sibling of the Qwen/Kolors strict-pose lanes, living in `candle-gen-z-image` (the VACE-style
+// dual-injection control on the vendored DiT). Candle-only: macOS keeps the MLX `z_image_turbo_control`
+// registry generator. `candle_gen_z_image` is already force-link anchored above (the registered txt2img
+// `z_image_turbo`); this is the named-type import the bespoke pose route (`image_jobs/zimage_control.rs`)
+// drives.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -541,6 +549,22 @@ pub(crate) async fn run_image_generate_job(
         // IS a candle txt2img id, so without this a `advanced.poses` job would be caught by the txt2img
         // branch and silently drop the poses (the Qwen-control reasoning, for the Kolors family).
         generate_candle_kolors_control_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && zimage_control_available(&request, settings) {
+        // Z-Image strict-pose Fun-ControlNet (sc-5489) — checked BEFORE `is_candle_engine` because
+        // `z_image_turbo` IS a candle txt2img id, so without this a `advanced.poses` job would be caught
+        // by the txt2img branch and silently drop the poses (the Qwen/Kolors-control reasoning, for the
+        // Z-Image family — the last of the three strict-pose families).
+        generate_candle_zimage_control_stream(
             api,
             settings,
             job,
@@ -1049,6 +1073,10 @@ include!("image_jobs/qwen_control.rs");
 // Kolors ControlNet path; the candle `KolorsControl` is a bespoke provider.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 include!("image_jobs/kolors_control.rs");
+// Z-Image Fun-ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the
+// MLX `z_image_turbo_control` registry generator; the candle `ZImageControl` is a bespoke provider.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+include!("image_jobs/zimage_control.rs");
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");

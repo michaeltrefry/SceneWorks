@@ -3283,8 +3283,9 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // Qwen-Image strict-pose ControlNet (sc-5489, epic 5480): `qwen_image` + `advanced.poses` is a
     // bespoke candle lane (`generate_candle_qwen_control_stream`), NOT txt2img — the
     // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out
-    // first so `qwen_image` pose jobs reach candle, while the other families' pose jobs (z_image /
-    // kolors / sdxl) stay on torch until their slices land. Mirrors the worker's `qwen_control_available`.
+    // first so `qwen_image` pose jobs reach candle (the kolors / z_image families follow below — all three
+    // strict-pose families are now wired; plain-sdxl pose has no product route). Mirrors the worker's
+    // `qwen_control_available`.
     if model == "qwen_image" && qwen_control_candle_eligible(&job.payload) {
         return true;
     }
@@ -3295,6 +3296,14 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // the `kolors_ipadapter_candle_eligible` branch above, so it reaches here. Mirrors the worker's
     // `kolors_control_available`.
     if model == "kolors" && kolors_control_candle_eligible(&job.payload) {
+        return true;
+    }
+    // Z-Image strict-pose Fun-ControlNet (sc-5489, epic 5480): `z_image_turbo` + `advanced.poses` is the
+    // bespoke candle lane (`generate_candle_zimage_control_stream`), NOT txt2img — the `image_request_\
+    // candle_eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out first (the
+    // Qwen/Kolors-control reasoning, for the last strict-pose family). Mirrors the worker's
+    // `zimage_control_available`. With this all three control families (qwen / kolors / z_image) are wired.
+    if model == "z_image_turbo" && zimage_control_candle_eligible(&job.payload) {
         return true;
     }
     image_request_candle_eligible(model, &job.payload)
@@ -3645,6 +3654,24 @@ fn qwen_control_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// the call site. Mirrors the worker's `kolors_control_available` gate (minus the local weight-resolve
 /// check) so the router and worker agree. Candle-only — the macOS path is the MLX Kolors ControlNet.
 fn kolors_control_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+}
+
+/// Z-Image strict-pose Fun-ControlNet candle-routing conditions (sc-5489, epic 5480). The candle
+/// `ZImageControl` provider serves `z_image_turbo` + a non-empty `advanced.poses` (one image per pose,
+/// each conditioned on a DWPose skeleton via the VACE-style `Z-Image-Turbo-Fun-Controlnet-Union-2.1`
+/// branch), NOT an `edit_image`. Same shape as the qwen/kolors gates — the model gate (`z_image_turbo`)
+/// is applied at the call site. Mirrors the worker's `zimage_control_available`. Candle-only — the macOS
+/// path is the MLX `z_image_turbo_control` registry generator.
+fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
@@ -4918,11 +4945,24 @@ mod candle_routing_tests {
             ),
             "candle worker should claim kolors strict-pose (sc-5489)"
         );
-        // A DIFFERENT family's pose job still defers to torch (its slice hasn't landed).
+        // sc-5489: `z_image_turbo` + `advanced.poses` is the LAST strict-pose family wired (the VACE
+        // Fun-ControlNet route) — all three (qwen / kolors / z_image) are candle lanes now.
+        assert!(
+            worker_supports_job(
+                &candle,
+                &image_generate_job(json!({
+                    "model": "z_image_turbo",
+                    "advanced": { "poses": [{ "id": "pose_1" }] }
+                }))
+            ),
+            "candle worker should claim z_image_turbo strict-pose (sc-5489)"
+        );
+        // Plain `sdxl` + poses still defers to torch — there is no plain-SDXL pose product route (the
+        // SDXL identity-pose surface ships via the InstantID lane, `instantid_realvisxl`, not here).
         assert!(!worker_supports_job(
             &candle,
             &image_generate_job(json!({
-                "model": "z_image_turbo",
+                "model": "sdxl",
                 "advanced": { "poses": [{ "id": "pose_1" }] }
             }))
         ));
@@ -5540,10 +5580,11 @@ mod candle_routing_tests {
         assert!(!qwen_control_candle_eligible(&object(json!({
             "model": "qwen_image", "mode": "edit_image", "advanced": { "poses": [{}] }
         }))));
-        // A DIFFERENT not-yet-ported model with poses still defers to torch (the z_image / sdxl slices
-        // are not landed) — the qwen branch is specific; the txt2img gate's has_poses deferral applies.
+        // Plain `sdxl` + poses still defers to torch (no plain-SDXL pose product route — SDXL pose ships
+        // via the InstantID lane) — the qwen branch is specific; the txt2img gate's has_poses deferral
+        // applies. (z_image_turbo + poses IS a candle lane now — see `zimage_control_pose_jobs_*`.)
         assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
-            "model": "z_image_turbo", "advanced": { "poses": [{}] }
+            "model": "sdxl", "advanced": { "poses": [{}] }
         }))));
     }
 
@@ -5568,6 +5609,27 @@ mod candle_routing_tests {
         // A kolors reference job (no poses) still routes via the IP-Adapter branch, not this one.
         assert!(!kolors_control_candle_eligible(&object(json!({
             "model": "kolors", "referenceAssetId": "asset_1"
+        }))));
+    }
+
+    #[test]
+    fn zimage_control_pose_jobs_route_to_candle() {
+        // z_image_turbo + advanced.poses routes to the candle VACE strict-pose lane (sc-5489, the last
+        // family) via the bespoke branch, NOT the txt2img gate (which DEFERS any advanced.poses to torch).
+        let payload =
+            json!({ "model": "z_image_turbo", "advanced": { "poses": [{ "keypoints": [] }] } });
+        assert!(zimage_control_candle_eligible(&object(payload.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        // No poses (or empty) → plain txt2img routes via the txt2img gate instead.
+        assert!(!zimage_control_candle_eligible(&object(
+            json!({ "model": "z_image_turbo" })
+        )));
+        assert!(!zimage_control_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "advanced": { "poses": [] }
+        }))));
+        // edit_image with poses is NOT this lane.
+        assert!(!zimage_control_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "edit_image", "advanced": { "poses": [{}] }
         }))));
     }
 }
