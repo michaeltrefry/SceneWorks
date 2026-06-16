@@ -43,9 +43,9 @@ jobs:
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
 
@@ -71,7 +71,9 @@ jobs:
         run: node apps/desktop/scripts/staple-dmg.mjs
 
       # Create a DRAFT release with the already-stapled DMG attached (review before
-      # publishing). Tags with a pre-release suffix (e.g. v1.2.3-rc.1) are marked
+      # publishing). The body is a fixed install blurb followed by auto-generated
+      # notes (--generate-notes appends a changelog of merged PRs since the last
+      # release). Tags with a pre-release suffix (e.g. v1.2.3-rc.1) are marked
       # prerelease. The tag name goes through an env var, not inline `${{ }}`, to
       # avoid script-injection from the ref.
       - name: Draft GitHub Release with the stapled DMG
@@ -86,7 +88,7 @@ jobs:
             echo "No DMG produced under target/release/bundle/dmg/" >&2
             exit 1
           fi
-          args=(--draft --title "SceneWorks $TAG"
+          args=(--draft --generate-notes --title "SceneWorks $TAG"
                 --notes "Signed & notarized macOS build (Apple Silicon, macOS 26.2+). Open the DMG and drag SceneWorks to Applications.")
           case "$TAG" in *-*) args+=(--prerelease) ;; esac
           gh release create "$TAG" "${args[@]}" "${dmgs[0]}"
