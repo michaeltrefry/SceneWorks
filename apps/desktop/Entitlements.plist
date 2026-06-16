@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <!-- WKWebView / Tauri IPC -->
+        <key>com.apple.security.network.client</key><true/>
+        <key>com.apple.security.network.server</key><true/>
+        <!-- The worker dlopens onnxruntime + spawns uv/python that load unsigned dylibs -->
+        <key>com.apple.security.cs.disable-library-validation</key><true/>
+        <!-- setup.rs sets ORT_DYLIB_PATH and friends; needed if any DYLD_* is used for subprocesses -->
+        <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+    </dict>
+</plist>

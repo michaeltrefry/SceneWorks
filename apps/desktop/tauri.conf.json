@@ -42,7 +42,9 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "26.2"
+      "minimumSystemVersion": "26.2",
+      "entitlements": "Entitlements.plist",
+      "signingIdentity": "Developer ID Application: Michael Trefry (R2526H7YN9)"
     },
     "windows": {
       "webviewInstallMode": {

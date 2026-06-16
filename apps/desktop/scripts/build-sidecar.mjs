@@ -10,6 +10,7 @@ import {
   writeFileSync,
   existsSync,
   readdirSync,
+  readFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +40,43 @@ if (!triple) {
   process.exit(1);
 }
 const exe = triple.includes("windows") ? ".exe" : "";
+
+// Sign a nested Mach-O for notarization. Tauri signs the .app and the externalBin
+// sidecars (sceneworks-api, uv), but NOT the extra binaries we drop into the
+// bundle's Resources/ (the static ffmpeg, the onnxruntime dylib). Apple's notary
+// service rejects any nested binary that lacks a Developer ID signature, a secure
+// timestamp, or (for executables) hardened runtime — so sign them inside-out here,
+// before Tauri seals the bundle. No-op unless an identity is configured (the same
+// identity Tauri uses for the .app), so plain dev builds are unchanged. The
+// identity comes from the APPLE_SIGNING_IDENTITY env var (CI/headless) OR, as a
+// fallback, bundle.macOS.signingIdentity in tauri.conf.json — because
+// beforeBuildCommand runs before Tauri signs and does NOT inherit the conf value
+// as an env var, so a local `tauri build` that sets the identity only in the conf
+// would otherwise skip pre-signing and fail notarization on the nested binaries.
+// execFileSync (not the shell `run` above) so the identity's spaces/parens in
+// "Developer ID Application: Name (TEAMID)" don't need quoting.
+function readConfSigningIdentity() {
+  try {
+    const conf = JSON.parse(
+      readFileSync(join(desktopDir, "tauri.conf.json"), "utf8"),
+    );
+    return conf?.bundle?.macOS?.signingIdentity || "";
+  } catch {
+    return "";
+  }
+}
+const signingIdentity =
+  process.env.APPLE_SIGNING_IDENTITY || readConfSigningIdentity();
+function codesignForNotarization(file) {
+  if (!signingIdentity || !triple.includes("apple-darwin")) return;
+  console.log(`> codesign --force --options runtime --timestamp "${file}"`);
+  execFileSync(
+    "codesign",
+    ["--force", "--sign", signingIdentity, "--options", "runtime", "--timestamp", file],
+    { stdio: "inherit" },
+  );
+  console.log(`build-sidecar: codesigned ${file} for notarization`);
+}
 
 // Build the web bundle + API binary with the embedded UI (single source of
 // truth for the embedded build). Empty VITE_API_BASE_URL makes the embedded UI
@@ -94,6 +132,7 @@ if (triple.includes("apple-darwin")) {
   const py = process.env.PYTHON || "python3";
   run(py, ["apps/desktop/scripts/stage-onnxruntime.py", dylibDest]);
   console.log(`build-sidecar: staged ${dylibDest}`);
+  codesignForNotarization(dylibDest);
   // onnxruntime is MIT — ship its license text + notice next to the dylib so the
   // MIT "include the copyright + permission notice" requirement is satisfied at
   // the distribution level (mirrors the ffmpeg GPLv3 §6 staging below). Source of
@@ -130,6 +169,7 @@ if (triple.includes("apple-darwin")) {
   const py = process.env.PYTHON || "python3";
   run(py, ["apps/desktop/scripts/stage-ffmpeg.py", ffmpegDest]);
   console.log(`build-sidecar: staged ${ffmpegDest}`);
+  codesignForNotarization(ffmpegDest);
   // The bundled ffmpeg is GPLv3 — ship its license text + written source offer
   // next to the binary so the distribution satisfies GPLv3 §6 (sc-3767). Source
   // of truth: apps/desktop/licenses/ffmpeg/ (tracked).
