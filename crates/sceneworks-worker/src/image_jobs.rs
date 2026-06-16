@@ -179,6 +179,14 @@ use candle_gen_flux::{IpAdapterFlux, IpAdapterFluxPaths, IpAdapterFluxRequest};
 // named-type import the bespoke pose route (`image_jobs/qwen_control.rs`) drives.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 use candle_gen_qwen_image::{QwenControl, QwenControlPaths, QwenControlRequest};
+// Kolors ControlNet (strict pose) provider (sc-5489, epic 5480) — the candle (Windows/CUDA) Kolors
+// sibling of the Qwen strict-pose lane, living in `candle-gen-kolors` (it reuses candle-gen-sdxl's
+// vendored UNet + the SDXL `ControlNet`, with the Kolors ChatGLM3 conditioning + leading-Euler sampler).
+// Candle-only: macOS keeps the MLX Kolors ControlNet path. `candle_gen_kolors` is already force-link
+// anchored above (the registered txt2img `kolors`); this is the named-type import the bespoke pose route
+// (`image_jobs/kolors_control.rs`) drives.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+use candle_gen_kolors::{KolorsControl, KolorsControlPaths, KolorsControlRequest};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).
@@ -518,6 +526,21 @@ pub(crate) async fn run_image_generate_job(
         // `qwen_image` IS a candle txt2img id, so without this a `advanced.poses` job would be caught
         // by the txt2img branch and silently drop the poses (the IP-Adapter reasoning, for poses).
         generate_candle_qwen_control_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && kolors_control_available(&request, settings) {
+        // Kolors strict-pose ControlNet (sc-5489) — checked BEFORE `is_candle_engine` because `kolors`
+        // IS a candle txt2img id, so without this a `advanced.poses` job would be caught by the txt2img
+        // branch and silently drop the poses (the Qwen-control reasoning, for the Kolors family).
+        generate_candle_kolors_control_stream(
             api,
             settings,
             job,
@@ -1022,6 +1045,10 @@ include!("image_jobs/flux_ipadapter.rs");
 // MLX `qwen_image_control` registry generator; the candle `QwenControl` is a bespoke provider.
 #[cfg(all(target_os = "windows", feature = "backend-candle"))]
 include!("image_jobs/qwen_control.rs");
+// Kolors ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the MLX
+// Kolors ControlNet path; the candle `KolorsControl` is a bespoke provider.
+#[cfg(all(target_os = "windows", feature = "backend-candle"))]
+include!("image_jobs/kolors_control.rs");
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");
