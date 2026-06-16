@@ -223,6 +223,10 @@ backend-candle = [
     # bespoke provider referenced by name (`PulidFlux::load`), NOT inventory-registered, so the worker
     # `generate_candle_pulid_stream` path calls it directly off-Mac — retiring the torch PuLID adapter.
     "dep:candle-gen-pulid",
+    # sc-5497 (epic 5482): the candle SCRFD/ArcFace face stack (sc-5490), reached DIRECTLY from
+    # `kps_jobs.rs` for the standalone kps_extract surface (`candle_gen_face::load` → `detect`) — the
+    # off-Mac sibling of the native-MLX `kps_jobs` path. Retires the Python InsightFace kps_extract path.
+    "dep:candle-gen-face",
     # sc-5928 (epic 4811 / epic 5482): the candle SeedVR2 one-step diffusion upscaler — the Windows/CUDA
     # sibling of `mlx-gen-seedvr2`. Self-registers `seedvr2` / `seedvr2_3b` / `seedvr2_7b` (image upscale
     # + the net-new video upscale) into the shared gen_core inventory; the worker reaches it via
@@ -858,6 +862,14 @@ candle-gen-instantid = { git = "https://github.com/michaeltrefry/candle-gen", re
 # candle-gen provider above, so `--features backend-candle` still resolves ONE candle-gen / gen-core
 # build (the sc-4482 skew gate stays single-rev — this rev pins gen-core 3714e7b, matching mlx-gen).
 candle-gen-pulid = { git = "https://github.com/michaeltrefry/candle-gen", rev = "30a094799ee5f4d75ccbe86547d5d41a809da06f", features = ["cuda"], optional = true }
+# Candle SCRFD/ArcFace face-analysis stack (sc-5490, epic 5480) — the Windows/CUDA sibling of
+# `mlx-gen-face`. Already rides in transitively via candle-gen-instantid / candle-gen-pulid (their
+# composed face detector), but the standalone kps_extract surface (sc-5497, epic 5482) calls it
+# DIRECTLY from `kps_jobs.rs` (`candle_gen_face::load` → `FaceEmbedder::detect`), so it needs to be a
+# direct dep. Same git rev as every candle-gen provider above (one candle build, single gen-core pin),
+# so `--features backend-candle` still resolves ONE candle-gen / gen-core build. Retires the Python
+# InsightFace `kps_extract` path off-Mac.
+candle-gen-face = { git = "https://github.com/michaeltrefry/candle-gen", rev = "30a094799ee5f4d75ccbe86547d5d41a809da06f", features = ["cuda"], optional = true }
 # Candle SeedVR2 one-step diffusion super-resolution upscaler (sc-5928 Windows / sc-5160 Linux, epic 4811
 # / epic 5482) — the Windows/CUDA + Linux/NVIDIA sibling of `mlx-gen-seedvr2`. Self-registers the upscaler ids `seedvr2` / `seedvr2_3b` /
 # `seedvr2_7b` (`Modality::Both`: image upscale via Reference + video upscale via VideoClip; int8/int4

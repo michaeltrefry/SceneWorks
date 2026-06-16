@@ -325,6 +325,43 @@ pub(crate) async fn ensure_scrfd_weights(
     .await
 }
 
+/// Resolve the candle face-stack DIRECTORY (`scrfd_10g.safetensors` + `arcface_iresnet100.safetensors`)
+/// for the off-Mac kps-extraction capability (sc-5497, epic 5482). Unlike the Mac path — which loads
+/// SCRFD alone via [`ensure_scrfd_weights`] — the candle `candle_gen_face::load` loads the SCRFD
+/// detector AND the ArcFace recognizer from one directory by their canonical names, so BOTH files must
+/// be staged. Shares the same env override (`SCENEWORKS_INSTANTID_WEIGHTS`) + app cache +
+/// download-on-first-use with [`ensure_instantid_weights`], so a prior InstantID / PuLID / extraction
+/// run leaves it already cached. Returns the bundle dir (which IS the candle face stack's load dir,
+/// exactly the `face_dir` the candle InstantID path resolves).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn ensure_face_stack_dir(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<PathBuf> {
+    let client = reqwest::Client::new();
+    let context = DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "KPS extraction canceled while fetching face-stack weights.",
+        fresh_download: false,
+    };
+    let bundle_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| settings.data_dir.join("cache").join("instantid-mlx"));
+    ensure_instantid_file(&context, INSTANTID_MLX_REPO, &bundle_dir, INSTANTID_SCRFD_FILE).await?;
+    ensure_instantid_file(
+        &context,
+        INSTANTID_MLX_REPO,
+        &bundle_dir,
+        INSTANTID_ARCFACE_FILE,
+    )
+    .await?;
+    Ok(bundle_dir)
+}
+
 /// Resolve all InstantID weight inputs, downloading the small converted bundle + the stock
 /// IdentityNet on first use. Returns `(identitynet_dir, ip_adapter, scrfd, arcface)` — all
 /// `Send` paths; the `!Send` MLX load happens on the blocking thread. Resolution order favours

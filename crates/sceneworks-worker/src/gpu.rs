@@ -86,6 +86,17 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
                     gpu.capabilities.push(capability);
                 }
             }
+            // SCRFD 5-point face-landmark extraction (sc-5497, epic 5482): the candle SCRFD/ArcFace face
+            // stack (`candle-gen-face`, the InstantID/PuLID detector reused directly from kps_jobs.rs)
+            // serves `kps_extract` for the Key Point Library "extract kps from this image" flow — the
+            // off-Mac sibling of the native-MLX path. A job-type capability (not a generation modality),
+            // so it isn't in `registry_capabilities`; advertise it explicitly. Unlike SeedVR2, the Python
+            // InsightFace path CAN serve kps_extract, so there's NO torch-refusal gate — the candle worker
+            // claims it Python-free, with the co-resident torch worker as fallback (the Python kps path is
+            // retired wholesale in Phase 7, epic 5483).
+            if !gpu.capabilities.contains(&WorkerCapability::KpsExtract) {
+                gpu.capabilities.push(WorkerCapability::KpsExtract);
+            }
             // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
             gpu.capabilities
                 .push(WorkerCapability::Unknown("candle".to_owned()));

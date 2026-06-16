@@ -5719,6 +5719,54 @@ mod candle_routing_tests {
         ));
     }
 
+    // ---- Candle kps_extract lane (sc-5497, epic 5482) ----
+
+    /// A queued `kps_extract` job carrying `payload`.
+    fn kps_extract_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_kps",
+            "type": "kps_extract",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// sc-5497: the candle worker advertises `kps_extract` (the candle SCRFD/ArcFace face stack) and
+    /// claims a kps_extract job — the off-Mac sibling of the native-MLX path. UNLIKE SeedVR2, the Python
+    /// InsightFace path CAN serve kps_extract, so there is NO torch-refusal gate: a co-resident torch
+    /// worker that advertises the capability still claims it (the candle worker just runs it Python-free
+    /// when it polls first; the Python path is retired wholesale in Phase 7, epic 5483). A worker that
+    /// never advertises the capability (e.g. a candle-disabled box) refuses it.
+    #[test]
+    fn candle_worker_claims_kps_extract_no_torch_refusal() {
+        let payload = json!({ "sourceAssetId": "a", "projectId": "p" });
+        let candle = gpu_worker(&["gpu", "kps_extract", "candle"]);
+        assert!(
+            worker_supports_job(&candle, &kps_extract_job(payload.clone())),
+            "candle worker should claim kps_extract"
+        );
+        let torch = gpu_worker(&["gpu", "kps_extract"]);
+        assert!(
+            worker_supports_job(&torch, &kps_extract_job(payload.clone())),
+            "torch worker still claims kps_extract (no refusal — it has the InsightFace path)"
+        );
+        let no_cap = gpu_worker(&["gpu", "image_generate", "candle"]);
+        assert!(
+            !worker_supports_job(&no_cap, &kps_extract_job(payload)),
+            "a worker not advertising kps_extract refuses it"
+        );
+    }
+
     // ---- Candle caption lane (sc-5098) ----
 
     /// A queued `training_caption` job carrying `payload`.

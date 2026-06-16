@@ -20,12 +20,25 @@
 
 use std::path::{Path, PathBuf};
 
+// The neutral image type both backends operate on (`mlx_gen` and `candle_gen` both re-export
+// `gen_core::Image`; the single-rev skew gate keeps them the same type).
+use gen_core::Image;
+// Native-MLX SCRFD detector (Mac, sc-4433): the same `scrfd_10g` detector the InstantID face stack runs.
+#[cfg(target_os = "macos")]
 use mlx_gen::weights::Weights;
-use mlx_gen::Image;
+#[cfg(target_os = "macos")]
 use mlx_gen_face::{detector_blob, Scrfd};
+// Candle SCRFD/ArcFace face stack (off-Mac, sc-5497): `FaceEmbedder` brings the `detect` trait method
+// into scope; `candle_gen_face::load` builds it from the staged `face_dir`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use gen_core::FaceEmbedder;
 use serde_json::{json, Value};
 
-use crate::image_jobs::{ensure_scrfd_weights, load_reference_image};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use crate::image_jobs::ensure_face_stack_dir;
+#[cfg(target_os = "macos")]
+use crate::image_jobs::ensure_scrfd_weights;
+use crate::image_jobs::load_reference_image;
 use crate::{
     heartbeat, normalize_app_managed_cache_path, progress_payload, task_join_error, update_job,
     ApiClient, Settings, WorkerError, WorkerResult,
@@ -33,9 +46,13 @@ use crate::{
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
 
-/// SCRFD detection confidence floor (InsightFace / `FaceAnalysis` default).
+/// SCRFD detection confidence floor (InsightFace / `FaceAnalysis` default). Mac only — the candle
+/// `FaceAnalysis::detect` applies the same InsightFace defaults internally, so the off-Mac path never
+/// passes them explicitly.
+#[cfg(target_os = "macos")]
 const DET_THRESH: f32 = 0.5;
-/// Non-max-suppression IoU threshold (InsightFace / `FaceAnalysis` default).
+/// Non-max-suppression IoU threshold (InsightFace / `FaceAnalysis` default). Mac only (see above).
+#[cfg(target_os = "macos")]
 const NMS_THRESH: f32 = 0.4;
 /// Below this detection score the landmarks are returned but flagged `lowConfidence`, so the
 /// caller can warn that the captured angle may be unreliable (extreme profile / poor framing).
@@ -43,6 +60,12 @@ const LOW_CONF_THRESH: f32 = 0.65;
 /// The landmark order, surfaced on the result so a consumer never has to assume it.
 const KPS_ORDER: [&str; 5] = ["left_eye", "right_eye", "nose", "mouth_left", "mouth_right"];
 const DETECTOR_ID: &str = "scrfd_10g";
+/// The detector backend surfaced on the result: native MLX on Mac (sc-4433), candle SCRFD/ArcFace
+/// off-Mac (sc-5497).
+#[cfg(target_os = "macos")]
+const DETECTOR_BACKEND: &str = "mlx";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const DETECTOR_BACKEND: &str = "candle";
 
 /// Map a detected pixel coordinate into the square-normalized `[0,1]` preset space, applying
 /// the engine's centered-letterbox geometry analytically (no image resize needed). Pure +
@@ -89,7 +112,7 @@ impl KpsExtraction {
         result.insert("sourceHeight".to_owned(), json!(self.source_height));
         result.insert(
             "detector".to_owned(),
-            json!({ "id": DETECTOR_ID, "backend": "mlx" }),
+            json!({ "id": DETECTOR_ID, "backend": DETECTOR_BACKEND }),
         );
         match self.kps {
             Some(kps) => {
@@ -117,6 +140,7 @@ impl KpsExtraction {
 
 /// Load SCRFD + detect the largest face's landmarks in `image`, normalized to the square
 /// preset space. Runs the `!Send` MLX work; call inside `spawn_blocking`.
+#[cfg(target_os = "macos")]
 fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtraction> {
     let weights = Weights::from_file(scrfd_path)
         .map_err(|error| WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}")))?;
@@ -151,6 +175,48 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
         bbox: Some([tl[0], tl[1], br[0], br[1]]),
         det_score: det.score,
         low_confidence: det.score < LOW_CONF_THRESH,
+        source_width: w,
+        source_height: h,
+    })
+}
+
+/// Off-Mac sibling of [`detect_largest_kps`] (sc-5497, epic 5482): load the candle SCRFD/ArcFace stack
+/// from `face_dir` and detect the largest face's landmarks, normalized to the same square preset space.
+/// `candle_gen_face::detect` returns every face's 5-point `kps` + `bbox` in original-image pixels (its
+/// inner `FaceAnalysis::detect` applies the InsightFace `det`/`nms` thresholds internally), so this picks
+/// the area-largest detection and normalizes it exactly as the MLX path does — the result is
+/// backend-identical. The candle stack runs f32 on CUDA; call inside `spawn_blocking`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn detect_largest_kps_candle(face_dir: &Path, image: &Image) -> WorkerResult<KpsExtraction> {
+    let analysis = candle_gen_face::load(face_dir)
+        .map_err(|error| WorkerError::Engine(format!("face stack {face_dir:?}: {error}")))?;
+    let dets = analysis
+        .detect(image)
+        .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))?;
+
+    let (w, h) = (image.width, image.height);
+    let largest = dets.into_iter().max_by(|a, b| {
+        let area = |d: &gen_core::DetectedFace| {
+            (d.bbox[2] - d.bbox[0]).max(0.0) * (d.bbox[3] - d.bbox[1]).max(0.0)
+        };
+        area(a).total_cmp(&area(b))
+    });
+    let Some(det) = largest else {
+        return Ok(KpsExtraction::none(w, h));
+    };
+
+    let mut kps = [[0.0f32; 2]; 5];
+    for (i, point) in det.kps.iter().enumerate() {
+        kps[i] = normalize_to_square(point[0], point[1], w, h);
+    }
+    let tl = normalize_to_square(det.bbox[0], det.bbox[1], w, h);
+    let br = normalize_to_square(det.bbox[2], det.bbox[3], w, h);
+    Ok(KpsExtraction {
+        detected: true,
+        kps: Some(kps),
+        bbox: Some([tl[0], tl[1], br[0], br[1]]),
+        det_score: det.det_score,
+        low_confidence: det.det_score < LOW_CONF_THRESH,
         source_width: w,
         source_height: h,
     })
@@ -217,8 +283,12 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
 }
 
 /// Run a `kps_extract` job: SCRFD landmark extraction from one image → normalized 5-point
-/// preset (or an explicit `detected: false` result on no face).
-#[cfg(target_os = "macos")]
+/// preset (or an explicit `detected: false` result on no face). Native-MLX SCRFD on Mac (sc-4433);
+/// the candle SCRFD/ArcFace stack off-Mac (sc-5497, epic 5482) — the result is backend-identical.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) async fn run_kps_extract_job(
     api: &ApiClient,
     settings: &Settings,
@@ -241,7 +311,13 @@ pub(crate) async fn run_kps_extract_job(
     .await?;
 
     let image = load_source_image(settings, job)?;
-    let scrfd_path = ensure_scrfd_weights(api, settings, job).await?;
+    // `weights` is a single SCRFD weight file on Mac and the SCRFD+ArcFace bundle DIR off-Mac (candle
+    // `load` resolves both files from one dir by name); both are `PathBuf`, both flow into the matching
+    // detector below.
+    #[cfg(target_os = "macos")]
+    let weights = ensure_scrfd_weights(api, settings, job).await?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let weights = ensure_face_stack_dir(api, settings, job).await?;
 
     update_job(
         api,
@@ -258,9 +334,18 @@ pub(crate) async fn run_kps_extract_job(
     )
     .await?;
 
-    let extraction = tokio::task::spawn_blocking(move || detect_largest_kps(&scrfd_path, &image))
-        .await
-        .map_err(|error| task_join_error("kps extraction task", error))??;
+    let extraction = tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        {
+            detect_largest_kps(&weights, &image)
+        }
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            detect_largest_kps_candle(&weights, &image)
+        }
+    })
+    .await
+    .map_err(|error| task_join_error("kps extraction task", error))??;
 
     let message = if extraction.detected {
         "Face landmarks extracted."
@@ -408,6 +493,68 @@ mod tests {
         );
         println!(
             "  extracted (score {:.3}, low_conf {}): le={le:?} re={re:?} nose={nose:?} ml={ml:?} mr={mr:?}",
+            extraction.det_score, extraction.low_confidence
+        );
+    }
+
+    /// Real-weights smoke (sc-5497, candle): run the actual candle SCRFD/ArcFace path on a real face
+    /// photo and assert the extracted landmarks are well-formed + in valid frontal geometry, the same
+    /// bar the MLX smoke holds — so the off-Mac kps lane is backend-identical. Exercises
+    /// `detect_largest_kps_candle` end to end (`candle_gen_face::load` → `detect` → largest →
+    /// normalize). Needs the staged face bundle dir (`SCENEWORKS_INSTANTID_WEIGHTS`, holding
+    /// `scrfd_10g.safetensors` + `arcface_iresnet100.safetensors`) + a face image
+    /// (`SCENEWORKS_TEST_FACE`) + a CUDA device. On demand: `cargo test -p sceneworks-worker
+    /// --features backend-candle --lib -- --ignored kps_extract_candle --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs real SCRFD/ArcFace weights + CUDA device"]
+    fn kps_extract_candle_real_weights_extracts_frontal_landmarks() {
+        let face_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
+            .map(PathBuf::from)
+            .expect("set SCENEWORKS_INSTANTID_WEIGHTS to the face bundle dir");
+        assert!(
+            face_dir.join("scrfd_10g.safetensors").exists(),
+            "missing scrfd_10g.safetensors in {face_dir:?}"
+        );
+        assert!(
+            face_dir.join("arcface_iresnet100.safetensors").exists(),
+            "missing arcface_iresnet100.safetensors in {face_dir:?}"
+        );
+        let face_path = std::env::var("SCENEWORKS_TEST_FACE")
+            .expect("set SCENEWORKS_TEST_FACE to a face image");
+        let decoded = image::open(&face_path)
+            .unwrap_or_else(|e| panic!("face {face_path}: {e}"))
+            .to_rgb8();
+        let image = Image {
+            width: decoded.width(),
+            height: decoded.height(),
+            pixels: decoded.into_raw(),
+        };
+
+        let extraction = detect_largest_kps_candle(&face_dir, &image).expect("detect");
+        assert!(extraction.detected, "expected a face in the test image");
+        let kps = extraction.kps.expect("kps on a detected face");
+        let order = KPS_ORDER;
+        for (i, p) in kps.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&p[0]) && (0.0..=1.0).contains(&p[1]),
+                "{} out of [0,1]: {p:?}",
+                order[i]
+            );
+        }
+        let [le, re, nose, ml, mr] = kps;
+        assert!(le[0] < re[0], "left eye should be left of right eye");
+        assert!(ml[0] < mr[0], "left mouth should be left of right mouth");
+        let eye_y = (le[1] + re[1]) / 2.0;
+        let mouth_y = (ml[1] + mr[1]) / 2.0;
+        assert!(eye_y < nose[1], "eyes above nose ({eye_y} !< {})", nose[1]);
+        assert!(
+            nose[1] < mouth_y,
+            "nose above mouth ({}, {mouth_y})",
+            nose[1]
+        );
+        println!(
+            "  candle extracted (score {:.3}, low_conf {}): le={le:?} re={re:?} nose={nose:?} ml={ml:?} mr={mr:?}",
             extraction.det_score, extraction.low_confidence
         );
     }

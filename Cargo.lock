@@ -5225,6 +5225,7 @@ dependencies = [
  "axum",
  "candle-gen",
  "candle-gen-chroma",
+ "candle-gen-face",
  "candle-gen-flux",
  "candle-gen-flux2",
  "candle-gen-instantid",

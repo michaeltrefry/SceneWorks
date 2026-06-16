@@ -106,11 +106,15 @@ mod openpose_skeleton;
 // rtmlib path stays the Windows/Linux backend.
 #[cfg(target_os = "macos")]
 mod pose_jobs;
-// SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX SCRFD
-// in-process (the InstantID face-stack detector) for the Key Point Library
-// "extract kps from this image" capability. macOS-only; the Python InsightFace
-// path stays the Windows/Linux backend.
-#[cfg(target_os = "macos")]
+// SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac, plus the
+// candle SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482) — the same
+// InstantID face-stack detector reused in-process for the Key Point Library "extract kps from this
+// image" capability. So the module compiles on Mac AND the candle lane; on a candle-disabled box the
+// Python InsightFace path stays the Windows/Linux backend.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod kps_jobs;
 // Image upscaling: Real-ESRGAN (epic 3482, sc-3489) RRDBNet x2/x4 via `ort`/CoreML on Mac, plus the
 // SeedVR2 one-step diffusion upscaler — native MLX on Mac (sc-4815) and the candle CUDA backend on
@@ -146,7 +150,10 @@ mod person_segment_sam3;
 #[cfg(target_os = "macos")]
 mod scail2_masks;
 use downloads::*;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use kps_jobs::*;
 #[cfg(target_os = "macos")]
 use pose_jobs::*;
@@ -749,11 +756,15 @@ async fn run_utility_job(
         JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Pose detection failed.", error)),
-        // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD
-        // in-process for the Key Point Library. macOS-only; off macOS `KpsExtract` is
-        // never advertised by the Rust worker (the Python InsightFace path handles it),
+        // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac + the candle
+        // SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482), served in-process
+        // for the Key Point Library. Available on Mac AND the candle lane; on a candle-disabled box
+        // `KpsExtract` is never advertised by the Rust worker (the Python InsightFace path handles it),
         // so this falls to the `_` arm there.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
         JobType::KpsExtract => run_kps_extract_job(api, settings, &job)
             .await
             .map_err(|error| ("Keypoint extraction failed.", error)),
