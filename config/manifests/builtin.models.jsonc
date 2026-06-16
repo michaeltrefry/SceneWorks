@@ -1115,10 +1115,13 @@
       // FLUX.2 [dev] (epic 5914) — the guidance-distilled 32B flagship, a SEPARATE
       // model from klein: a Mistral3 text encoder (vs klein's Qwen3) + a 48/48/15360
       // DiT, ported natively to mlx-gen (sc-5915/5916/5917/2365). MLX-only (no torch
-      // backend), Mac-only. T2I-only for now — the Pixtral edit/reference path is
-      // sc-5918/5919/5922. Shares the `mlx_flux2` adapter + the `flux2` engine.
+      // backend), Mac-only. Shares the `mlx_flux2` adapter + the `flux2` engine.
+      // Image edit + reference (sc-5919/5922): reference image(s) condition via the
+      // DiT token concat through the `flux2_dev_edit` variant — the same surface as
+      // klein. Pose library is best-effort (skeleton-as-edit-image, like klein); the
+      // real FLUX.2-dev pose ControlNet is sc-2292.
       "adapter": "mlx_flux2",
-      "capabilities": ["text_to_image"],
+      "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "macOnly": true,
       "downloads": [
         {
@@ -1166,8 +1169,41 @@
       "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-dev",
       "ui": {
         "label": "FLUX.2 [dev]",
-        "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image model, ported natively to MLX (Apple Silicon only). A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Pre-quantized to Q4 at install (the dense weights are too large to quantize in memory) and needs a 128 GB Mac (~74 GB peak at 1024²). Distributed under the FLUX [dev] Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-dev and add a Hugging Face token under Settings → Service credentials before downloading. Reference editing and LoRAs are coming separately.",
-        "recommendedFor": ["text_to_image"],
+        "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image + reference-editing model, ported natively to MLX (Apple Silicon only). A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Supports reference editing — drop in a source or character image and the model conditions on it (single + multi-image), the same surface as FLUX.2 [klein]. Pre-quantized to Q4 at install (the dense weights are too large to quantize in memory) and needs a 128 GB Mac (~74 GB peak at 1024²; reference editing adds the reference tokens on top, so expect higher peaks and slower renders than klein). Distributed under the FLUX [dev] Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-dev and add a Hugging Face token under Settings → Service credentials before downloading. LoRAs are coming separately.",
+        "recommendedFor": ["text_to_image", "character_image", "style_variations"],
+        // Embedded-guidance edit knob: maps to the dev guidance scale (default 4.0,
+        // 1–10), the same "Prompt strength" surface as the klein edit variants
+        // (mlx_flux2 adapter). The reference is concatenated structurally (not a
+        // strength blend), so this knob steers prompt adherence, not blend weight.
+        "variationStrength": {
+          "label": "Prompt strength",
+          "default": 4.0,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.5
+        },
+        // Shares the FLUX.2-klein angle set (same mlx_flux2 adapter + flux2 prompt
+        // augments): per-angle prompt over a shared seed + the reference image.
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
+        // Best-effort pose library (mirrors klein, sc-2262): no FLUX.2-dev pose
+        // ControlNet exists yet (that is sc-2292) — the worker renders the selected
+        // library pose as an OpenPose skeleton and feeds it as a second edit image
+        // alongside the reference (`MultiReference [skeleton, reference]`) through the
+        // dev edit variant (the engine MultiReference path validated in sc-5919).
+        // Best-effort tier; sc-2292 upgrades this to the real strict-pose ControlNet.
+        "poseLibrary": true,
         "promptGuide": {
           "title": "FLUX.2 [dev] Prompt Guide",
           "path": "/prompt-guides/flux2-dev.md",
