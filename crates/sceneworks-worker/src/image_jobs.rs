@@ -161,7 +161,10 @@ use candle_gen_instantid::{
 // `candle_gen_sdxl` is already force-link anchored above (the registered txt2img `sdxl`); this is the
 // named-type import the bespoke reference route (`image_jobs/sdxl_ipadapter.rs`) drives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_sdxl::{IpAdapterSdxl, IpAdapterSdxlPaths, IpAdapterSdxlRequest};
+use candle_gen_sdxl::{
+    IpAdapterSdxl, IpAdapterSdxlPaths, IpAdapterSdxlRequest, SdxlEdit, SdxlEditPaths,
+    SdxlEditRequest,
+};
 // Kolors IP-Adapter-Plus reference provider (sc-5488, epic 5480) — the candle (Windows/CUDA) Kolors
 // sibling of the SDXL IP lane, living in `candle-gen-kolors` (it reuses candle-gen-sdxl's vendored IP
 // UNet + the CLIP ViT-L/14-336 image encoder, with the Kolors ChatGLM3 conditioning + leading-Euler
@@ -489,6 +492,22 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let handled = if settings.backend_candle_enabled && instantid_available(&request, settings) {
         generate_instantid_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && sdxl_edit_candle_available(&request, settings) {
+        // SDXL img2img / inpaint / outpaint edit (sc-5487) — checked BEFORE `is_candle_engine` because
+        // `sdxl`/`realvisxl` ARE candle txt2img ids, so without this an `edit_image` job would be caught
+        // by the txt2img branch (which can't honor a source/mask). Disjoint from the IP-Adapter lane
+        // below (that one is reference-only and not `edit_image`).
+        generate_candle_sdxl_edit_stream(
             api,
             settings,
             job,
@@ -1109,6 +1128,11 @@ include!("image_jobs/instantid.rs");
 // candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/sdxl_ipadapter.rs");
+// SDXL img2img / inpaint / outpaint edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps the
+// MLX SDXL advanced path (sdxl.rs `SdxlSubMode::{Edit,Inpaint,Outpaint}`); the candle `SdxlEdit` is a
+// bespoke provider, so this is candle-exclusive.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/sdxl_edit_candle.rs");
 // Kolors IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS
 // keeps the MLX Kolors IP path (kolors.rs, the registry `Reference` route); the candle `IpAdapterKolors`
 // is a bespoke provider, so this is candle-exclusive.

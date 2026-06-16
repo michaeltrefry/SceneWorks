@@ -111,11 +111,14 @@ fn fit_engine_image(source: Image, width: u32, height: u32, mode: &str) -> Worke
 
 /// The engine edit-variant id for a FLUX.2 SceneWorks model, or `None` if the model
 /// has no edit variant. The base 9b + true_v2 share `flux2_klein_9b_edit`; the -kv
-/// distill uses `flux2_klein_9b_kv_edit` (reference-K/V cache).
+/// distill uses `flux2_klein_9b_kv_edit` (reference-K/V cache); dev uses the
+/// `flux2_dev_edit` variant (sc-5919) — the same dev snapshot, edit conditioning via
+/// the DiT token concat (Reference / MultiReference), embedded guidance, no -kv cache.
 fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
     match model {
         "flux2_klein_9b" | "flux2_klein_9b_true_v2" => Some("flux2_klein_9b_edit"),
         "flux2_klein_9b_kv" => Some("flux2_klein_9b_kv_edit"),
+        "flux2_dev" => Some("flux2_dev_edit"),
         _ => None,
     }
 }
