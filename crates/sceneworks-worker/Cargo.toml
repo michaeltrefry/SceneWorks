@@ -146,8 +146,10 @@ sceneworks-core = { path = "../sceneworks-core" }
 # `generate_video_tiled`). The delta is PURE candle-gen-seedvr2 Rust — gen-core stays 7b89d45
 # (byte-identical), so only seedvr2 recompiles and the backend-candle graph's gen-core rev is unchanged
 # from bcd94ad (same accepted momentary REV-skew vs the mlx-gen 98592bb pin below, sc-5905). a5a4d94 is
-# candle-gen #93's content commit, durable on its branch (an ancestor of the eventual #93 merge); flip to
-# the merged candle-gen main rev once #93 lands. (The worker-thread poison half of sc-6067 is already
+# candle-gen #93's content commit, now a DURABLE ancestor of candle-gen main (merge commit ec01336 of
+# #93, NOT squash) so the pin stays fetchable after the branch delete — it deliberately stays at the
+# minimal seedvr2-only delta a5a4d94 rather than flipping to merged-main HEAD, which has since advanced
+# with the UNRELATED sc-6217 qwen-attn-chunk (#92). (The worker-thread poison half of sc-6067 is already
 # covered for candle — the catch_unwind crash-recovery in generator_cache.rs is shared, backend-agnostic.)
 # Rev 98592bb (mlx-gen #485 merged, sc-6067): bumps every mlx-gen crate 7b89d45 -> 98592bb to spatially
 # tile the SeedVR2 *image* upscale path. The image path (`Seedvr2Pipeline::generate`) ran the whole frame
