@@ -19,11 +19,11 @@ import {
   ELEMENT_PALETTE_MAX,
   makeObjElement,
   makeTextElement,
-  normalizeHexColor,
   orderCaption,
   parseCaption,
   STYLE_PALETTE_MAX,
 } from "../ideogramCaption.js";
+import PaletteEditor from "./PaletteEditor.jsx";
 
 const MODES = [
   ["form", "Builder"],
@@ -45,40 +45,6 @@ function getComposition(caption) {
 function getElements(caption) {
   const els = getComposition(caption).elements;
   return Array.isArray(els) ? els : [];
-}
-
-// A palette field: comma/space-separated #RRGGBB. Keeps its own text buffer so
-// the user can type freely; commits the normalized, valid colors on blur.
-function PaletteField({ value, onChange, max, label }) {
-  const [text, setText] = useState(() => (Array.isArray(value) ? value.join(", ") : ""));
-  // Re-seed from props only when the committed value actually changes (e.g. an
-  // external edit or a JSON-mode apply), not on every keystroke.
-  useEffect(() => {
-    setText(Array.isArray(value) ? value.join(", ") : "");
-  }, [value]);
-
-  function commit() {
-    const tokens = text.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
-    const colors = [];
-    for (const token of tokens) {
-      const normalized = normalizeHexColor(token);
-      if (normalized && !colors.includes(normalized)) colors.push(normalized);
-    }
-    onChange(colors.length ? colors.slice(0, max) : null);
-  }
-
-  return (
-    <label className="structured-field structured-palette">
-      <span>{label}</span>
-      <input
-        type="text"
-        placeholder={`#RRGGBB, #RRGGBB … (max ${max})`}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-      />
-    </label>
-  );
 }
 
 // Four integer inputs for a [ymin, xmin, ymax, xmax] box (0–1000). The visual
@@ -342,7 +308,7 @@ export default function StructuredPromptBuilder({
                   <span>Medium</span>
                   <input type="text" placeholder="photograph, oil painting" value={style.medium ?? ""} onChange={(e) => setStyleField("medium", e.target.value)} />
                 </label>
-                <PaletteField
+                <PaletteEditor
                   label={`Color palette (max ${STYLE_PALETTE_MAX})`}
                   value={style.color_palette}
                   max={STYLE_PALETTE_MAX}
@@ -420,7 +386,7 @@ export default function StructuredPromptBuilder({
                     + Bounding box
                   </button>
                 )}
-                <PaletteField
+                <PaletteEditor
                   label={`Palette (max ${ELEMENT_PALETTE_MAX})`}
                   value={el.color_palette}
                   max={ELEMENT_PALETTE_MAX}
