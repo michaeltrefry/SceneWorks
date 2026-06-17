@@ -1192,24 +1192,143 @@ fn flux2_klein_9b_true_v2_real_weights_generates_one_image() {
     smoke_generate_one("flux2_klein_9b_true_v2", dir, Some(1.0), None);
 }
 
-/// Real-weights smoke (sc-5921 / sc-5923 boundary): FLUX.2-dev (embedded guidance, ~28-step).
-/// Loads the install-time pre-quantized Q4 dir under the SceneWorks data dir
-/// (`models/mlx/flux2_dev`, assembled by the `flux2_dev_quant` convert job) via the
-/// `flux2_dev` engine id — proving the worker's `mlx_gen_flux2` force-link reaches the dev
-/// loader and that the packed snapshot loads + generates (the Q8 LoadSpec hint is a no-op on
-/// the already-packed weights). Needs a previously-converted dir + a 128 GB Metal device.
-/// `SCENEWORKS_FLUX2_DEV_DIR` overrides the dir. Run on demand:
+/// The install-time pre-quantized Q4 dev snapshot dir (`models/mlx/flux2_dev`, assembled by the
+/// `flux2_dev_quant` convert job); `SCENEWORKS_FLUX2_DEV_DIR` overrides it.
+#[cfg(target_os = "macos")]
+fn flux2_dev_dir() -> std::path::PathBuf {
+    std::env::var("SCENEWORKS_FLUX2_DEV_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_home().join("Library/Application Support/SceneWorks/data/models/mlx/flux2_dev")
+        })
+}
+
+/// Worker-layer dev real-weight e2e (sc-5923): load `engine_id` from the converted Q4 dev dir and
+/// generate one RGB8 image at an env-configurable size/steps (`SCENEWORKS_FLUX2_DEV_SIZE` /
+/// `SCENEWORKS_FLUX2_DEV_STEPS`, default 512 / the dev default 28). For the footprint reconciliation,
+/// set `SCENEWORKS_FLUX2_DEV_SIZE=1024` (the production default) and wrap the test binary in
+/// `/usr/bin/time -l` to read the steady-state "peak memory footprint" vs the manifest `minMemoryGb`
+/// (peak is activation-bound, reached within a couple of steps, so a low `STEPS` measures the same
+/// ceiling faster). `conditioning` adds edit reference(s); empty = T2I. Proves the worker's
+/// `gen_core::load` force-link reaches the dev loader, the packed snapshot loads + generates (the Q4
+/// LoadSpec hint is a no-op on the already-packed weights), and the requested conditioning is
+/// consumed (a real, non-flat RGB8 frame). Returns the decoded image.
+#[cfg(target_os = "macos")]
+fn dev_worker_generate(
+    engine_id: &str,
+    base: std::path::PathBuf,
+    conditioning: Vec<gen_core::Conditioning>,
+) -> Image {
+    let size: u32 = std::env::var("SCENEWORKS_FLUX2_DEV_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    let steps: u32 = std::env::var("SCENEWORKS_FLUX2_DEV_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(28);
+    let generator =
+        load_engine(engine_id, base, Some(gen_core::Quant::Q4), Vec::new(), None).unwrap();
+    let mut steps_seen = 0u32;
+    let request = GenerationRequest {
+        prompt: "a serene mountain lake at dawn".into(),
+        width: size,
+        height: size,
+        count: 1,
+        seed: Some(42),
+        steps: Some(steps),
+        guidance: Some(4.0),
+        conditioning,
+        ..Default::default()
+    };
+    let out = generator
+        .generate(&request, &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        })
+        .unwrap();
+    let img = match out {
+        GenerationOutput::Images(mut v) => v.remove(0),
+        other => panic!("expected Images, got {other:?}"),
+    };
+    assert_eq!((img.width, img.height), (size, size), "output dimensions");
+    assert_eq!(
+        img.pixels.len(),
+        (size * size * 3) as usize,
+        "RGB8 pixel count"
+    );
+    assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(
+        img.pixels.windows(2).any(|w| w[0] != w[1]),
+        "render is flat (degenerate)"
+    );
+    img
+}
+
+/// Real-weights smoke (sc-5921 / sc-5923 boundary): FLUX.2-dev T2I (embedded guidance, ~28-step)
+/// through the worker `flux2_dev` engine path — proves the `mlx_gen_flux2` force-link reaches the dev
+/// loader and the packed snapshot loads + generates. Env-sizable (default 512²; set
+/// `SCENEWORKS_FLUX2_DEV_SIZE=1024` for the production-default footprint run, sc-5923). Needs a
+/// previously-converted Q4 dir + a 128 GB Metal device. Run on demand:
 /// `cargo test -p sceneworks-worker --lib -- --ignored flux2_dev_real_weights`.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "needs a converted FLUX.2-dev Q4 dir + 128 GB Metal device"]
 fn flux2_dev_real_weights_generates_one_image() {
-    let dir = std::env::var("SCENEWORKS_FLUX2_DEV_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs_home().join("Library/Application Support/SceneWorks/data/models/mlx/flux2_dev")
-        });
-    smoke_generate_one("flux2_dev", dir, Some(4.0), None);
+    dev_worker_generate("flux2_dev", flux2_dev_dir(), Vec::new());
+}
+
+/// Real-weights smoke (sc-5923): FLUX.2-dev EDIT through the worker `flux2_dev_edit` engine path
+/// (the `flux2_edit_engine_id("flux2_dev")` variant, sc-5919/5922). Loads the SAME converted Q4 dev
+/// snapshot, then renders with a single `Conditioning::Reference` AND with a 2-image
+/// `Conditioning::MultiReference` — the two reference shapes the worker `generate_flux2_edit_stream`
+/// builds (grouped / pose-library `[skeleton, reference]`). Asserts each produces a real, non-flat
+/// RGB8 frame and that the two differ (the references are actually consumed, not dropped). Env-sizable
+/// like the T2I smoke; `SCENEWORKS_FLUX2_DEV_EDIT_REFS=1|2` isolates one pass for a clean per-pass
+/// footprint measurement (sc-5923 — multi-reference adds the most sequence tokens, so it drives the
+/// peak). Needs the converted Q4 dir + a 128 GB Metal device. Run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored flux2_dev_edit_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs a converted FLUX.2-dev Q4 dir + 128 GB Metal device"]
+fn flux2_dev_edit_real_weights_generates_one_image() {
+    let dir = flux2_dev_dir();
+    let only: Option<u32> = std::env::var("SCENEWORKS_FLUX2_DEV_EDIT_REFS")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
+    let single = (only != Some(2)).then(|| {
+        dev_worker_generate(
+            "flux2_dev_edit",
+            dir.clone(),
+            vec![gen_core::Conditioning::Reference {
+                image: synthetic_rgb(512, 512, |x, y| {
+                    [((x * 255) / 512) as u8, ((y * 255) / 512) as u8, 96]
+                }),
+                strength: None,
+            }],
+        )
+    });
+    let multi = (only != Some(1)).then(|| {
+        dev_worker_generate(
+            "flux2_dev_edit",
+            dir,
+            vec![gen_core::Conditioning::MultiReference {
+                images: vec![
+                    synthetic_rgb(512, 512, |x, _| [((x * 255) / 512) as u8, 60, 200]),
+                    synthetic_rgb(512, 512, |_, y| [40, ((y * 255) / 512) as u8, 180]),
+                ],
+            }],
+        )
+    });
+    // When both passes ran (the default), the two reference shapes must drive different output.
+    if let (Some(single), Some(multi)) = (single, multi) {
+        assert_ne!(
+            single.pixels, multi.pixels,
+            "single- and multi-reference edits should differ (references consumed)"
+        );
+    }
 }
 
 /// Real-weights smoke: SDXL base (real CFG, guidance 7.0 + a negative prompt,

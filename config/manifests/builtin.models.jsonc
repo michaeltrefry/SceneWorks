@@ -1250,6 +1250,11 @@
       // (sc-2365) — so minMemoryGb 96 (128 GB Macs only). The convert pre-quantizes
       // transformer + text_encoder and symlinks the (identical-to-klein) VAE +
       // tokenizer + model_index.json from the gated source snapshot.
+      // sc-5923 worker-layer footprint (Q4, 1024², /usr/bin/time -l peak): T2I ~74 GB,
+      // single-reference edit ~81 GB — both within 96. Multi-reference (2-image) edit
+      // peaks ~104 GB (> 96, activation-bound on the longer ref sequence); that path is
+      // currently UI-latent for dev (no multi-image picker; pose routes to the
+      // flux2_dev_control engine, sc-6055) and is tracked for an engine/guard fix.
       "mlx": {
         "minMemoryGb": 96,
         "quantize": 4,
