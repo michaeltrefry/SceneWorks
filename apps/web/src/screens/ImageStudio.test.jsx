@@ -13,6 +13,7 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { AppContext } from "../context/AppContext.js";
+import { buildStructuredPromptRecipe, serializeCaption } from "../ideogramCaption.js";
 import { ImageStudio } from "./ImageStudio.jsx";
 
 const Z_IMAGE = {
@@ -549,5 +550,109 @@ describe("ImageStudio model picker capability gating", () => {
 
     expect(modeButton("Edit").disabled).toBe(true);
     expect(modeButton("Edit").title).toBe("No available Mac model supports this mode.");
+  });
+});
+
+describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const IDEOGRAM = {
+    ...Z_IMAGE,
+    id: "ideogram_4",
+    name: "Ideogram 4",
+    family: "ideogram",
+    capabilities: ["text_to_image"],
+    structuredPrompt: true,
+  };
+
+  const CAPTION = {
+    high_level_description: "A red fox in the snow",
+    compositional_deconstruction: {
+      background: "A snowy pine forest",
+      elements: [{ type: "obj", desc: "a red fox sitting upright" }],
+    },
+  };
+
+  const generateButton = () =>
+    [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+
+  it("restores the builder from a recipe, then re-emits the same caption + blob on Generate", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const structuredPrompt = buildStructuredPromptRecipe({
+      intent: "a red fox in the snow",
+      caption: CAPTION,
+      magicPromptBackend: "prompt_refine",
+    });
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [IDEOGRAM],
+        studioLaunch: {
+          id: "launch-1",
+          view: "Image",
+          assetId: "asset-1",
+          // Mirrors a stored Ideogram asset: prompt = serialized caption, with the
+          // full structured-prompt blob under rawAdapterSettings.structuredPrompt.
+          recipe: {
+            model: "ideogram_4",
+            mode: "text_to_image",
+            prompt: serializeCaption(CAPTION),
+            rawAdapterSettings: { structuredPrompt },
+          },
+        },
+      }),
+    );
+
+    // Restore selected the structured model and rehydrated the builder (Generate is
+    // enabled, which requires a valid, non-empty caption in the form — not plain text).
+    expect(field(container, "Model").value).toBe("ideogram_4");
+    expect(generateButton().disabled).toBe(false);
+
+    await click(generateButton());
+
+    const payload = createImageJob.mock.calls[0][0];
+    // Top-level prompt is the canonical serialized caption — byte-identical to source.
+    expect(payload.prompt).toBe(serializeCaption(CAPTION));
+    // The full structured-prompt blob round-trips through advanced (→ rawAdapterSettings).
+    expect(payload.advanced.structuredPrompt.caption).toEqual(CAPTION);
+    expect(payload.advanced.structuredPrompt.intent).toBe("a red fox in the snow");
+    expect(payload.advanced.structuredPrompt.magicPromptBackend).toBe("prompt_refine");
+    expect(payload.advanced.structuredPrompt.runtimePrompt).toBe(serializeCaption(CAPTION));
+  });
+
+  it("does not attach a structured-prompt blob for non-structured models", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(baseContext({ createImageJob, imageModels: [Z_IMAGE] }));
+
+    await click(generateButton());
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.advanced.structuredPrompt).toBeUndefined();
   });
 });

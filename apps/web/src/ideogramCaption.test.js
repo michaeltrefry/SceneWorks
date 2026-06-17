@@ -371,4 +371,20 @@ describe("factories + recipe storage", () => {
     expect(runtimePromptFromRecipe({ caption: FOX })).toBe(FOX_JSON);
     expect(runtimePromptFromRecipe(null)).toBe("");
   });
+
+  it("restore round-trip: a stored caption re-serializes byte-identically (sc-6147)", () => {
+    // What ImageStudio persists in advanced.structuredPrompt, then restores from
+    // rawAdapterSettings.structuredPrompt on "Use this recipe".
+    const recipe = buildStructuredPromptRecipe({ intent: "a red fox in the snow", caption: FOX });
+    // The restore path runs the stored caption back through orderCaption (key order
+    // in the stored object may be insertion-order, not canonical) before re-serializing.
+    const scrambled = {
+      compositional_deconstruction: recipe.caption.compositional_deconstruction,
+      style_description: recipe.caption.style_description,
+      high_level_description: recipe.caption.high_level_description,
+    };
+    expect(validateCaption(scrambled).ok).toBe(true);
+    expect(serializeCaption(orderCaption(scrambled))).toBe(FOX_JSON);
+    expect(serializeCaption(orderCaption(scrambled))).toBe(recipe.runtimePrompt);
+  });
 });

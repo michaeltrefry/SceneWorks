@@ -8,7 +8,14 @@ import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
-import { emptyCaption, parseMagicPromptCaption, serializeCaption, validateCaption } from "../ideogramCaption.js";
+import {
+  buildStructuredPromptRecipe,
+  emptyCaption,
+  orderCaption,
+  parseMagicPromptCaption,
+  serializeCaption,
+  validateCaption,
+} from "../ideogramCaption.js";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
@@ -793,7 +800,23 @@ export function ImageStudio() {
       }
       setModel(recipe.model);
     }
-    setPrompt(String(recipe.prompt ?? ""));
+    // Structured-prompt round-trip (sc-6147): a structured model's recipe carries
+    // the full caption under rawAdapterSettings.structuredPrompt. Rehydrate the
+    // builder (caption + intent + magic-prompt backend) instead of dropping the
+    // serialized JSON into the plain prompt box. Falls back to the plain `prompt`
+    // path when the blob is absent/invalid (older assets, non-structured models).
+    const structuredRecipe = rawSettings.structuredPrompt;
+    const restoredCaption = structuredRecipe?.caption ?? null;
+    if (restoredCaption && validateCaption(restoredCaption).ok) {
+      setCaption(orderCaption(restoredCaption));
+      setPromptMode("form");
+      setMagicPromptBackend(structuredRecipe.magicPromptBackend ?? null);
+      // The intent (original idea) seeds the plain box; the serialized caption is
+      // authoritative for generation and is rebuilt from `caption` on submit.
+      setPrompt(String(structuredRecipe.intent ?? ""));
+    } else {
+      setPrompt(String(recipe.prompt ?? ""));
+    }
     promptEdited.current = true;
     setNegativePrompt(String(recipe.negativePrompt ?? ""));
     // Recipe replay restores the creative setup, but intentionally leaves Seed
@@ -1086,6 +1109,21 @@ export function ImageStudio() {
           : {}),
         advanced: {
           resolution,
+          // Structured-prompt recipe round-trip (sc-6147): persist the full caption +
+          // original intent + magic-prompt backend alongside the job so "Use this recipe"
+          // can rehydrate the builder rather than replay the serialized JSON as a plain
+          // prompt. Rides in `advanced`, which the worker clones verbatim into the asset's
+          // rawAdapterSettings — no backend change needed. Only for structured models.
+          ...(structuredActive
+            ? {
+                structuredPrompt: buildStructuredPromptRecipe({
+                  intent: prompt,
+                  caption,
+                  magicPromptBackend,
+                  edited: !magicPromptBackend,
+                }),
+              }
+            : {}),
           // Configurable sampler / scheduler (epic 1753). Worker registry
           // falls back to model-native when given "default", so emitting the
           // values unconditionally is safe — invalid values are ignored.
