@@ -16,11 +16,6 @@ function click(el) {
   el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 }
 
-function blur(el) {
-  // React 18 delegates onBlur via the bubbling `focusout` event.
-  el.dispatchEvent(new Event("focusout", { bubbles: true }));
-}
-
 describe("StructuredPromptBuilder", () => {
   let container;
   let root;
@@ -96,16 +91,34 @@ describe("StructuredPromptBuilder", () => {
     );
   });
 
-  it("commits a normalized palette on blur (lowercase -> uppercase, dedup)", async () => {
+  it("adds normalized swatches to an element via the palette editor", async () => {
     await mount();
     await act(async () => setValue(byPlaceholder("The scene behind"), "bg"));
     await act(async () => click(buttonByText("+ Object")));
-    const palette = byPlaceholder("#RRGGBB");
-    await act(async () => setValue(palette, "#ff0000, #00ff00 #ff0000"));
-    await act(async () => blur(palette));
+    const hex = container.querySelector('input[aria-label="Hex color"]');
+    await act(async () => setValue(hex, "#ff0000"));
+    await act(async () => click(buttonByText("Add")));
+    await act(async () => setValue(hex, "#00ff00"));
+    await act(async () => click(buttonByText("Add")));
 
     const el = snap.caption.compositional_deconstruction.elements[0];
     expect(el.color_palette).toEqual(["#FF0000", "#00FF00"]);
+  });
+
+  it("round-trips an overall/document palette into the caption JSON (sc-5996)", async () => {
+    await mount();
+    await act(async () => setValue(byPlaceholder("The scene behind"), "a calm studio"));
+    // Enable style so the document-level palette is available (the schema only
+    // allows an overall palette inside a style block with a discriminator).
+    await act(async () => click(container.querySelector('.structured-checkline input[type="checkbox"]')));
+    await act(async () => setValue(byPlaceholder("telephoto"), "studio strobe, eye-level"));
+    const hex = container.querySelector('input[aria-label="Hex color"]');
+    await act(async () => setValue(hex, "#0A2540"));
+    await act(async () => click(buttonByText("Add")));
+
+    expect(snap.validation.ok).toBe(true);
+    expect(snap.caption.style_description.color_palette).toEqual(["#0A2540"]);
+    expect(serializeCaption(snap.caption)).toContain('"color_palette": ["#0A2540"]');
   });
 
   it("shows the live ordered-JSON preview and applies raw-JSON edits", async () => {
