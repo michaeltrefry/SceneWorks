@@ -3313,6 +3313,16 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if matches!(model, "sdxl" | "realvisxl") && sdxl_edit_candle_eligible(&job.payload) {
         return true;
     }
+    // FLUX.2-klein reference / img2img edit (sc-5487, epic 5480): a klein-family `edit_image` job with a
+    // source image is the bespoke candle `Flux2Edit` lane (`generate_candle_flux2_edit_stream`), NOT
+    // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
+    // FLUX.2-klein has no torch path, so this is the only off-Mac edit lane for it. Mirrors the worker's
+    // `flux2_edit_candle_available` gate.
+    if matches!(model, "flux2_klein_9b" | "flux2_klein_9b_true_v2")
+        && flux2_edit_candle_eligible(&job.payload)
+    {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
@@ -3650,6 +3660,22 @@ fn pulid_flux_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// worker's `sdxl_edit_candle_available` gate (minus the local weight-resolve check) so the router and
 /// worker agree. Candle-only — macOS keeps the MLX `SdxlSubMode::{Edit,Inpaint,Outpaint}` path.
 fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// FLUX.2-klein edit candle-routing conditions (sc-5487, epic 5480). The candle `Flux2Edit` provider
+/// serves `edit_image` mode with a `sourceAssetId` on the klein family — Kontext-style reference
+/// token-concat editing (no mask / inpaint / outpaint; that masked shape is the SDXL edit lane's). Same
+/// payload predicate as `sdxl_edit_candle_eligible`, gated to the klein family by the caller. Mirrors the
+/// worker's `flux2_edit_candle_available` gate (minus the local weight-resolve check) so the router and
+/// worker agree. Candle-only — macOS keeps the MLX `flux2_klein_9b_edit` registry path.
+fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
@@ -4955,10 +4981,10 @@ mod candle_routing_tests {
                 "qwen_image",
                 json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
             ),
-            (
-                "flux2_klein_9b",
-                json!({ "mode": "edit_image", "sourceAssetId": "a" }),
-            ),
+            // NB: `flux2_klein_9b` + `edit_image` is NOT here — sc-5487 wired it to the candle `Flux2Edit`
+            // lane (asserted via `image_job_is_candle_eligible` in `candle_worker_claims_*`), like SDXL
+            // edit. The txt2img gate still rejects it (it rejects all `edit_image`), but it no longer
+            // "falls back to torch" at the router level.
             // sc-5484 / sc-5576: Chroma / Kolors / SenseNova-U1 are pure T2I on candle. Their MLX-only
             // conditioning shapes (Kolors edit / IP-reference / pose-control; SenseNova edit) defer.
             (
@@ -5189,6 +5215,23 @@ mod candle_routing_tests {
                 "sourceAssetId": "asset_1"
             }))
         ));
+        // sc-5487: a FLUX.2-klein edit (`edit_image` + a source) is now the candle `Flux2Edit` lane.
+        // klein has no torch path, so the candle worker CLAIMS it (the only off-Mac lane for it).
+        assert!(worker_supports_job(
+            &candle,
+            &image_generate_job(json!({
+                "model": "flux2_klein_9b",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1"
+            }))
+        ));
+        // The -kv distill edit has no candle provider yet (needs the reference-K/V cache port) → NOT
+        // claimed by candle; it stays on the MLX/torch path.
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "flux2_klein_9b_kv",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1"
+        }))));
     }
 
     #[test]

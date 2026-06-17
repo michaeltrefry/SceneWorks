@@ -168,6 +168,14 @@ use candle_gen_sdxl::{
     IpAdapterSdxl, IpAdapterSdxlPaths, IpAdapterSdxlRequest, SdxlEdit, SdxlEditPaths,
     SdxlEditRequest,
 };
+// FLUX.2-klein reference / img2img edit provider (sc-5487, epic 5480) — the candle (Windows/CUDA) FLUX.2
+// edit lane (the sibling of the SDXL edit lane above), living in `candle-gen-flux2` (Kontext-style
+// reference token-concat over the txt2img FLUX.2 stack + the VAE encoder). Candle-only: macOS keeps the
+// MLX `flux2_klein_9b_edit` registry path. `candle_gen_flux2` is already force-link anchored above (the
+// registered txt2img `flux2_klein_9b`); this is the named-type import the bespoke edit route
+// (`image_jobs/flux2_edit_candle.rs`) drives.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_flux2::{Flux2Edit, Flux2EditPaths, Flux2EditRequest};
 // Kolors IP-Adapter-Plus reference provider (sc-5488, epic 5480) — the candle (Windows/CUDA) Kolors
 // sibling of the SDXL IP lane, living in `candle-gen-kolors` (it reuses candle-gen-sdxl's vendored IP
 // UNet + the CLIP ViT-L/14-336 image encoder, with the Kolors ChatGLM3 conditioning + leading-Euler
@@ -524,6 +532,23 @@ pub(crate) async fn run_image_generate_job(
         // by the txt2img branch (which can't honor a source/mask). Disjoint from the IP-Adapter lane
         // below (that one is reference-only and not `edit_image`).
         generate_candle_sdxl_edit_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && flux2_edit_candle_available(&request, settings) {
+        // FLUX.2-klein reference / img2img edit (sc-5487) — checked BEFORE `is_candle_engine` because
+        // `flux2_klein_9b` IS a candle txt2img id, so without this an `edit_image` job would be caught by
+        // the txt2img branch (which can't honor a source reference). FLUX.2-klein has no torch path, so
+        // before this an off-Mac klein edit had no real lane (it deferred to a torch worker that lacks
+        // the model). Disjoint from the IP-Adapter / SDXL-edit lanes (different model family).
+        generate_candle_flux2_edit_stream(
             api,
             settings,
             job,
@@ -1149,6 +1174,11 @@ include!("image_jobs/sdxl_ipadapter.rs");
 // bespoke provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/sdxl_edit_candle.rs");
+// FLUX.2-klein reference / img2img edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps the
+// MLX FLUX.2 edit path (flux2.rs `generate_flux2_edit_stream`); the candle `Flux2Edit` is a bespoke
+// provider, so this is candle-exclusive.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/flux2_edit_candle.rs");
 // Kolors IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS
 // keeps the MLX Kolors IP path (kolors.rs, the registry `Reference` route); the candle `IpAdapterKolors`
 // is a bespoke provider, so this is candle-exclusive.
