@@ -73,9 +73,10 @@ export const ELEMENT_PALETTE_MAX = 5;
 
 // A structurally-valid empty caption: `compositional_deconstruction` is the
 // only required section, with a (string) background and an elements list.
+// high_level_description / style_description are optional and omitted until the
+// user fills them, so an untouched skeleton never serializes empty keys.
 export function emptyCaption() {
   return {
-    high_level_description: "",
     compositional_deconstruction: { background: "", elements: [] },
   };
 }
