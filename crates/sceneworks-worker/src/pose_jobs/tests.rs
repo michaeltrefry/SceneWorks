@@ -145,3 +145,70 @@ fn pose_decode_negative_value_marks_missing() {
     // val <= 0 -> loc (-1,-1) -> negative rescaled coords, score <= 0
     assert!(kp[0][2] <= 0.0);
 }
+
+/// sc-5496 off-Mac GPU smoke (ignored — needs the real RTMW onnx weights + CUDA). Validates the
+/// Windows/Linux candle DWPose lane end-to-end: load the detector through `Detector::load`, run it on a
+/// person photo, and confirm it engages the hardware EP (or CPU fallback), finds ≥1 person, and decodes
+/// a sane normalized OpenPose-18 body (neck between the shoulders). The numeric parity vs the Python
+/// rtmlib reference was already established in the spike (docs/sc-3487/spike-findings.md); this just
+/// proves the off-Mac `ort` CUDA path produces faithful output through the same code. Stage the weights
+/// + image via env, then:
+///   cargo test -p sceneworks-worker --features backend-candle --lib -- --ignored pose_detect_candle
+#[cfg(not(target_os = "macos"))]
+#[test]
+#[ignore]
+fn pose_detect_candle_real_weights_finds_person() {
+    let det = std::env::var("SCENEWORKS_DWPOSE_DET")
+        .expect("set SCENEWORKS_DWPOSE_DET to the yolox onnx");
+    let pose = std::env::var("SCENEWORKS_DWPOSE_POSE")
+        .expect("set SCENEWORKS_DWPOSE_POSE to the rtmw onnx");
+    let img = std::env::var("SCENEWORKS_TEST_POSE_IMAGE")
+        .expect("set SCENEWORKS_TEST_POSE_IMAGE to a person photo");
+
+    let (out, device) = detect_batch(
+        PathBuf::from(det),
+        PathBuf::from(pose),
+        vec![Some(PathBuf::from(img))],
+    )
+    .expect("detect_batch");
+    eprintln!("DWPose execution device = {device}");
+
+    let src = out
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("readable test image");
+    assert!(
+        !src.people.is_empty(),
+        "expected at least one detected person"
+    );
+    let (w, h) = (src.width as f32, src.height as f32);
+    let rec = squareify(&wholebody_to_openpose(&src.people[0], w, h), w, h);
+    assert_eq!(rec.keypoints.len(), 18);
+
+    // Confident body points are normalized (not raw pixels) and land near the [0,1]
+    // square. DWPose legitimately extrapolates a keypoint a little past the frame edge
+    // (a body part the crop cuts off), so allow a small overshoot rather than a hard
+    // clamp — the assertion's job is to catch raw-pixel leakage (coords in the 100s),
+    // not to reject normal edge points.
+    for p in &rec.keypoints {
+        if p[2] as f64 >= DEFAULT_POSE_MIN_CONF {
+            assert!(
+                (-0.25..=1.25).contains(&p[0]) && (-0.25..=1.25).contains(&p[1]),
+                "confident keypoint not normalized near [0,1]: {p:?}"
+            );
+        }
+    }
+
+    // Neck (op 1) is the shoulder midpoint, so its x sits between the two shoulders (op 2 / op 5).
+    let (neck, r_sho, l_sho) = (rec.keypoints[1], rec.keypoints[2], rec.keypoints[5]);
+    eprintln!("neck={neck:?} r_sho={r_sho:?} l_sho={l_sho:?}");
+    if neck[2] as f64 >= DEFAULT_POSE_MIN_CONF {
+        let (lo, hi) = (r_sho[0].min(l_sho[0]), r_sho[0].max(l_sho[0]));
+        assert!(
+            neck[0] >= lo - 1e-3 && neck[0] <= hi + 1e-3,
+            "neck x {} should sit between shoulders [{lo}, {hi}]",
+            neck[0]
+        );
+    }
+}

@@ -97,6 +97,17 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
             if !gpu.capabilities.contains(&WorkerCapability::KpsExtract) {
                 gpu.capabilities.push(WorkerCapability::KpsExtract);
             }
+            // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
+            // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
+            // with the CUDA execution provider, serving `pose_detect` for the Pose Library "create from
+            // photo" flow + InstantID pose conditioning. A job-type capability (not a generation modality),
+            // so it isn't in `registry_capabilities`; advertise it explicitly. Like kps_extract — and
+            // unlike SeedVR2 — the Python rtmlib path CAN serve pose_detect, so there's NO torch-refusal
+            // gate: the candle worker claims it Python-free, with the co-resident torch worker as a
+            // fallback (the Python rtmlib path is retired wholesale in Phase 7, epic 5483).
+            if !gpu.capabilities.contains(&WorkerCapability::PoseDetect) {
+                gpu.capabilities.push(WorkerCapability::PoseDetect);
+            }
             // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
             gpu.capabilities
                 .push(WorkerCapability::Unknown("candle".to_owned()));
