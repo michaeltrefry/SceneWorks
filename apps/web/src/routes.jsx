@@ -29,6 +29,7 @@ const LicensesScreen = lazyScreen(() => import("./screens/LicensesScreen.jsx"), 
 const MakePicture = lazyScreen(() => import("./screens/simple/MakePicture.jsx"), "MakePicture");
 const MakeVideo = lazyScreen(() => import("./screens/simple/MakeVideo.jsx"), "MakeVideo");
 const MyCreations = lazyScreen(() => import("./screens/simple/MyCreations.jsx"), "MyCreations");
+const SimpleCharacters = lazyScreen(() => import("./screens/simple/Characters.jsx"), "Characters");
 const SimpleSettings = lazyScreen(() => import("./screens/simple/SimpleSettings.jsx"), "SimpleSettings");
 
 export function RouteFallback({ label = "Loading view…" } = {}) {
@@ -78,6 +79,7 @@ export const simpleNavSections = [
     items: [
       { id: "MakePicture", label: "Make a picture", icon: Icon.Image },
       { id: "MakeVideo", label: "Make a video", icon: Icon.Video },
+      { id: "SimpleCharacters", label: "Characters", icon: Icon.Character },
     ],
   },
   {
@@ -100,6 +102,11 @@ const viewRegistry = {
     title: "Make a video",
     blurb: "Start from a description or bring a picture to life.",
     render: ({ activeProjectId } = {}) => <MakeVideo key={activeProjectId ?? "default"} />,
+  },
+  SimpleCharacters: {
+    title: "Characters",
+    blurb: "Save a person or character once, then keep the same face across everything.",
+    render: ({ activeProjectId } = {}) => <SimpleCharacters key={activeProjectId ?? "default"} />,
   },
   MyCreations: {
     title: "My creations",
