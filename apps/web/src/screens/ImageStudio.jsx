@@ -132,9 +132,11 @@ function preferredResolution(model, options) {
 
 const UPSCALE_ENGINES = [
   { id: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
-  // SeedVR2: native-MLX one-step diffusion upscaler (Mac-only, epic 4811 / sc-4815) with a
-  // detail/softness control; gated to Mac via macUpscaleEngineBlocked + imageUpscaleSeedvr2.
+  // SeedVR2: one-step diffusion upscaler (native MLX on Mac / candle off-Mac, epic 4811 / sc-5928 /
+  // sc-5160) with a detail/softness control; shown on every GPU platform via imageUpscaleSeedvr2.
   { id: "seedvr2", label: "SeedVR2", factors: [2, 4], softness: true },
+  // AuraSR is kept only for graceful fallback of a stale saved selection — hidden on every platform
+  // (dropped, sc-3668 / sc-5499) via macUpscaleEngineBlocked.
   { id: "aura-sr", label: "AuraSR", factors: [4] },
 ];
 
@@ -410,12 +412,12 @@ export function ImageStudio() {
     }
   }
 
-  // Engines offered in the picker; AuraSR is dropped on a gated Mac (sc-3668).
+  // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
   const availableUpscaleEngines = UPSCALE_ENGINES.filter(
     (engine) => !macUpscaleEngineBlocked(macCapabilities, engine.id),
   );
-  // If a restored/saved engine is gated out (e.g. AuraSR on a Mac), fall back to the default
-  // real-esrgan engine so the user never submits an aura-sr job that the Mac would refuse.
+  // If a restored/saved engine is gated out (e.g. a stale saved AuraSR selection), fall back to the
+  // default real-esrgan engine so the user never submits an aura-sr job the native workers refuse.
   useEffect(() => {
     if (!macUpscaleEngineBlocked(macCapabilities, upscaleEngine)) return;
     setUpscaleEngine("real-esrgan");

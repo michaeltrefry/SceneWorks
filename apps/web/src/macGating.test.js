@@ -75,11 +75,21 @@ describe("macGating helpers", () => {
     expect(macFeatureBlock(gating, "lycoris")).toBeNull();
   });
 
-  it("drops the AuraSR upscale engine on a gated Mac, keeps Real-ESRGAN (sc-3668)", () => {
+  it("drops the AuraSR upscale engine on every platform (sc-3668 / sc-5499), keeps Real-ESRGAN", () => {
+    // Dropped under active Mac gating...
     expect(macUpscaleEngineBlocked(gating, "aura-sr")).toBe(true);
     expect(macUpscaleEngineBlocked(gating, "real-esrgan")).toBe(false);
-    // Inert on Windows/Linux / observe mode — the engine picker is untouched.
-    expect(macUpscaleEngineBlocked(DEFAULT_MAC_CAPABILITIES, "aura-sr")).toBe(false);
+    // ...and now off-Mac too (sc-5499): the capability is false on every platform, so the check is
+    // gating-independent — hidden on Windows/Linux and pre-load (the INVERSE of the old behavior).
+    expect(macUpscaleEngineBlocked(DEFAULT_MAC_CAPABILITIES, "aura-sr")).toBe(true);
+    const windows = {
+      ...DEFAULT_MAC_CAPABILITIES,
+      platform: "windows",
+      features: { imageUpscaleAuraSr: { supported: false }, imageUpscaleSeedvr2: { supported: true } },
+    };
+    expect(macUpscaleEngineBlocked(windows, "aura-sr")).toBe(true);
+    // Real-ESRGAN stays the cross-platform default upscaler.
+    expect(macUpscaleEngineBlocked(windows, "real-esrgan")).toBe(false);
   });
 
   it("offers SeedVR2 wherever the capability confirms a backend — Mac + Windows + Linux (epic 4811 / sc-5928 / sc-5160)", () => {

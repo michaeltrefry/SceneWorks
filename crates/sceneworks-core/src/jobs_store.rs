@@ -2104,8 +2104,9 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // `mlx-gen-seedvr2`, so the upscale tool runs Python-free. The AuraSR engine (`aura-sr`,
         // a 617M-param torch-only GigaGAN) was DROPPED on Mac after the sc-3668 port-or-drop
         // spike (no viable Rust path; only a marginal, ~35-50x-slower quality difference vs
-        // Real-ESRGAN x4). The Mac UI hides the AuraSR engine option, so this Err is now a
-        // defensive submit-time guard; AuraSR stays available on Windows/Linux.
+        // Real-ESRGAN x4) and is now dropped as an offered engine off-Mac too (sc-5499 — the
+        // Python torch backend that served it is retired in Phase 7). The UI hides the AuraSR
+        // engine option on every platform, so this Err is a defensive submit-time guard.
         JobType::ImageUpscale => {
             if upscale_job_is_mlx_eligible(job) {
                 Ok(())
@@ -2113,8 +2114,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
                 Err(UnsupportedReason::new(
                     model,
                     "image_upscale (AuraSR)",
-                    "the Rust upscaler runs Real-ESRGAN; the AuraSR engine is dropped on Mac (available on Windows/Linux).",
-                    Some("sc-3668"),
+                    "the Rust upscaler runs Real-ESRGAN (+ SeedVR2); the AuraSR engine is dropped as an offered engine (sc-3668 / sc-5499).",
+                    Some("sc-5499"),
                 ))
             }
         }
@@ -2421,20 +2422,24 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         },
     );
     features.insert(
-        // The AuraSR upscale engine (`engine=aura-sr`) is dropped on Mac (sc-3668,
-        // port-or-drop spike): it is a 617M-param torch-only GigaGAN with no viable Rust
-        // path and only a marginal, ~35-50x-slower quality difference vs the already-ported
-        // Real-ESRGAN x4. The Mac UI hides this engine option so a user never reaches the
-        // `mlx_unsupported` error; it stays available on Windows/Linux. This must agree with
-        // the AuraSR arm of `mac_rust_supported` (what the UI hides == what routing refuses).
+        // The AuraSR upscale engine (`engine=aura-sr`) is dropped on Mac (sc-3668, port-or-drop
+        // spike): it is a 617M-param torch-only GigaGAN with no viable Rust path and only a marginal,
+        // ~35-50x-slower quality difference vs the already-ported Real-ESRGAN x4. As of sc-5499 it is
+        // also dropped as an OFFERED engine off-Mac — there is no native (MLX/candle) path and the
+        // Python torch backend that served it on Windows/Linux is retired in Phase 7 (epic 5483), so
+        // exposing it would point users at a path about to disappear. `supported: false` on every
+        // platform (platform-intrinsic, like `imageUpscaleSeedvr2`), so the UI hides the engine
+        // everywhere. Must agree with the AuraSR arm of `mac_rust_supported` (UI-hidden == routing
+        // refuses): the native MLX/candle workers refuse it; only the (transitional) torch worker runs
+        // an explicitly-submitted aura-sr job until Phase 7.
         "imageUpscaleAuraSr".to_owned(),
         MacFeatureSupport {
             supported: false,
             reason: Some(UnsupportedReason::new(
                 None,
                 "image_upscale (AuraSR)",
-                "AuraSR is a torch-only GAN upscaler, dropped on Mac; Real-ESRGAN x4 is the Mac upscaler (it stays available on Windows/Linux).",
-                Some("sc-3668"),
+                "AuraSR is a torch-only GAN upscaler, dropped as an offered engine on all platforms (sc-3668 / sc-5499); Real-ESRGAN is the cross-platform upscaler (SeedVR2 the high-fidelity option).",
+                Some("sc-5499"),
             )),
         },
     );
@@ -4347,12 +4352,16 @@ fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
             .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
 }
 
-/// Whether an `image_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
-/// SeedVR2 provider (`candle-gen-seedvr2`) serves `engine=seedvr2` off-Mac. Unlike the mlx gate, the
-/// default (`real-esrgan`) engine is NOT candle-eligible — only an explicit SeedVR2 request routes to
-/// the candle worker; Real-ESRGAN / AuraSR have no candle path and stay on the Python torch worker.
+/// Whether an `image_upscale` job is candle-eligible (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic
+/// 4811 / epic 5482): the candle worker serves **Real-ESRGAN** (`ort`/CUDA, the off-Mac sibling of
+/// the Mac CoreML path — sc-5499) AND **SeedVR2** (`candle-gen-seedvr2`, sc-5928) off-Mac. This now
+/// mirrors `upscale_job_is_mlx_eligible` exactly (the default `real-esrgan` engine + `seedvr2`);
+/// `aura-sr` was dropped as an offered engine (sc-3668 Mac / sc-5499 off-Mac) so it has no candle
+/// path — a candle worker refuses it (it runs only on the Python torch worker until Phase 7). Note
+/// Real-ESRGAN keeps its torch path as a co-resident fallback (the torch worker is NOT refused it,
+/// unlike SeedVR2), so a Real-ESRGAN job may run on whichever worker claims it first.
 fn upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    upscale_job_requests_seedvr2(job)
+    upscale_job_is_mlx_eligible(job)
 }
 
 /// Whether a `video_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
@@ -4542,10 +4551,10 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         {
             return false;
         }
-        // Image upscale (sc-5928, epic 4811 / epic 5482): the candle worker serves SeedVR2 image
-        // upscaling (`candle-gen-seedvr2`, the Windows/CUDA sibling of mlx-gen-seedvr2). Real-ESRGAN
-        // (the default engine) / AuraSR have no candle path, so a non-SeedVR2 engine is refused and
-        // stays on the Python torch worker.
+        // Image upscale (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic 4811 / epic 5482): the candle
+        // worker serves Real-ESRGAN (`ort`/CUDA, sc-5499) AND SeedVR2 (`candle-gen-seedvr2`, the
+        // Windows/CUDA sibling of mlx-gen-seedvr2). Only `aura-sr` has no candle path — it is refused
+        // and runs on the Python torch worker until Phase 7.
         if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_candle_eligible(job) {
             return false;
         }
@@ -5765,23 +5774,30 @@ mod candle_routing_tests {
         .expect("valid JobSnapshot")
     }
 
-    /// sc-5928: the candle worker claims `engine=seedvr2` image upscale (the candle-gen-seedvr2
-    /// provider) but refuses Real-ESRGAN (the default), which stays on the Python torch worker.
+    /// sc-5499 + sc-5928: the candle worker claims both off-Mac image upscalers — Real-ESRGAN
+    /// (`ort`/CUDA, sc-5499, incl. the default engine) and SeedVR2 (`candle-gen-seedvr2`, sc-5928).
+    /// Only `aura-sr` (an offered engine dropped on every platform, sc-3668 / sc-5499) has no candle
+    /// path → refused (it runs only on the Python torch worker until Phase 7).
     #[test]
-    fn candle_worker_claims_seedvr2_image_upscale_refuses_real_esrgan() {
+    fn candle_worker_claims_real_esrgan_and_seedvr2_image_upscale_refuses_aura_sr() {
         let candle = gpu_worker(&["gpu", "image_upscale", "candle"]);
         assert!(worker_supports_job(
             &candle,
             &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "seedvr2" }))
         ));
-        // Real-ESRGAN (the default engine) has no candle path → refused → stays on the torch worker.
-        assert!(!worker_supports_job(
+        // Real-ESRGAN (incl. the default engine) now has a candle path (the off-Mac ort/CUDA upscaler).
+        assert!(worker_supports_job(
             &candle,
             &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "real-esrgan" }))
         ));
-        assert!(!worker_supports_job(
+        assert!(worker_supports_job(
             &candle,
             &image_upscale_job(json!({ "sourceAssetId": "a" })) // default = real-esrgan
+        ));
+        // AuraSR is dropped as an offered engine → no candle path → refused.
+        assert!(!worker_supports_job(
+            &candle,
+            &image_upscale_job(json!({ "sourceAssetId": "a", "engine": "aura-sr" }))
         ));
     }
 

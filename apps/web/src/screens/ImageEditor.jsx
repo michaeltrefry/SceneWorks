@@ -194,10 +194,12 @@ function konvaColorFilter(imageData) {
   applyColorAdjustments(imageData.data, this.getAttr("colorAdjust"));
 }
 
-// Upscale engines + their valid factors (sc-2433). Mirrors the engines the worker
-// supports (image_adapters.create_image_upscaler): Real-ESRGAN 2x/4x, AuraSR 4x,
-// SeedVR2 2x/4x (the native-MLX one-step diffusion upscaler, Mac-only, epic 4811 / sc-4815).
-// `seedvr2` exposes a detail/softness control; the others do not (`softness: true`).
+// Upscale engines + their valid factors (sc-2433). Real-ESRGAN 2x/4x is the cross-platform default
+// (`ort`: CoreML on Mac / CUDA off-Mac, sc-3489 / sc-5499); SeedVR2 2x/4x is the one-step diffusion
+// upscaler (native MLX on Mac / candle off-Mac, epic 4811 / sc-5928 / sc-5160) and exposes a
+// detail/softness control (`softness: true`). `aura-sr` is kept here only so a stale saved selection
+// gracefully falls back — it is hidden on every platform (dropped, sc-3668 / sc-5499) via
+// `macUpscaleEngineBlocked`.
 const UPSCALE_ENGINES = [
   { key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
   { key: "seedvr2", label: "SeedVR2", factors: [2, 4], softness: true },
@@ -381,12 +383,12 @@ export function ImageEditor() {
   const [upscaleFactor, setUpscaleFactor] = useState(2);
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only meaningful for the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(0);
-  // Engines offered in the picker; AuraSR is dropped on a gated Mac (sc-3668).
+  // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
   const availableUpscaleEngines = UPSCALE_ENGINES.filter(
     (entry) => !macUpscaleEngineBlocked(macCapabilities, entry.key),
   );
-  // If the selected engine got gated out (e.g. AuraSR on a Mac), fall back to the default
-  // real-esrgan engine (the guaranteed-available Mac upscaler) so the tool stays usable.
+  // If the selected engine got gated out (e.g. a stale saved AuraSR selection), fall back to the
+  // default real-esrgan engine (the guaranteed-available cross-platform upscaler) so the tool stays usable.
   useEffect(() => {
     if (macUpscaleEngineBlocked(macCapabilities, upscaleEngine)) {
       setUpscaleEngine("real-esrgan");

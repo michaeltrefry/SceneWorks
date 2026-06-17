@@ -70,14 +70,15 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
                     gpu.capabilities.push(capability);
                 }
             }
-            // SeedVR2 image + video upscaling (sc-5928, epic 4811 / epic 5482): the candle SeedVR2
-            // provider (`candle-gen-seedvr2`, force-linked under backend-candle) serves `image_upscale`
-            // AND the net-new `video_upscale` via `gen_core::load("seedvr2")` — the Windows/CUDA sibling
-            // of the Mac mlx-gen-seedvr2 path. These are job-type capabilities (not a generation
+            // Image + video upscaling (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic 4811 / epic 5482):
+            // off-Mac the candle worker serves `image_upscale` for BOTH Real-ESRGAN (`ort`/CUDA in
+            // `upscale_jobs`, the off-Mac sibling of the Mac CoreML path — sc-5499) and SeedVR2
+            // (`candle-gen-seedvr2`, force-linked under backend-candle, via `gen_core::load("seedvr2")`),
+            // AND the net-new SeedVR2 `video_upscale`. These are job-type capabilities (not a generation
             // modality), so they aren't in `registry_capabilities`; advertise them explicitly. The
-            // routing gate confines the candle worker to the SeedVR2 engine ids
-            // (`upscale_job_is_candle_eligible` / `video_upscale_job_is_candle_eligible`); Real-ESRGAN /
-            // AuraSR have no candle path and stay on the Python torch worker.
+            // routing gate (`upscale_job_is_candle_eligible` / `video_upscale_job_is_candle_eligible`)
+            // admits Real-ESRGAN + SeedVR2; only `aura-sr` has no candle path (dropped as an offered
+            // engine, sc-3668 / sc-5499) and runs on the Python torch worker until Phase 7.
             for capability in [
                 WorkerCapability::ImageUpscale,
                 WorkerCapability::VideoUpscale,

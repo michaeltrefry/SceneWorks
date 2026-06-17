@@ -6974,23 +6974,12 @@ describe("SceneWorks app shell", () => {
       }),
     );
 
-    await changeField(field(container, "Engine"), "aura-sr");
-    expect(field(container, "Scale").value).toBe("4");
-    expect([...field(container, "Scale").querySelectorAll("option")].map((option) => option.value)).toEqual(["4"]);
-
-    await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
-    });
-
-    expect(createImageJob).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        upscale: {
-          enabled: true,
-          factor: 4,
-          engine: "aura-sr",
-        },
-      }),
-    );
+    // AuraSR is dropped as an offered engine (sc-3668 / sc-5499) and SeedVR2 needs its platform
+    // capability flag, so under the default capabilities the picker offers only Real-ESRGAN — there
+    // is no `aura-sr` option to select.
+    expect([...field(container, "Engine").querySelectorAll("option")].map((option) => option.value)).toEqual([
+      "real-esrgan",
+    ]);
   });
 
   it("submits a Kolors character job with the approved reference and IP-Adapter scale", async () => {
