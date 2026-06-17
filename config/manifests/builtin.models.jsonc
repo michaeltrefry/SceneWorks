@@ -882,6 +882,10 @@
       // 2048²/6:1 ceiling wants ~96 GB (advanced high-res on smaller Macs is capped UI-side).
       "mlx": {
         "minMemoryGb": 48,
+        // The turnkey's default subdir is the packed q4/ weights, so the resolved quant must be Q4 —
+        // otherwise the generic resolve_quant Q8 default is recorded in the asset recipe even though
+        // the model runs q4 (sc-6237). Q8 is still reachable per-request via advanced mlxQuantize: 8.
+        "quantize": 4,
         "repo": "SceneWorks/ideogram-4-mlx"
       },
       // Ideogram Non-Commercial Model Agreement (gated): accept the license at the source repo and
