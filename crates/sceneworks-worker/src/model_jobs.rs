@@ -1406,6 +1406,19 @@ pub(crate) async fn run_lora_import_job(
         .await;
     }
 
+    // sc-6137: verify a caller-supplied content digest. HF repo files are already
+    // per-file verified during download; this covers source-URL/uploaded imports where
+    // a SHA-256 is supplied out-of-band. `verify_file_sha256` removes the file on
+    // mismatch, so a corrupt artifact is never left behind.
+    if let Some(expected_sha256) = optional_payload_string(&job.payload, "expectedSha256") {
+        if let Some(file) = first_safetensors_path(&target_dir) {
+            if let Err(error) = verify_file_sha256(&file, expected_sha256, "Imported LoRA").await {
+                return fail_job(api, &job.id, "LoRA import failed.", Some(error.to_string()))
+                    .await;
+            }
+        }
+    }
+
     let detected_family = match detect_family_in_target_dir(&target_dir) {
         Ok(detected) => detected,
         Err(error) => {
@@ -1712,6 +1725,23 @@ pub(crate) async fn run_model_import_job(
             Some("Provide repo, sourceUrl, or sourcePath for model import".to_owned()),
         )
         .await;
+    }
+
+    // sc-6137: verify a caller-supplied content digest for source-URL/uploaded model
+    // imports (HF repo files are per-file verified during download). On mismatch the
+    // file is removed and the job fails with an actionable message.
+    if let Some(expected_sha256) = optional_payload_string(&job.payload, "expectedSha256") {
+        if let Some(file) = first_safetensors_path(&target_dir) {
+            if let Err(error) = verify_file_sha256(&file, expected_sha256, "Imported model").await {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Model import failed.",
+                    Some(error.to_string()),
+                )
+                .await;
+            }
+        }
     }
 
     let detected_family = match detect_model_family(&target_dir) {

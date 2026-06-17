@@ -17,8 +17,8 @@ use tempfile::tempdir;
 use super::api_client::ApiClient;
 use super::downloads::{
     build_source_url_client, credential_for_host, download_lora_source_url,
-    download_progress_payload, download_snapshot_into_cache, DownloadContext, DownloadProgress,
-    HuggingFaceSnapshot, SnapshotFile,
+    download_progress_payload, download_snapshot_into_cache, normalize_sha256, DownloadContext,
+    DownloadProgress, HuggingFaceSnapshot, SnapshotFile,
 };
 #[cfg(target_os = "macos")]
 use super::gpu::mlx_gpu;
@@ -1134,6 +1134,7 @@ async fn download_snapshot_rejects_truncated_file() {
             path: "shard.safetensors".to_owned(),
             size: Some(64),
             download_url: format!("{base_url}/owner/model/resolve/main/shard.safetensors"),
+            sha256: None,
         }],
     };
     let mut progress = DownloadProgress::new(
@@ -1172,6 +1173,133 @@ async fn download_snapshot_rejects_truncated_file() {
     assert!(!repo_dir.join("snapshots").exists());
 }
 
+#[test]
+fn normalize_sha256_accepts_only_real_digests() {
+    let hex = "a".repeat(64);
+    // Bare 64-hex, a `sha256:` prefix, and uppercase all normalize to lowercase hex.
+    assert_eq!(normalize_sha256(&hex).as_deref(), Some(hex.as_str()));
+    assert_eq!(
+        normalize_sha256(&format!("  sha256:{hex}  ")).as_deref(),
+        Some(hex.as_str())
+    );
+    assert_eq!(
+        normalize_sha256(&"A".repeat(64)).as_deref(),
+        Some(hex.as_str())
+    );
+    // A git blob SHA-1 (40 hex), a non-hex string, and empty are not content digests.
+    assert_eq!(normalize_sha256(&"a".repeat(40)), None);
+    assert_eq!(normalize_sha256(&"z".repeat(64)), None);
+    assert_eq!(normalize_sha256(""), None);
+}
+
+#[tokio::test]
+async fn download_snapshot_rejects_digest_mismatch() {
+    let temp = tempdir().expect("tempdir creates");
+    let base_url = spawn_binary_stub(b"weights!!".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let repo_dir = temp.path().join("models--owner--model");
+
+    // The transfer is complete (size matches) but the source-declared sha256 does
+    // not — a corrupted download that must be rejected and discarded (sc-6137).
+    let snapshot = HuggingFaceSnapshot {
+        files: vec![SnapshotFile {
+            path: "model.safetensors".to_owned(),
+            size: Some(9),
+            download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+            sha256: Some("0".repeat(64)),
+        }],
+    };
+    let mut progress = DownloadProgress::new(
+        "owner/model",
+        0,
+        snapshot.total_bytes(),
+        Duration::from_secs(3600),
+    );
+
+    let error = download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &repo_dir,
+        "main",
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect_err("a digest mismatch is rejected");
+
+    assert!(error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("integrity check"));
+    // The corrupt blob is removed and the snapshot is never materialized.
+    assert!(!repo_dir
+        .join("blobs")
+        .join("etag-model.safetensors")
+        .exists());
+    assert!(!repo_dir.join("snapshots").exists());
+}
+
+#[tokio::test]
+async fn download_snapshot_accepts_matching_digest() {
+    use sha2::{Digest, Sha256};
+    let temp = tempdir().expect("tempdir creates");
+    let base_url = spawn_binary_stub(b"weights!!".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let repo_dir = temp.path().join("models--owner--model");
+
+    let digest = format!("{:x}", Sha256::digest(b"weights!!"));
+    let snapshot = HuggingFaceSnapshot {
+        files: vec![SnapshotFile {
+            path: "model.safetensors".to_owned(),
+            size: Some(9),
+            download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+            sha256: Some(digest),
+        }],
+    };
+    let mut progress = DownloadProgress::new(
+        "owner/model",
+        0,
+        snapshot.total_bytes(),
+        Duration::from_secs(3600),
+    );
+
+    download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &repo_dir,
+        "main",
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect("a matching digest is accepted");
+
+    assert_eq!(
+        tokio::fs::read(repo_dir.join("blobs").join("etag-model.safetensors"))
+            .await
+            .unwrap(),
+        b"weights!!"
+    );
+}
+
 #[tokio::test]
 async fn download_snapshot_resumes_existing_partial_blob() {
     let temp = tempdir().expect("tempdir creates");
@@ -1192,6 +1320,7 @@ async fn download_snapshot_resumes_existing_partial_blob() {
             path: "model.safetensors".to_owned(),
             size: Some(9),
             download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+            sha256: None,
         }],
     };
     let mut progress = DownloadProgress::new(
@@ -1241,6 +1370,7 @@ async fn download_snapshot_fresh_retry_discards_partial_blob() {
             path: "model.safetensors".to_owned(),
             size: Some(9),
             download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+            sha256: None,
         }],
     };
     let mut progress = DownloadProgress::new(
@@ -1425,6 +1555,7 @@ async fn download_snapshot_writes_hugging_face_cache_layout() {
             path: "model.safetensors".to_owned(),
             size: Some(9),
             download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+            sha256: None,
         }],
     };
     let mut progress = DownloadProgress::new(

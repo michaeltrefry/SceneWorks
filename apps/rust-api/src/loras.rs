@@ -595,6 +595,7 @@ pub(crate) async fn lora_import_request_from_multipart(
         files: Vec::new(),
         family: None,
         base_model: None,
+        expected_sha256: None,
         scope: default_lora_scope(),
         project_id: None,
         uploaded_source_path: false,

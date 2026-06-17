@@ -45,7 +45,16 @@ pub(crate) async fn ensure_cached_file(
         expected_size,
         progress_report_interval(context.settings),
     );
-    download_file(context, url, target, expected_size, label, &mut progress).await?;
+    download_file(
+        context,
+        url,
+        target,
+        expected_size,
+        None,
+        label,
+        &mut progress,
+    )
+    .await?;
     Ok(target.to_path_buf())
 }
 
@@ -114,6 +123,10 @@ pub(crate) struct SnapshotFile {
     pub(crate) path: String,
     pub(crate) size: Option<u64>,
     pub(crate) download_url: String,
+    /// SHA-256 of the file content from Hugging Face's `lfs.oid` (tree API
+    /// `expand=1`). Present for LFS-tracked files (the weights); `None` for small
+    /// non-LFS files (configs/tokenizers), whose integrity rides on the size check.
+    pub(crate) sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,7 +206,30 @@ pub(crate) fn snapshot_file_from_entry(
             quote_path(revision),
             quote_path(path)
         ),
+        sha256: entry
+            .get("lfs")
+            .and_then(|lfs| lfs.get("oid"))
+            .and_then(Value::as_str)
+            .and_then(normalize_sha256),
     })
+}
+
+/// Normalize a candidate SHA-256 digest (from `lfs.oid` or an HF ETag): strip an
+/// optional `sha256:` prefix and surrounding whitespace, lowercase it, and accept it
+/// only if it is exactly 64 hex characters. Returns `None` for anything else (e.g. a
+/// git blob SHA-1 ETag, a fallback blob name) so callers verify only real content
+/// digests.
+pub(crate) fn normalize_sha256(value: &str) -> Option<String> {
+    let digest = value
+        .trim()
+        .trim_start_matches("sha256:")
+        .trim()
+        .to_ascii_lowercase();
+    if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(digest)
+    } else {
+        None
+    }
 }
 
 pub(crate) struct DownloadContext<'a> {
@@ -207,10 +243,79 @@ pub(crate) struct DownloadContext<'a> {
 
 const AUTO_RESUME_ATTEMPTS: usize = 1;
 
+/// Download a single file to `dest` (resumable via HTTP Range), rejecting a truncated
+/// response (size mismatch) and, when `expected_sha256` is provided, a corrupt one
+/// (content-digest mismatch). On a digest mismatch the file is removed so a corrupt
+/// artifact is never left behind (sc-6137). `label` names the file in the error.
+async fn download_file(
+    context: &DownloadContext<'_>,
+    url: &str,
+    dest: &Path,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+    label: &str,
+    progress: &mut DownloadProgress<'_>,
+) -> WorkerResult<()> {
+    download_file_inner(context, url, dest, expected_size, label, progress).await?;
+    if let Some(expected) = expected_sha256 {
+        verify_file_sha256(dest, expected, label).await?;
+    }
+    Ok(())
+}
+
+/// Verify `path`'s SHA-256 equals `expected`; on mismatch, remove the file and return
+/// an actionable error. A malformed/absent `expected` (not 64 hex) is treated as "no
+/// digest available" and skipped — only a real content digest is enforced.
+pub(crate) async fn verify_file_sha256(
+    path: &Path,
+    expected: &str,
+    label: &str,
+) -> WorkerResult<()> {
+    let Some(expected) = normalize_sha256(expected) else {
+        return Ok(());
+    };
+    let actual = sha256_file(path).await?;
+    if actual != expected {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} failed its integrity check (sha256 {actual}, but the source declares {expected}); \
+             the download was corrupted. Re-download the file."
+        )));
+    }
+    Ok(())
+}
+
+/// Stream `path` through SHA-256 on the blocking pool (weights are multi-GB; hashing
+/// on the async runtime would stall heartbeats/cancel checks).
+async fn sha256_file(path: &Path) -> WorkerResult<String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> std::io::Result<String> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(&path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    })
+    .await
+    .map_err(|error| {
+        WorkerError::Io(std::io::Error::other(format!(
+            "sha256 task failed: {error}"
+        )))
+    })?
+    .map_err(WorkerError::Io)
+}
+
 /// Download a single file to `dest` (resumable via HTTP Range), reporting transfer
 /// progress and rejecting a truncated response. `label` names the file in the
 /// size-mismatch error.
-async fn download_file(
+async fn download_file_inner(
     context: &DownloadContext<'_>,
     url: &str,
     dest: &Path,
@@ -386,6 +491,7 @@ pub(crate) async fn download_snapshot(
             &file.download_url,
             &target_path,
             file.size,
+            file.sha256.as_deref(),
             &file.path,
             progress,
         )
@@ -438,6 +544,9 @@ pub(crate) async fn download_snapshot_into_cache(
             &file.download_url,
             &blobs_dir.join(&etag),
             file.size,
+            // The blob is named by its etag (= the LFS sha256), and the tree API
+            // reports the same digest as `lfs.oid`; verify the content against it.
+            file.sha256.as_deref(),
             &file.path,
             progress,
         )

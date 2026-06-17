@@ -605,6 +605,7 @@ pub(crate) async fn model_import_request_from_multipart(
         source_path: None,
         files: Vec::new(),
         family: None,
+        expected_sha256: None,
         uploaded_source_path: false,
     };
     let mut staged_path = None;
