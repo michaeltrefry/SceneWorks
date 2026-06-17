@@ -7390,6 +7390,90 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("surfaces the FLUX.2-dev Enhance prompt toggle (ui.promptEnhance) and submits advanced.enhancePrompt", async () => {
+    const createImageJob = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [],
+          characters: [
+            {
+              id: "char-1",
+              name: "Mira",
+              type: "person",
+              looks: [],
+              approvedReferences: [
+                {
+                  assetId: "ref-1",
+                  approved: true,
+                  asset: {
+                    id: "ref-1",
+                    type: "image",
+                    displayName: "Mira ref",
+                    projectId: "project-1",
+                    file: { path: "assets/images/ref_0001.png", mimeType: "image/png" },
+                  },
+                },
+              ],
+            },
+          ],
+          createImageJob,
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            {
+              id: "flux2_dev",
+              name: "FLUX.2 [dev]",
+              type: "image",
+              family: "flux2-dev",
+              capabilities: ["text_to_image", "character_image"],
+              // The model declares its built-in prompt upsampler — the manifest gates the toggle.
+              ui: { promptEnhance: true },
+            },
+          ],
+          latestAssets: [],
+          launchRequest: { id: "launch-flux2dev", view: "Image", characterId: "char-1", referenceAssetId: "ref-1", mode: "character_image" },
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: null,
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    // The toggle lives in the (collapsed-by-default) Advanced panel — open it first.
+    await act(async () => {
+      container.querySelector(".advanced-toggle").click();
+    });
+
+    // The manifest-driven "Enhance prompt" toggle renders for flux2_dev (off by default).
+    const enhanceToggle = container.querySelector(".prompt-enhance-toggle input");
+    expect(enhanceToggle).not.toBeNull();
+    expect(enhanceToggle.checked).toBe(false);
+    expect(container.textContent).toContain("Enhance prompt");
+
+    // Turn it on, then generate.
+    await act(async () => {
+      enhanceToggle.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+    });
+
+    // The toggle rides advanced.enhancePrompt; the worker threads it into the dev GenerationRequest.
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        advanced: expect.objectContaining({ enhancePrompt: true }),
+      }),
+    );
+  });
+
   it("hides the Reference strength slider for Qwen and submits trueCfgScale alone", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);

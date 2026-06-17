@@ -247,10 +247,11 @@ fn flux2_edit_generate_one(
     steps: u32,
     guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
+    enhance: &PromptEnhance,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
         height,
@@ -262,6 +263,7 @@ fn flux2_edit_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
+    enhance.apply(&mut request);
     let output = generator
         .generate(&request, on_progress)
         .map_err(|error| WorkerError::Engine(format!("edit generation failed: {error}")))?;
@@ -436,6 +438,9 @@ async fn generate_flux2_edit_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
+    // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
+    // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
+    let enhance = PromptEnhance::from_advanced(&request.advanced);
     let spec = load_spec(weights_dir, quant, adapters, None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -483,6 +488,7 @@ async fn generate_flux2_edit_stream(
                         steps,
                         guidance,
                         conditioning,
+                        &enhance,
                         &cancel,
                         on_progress,
                     )?;

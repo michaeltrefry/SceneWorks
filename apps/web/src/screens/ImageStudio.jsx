@@ -377,6 +377,10 @@ export function ImageStudio() {
   // less VRAM. Per-payload (sent in `advanced.flashAttn`); the worker honors it only on candle, and
   // ignores it on every other backend. Default on. Sticky pref (persisted), not model-reset.
   const [flashAttn, setFlashAttn] = useState(saved.flashAttn ?? true);
+  // FLUX.2-dev "Enhance prompt" (sc-6135): the model's built-in Mistral3 caption upsampler rewrites
+  // the prompt before encoding — text-only for txt2img, reference-aware for edit. Per-payload
+  // (`advanced.enhancePrompt`); only flux2_dev acts on it. Sticky pref (persisted), default off.
+  const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
@@ -563,6 +567,8 @@ export function ImageStudio() {
   const viewAngles = Array.isArray(selectedModel?.ui?.viewAngles) ? selectedModel.ui.viewAngles : null;
   // Whether the model supports the OpenPose pose library (InstantID).
   const poseLibrary = Boolean(selectedModel?.ui?.poseLibrary);
+  // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
+  const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
   // Mac UI gating (sc-3486): disable the per-model feature controls the selected model can't run
   // in the Rust/MLX flow on Mac, so the user never reaches a `mlx_unsupported` error after submit.
   const macEditBlock = macModelFeatureBlock(selectedModel, macCapabilities, "edit");
@@ -978,6 +984,7 @@ export function ImageStudio() {
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
     flashAttn,
+    enhancePrompt,
   });
 
   // Snapshot the current working config into a named recipe preset in the
@@ -1144,6 +1151,9 @@ export function ImageStudio() {
           // when `advanced.flashAttn` is absent, so the default-on case adds nothing to the payload.
           // Only the candle (Windows/CUDA) SDXL backend reads it; every other backend ignores it.
           ...(flashAttn ? {} : { flashAttn: false }),
+          // FLUX.2-dev caption upsampling (sc-6135): emitted only when the model declares the
+          // toggle AND it's on (off-by-default; the worker/engine ignore it for other models).
+          ...(promptEnhance && enhancePrompt ? { enhancePrompt: true } : {}),
           // IP-Adapter / InstantID reference strength only applies when a character
           // reference is attached AND the model uses the IP-Adapter knob; Qwen's
           // edit pipeline ignores this scalar (hideReferenceStrength gates it out).
@@ -1702,6 +1712,19 @@ export function ImageStudio() {
                   />
                   Flash attention
                 </label>
+                {promptEnhance ? (
+                  <label
+                    className="checkline prompt-enhance-toggle"
+                    title="Have FLUX.2-dev's built-in LLM rewrite (upsample) your prompt before generating — text-only for new images, and reference-aware when editing. Distinct from the Refine button; off by default."
+                  >
+                    <input
+                      checked={enhancePrompt}
+                      onChange={(event) => setEnhancePrompt(event.target.checked)}
+                      type="checkbox"
+                    />
+                    Enhance prompt
+                  </label>
+                ) : null}
                 <label className="checkline upscale-toggle">
                   <input
                     checked={upscaleEnabled}

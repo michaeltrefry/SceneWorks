@@ -996,6 +996,7 @@ fn smoke_generate_one(
         None,
         None,
         None,
+        &PromptEnhance::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1169,6 +1170,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         None,
+        &PromptEnhance::default(),
         &cancel,
         &mut |_p| {},
     )
@@ -1416,6 +1418,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         None,
         None,
         None,
+        &PromptEnhance::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1465,6 +1468,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         None,
         None,
         None,
+        &PromptEnhance::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1797,6 +1801,7 @@ fn smoke_generate_one_true_cfg(
         None,
         None,
         None,
+        &PromptEnhance::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -1987,6 +1992,7 @@ fn sc3031_ab_dump_txt2img() {
         None,
         None,
         None,
+        &PromptEnhance::default(),
         &cancel,
         &mut |_| {},
     )
@@ -2395,6 +2401,34 @@ fn flux2_dev_edit_memory_guard_gates_multiref_on_small_machines() {
     assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, None).is_ok());
 }
 
+// ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
+
+#[cfg(target_os = "macos")]
+#[test]
+fn prompt_enhance_reads_advanced_settings() {
+    // Absent → disabled with no overrides (the default for every model/job).
+    let off = PromptEnhance::from_advanced(
+        &request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
+        }))
+        .advanced,
+    );
+    assert!(!off.enabled);
+    assert_eq!(off.temperature, None);
+    assert_eq!(off.max_tokens, None);
+
+    // The dev Image-Studio toggle sets `enhancePrompt`; optional temperature / max-tokens follow
+    // (same keys as the LTX-2.3 video path).
+    let on = PromptEnhance::from_advanced(&request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
+        "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
+    }))
+    .advanced);
+    assert!(on.enabled);
+    assert_eq!(on.temperature, Some(0.2));
+    assert_eq!(on.max_tokens, Some(256));
+}
+
 // ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
 
 #[cfg(target_os = "macos")]
@@ -2669,6 +2703,7 @@ fn flux2_edit_real_weights_generates_one_image() {
         4,
         Some(1.0),
         build_edit_conditioning(std::slice::from_ref(&reference)),
+        &PromptEnhance::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -3362,6 +3397,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         4,
         Some(1.0),
         conditioning,
+        &PromptEnhance::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {

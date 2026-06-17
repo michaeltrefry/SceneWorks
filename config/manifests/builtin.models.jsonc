@@ -1315,6 +1315,13 @@
         // Strict ControlNet → expose the pose-lock-strength slider (advanced.controlScale;
         // the dev Fun-Controlnet-Union README recommends 0.65–0.80, worker default 0.75).
         "poseControlScale": true,
+        // FLUX.2-dev's built-in caption upsampler (sc-6030/sc-6135): an opt-in "Enhance prompt"
+        // toggle that has the model's own Mistral3 LLM rewrite the prompt before the diffusion
+        // encode — text-only for txt2img, and image-conditioned on the reference for edit (it reads
+        // the reference image, unlike the generic "Refine my prompt" / prompt_refine button). Sets
+        // advanced.enhancePrompt; the worker threads it into the dev GenerationRequest (off by
+        // default; every other model ignores the field).
+        "promptEnhance": true,
         "promptGuide": {
           "title": "FLUX.2 [dev] Prompt Guide",
           "path": "/prompt-guides/flux2-dev.md",

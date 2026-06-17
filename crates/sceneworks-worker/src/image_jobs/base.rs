@@ -574,13 +574,52 @@ pub(crate) fn emit_load_event(event: &str, job_id: &str, engine: &str, adapter_c
     );
 }
 
+/// Optional prompt-enhancement settings resolved from a job request's `advanced` block and threaded
+/// into a [`GenerationRequest`] (sc-6135). Mirrors the LTX-2.3 video path (`advanced.enhancePrompt` /
+/// `enhanceTemperature` / `enhanceMaxTokens`). Only FLUX.2-dev / FLUX.2-dev-edit act on it — the
+/// Mistral3 caption upsampler (sc-6030), text-only for txt2img and image-conditioned on the
+/// reference image(s) for edit; every other engine ignores the fields, and the dev Image-Studio
+/// toggle (manifest `ui.promptEnhance`) is the only surface that sets `enhancePrompt`, so this is a
+/// no-op for all other models.
+#[derive(Clone, Default)]
+pub(crate) struct PromptEnhance {
+    enabled: bool,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+}
+
+impl PromptEnhance {
+    /// Resolve from a job request's `advanced` settings (same keys as the LTX-2.3 video path).
+    pub(crate) fn from_advanced(advanced: &JsonObject) -> Self {
+        PromptEnhance {
+            enabled: advanced::bool(advanced, "enhancePrompt"),
+            temperature: advanced
+                .get("enhanceTemperature")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            max_tokens: advanced
+                .get("enhanceMaxTokens")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+        }
+    }
+
+    /// Write the resolved enhancement settings onto a `GenerationRequest`.
+    fn apply(&self, request: &mut GenerationRequest) {
+        request.enhance_prompt = self.enabled;
+        request.enhance_temperature = self.temperature;
+        request.enhance_max_tokens = self.max_tokens;
+    }
+}
+
 /// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
 /// `guidance` is `None` for distilled variants (the engine rejects it on them).
 ///
 /// `reference` is the optional identity img2img-init (sc-3619): `(image, strength)` adds a
 /// `Reference` conditioning that seeds the denoise from the reference latents — the plain
 /// (no-ControlNet) Z-Image reference-without-pose path, reusing the same engine img2img the
-/// strict-pose tier already drives. `None` → plain txt2img.
+/// strict-pose tier already drives. `None` → plain txt2img. `enhance` carries the optional
+/// caption-upsampling settings (sc-6135; only FLUX.2-dev acts on them).
 #[allow(clippy::too_many_arguments)]
 fn generate_one(
     generator: &dyn Generator,
@@ -596,6 +635,7 @@ fn generate_one(
     sampler: Option<&str>,
     scheduler: Option<&str>,
     scheduler_shift: Option<f32>,
+    enhance: &PromptEnhance,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -606,7 +646,7 @@ fn generate_one(
         }],
         None => Vec::new(),
     };
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
         width,
@@ -623,6 +663,7 @@ fn generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
+    enhance.apply(&mut request);
     let output = generator
         .generate(&request, on_progress)
         .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
@@ -995,6 +1036,9 @@ async fn generate_stream(
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
+    // sc-6135: caption upsampling (FLUX.2-dev only; every other engine ignores it). Resolved from
+    // the request's advanced `enhancePrompt` toggle, gated to dev by the manifest `ui.promptEnhance`.
+    let enhance = PromptEnhance::from_advanced(&request.advanced);
     let spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -1018,6 +1062,7 @@ async fn generate_stream(
                     sampler.as_deref(),
                     scheduler.as_deref(),
                     scheduler_shift,
+                    &enhance,
                     &cancel,
                     on_progress,
                 )?;
@@ -1189,6 +1234,9 @@ async fn generate_candle_stream(
     let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
+    // sc-6135: caption upsampling is FLUX.2-dev-only and dev runs on the macOS path, so this is a
+    // no-op here — resolved for uniformity (and so a future candle enhancer would be wired).
+    let enhance = PromptEnhance::from_advanced(&request.advanced);
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
     // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path).
     let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
@@ -1219,6 +1267,7 @@ async fn generate_candle_stream(
                     None,
                     None,
                     None,
+                    &enhance,
                     &cancel,
                     on_progress,
                 )?;
