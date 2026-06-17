@@ -26,7 +26,7 @@ const PresetManagerScreen = lazyScreen(() => import("./screens/PresetManagerScre
 const SettingsScreen = lazyScreen(() => import("./screens/SettingsScreen.jsx"), "SettingsScreen");
 const LogsScreen = lazyScreen(() => import("./screens/LogsScreen.jsx"), "LogsScreen");
 const LicensesScreen = lazyScreen(() => import("./screens/LicensesScreen.jsx"), "LicensesScreen");
-const SimpleWorkflowScreen = lazyScreen(() => import("./screens/SimpleWorkflowScreen.jsx"), "SimpleWorkflowScreen");
+const MakePicture = lazyScreen(() => import("./screens/simple/MakePicture.jsx"), "MakePicture");
 
 export function RouteFallback({ label = "Loading view…" } = {}) {
   return <section className="main-surface">{label}</section>;
@@ -71,21 +71,26 @@ export const navSections = [
 
 export const simpleNavSections = [
   {
-    label: "Workflow",
+    label: "Create",
     items: [
-      { id: "SimpleWorkflow", label: "Create", icon: Icon.Sparkle },
-      { id: "Library", label: "Assets", icon: Icon.Library },
-      { id: "Queue", icon: Icon.Queue },
+      { id: "MakePicture", label: "Make a picture", icon: Icon.Image },
+    ],
+  },
+  {
+    label: "Yours",
+    items: [
+      { id: "Library", label: "My creations", icon: Icon.Library },
+      { id: "Queue", label: "In progress", icon: Icon.Queue },
       { id: "Settings", icon: Icon.Sliders },
     ],
   },
 ];
 
 const viewRegistry = {
-  SimpleWorkflow: {
-    title: "Create",
-    blurb: "A minimal starting point for common workflows.",
-    render: () => <SimpleWorkflowScreen />,
+  MakePicture: {
+    title: "Make a picture",
+    blurb: "Describe an idea — pick a look if you like — and we'll render a few options.",
+    render: ({ activeProjectId } = {}) => <MakePicture key={activeProjectId ?? "default"} />,
   },
   Library: {
     title: "Assets",
@@ -186,7 +191,7 @@ export function isViewVisibleInMode(viewId, uiMode) {
 }
 
 export function getInitialViewForMode(uiMode) {
-  return uiMode === "simple" ? "SimpleWorkflow" : "Library";
+  return uiMode === "simple" ? "MakePicture" : "Library";
 }
 
 export function coerceViewForMode(viewId, uiMode) {

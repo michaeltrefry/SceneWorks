@@ -16,17 +16,17 @@ describe("route visibility by interface mode", () => {
     expect(getInitialViewForMode("advanced")).toBe("Library");
   });
 
-  it("shows the minimal simple workflow route only in simple mode", () => {
+  it("shows the simple create routes only in simple mode", () => {
     const simpleIds = getNavigationSections("simple").flatMap((section) => section.items.map((item) => item.id));
 
-    expect(simpleIds).toEqual(["SimpleWorkflow", "Library", "Queue", "Settings"]);
-    expect(isViewVisibleInMode("SimpleWorkflow", "simple")).toBe(true);
+    expect(simpleIds).toEqual(["MakePicture", "Library", "Queue", "Settings"]);
+    expect(isViewVisibleInMode("MakePicture", "simple")).toBe(true);
     expect(isViewVisibleInMode("Train", "simple")).toBe(false);
-    expect(isViewVisibleInMode("SimpleWorkflow", "advanced")).toBe(false);
+    expect(isViewVisibleInMode("MakePicture", "advanced")).toBe(false);
   });
 
   it("coerces hidden routes to the active mode's initial view", () => {
-    expect(coerceViewForMode("Train", "simple")).toBe("SimpleWorkflow");
-    expect(coerceViewForMode("SimpleWorkflow", "advanced")).toBe("Library");
+    expect(coerceViewForMode("Train", "simple")).toBe("MakePicture");
+    expect(coerceViewForMode("MakePicture", "advanced")).toBe("Library");
   });
 });

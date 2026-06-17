@@ -8784,3 +8784,337 @@ details[open] > summary.lora-scope-group-heading::before,
     grid-template-columns: 1fr;
   }
 }
+
+/* ============================================================
+   Simple mode — "atelier" surface (sc-simple). Scoped to
+   [data-ui-mode="simple"] so the advanced studios are untouched.
+   Reuses the app's accent/warm tokens for the green→blue aurora so
+   it still respects the user's chosen accent.
+   ============================================================ */
+[data-ui-mode="simple"] {
+  /* warmer paper canvas than the cool advanced grey */
+  --bg: oklch(0.985 0.008 85);
+  --sw-aurora: linear-gradient(105deg, var(--accent-strong) 0%, var(--warm) 100%);
+}
+
+.sw-make {
+  padding: 28px 32px;
+}
+.sw-make-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 1024px) {
+  .sw-make-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.sw-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  padding: 24px 26px;
+  box-shadow: var(--shadow-sm);
+}
+.sw-q {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.sw-q .sw-opt {
+  color: var(--text-faint);
+  font-weight: 500;
+  font-size: 13px;
+}
+.sw-prompt {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  padding: 15px 17px;
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--surface);
+  resize: vertical;
+}
+.sw-prompt:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+.sw-row-actions {
+  margin-top: 12px;
+}
+.sw-field {
+  margin-top: 24px;
+}
+.sw-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.sw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  border-radius: var(--r-pill);
+  padding: 9px 15px;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.sw-chip:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+.sw-chip svg {
+  width: 16px;
+  height: 16px;
+}
+.sw-chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+.sw-chip-spark {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+.sw-chip[disabled] {
+  opacity: 0.55;
+  cursor: default;
+}
+.sw-tiles {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 11px;
+}
+@media (max-width: 560px) {
+  .sw-tiles {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+.sw-tile {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--surface);
+  cursor: pointer;
+  padding: 0;
+}
+.sw-tile:hover {
+  border-color: var(--border-strong);
+}
+.sw-tile.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.sw-tile span {
+  display: block;
+  padding: 7px 3px;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--text-muted);
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.1;
+  min-height: 2.2em;
+}
+.sw-tile.on span {
+  color: var(--accent-strong);
+}
+.sw-scene {
+  display: block;
+  width: 100%;
+  height: 74px;
+}
+/* The default (photo) palette lives in the LookScene fill fallbacks, so the
+   per-look custom properties below can be inherited from the tile ancestor
+   without a property on .sw-scene itself shadowing them. */
+.look-cine {
+  --s-sky: #0f2a31;
+  --s-moon: #ffcf9e;
+  --s-mtna: #15545a;
+  --s-mtnb: #0c3a40;
+  --s-cabin: #241a16;
+  --s-roof: #15100d;
+  --s-win: #ff9e57;
+  --s-ground: #0b2429;
+}
+.look-illus {
+  --s-sky: #ffd9a0;
+  --s-moon: #fff4e0;
+  --s-mtna: #6b8fd6;
+  --s-mtnb: #a7b9e6;
+  --s-cabin: #c9603f;
+  --s-roof: #8e3f28;
+  --s-win: #fff0bf;
+  --s-ground: #eef1f6;
+}
+.look-anime {
+  --s-sky: #ffc9de;
+  --s-moon: #ffffff;
+  --s-mtna: #9ec5ff;
+  --s-mtnb: #c9defc;
+  --s-cabin: #b486e0;
+  --s-roof: #8a5fbf;
+  --s-win: #fff7c2;
+  --s-ground: #eafff6;
+}
+.look-3d {
+  --s-sky: #dfe6ee;
+  --s-moon: #fbe9c0;
+  --s-mtna: #9aa7bd;
+  --s-mtnb: #b9c3d4;
+  --s-cabin: #a98b78;
+  --s-roof: #7f6353;
+  --s-win: #ffd98a;
+  --s-ground: #cfd6df;
+}
+.look-water {
+  --s-sky: #cfe3ea;
+  --s-moon: #f6ecd6;
+  --s-mtna: #8fb4c4;
+  --s-mtnb: #b6d2dc;
+  --s-cabin: #c08a6e;
+  --s-roof: #9c6a52;
+  --s-win: #ffe9ad;
+  --s-ground: #e7eef0;
+}
+.sw-go {
+  margin-top: 26px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.sw-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  border: none;
+  border-radius: var(--r-lg);
+  background: var(--sw-aurora);
+  color: var(--accent-fg);
+  font-family: var(--font-ui);
+  font-weight: 800;
+  font-size: 16px;
+  padding: 15px 28px;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+}
+.sw-cta:hover {
+  filter: brightness(1.04);
+}
+.sw-cta[disabled] {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+}
+.sw-cta svg {
+  width: 18px;
+  height: 18px;
+}
+.sw-meta {
+  color: var(--text-faint);
+  font-size: 13px;
+}
+.sw-notice {
+  margin: 14px 0 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+.sw-disclosure {
+  margin-top: 22px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.sw-disclosure summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.sw-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+.sw-caret {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.15s var(--ease-out);
+}
+.sw-disclosure[open] .sw-caret {
+  transform: rotate(180deg);
+}
+.sw-adv {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px 22px;
+  margin-top: 16px;
+}
+.sw-adv label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-faint);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sw-adv select {
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  background: var(--surface);
+  color: var(--text);
+}
+.sw-results h3 {
+  margin-top: 0;
+}
+.sw-rendering {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+.sw-empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-lg);
+  padding: 36px 20px;
+  text-align: center;
+  color: var(--text-faint);
+  background: var(--surface);
+}
+.sw-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.sw-shot {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  padding: 0;
+  background: var(--surface-hover);
+  cursor: pointer;
+  aspect-ratio: 1;
+}
+.sw-shot img,
+.sw-shot video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}

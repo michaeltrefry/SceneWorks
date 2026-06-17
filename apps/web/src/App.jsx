@@ -911,6 +911,16 @@ export function App() {
     }
   }, [accent]);
 
+  // Mirror the active UI mode onto the root so Simple mode can swap to the calmer
+  // "atelier" palette and surface styles ([data-ui-mode="simple"]) without touching
+  // the advanced theme tokens. Persistence is handled by changeUiMode/persistUiMode.
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    document.documentElement.setAttribute("data-ui-mode", uiMode);
+  }, [uiMode]);
+
   // Seed the theme from the server on launch (the durable copy; localStorage is
   // only an instant-paint cache). Each toggle persists itself via changeTheme,
   // so there's no save effect to race with this read.
