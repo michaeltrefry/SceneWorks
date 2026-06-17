@@ -6,9 +6,12 @@
 
 use super::*;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Detector in Phase 6.
+#[cfg(target_os = "macos")]
 use mlx_gen::weights::Weights;
+#[cfg(target_os = "macos")]
 use mlx_rs::Array;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use tokio::io::AsyncWriteExt;
 
 #[test]
@@ -146,6 +149,7 @@ fn detections_to_json_normalizes_orders_and_drops_degenerate() {
 
 /// Cache fixtures staged during development (sc-3633): the exported detector,
 /// the bus.jpg test image, and the `ultralytics.predict` reference detections.
+#[cfg(target_os = "macos")]
 fn cache_fixture(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let path = PathBuf::from(home)
@@ -156,6 +160,7 @@ fn cache_fixture(name: &str) -> Option<PathBuf> {
 
 /// Flatten an array to a contiguous f32 vec in logical row-major order (forces a copy
 /// of a transposed view), so two arrays of equal shape compare element-by-element.
+#[cfg(target_os = "macos")]
 fn flat(a: &Array) -> Vec<f32> {
     a.reshape(&[-1])
         .expect("flatten")
@@ -164,6 +169,7 @@ fn flat(a: &Array) -> Vec<f32> {
 }
 
 /// Max absolute difference between two equally-shaped arrays.
+#[cfg(target_os = "macos")]
 fn max_abs_diff(got: &Array, want: &Array) -> f32 {
     assert_eq!(got.shape(), want.shape(), "shape mismatch");
     flat(got)
@@ -179,6 +185,7 @@ fn max_abs_diff(got: &Array, want: &Array) -> f32 {
 /// the (separately-verified) letterbox/decode/NMS math. Ignored by default — run with the
 /// fused weights + oracle staged in the app cache:
 ///   cargo test -p sceneworks-worker person_jobs -- --ignored --nocapture
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "requires staged yolo11m_fused_mlx.safetensors + refs.safetensors in the app cache"]
 fn yolo11_mlx_forward_matches_reference_oracle() {
@@ -261,6 +268,7 @@ fn yolo11_mlx_forward_matches_reference_oracle() {
 /// extended oracle staged:
 ///   cargo test -p sceneworks-worker person_jobs::tests::yolo11_mlx_per_block_isolation \
 ///     -- --ignored --nocapture --test-threads=1
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "requires staged yolo11m_fused_mlx.safetensors + refs_ext.safetensors in the app cache"]
 fn yolo11_mlx_per_block_isolation() {
@@ -448,6 +456,7 @@ fn yolo11_mlx_per_block_isolation() {
 /// reproduce `ultralytics.predict`'s 4 people on the staged photo. Ignored by default —
 /// run with the model + fixtures staged in the app cache:
 ///   cargo test -p sceneworks-worker person_jobs -- --ignored --nocapture
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "requires staged yolo11m_fused_mlx.safetensors + people.jpg fixtures in the app cache"]
 fn yolo11_matches_ultralytics_reference_on_photo() {
@@ -513,6 +522,7 @@ fn yolo11_matches_ultralytics_reference_on_photo() {
 /// people. Validates the URL + that the hosted artifact is the right weights.
 /// Ignored by default (network); run with the people.jpg fixture staged:
 ///   cargo test -p sceneworks-worker person_jobs -- --ignored --nocapture
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "network: downloads the fused weights from HuggingFace"]
 fn yolo11_downloads_and_detects_from_huggingface() {
@@ -555,4 +565,54 @@ fn yolo11_downloads_and_detects_from_huggingface() {
         4,
         "4 people from downloaded weights"
     );
+}
+
+/// sc-5498 off-Mac GPU smoke (ignored — needs the real `yolo11m.onnx` + CUDA). Validates the
+/// Windows/Linux candle YOLO11 person-detect lane end-to-end: load the detector through the
+/// off-Mac `ort` path, run it on a person photo, and confirm it engages the hardware EP (or CPU
+/// fallback), finds ≥1 person, and decodes a sane normalized box. The numeric parity vs the
+/// Ultralytics reference was established for the model itself (the MLX forward reproduces
+/// `ultralytics.predict`'s boxes from the same `(1,84,8400)` export); this proves the off-Mac
+/// `ort` path produces faithful output through the shared decode/NMS. Stage a yolo11m.onnx +
+/// image via env (the env pin `resolve_detector_weights` honors), then:
+///   cargo test -p sceneworks-worker --features backend-candle --lib -- --ignored person_detect_candle
+#[cfg(not(target_os = "macos"))]
+#[test]
+#[ignore]
+fn person_detect_candle_real_weights_finds_person() {
+    let weights = std::env::var("SCENEWORKS_PERSON_DETECTOR_WEIGHTS")
+        .expect("set SCENEWORKS_PERSON_DETECTOR_WEIGHTS to a yolo11m.onnx export");
+    let img = std::env::var("SCENEWORKS_TEST_PERSON_IMAGE")
+        .expect("set SCENEWORKS_TEST_PERSON_IMAGE to a person photo");
+
+    let result = detect_people_blocking(PathBuf::from(weights), PathBuf::from(img), 0.25)
+        .expect("detect_people_blocking");
+    eprintln!(
+        "YOLO11 person-detect device = {} detections = {}",
+        result.device,
+        result.detections.len()
+    );
+    assert!(
+        !result.detections.is_empty(),
+        "expected at least one detected person"
+    );
+
+    // Boxes normalize into [0,1]; confidence-descending; degenerate boxes dropped.
+    let json = detections_to_json(&result.detections, result.width, result.height);
+    assert!(
+        !json.is_empty(),
+        "expected at least one normalized detection"
+    );
+    let top = &json[0];
+    eprintln!("top detection = {top}");
+    let b = &top["box"];
+    for key in ["x", "y", "width", "height"] {
+        let v = b[key].as_f64().unwrap();
+        assert!(
+            (0.0..=1.0).contains(&v),
+            "normalized box {key} out of [0,1]: {v}"
+        );
+    }
+    assert!(b["width"].as_f64().unwrap() > 0.0 && b["height"].as_f64().unwrap() > 0.0);
+    assert_eq!(top["maskState"], "missing");
 }

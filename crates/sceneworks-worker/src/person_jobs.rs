@@ -1,29 +1,42 @@
-//! YOLO11 person detection on the Rust worker (epic 3482, sc-3488 slice 1 / sc-3633).
+//! YOLO11 person detection on the Rust worker (epic 3482, sc-3488 slice 1 / sc-3633;
+//! off-Mac candle lane sc-5498, epic 5482).
 //!
 //! Ports the Python `scene_worker/person_adapters.py` `_UltralyticsDetector`
-//! (Ultralytics `yolo11m.pt`, COCO class 0) to Rust so the Replace-Person
-//! detection step runs on a Python-free Mac.
+//! (Ultralytics `yolo11m.pt`, COCO class 0) to Rust so the Replace-Person detection +
+//! selected-person tracking steps run Python-free. The pure detector math (letterbox /
+//! decode / NMS / box normalization) is backend-neutral and unit-tested without weights;
+//! only the forward pass differs by platform:
 //!
-//! **Backend = native MLX (mlx-rs), not `ort`+CoreML** (Michael's call, 2026-06-08).
-//! The whole Mac stack is MLX (mlx-gen); and the `ort` CoreML EP *hangs indefinitely*
-//! in `commit_from_file` on the Ultralytics YOLO11 ONNX export, so the `ort` path was
-//! abandoned for this model. The YOLO11m forward pass is assembled here directly from
-//! `mlx_gen::nn` primitives (`conv2d`/`silu`/`upsample_nearest`) plus `mlx_rs::ops` for
-//! the CSP splits, depthwise convs, SPPF max-pool, C2PSA attention, and the DFL/anchor
-//! decode head — mirroring how DWPose (`pose_jobs`) lives in the worker rather than a
-//! new mlx-gen crate. Weights are the conv+BN-fused `yolo11m_fused_mlx.safetensors`
-//! (MLX `(out, kH, kW, in)` layout — loaded raw, no further transpose).
+//!  - **macOS = native MLX (mlx-rs)** (Michael's call, 2026-06-08). The whole Mac stack is
+//!    MLX (mlx-gen), and the `ort` CoreML EP *hangs indefinitely* in `commit_from_file` on
+//!    the Ultralytics YOLO11 ONNX export, so the `ort` path was abandoned for this model
+//!    *on CoreML*. The YOLO11m forward is assembled here from `mlx_gen::nn` primitives
+//!    (`conv2d`/`silu`/`upsample_nearest`) plus `mlx_rs::ops` for the CSP splits, depthwise
+//!    convs, SPPF max-pool, C2PSA attention, and the DFL/anchor decode head. Weights are the
+//!    conv+BN-fused `yolo11m_fused_mlx.safetensors` (MLX `(out, kH, kW, in)` layout — loaded
+//!    raw, no further transpose).
+//!  - **off-Mac (Windows/Linux candle GPU-worker lane) = `ort` + CUDA/CPU EP** (sc-5498).
+//!    The CoreML hang is CoreML-specific; onnxruntime's CUDA/CPU EPs run the canonical
+//!    `yolo11m.onnx` export fine. The session is built with the CUDA EP + `error_on_failure`
+//!    and falls back to a CPU session (reporting `device = "cpu"` honestly) — the same EP
+//!    pattern as DWPose (`pose_jobs`, sc-5496). The ONNX output is the SAME `(1,84,8400)`
+//!    channel-major tensor the MLX forward was reverse-engineered to reproduce, so the
+//!    shared `decode`/`nms`/`detections_to_json` consume both backends unchanged.
 //!
-//! macOS-only in practice: it gates with `pose_jobs`, and the Python Ultralytics path
-//! stays the Windows/Linux detector. The pure detector math (letterbox / decode / NMS /
-//! box normalization) is unit-tested without the weights; the forward pass is covered
-//! by an `#[ignore]` parity test against a captured per-block reference oracle.
+//! Available on macOS AND the off-Mac candle lane (it gates with `pose_jobs`/`kps_jobs`);
+//! on a candle-disabled box the Python Ultralytics path stays the Windows/Linux backend
+//! (the candle worker advertises `person_detect`/`person_track` while the Python path stays
+//! a co-resident fallback, retired wholesale in Phase 7, epic 5483). The MLX forward pass is
+//! covered by an `#[ignore]` parity test against a captured per-block reference oracle; the
+//! off-Mac `ort` lane by an `#[ignore]` GPU smoke. Person *segmentation* (SAM masks) is NOT
+//! ported here — off-Mac tracks are box-only (`maskState = "missing"`); a candle SAM backport
+//! is tracked separately (epic 3792, sc-5062).
 //!
 //! Pipeline (matched to the Ultralytics YOLO11 export — verified against the real
 //! `yolo11m.onnx` + `ultralytics.predict`):
-//!  - input `images` (1,640,640,3) f32 NHWC: letterbox to 640 (ratio=min(640/w,640/h),
-//!    pad 114 centered), RGB channel order, divided by 255. cv2 INTER_LINEAR half-pixel
-//!    sampling.
+//!  - input `images` f32 (1,640,640,3 NHWC on MLX / 1,3,640,640 NCHW on ort): letterbox to
+//!    640 (ratio=min(640/w,640/h), pad 114 centered), RGB channel order, divided by 255.
+//!    cv2 INTER_LINEAR half-pixel sampling.
 //!  - the forward produces `(1,84,8400)` channel-major: rows 0..4 = cx,cy,w,h in
 //!    letterbox px; rows 4..84 = 80 sigmoid class scores in [0,1] (no separate
 //!    objectness). Person = class 0 → channel 4.
@@ -39,21 +52,39 @@ use image::RgbImage;
 use serde_json::{json, Value};
 
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Detector in Phase 6.
+// The native-MLX YOLO11m forward is the macOS backend.
+#[cfg(target_os = "macos")]
 use mlx_gen::nn::{conv2d, silu, upsample_nearest};
+#[cfg(target_os = "macos")]
 use mlx_gen::weights::Weights;
+#[cfg(target_os = "macos")]
 use mlx_gen::Result as MlxResult;
+#[cfg(target_os = "macos")]
 use mlx_rs::ops::indexing::TryIndexOp;
+#[cfg(target_os = "macos")]
 use mlx_rs::ops::{
     add, concatenate_axis, maximum, multiply, pad, sigmoid, softmax_axis, split, split_sections,
     subtract, sum_axis,
 };
+#[cfg(target_os = "macos")]
 use mlx_rs::Array;
+
+// The off-Mac (Windows/Linux candle GPU-worker lane) backend is `ort` (onnxruntime) with the
+// CUDA execution provider + a CPU fallback (sc-5498) — the same EP pattern as `pose_jobs`.
+#[cfg(not(target_os = "macos"))]
+use ort::execution_providers::CUDAExecutionProvider;
+#[cfg(not(target_os = "macos"))]
+use ort::session::Session;
+#[cfg(not(target_os = "macos"))]
+use ort::value::Tensor;
 
 use crate::{Settings, WorkerError, WorkerResult};
 
 /// Square detector input edge (the YOLO11 export is fixed 640×640).
 const DET: usize = 640;
-/// Total anchor count across the three detect scales (80²+40²+20²).
+/// Total anchor count across the three detect scales (80²+40²+20²). The MLX head builds its
+/// anchors against this; the off-Mac `ort` path reads the count from the ONNX output shape.
+#[cfg(target_os = "macos")]
 const ANCHORS: i32 = 8400;
 /// COCO "person" class index, matching Python `PERSON_CLASS_INDEX`.
 const PERSON_CLASS: usize = 0;
@@ -61,10 +92,17 @@ const PERSON_CLASS: usize = 0;
 const PAD_VALUE: f32 = 114.0;
 /// Greedy-NMS IoU threshold — Ultralytics `predict` default (`iou=0.7`).
 const NMS_IOU: f32 = 0.7;
-/// The fused MLX-layout detector weights in the app cache / model dir.
+/// The detector weights in the app cache / model dir: the fused MLX safetensors on macOS, the
+/// canonical ONNX export off-Mac (the `ort` lane, sc-5498).
+#[cfg(target_os = "macos")]
 const DET_FILE: &str = "yolo11m_fused_mlx.safetensors";
-/// Hugging Face repo for the fused MLX detector weights.
+/// Hugging Face repo for the detector weights (MLX safetensors on macOS / ONNX off-Mac).
+#[cfg(target_os = "macos")]
 const DET_REPO: &str = "SceneWorks/yolo11m-person-detect-mlx";
+#[cfg(not(target_os = "macos"))]
+const DET_FILE: &str = "yolo11m.onnx";
+#[cfg(not(target_os = "macos"))]
+const DET_REPO: &str = "SceneWorks/yolo11m-person-detect-onnx";
 // ---------------------------------------------------------------------------
 // pure detector math (unit-tested without weights)
 // ---------------------------------------------------------------------------
@@ -152,6 +190,7 @@ fn sample_rgb(img: &RgbImage, x: f32, y: f32, c: usize, border: f32) -> f32 {
 
 /// Build the (1,640,640,3) RGB `/255` letterboxed input in **NHWC** order (the layout
 /// `mlx_gen::nn::conv2d` expects) and return the geometry.
+#[cfg(target_os = "macos")]
 fn preprocess(img: &RgbImage) -> (Vec<f32>, Letterbox) {
     let lb = Letterbox::compute(img.width(), img.height());
     let (w, h) = (img.width() as f32, img.height() as f32);
@@ -319,6 +358,7 @@ pub(crate) fn detections_to_json(dets: &[Detection], frame_w: u32, frame_h: u32)
 /// points the parity oracle (`refs.safetensors`) checks. Block tensors stay NHWC; the
 /// oracle is NCHW, so the test transposes before comparing. The block fields exist only
 /// for the parity test — the production `detect_people` path reads `output` alone.
+#[cfg(target_os = "macos")]
 pub(crate) struct YoloForward {
     #[cfg_attr(not(test), allow(dead_code))]
     pub block4: Array,
@@ -335,6 +375,7 @@ pub(crate) struct YoloForward {
 
 /// Loaded YOLO11m detector: the fused MLX weights plus the precomputed detect anchors
 /// and strides (constant for the fixed 640 input).
+#[cfg(target_os = "macos")]
 struct Yolo {
     weights: Weights,
     anchor_x: Array,
@@ -342,6 +383,7 @@ struct Yolo {
     stride: Array,
 }
 
+#[cfg(target_os = "macos")]
 impl Yolo {
     fn load(path: &Path) -> WorkerResult<Self> {
         let weights = Weights::from_file(path)
@@ -682,9 +724,8 @@ impl Yolo {
     }
 }
 
-static DETECTOR: OnceLock<Mutex<Option<Yolo>>> = OnceLock::new();
-
-/// Person detections for one frame, plus the device the model ran on.
+/// Person detections for one frame, plus the device the model ran on. Backend-neutral —
+/// the macOS MLX path and the off-Mac `ort` path both return this.
 pub(crate) struct DetectResult {
     pub width: u32,
     pub height: u32,
@@ -692,8 +733,13 @@ pub(crate) struct DetectResult {
     pub device: &'static str,
 }
 
-/// Blocking person detection on a single rendered frame. The MLX model is loaded once
-/// and cached process-wide (like Python's lazy model load); invoke via `spawn_blocking`.
+#[cfg(target_os = "macos")]
+static DETECTOR: OnceLock<Mutex<Option<Yolo>>> = OnceLock::new();
+
+/// Blocking person detection on a single rendered frame (macOS native-MLX backend). The
+/// model is loaded once and cached process-wide (like Python's lazy model load); invoke
+/// via `spawn_blocking`.
+#[cfg(target_os = "macos")]
 pub(crate) fn detect_people_blocking(
     weights_path: PathBuf,
     image_path: PathBuf,
@@ -728,12 +774,158 @@ pub(crate) fn detect_people_blocking(
 }
 
 // ---------------------------------------------------------------------------
-// weights resolution + download-on-first-use
+// off-Mac onnxruntime YOLO11 detector (sc-5498) — the Windows/Linux candle-lane sibling
+// of the native-MLX forward above. Runs the canonical `yolo11m.onnx` export through `ort`
+// with the CUDA EP (+ CPU fallback) and feeds its `(1,84,8400)` output into the shared
+// `decode`/`nms` math, exactly as the MLX path does.
 // ---------------------------------------------------------------------------
 
-/// Resolve already-present fused MLX detector weights: explicit env pin
-/// (`SCENEWORKS_PERSON_DETECTOR_WEIGHTS`), then the app cache
-/// `<data_dir>/cache/person-detect/`, then the model dir
+/// Build the (1,3,640,640) RGB `/255` letterboxed input in **NCHW** order (the layout the
+/// `yolo11m.onnx` export expects) and return the geometry. Same letterbox + cv2 half-pixel
+/// sampling as the MLX `preprocess`, only the output channel order differs.
+#[cfg(not(target_os = "macos"))]
+fn preprocess_nchw(img: &RgbImage) -> (Vec<f32>, Letterbox) {
+    let lb = Letterbox::compute(img.width(), img.height());
+    let (w, h) = (img.width() as f32, img.height() as f32);
+    let new_w = (w * lb.ratio).round();
+    let new_h = (h * lb.ratio).round();
+    let sx = w / new_w.max(1.0);
+    let sy = h / new_h.max(1.0);
+    let new_w = new_w as usize;
+    let new_h = new_h as usize;
+    let pad_x = lb.pad_x as usize;
+    let pad_y = lb.pad_y as usize;
+
+    // NCHW: chw[c * DET * DET + y * DET + x].
+    let mut chw = vec![PAD_VALUE / 255.0; 3 * DET * DET];
+    for dy in 0..new_h {
+        let src_y = (dy as f32 + 0.5) * sy - 0.5; // cv2 INTER_LINEAR half-pixel
+        let y = dy + pad_y;
+        for dx in 0..new_w {
+            let src_x = (dx as f32 + 0.5) * sx - 0.5;
+            let x = dx + pad_x;
+            for c in 0..3 {
+                let v = sample_rgb(
+                    img,
+                    src_x.clamp(0.0, w - 1.0),
+                    src_y.clamp(0.0, h - 1.0),
+                    c,
+                    0.0,
+                );
+                chw[c * DET * DET + y * DET + x] = v / 255.0;
+            }
+        }
+    }
+    (chw, lb)
+}
+
+fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
+    WorkerError::Engine(format!("onnxruntime: {e}"))
+}
+
+/// Build a YOLO11 session, optionally registering the CUDA EP before the CPU fallback.
+/// `accel == false` builds a plain CPU session. `error_on_failure` so a CUDA provider that
+/// can't initialise (no GPU, or a cuDNN/CUDA mismatch in the loaded onnxruntime) surfaces as
+/// an error here — `OrtYolo::load` then falls back to a CPU session and reports `device =
+/// "cpu"` honestly, instead of onnxruntime silently CPU-executing while we still claim CUDA
+/// (the same honesty contract as `pose_jobs::build_session`, sc-5496).
+#[cfg(not(target_os = "macos"))]
+fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
+    let mut b = Session::builder().map_err(ort_err)?;
+    if accel {
+        b = b
+            .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])
+            .map_err(ort_err)?;
+    }
+    b.commit_from_file(path).map_err(ort_err)
+}
+
+/// Loaded ONNX YOLO11m detector: the `ort` session plus the device it runs on.
+#[cfg(not(target_os = "macos"))]
+struct OrtYolo {
+    session: Session,
+    device: &'static str,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl OrtYolo {
+    /// Load the detector, preferring the CUDA EP and falling back to a CPU session if the
+    /// provider can't initialise (mirrors `pose_jobs::Detector::load`).
+    fn load(path: &Path) -> WorkerResult<Self> {
+        match build_session(path, true) {
+            Ok(session) => Ok(Self {
+                session,
+                device: "cuda",
+            }),
+            Err(_) => Ok(Self {
+                session: build_session(path, false)?,
+                device: "cpu",
+            }),
+        }
+    }
+
+    /// Detect every person in one frame → NMS'd boxes in original px.
+    fn detect_people(&mut self, img: &RgbImage, conf: f32) -> WorkerResult<Vec<Detection>> {
+        let (input, lb) = preprocess_nchw(img);
+        let tensor = Tensor::from_array(([1_i64, 3, DET as i64, DET as i64].to_vec(), input))
+            .map_err(ort_err)?;
+        let outputs = self.session.run(ort::inputs![tensor]).map_err(ort_err)?;
+        // The Ultralytics export has a single output `(1,84,8400)` channel-major — the SAME
+        // tensor the MLX forward was reverse-engineered to reproduce. Read its reported shape
+        // so `decode` indexes it correctly regardless of the exact class count.
+        let (shape, data) = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
+        let shape: Vec<i64> = shape.to_vec();
+        let raw = decode(data, &shape, &lb, conf, img.width(), img.height());
+        Ok(nms(raw, NMS_IOU))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+static DETECTOR: OnceLock<Mutex<Option<OrtYolo>>> = OnceLock::new();
+
+/// Blocking person detection on a single rendered frame (off-Mac `ort`/CUDA backend). The
+/// session is loaded once and cached process-wide; invoke via `spawn_blocking`.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn detect_people_blocking(
+    weights_path: PathBuf,
+    image_path: PathBuf,
+    conf: f32,
+) -> WorkerResult<DetectResult> {
+    let img = image::open(&image_path)
+        .map_err(|e| WorkerError::InvalidPayload(format!("person frame open: {e}")))?
+        .to_rgb8();
+    let (width, height) = (img.width(), img.height());
+
+    let cell = DETECTOR.get_or_init(|| Mutex::new(None));
+    // Recover from a poisoned lock instead of panicking every subsequent job (mirrors the
+    // macOS path): drop the possibly-corrupt cached session so the block below reloads.
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        *guard = Some(OrtYolo::load(&weights_path)?);
+    }
+    let detector = guard.as_mut().expect("detector loaded");
+    let device = detector.device;
+    let detections = detector.detect_people(&img, conf)?;
+    Ok(DetectResult {
+        width,
+        height,
+        detections,
+        device,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// weights resolution + download-on-first-use (backend-neutral: the macOS MLX safetensors
+// or the off-Mac ONNX export, selected by the cfg-split `DET_FILE`/`DET_REPO`)
+// ---------------------------------------------------------------------------
+
+/// Resolve already-present detector weights (the MLX safetensors on macOS / the ONNX export
+/// off-Mac, per `DET_FILE`): explicit env pin (`SCENEWORKS_PERSON_DETECTOR_WEIGHTS`), then the
+/// app cache `<data_dir>/cache/person-detect/`, then the model dir
 /// `<data_dir>/models/person-detect/`. Returns `None` when nothing is staged (then
 /// `ensure_detector_weights` downloads it).
 pub(crate) fn resolve_detector_weights(settings: &Settings) -> Option<PathBuf> {
@@ -752,8 +944,9 @@ pub(crate) fn resolve_detector_weights(settings: &Settings) -> Option<PathBuf> {
     None
 }
 
-/// Resolve the fused MLX detector weights, downloading them from HuggingFace on first
-/// use (into the app cache) with streaming progress/cancel and size-aware resume.
+/// Resolve the detector weights (MLX safetensors on macOS / ONNX export off-Mac, per
+/// `DET_REPO`/`DET_FILE`), downloading them from HuggingFace on first use (into the app cache)
+/// with streaming progress/cancel and size-aware resume.
 pub(crate) async fn ensure_detector_weights(
     settings: &Settings,
     context: &DownloadContext<'_>,

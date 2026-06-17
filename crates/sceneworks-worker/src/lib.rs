@@ -135,12 +135,21 @@ mod kps_jobs;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod upscale_jobs;
-// YOLO11 person detection via onnxruntime/CoreML (epic 3482, sc-3488/sc-3633).
-// macOS-only like pose_jobs: the `ort` engine + CoreML EP only mean anything on
-// Apple Silicon, and the Python Ultralytics path stays the Windows/Linux backend.
-#[cfg(target_os = "macos")]
+// YOLO11 person detection + selected-person ByteTrack tracking (epic 3482, sc-3488/sc-3633;
+// off-Mac candle lane sc-5498, epic 5482). Native-MLX YOLO11m on Mac, `ort`/CUDA on the off-Mac
+// candle GPU-worker lane (the pure-Rust ByteTrack in `person_track` is backend-neutral). So both
+// modules compile on Mac AND the candle lane; on a candle-disabled box the Python Ultralytics
+// path stays the Windows/Linux backend. Person *segmentation* (SAM masks) stays Mac-only
+// (`person_segment*` below) — off-Mac tracks are box-only; a candle SAM backport is epic 3792.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod person_jobs;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod person_track;
 // Native-MLX SAM2 person segmentation (epic 3704, sc-3709): the `mlx-gen-sam2`
 // box-prompt segmenter generates per-frame masks in `run_person_track`. macOS-only

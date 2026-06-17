@@ -5859,6 +5859,89 @@ mod candle_routing_tests {
         );
     }
 
+    // ---- Candle person detect/track lane (sc-5498) ----
+
+    /// A queued real (non-preview) `person_detect` job carrying `payload`.
+    fn person_detect_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_person_detect",
+            "type": "person_detect",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// A queued real (non-preview) `person_track` job carrying `payload`.
+    fn person_track_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_person_track",
+            "type": "person_track",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// sc-5498: the candle worker advertises `person_detect` + `person_track` (YOLO11 via the `ort`
+    /// CUDA EP + the pure-Rust ByteTrack) and claims both — the off-Mac sibling of the macOS
+    /// native-MLX path (sc-3633/sc-3634). Like kps_extract / pose_detect (and unlike SeedVR2), the
+    /// Python Ultralytics path CAN serve them, so there is NO torch-refusal gate: a co-resident
+    /// torch worker that advertises the capability still claims it (the candle worker just runs it
+    /// Python-free when it polls first; the Python path is retired wholesale in Phase 7, epic 5483).
+    /// A worker that never advertises the capability refuses the job. (These are the real,
+    /// non-preview jobs; the procedural `preview: true` path keys off the separate
+    /// `person_detect_preview` / `person_track_preview` capabilities.)
+    #[test]
+    fn candle_worker_claims_person_detect_and_track_no_torch_refusal() {
+        let payload = json!({ "projectId": "p", "sourceAssetId": "a" });
+        let candle = gpu_worker(&["gpu", "person_detect", "person_track", "candle"]);
+        assert!(
+            worker_supports_job(&candle, &person_detect_job(payload.clone())),
+            "candle worker should claim person_detect"
+        );
+        assert!(
+            worker_supports_job(&candle, &person_track_job(payload.clone())),
+            "candle worker should claim person_track"
+        );
+        let torch = gpu_worker(&["gpu", "person_detect", "person_track"]);
+        assert!(
+            worker_supports_job(&torch, &person_detect_job(payload.clone())),
+            "torch worker still claims person_detect (no refusal — it has the Ultralytics path)"
+        );
+        assert!(
+            worker_supports_job(&torch, &person_track_job(payload.clone())),
+            "torch worker still claims person_track (no refusal — it has the Ultralytics path)"
+        );
+        let no_cap = gpu_worker(&["gpu", "image_generate", "candle"]);
+        assert!(
+            !worker_supports_job(&no_cap, &person_detect_job(payload.clone())),
+            "a worker not advertising person_detect refuses it"
+        );
+        assert!(
+            !worker_supports_job(&no_cap, &person_track_job(payload)),
+            "a worker not advertising person_track refuses it"
+        );
+    }
+
     // ---- Candle caption lane (sc-5098) ----
 
     /// A queued `training_caption` job carrying `payload`.

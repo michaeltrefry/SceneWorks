@@ -108,6 +108,25 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
             if !gpu.capabilities.contains(&WorkerCapability::PoseDetect) {
                 gpu.capabilities.push(WorkerCapability::PoseDetect);
             }
+            // YOLO11 person detection + selected-person ByteTrack tracking (sc-5498, epic 5482):
+            // the off-Mac sibling of the macOS native-MLX path (sc-3633/sc-3634) — `yolo11m.onnx`
+            // via `ort`/CUDA in `person_jobs` + the pure-Rust SORT/ByteTrack in `person_track`,
+            // serving `person_detect` (Replace-Person candidate boxes) + `person_track` (the
+            // reusable selected-person track). Job-type capabilities (not generation modalities),
+            // so they aren't in `registry_capabilities`; advertise them explicitly. Like
+            // kps_extract / pose_detect — and unlike SeedVR2 — the Python Ultralytics path CAN
+            // serve them, so there's NO torch-refusal gate: the candle worker claims them
+            // Python-free, with the co-resident torch worker as a fallback (retired wholesale in
+            // Phase 7, epic 5483). Person *segmentation* (SAM masks) is NOT ported off-Mac yet
+            // (epic 3792, sc-5062), so candle person tracks are box-only (`maskState = "missing"`).
+            for capability in [
+                WorkerCapability::PersonDetect,
+                WorkerCapability::PersonTrack,
+            ] {
+                if !gpu.capabilities.contains(&capability) {
+                    gpu.capabilities.push(capability);
+                }
+            }
             // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
             gpu.capabilities
                 .push(WorkerCapability::Unknown("candle".to_owned()));

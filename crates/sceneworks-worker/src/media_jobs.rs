@@ -567,11 +567,15 @@ pub(crate) async fn run_person_detect(
     Ok(result)
 }
 
-/// Run the native MLX YOLO11 person detector on a rendered frame, returning the
-/// normalized detection array (Python `run_person_detect` shape) + the device
-/// the model ran on. macOS-only: MLX (mlx-rs) is the Apple-Silicon backend
-/// (epic 3482, sc-3633); the Python Ultralytics path serves Windows/Linux.
-#[cfg(target_os = "macos")]
+/// Run the YOLO11 person detector on a rendered frame, returning the normalized detection
+/// array (Python `run_person_detect` shape) + the device the model ran on. Available on Mac
+/// (native MLX, epic 3482 / sc-3633) AND the off-Mac candle GPU-worker lane (`ort`/CUDA,
+/// sc-5498); identical body — the platform backend is chosen inside `person_jobs`. On a
+/// candle-disabled box the Python Ultralytics path serves Windows/Linux (the stub below).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 async fn run_yolo11_person_detect(
     api: &ApiClient,
     settings: &Settings,
@@ -600,7 +604,7 @@ async fn run_yolo11_person_detect(
     Ok((boxes, result.device))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 async fn run_yolo11_person_detect(
     _api: &ApiClient,
     _settings: &Settings,
@@ -619,16 +623,22 @@ async fn run_yolo11_person_detect(
 /// no frame at `duration` (the last decodable frame sits ~`1/fps` before it), and an
 /// `ffmpeg -ss duration` accurate seek then yields no output and fails the whole track.
 /// 0.2 s clears one frame for any clip ≥ 5 fps without meaningfully moving the sample.
-/// macOS-only, like its sole caller `assemble_real_person_track` (the Python Win/Linux
-/// path samples/extracts separately).
-#[cfg(target_os = "macos")]
+/// Available on Mac AND the off-Mac candle lane, like its sole caller
+/// `assemble_real_person_track` (the Python Win/Linux path samples/extracts separately).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const FRAME_SEEK_GUARD_SECONDS: f64 = 0.2;
 
 /// Clamp a sample timestamp to a frame-extraction seek that always lands on a real frame:
 /// never past `duration - FRAME_SEEK_GUARD_SECONDS`. Only the final inclusive-end sample is
 /// affected; every interior sample passes through unchanged. The tracker still records the
 /// logical sample time — only the seek used to pull pixels is clamped.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn frame_seek_timestamp(timestamp: f64, duration: f64) -> f64 {
     timestamp.min((duration - FRAME_SEEK_GUARD_SECONDS).max(0.0))
 }
@@ -1013,7 +1023,127 @@ fn write_track_mask_pngs(
     written
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Track the selected person through real source content on the off-Mac candle GPU-worker lane
+/// (sc-5498): sample frames at the 2-FPS cadence, run the `ort`/CUDA YOLO11 detector on each,
+/// associate the boxes into track identities with the pure-Rust SORT/ByteTrack tracker
+/// (sc-3634, `person_track`), and resample the chosen identity onto the sample cadence. Person
+/// *segmentation* (SAM masks) is NOT ported off-Mac yet (epic 3792, sc-5062), so candle tracks
+/// are box-only — `maskState = "missing"` and the replacement loader derives box masks from the
+/// frames. Mirrors the macOS path minus the SAM pass; the Python Ultralytics path is the
+/// fallback on a candle-disabled box.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
+async fn assemble_real_person_track(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    _project_path: &std::path::Path,
+    source_media_path: &std::path::Path,
+    detection: &Value,
+    _track_id: &str,
+    selected_timestamp: f64,
+    duration: f64,
+    confidence: f64,
+    _segment_enabled: bool,
+) -> WorkerResult<RealPersonTrack> {
+    use crate::person_track as pt;
+
+    let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person tracking canceled while fetching detector weights.",
+        fresh_download: false,
+    };
+    let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
+    let conf = confidence as f32;
+    let timestamps = pt::sample_timestamps(duration);
+
+    let work_dir = std::env::temp_dir().join(format!("sw-person-track-{}", job.id));
+    tokio::fs::create_dir_all(&work_dir).await?;
+
+    // The detector reports its real execution device per frame (cuda / cpu, per the `ort` EP).
+    let mut device = "cuda";
+    let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
+        Vec::with_capacity(timestamps.len());
+    for (index, &timestamp) in timestamps.iter().enumerate() {
+        check_cancel(api, &job.id, "Person tracking canceled during sampling.").await?;
+        let frame_path = work_dir.join(format!("frame_{index:04}.png"));
+        let ffmpeg_context = FfmpegContext {
+            api,
+            settings,
+            job_id: &job.id,
+            cancel_message: "Person tracking canceled by user.",
+        };
+        render_frame_png(
+            "ffmpeg",
+            source_media_path,
+            &frame_path,
+            frame_seek_timestamp(timestamp, duration),
+            1280,
+            720,
+            Some(ffmpeg_context),
+        )
+        .await?;
+        let weights_for_frame = weights.clone();
+        let frame_for_task = frame_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
+        })
+        .await
+        .map_err(|error| task_join_error("person track detect task", error))??;
+        device = result.device;
+        let boxes = result
+            .detections
+            .iter()
+            .map(|d| {
+                (
+                    pt::xyxy_to_normalized(
+                        d.x1 as f64,
+                        d.y1 as f64,
+                        d.x2 as f64,
+                        d.y2 as f64,
+                        result.width,
+                        result.height,
+                    ),
+                    d.score as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        per_frame.push((timestamp, boxes));
+    }
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+
+    let observations = pt::observe(per_frame);
+    let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, &timestamps);
+    if assembly.target_track_id.is_none() || assembly.detected_frames == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "Selected person was not found in the source video. Re-run detection or adjust the selection."
+                .to_owned(),
+        ));
+    }
+
+    Ok(RealPersonTrack {
+        frames: pt::frames_to_json(&assembly.frames),
+        average_confidence: pt::average_confidence(&assembly.frames),
+        // Segmentation (SAM masks) is not ported off-Mac yet (epic 3792, sc-5062), so the track
+        // is box-only; the replacement loader derives box masks from these frames.
+        mask_state: "missing",
+        quality: assembly.quality,
+        tracker_meta: json!({
+            "backend": "candle",
+            "device": device,
+            "model": "yolo11m",
+            "tracker": "sort_bytetrack",
+            "segmenter": "disabled",
+        }),
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track(
     _api: &ApiClient,
