@@ -97,6 +97,13 @@ impl GeneratorCache {
         Self { entry: None }
     }
 
+    /// Drop the resident generator so the next job reloads from scratch. Called after a contained
+    /// panic (sc-6067): MLX/Metal state after a mid-op abort is suspect, so the cached generator
+    /// must not be reused.
+    fn evict(&mut self) {
+        self.entry = None;
+    }
+
     fn with_generator<R>(
         &mut self,
         key: GeneratorCacheKey,
@@ -131,12 +138,34 @@ fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
             .spawn(move || {
                 let mut cache = GeneratorCache::new();
                 while let Ok(job) = rx.recv() {
-                    job(&mut cache);
+                    // Backstop: contain any panic that escapes a job's own guard so this single
+                    // shared cache thread can never die and poison every later generation (sc-6067).
+                    // A job normally catches its own panic, replies with a clean error, and evicts;
+                    // this catches anything it misses. On a contained panic the cache is reset
+                    // because post-abort MLX/Metal state is suspect.
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut cache)))
+                        .is_err()
+                    {
+                        cache.evict();
+                    }
                 }
             })
             .expect("start MLX generator cache worker");
         tx
     })
+}
+
+/// Best-effort human-readable text from a caught panic payload — the `&str`/`String` a `panic!`
+/// produces. mlx-rs `.unwrap()`/`.expect()` panics carry their formatted message as a `String`
+/// (e.g. the `[metal::malloc] Attempting to allocate …` Metal OOM), so this surfaces the real cause.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_owned()
+    }
 }
 
 pub(crate) async fn with_cached_generator<R>(
@@ -152,7 +181,23 @@ where
     let load_error_context = load_error_context.into();
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
     let job = Box::new(move |cache: &mut GeneratorCache| {
-        let result = cache.with_generator(key, spec, load_error_context, run);
+        // Contain a panic from inside the engine (e.g. mlx-rs `.unwrap()`-ing a Metal allocation
+        // failure) so it fails THIS job with a clean error instead of unwinding out of the shared
+        // cache thread and stopping every subsequent generation (sc-6067). The cached generator is
+        // evicted on panic — post-abort MLX/Metal state is suspect, so the next job reloads fresh.
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.with_generator(key, spec, load_error_context, run)
+        })) {
+            Ok(result) => result,
+            Err(panic) => {
+                cache.evict();
+                Err(WorkerError::Engine(format!(
+                    "MLX generation panicked and was contained (the engine likely ran out of \
+                     memory; the cached generator was reset): {}",
+                    panic_message(panic.as_ref())
+                )))
+            }
+        };
         let _ = reply_tx.send(result);
     });
     generator_worker()
@@ -361,6 +406,57 @@ mod tests {
         assert!(
             matches!(result, Err(WorkerError::Canceled(_))),
             "expected the cancel flag to map to WorkerError::Canceled, got {result:?}"
+        );
+    }
+
+    // sc-6067: a panic inside a job closure (e.g. mlx-rs `.unwrap()`-ing a Metal OOM) must be
+    // CONTAINED — it fails only that job with a clean error AND the single shared cache thread keeps
+    // serving. Without the `catch_unwind` guard the worker thread unwinds and dies, and every later
+    // generation fails with "MLX generator cache worker stopped" until a process restart. (The panic
+    // backtrace this test triggers is printed by the default panic hook — that is expected.)
+    #[tokio::test]
+    async fn panicking_job_is_contained_and_worker_keeps_serving() {
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+
+        // A run closure that panics mid-generation → comes back as a clean Engine error, not a hang.
+        let panicked = with_cached_generator(
+            "sc3724_stub",
+            spec.clone(),
+            "stub load",
+            move |_generator| -> WorkerResult<()> {
+                panic!("simulated mlx-rs Metal allocation panic");
+            },
+        )
+        .await;
+        let Err(WorkerError::Engine(msg)) = &panicked else {
+            panic!("a job-closure panic must map to a clean Engine error, got {panicked:?}");
+        };
+        assert!(
+            msg.contains("was contained"),
+            "contained-panic message: {msg}"
+        );
+        assert!(
+            msg.contains("simulated mlx-rs Metal allocation panic"),
+            "the original panic text must surface for diagnostics: {msg}"
+        );
+
+        // The shared cache thread must still be alive and serving: a subsequent job succeeds.
+        let after = with_cached_generator("sc3724_stub", spec, "stub load", move |generator| {
+            let req = gen_core::GenerationRequest {
+                width: 2,
+                height: 2,
+                ..Default::default()
+            };
+            generator
+                .generate(&req, &mut |_progress| {})
+                .map(|_| ())
+                .map_err(|error| WorkerError::Engine(error.to_string()))
+        })
+        .await;
+        assert!(
+            after.is_ok(),
+            "worker must keep serving after a contained panic, got {after:?}"
         );
     }
 }
