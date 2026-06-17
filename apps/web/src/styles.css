@@ -9597,3 +9597,128 @@ details[open] > summary.lora-scope-group-heading::before,
   width: 100%;
   accent-color: var(--accent);
 }
+
+/* Teach — guided LoRA trainer */
+.sw-teach-kinds {
+  grid-template-columns: repeat(3, 1fr);
+}
+@media (max-width: 560px) {
+  .sw-teach-kinds {
+    grid-template-columns: 1fr;
+  }
+}
+.sw-drop {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 22px 18px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 14px;
+}
+.sw-drop:hover {
+  border-color: var(--text);
+  color: var(--text);
+}
+.sw-drop svg {
+  width: 22px;
+  height: 22px;
+}
+.sw-teach-thumbs {
+  margin-top: 12px;
+}
+.sw-teach-thumbs .sw-ref {
+  cursor: pointer;
+}
+.sw-teach-name {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+@media (max-width: 560px) {
+  .sw-teach-name {
+    grid-template-columns: 1fr;
+  }
+}
+.sw-teach-name label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-faint);
+}
+.sw-linkbtn {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent-strong);
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.sw-teach-capnote {
+  margin-top: 12px;
+}
+.sw-teach-run {
+  padding: 6px 0;
+}
+.sw-bar.sw-teach-bar {
+  height: 10px;
+  border-radius: 5px;
+  background: var(--border);
+  overflow: hidden;
+  margin: 4px 0 4px;
+}
+.sw-bar.sw-teach-bar i {
+  display: block;
+  height: 100%;
+  background: var(--sw-aurora);
+  transition: width 0.4s var(--ease-out);
+}
+.sw-teach-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.sw-teach-list .sw-line {
+  justify-content: flex-start;
+  gap: 10px;
+}
+.sw-teach-list .sw-line-label {
+  display: flex;
+  flex-direction: column;
+}
+.sw-teach-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+.sw-teach-dot.ready {
+  background: var(--accent);
+}
+.sw-teach-dot.pending {
+  background: var(--periwinkle, #3f62d6);
+  animation: sw-teach-pulse 1.4s ease-in-out infinite;
+}
+@keyframes sw-teach-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sw-teach-dot.pending {
+    animation: none;
+  }
+}
+.sw-teach-hint {
+  margin-top: 14px;
+}

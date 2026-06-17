@@ -30,6 +30,7 @@ const MakePicture = lazyScreen(() => import("./screens/simple/MakePicture.jsx"),
 const MakeVideo = lazyScreen(() => import("./screens/simple/MakeVideo.jsx"), "MakeVideo");
 const MyCreations = lazyScreen(() => import("./screens/simple/MyCreations.jsx"), "MyCreations");
 const SimpleCharacters = lazyScreen(() => import("./screens/simple/Characters.jsx"), "Characters");
+const Teach = lazyScreen(() => import("./screens/simple/Teach.jsx"), "Teach");
 const SimpleSettings = lazyScreen(() => import("./screens/simple/SimpleSettings.jsx"), "SimpleSettings");
 
 export function RouteFallback({ label = "Loading view…" } = {}) {
@@ -80,6 +81,7 @@ export const simpleNavSections = [
       { id: "MakePicture", label: "Make a picture", icon: Icon.Image },
       { id: "MakeVideo", label: "Make a video", icon: Icon.Video },
       { id: "SimpleCharacters", label: "Characters", icon: Icon.Character },
+      { id: "Teach", label: "Teach something", icon: Icon.Train },
     ],
   },
   {
@@ -112,6 +114,11 @@ const viewRegistry = {
     title: "My creations",
     blurb: "Everything you've made in this workspace.",
     render: ({ activeProjectId } = {}) => <MyCreations key={activeProjectId ?? "default"} />,
+  },
+  Teach: {
+    title: "Teach something new",
+    blurb: "Show SceneWorks a handful of examples and it'll learn a person, a style, or an object you can use in any prompt.",
+    render: ({ activeProjectId } = {}) => <Teach key={activeProjectId ?? "default"} />,
   },
   SimpleSettings: {
     title: "Settings",
