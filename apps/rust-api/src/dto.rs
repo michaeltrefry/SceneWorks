@@ -18,6 +18,12 @@ pub(crate) struct PromptRefineRequest {
     /// worker can build a guide-aware system prompt without filesystem access to
     /// the web assets.
     pub(crate) guide: Option<String>,
+    /// `"refine"` (default) or `"magic_prompt"` — the latter expands a plain idea
+    /// into a structured Ideogram 4 JSON caption (epic 4725, sc-5997).
+    pub(crate) task: Option<String>,
+    /// Target image aspect ratio as `"W:H"` (magic-prompt only); drives bbox/layout
+    /// decisions in the caption. Defaults to `"1:1"` worker-side when absent.
+    pub(crate) aspect_ratio: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

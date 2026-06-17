@@ -226,6 +226,103 @@ fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 // ----------------------------------------------------------------------------------------------
+// Magic-prompt expansion (epic 4725, sc-5997) — plain idea → structured JSON caption. Drives the
+// SAME `prompt_refine` TextLlm (Llama-3.2-3B) with Ideogram's open-source magic-prompt system prompt
+// (`task: "magic_prompt"`) instead of the rewrite rules. The hosted Ideogram / OpenRouter Sonnet/Opus
+// configs in the reference are replaced by the local model (native-first, offline). The caller (web)
+// strips the non-schema `aspect_ratio` key + bboxes and validates the result against the sc-5993
+// caption contract, so this side stays generic: build messages, run, extract the JSON object.
+// ----------------------------------------------------------------------------------------------
+
+/// Ideogram 4's magic-prompt system-prompt file, embedded verbatim. Source (Apache-2.0):
+/// github.com/ideogram-oss/ideogram4 `src/ideogram4/magic_prompt_system_prompts/v1.txt`. Parsed for
+/// its `[SYSTEM]` + `[USER]` sections at runtime (the `[META]` block is ignored).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const MAGIC_PROMPT_V1: &str = include_str!("ideogram_magic_prompt_v1.txt");
+
+/// Body of a `[NAME]` section in the magic-prompt file (port of the reference `_load_sections`):
+/// section markers are a bracketed single word alone on a line. Returns the trimmed body, or empty.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn magic_section(name: &str) -> String {
+    let mut capturing = false;
+    let mut body: Vec<&str> = Vec::new();
+    for line in MAGIC_PROMPT_V1.lines() {
+        let trimmed = line.trim();
+        let is_marker = trimmed.len() >= 2
+            && trimmed.starts_with('[')
+            && trimmed.ends_with(']')
+            && !trimmed.contains(' ');
+        if is_marker {
+            if capturing {
+                break;
+            }
+            capturing = trimmed[1..trimmed.len() - 1].eq_ignore_ascii_case(name);
+            continue;
+        }
+        if capturing {
+            body.push(line);
+        }
+    }
+    body.join("\n").trim().to_owned()
+}
+
+/// The `(system, user)` chat messages for a magic-prompt expansion: the `[SYSTEM]` block, and the
+/// `[USER]` template with `{{aspect_ratio}}` / `{{original_prompt}}` substituted (port of the
+/// reference `build_messages`). `aspect_ratio` is `"W:H"`.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (String, String) {
+    let system = magic_section("SYSTEM");
+    let mut user = magic_section("USER");
+    if user.is_empty() {
+        user = "TARGET IMAGE ASPECT RATIO: {{aspect_ratio}} (width:height).".to_owned();
+    }
+    user = user.replace("{{aspect_ratio}}", aspect_ratio);
+    user = if user.contains("{{original_prompt}}") {
+        user.replace("{{original_prompt}}", prompt)
+    } else {
+        format!("{user}\n\n{prompt}")
+    };
+    (system, user)
+}
+
+/// Reduce a magic-prompt reply to its JSON object: strip `<think>` blocks and a wrapping code fence
+/// (reusing the refine cleanup), then take the outermost `{ … }` span so leading/trailing prose from
+/// a small model is dropped. The caller parses + validates; here we only isolate the object.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn clean_json_output(text: &str) -> String {
+    let mut text = strip_think_blocks(text.trim()).trim().to_owned();
+    if let Some(pos) = last_ci(&text, "</think>") {
+        text = text[pos + "</think>".len()..].trim().to_owned();
+    }
+    if text.starts_with("```") && text.ends_with("```") {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() >= 2 {
+            text = lines[1..lines.len() - 1].join("\n").trim().to_owned();
+        }
+    }
+    match (text.find('{'), text.rfind('}')) {
+        (Some(start), Some(end)) if end > start => text[start..=end].to_owned(),
+        _ => text,
+    }
+}
+
+// ----------------------------------------------------------------------------------------------
 // Job handler — native MLX on macOS (sc-5552) and candle on the Windows candle build (sc-5525). The
 // body is backend-agnostic: `gen_core::load_textllm("prompt_refine", …)` resolves whichever provider
 // is force-linked above. The Python torch `PromptRefiner` remains the fallback on other platforms.
@@ -271,14 +368,46 @@ pub(crate) async fn run_prompt_refine_job(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_REFINE_MODEL)
         .to_owned();
+    // Magic-prompt expansion (sc-5997) drives the same model with Ideogram's caption system prompt
+    // instead of the rewrite rules; captions run longer than a one-line prompt, so allow more tokens
+    // and sample cooler for steadier JSON.
+    let is_magic = payload
+        .get("task")
+        .and_then(Value::as_str)
+        .map(|task| task.trim().eq_ignore_ascii_case("magic_prompt"))
+        .unwrap_or(false);
     let max_new_tokens = payload
         .get("maxNewTokens")
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
-        .unwrap_or(512);
+        .unwrap_or(if is_magic { 2048 } else { 512 });
+    let temperature = if is_magic { 0.4 } else { 0.7 };
+    let work_message = if is_magic {
+        "Expanding to a caption…"
+    } else {
+        "Refining prompt…"
+    };
+    let done_message = if is_magic {
+        "Caption ready."
+    } else {
+        "Prompt refined."
+    };
 
-    let system = build_refine_system_prompt(guide.as_deref(), workflow.as_deref());
+    let (system, user_message) = if is_magic {
+        let aspect_ratio = payload
+            .get("aspectRatio")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("1:1");
+        build_magic_prompt_messages(&original_prompt, aspect_ratio)
+    } else {
+        (
+            build_refine_system_prompt(guide.as_deref(), workflow.as_deref()),
+            original_prompt.clone(),
+        )
+    };
     let weights_dir = resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?;
     // Attribute the run to the active backend (MLX on macOS, candle off-Mac) on the streamed progress
     // + UI architecture pill (mirrors the image/video paths), not the gpu-id device label.
@@ -304,7 +433,7 @@ pub(crate) async fn run_prompt_refine_job(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, u32)>(64);
     let blocking_cancel = cancel.clone();
     let job_id = job.id.clone();
-    let prompt = original_prompt.clone();
+    let prompt = user_message;
     let engine_label = model.clone();
     let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<String> {
         emit_event(
@@ -327,7 +456,7 @@ pub(crate) async fn run_prompt_refine_job(
             system,
             prompt,
             sampling: TextLlmSampling {
-                temperature: 0.7,
+                temperature,
                 top_p: 0.9,
                 max_new_tokens,
                 seed: None,
@@ -366,7 +495,7 @@ pub(crate) async fn run_prompt_refine_job(
                                 JobStatus::Running,
                                 ProgressStage::Running,
                                 0.4 + 0.5 * within,
-                                "Refining prompt…",
+                                work_message,
                                 None,
                                 backend,
                             ),
@@ -390,7 +519,12 @@ pub(crate) async fn run_prompt_refine_job(
     let raw = blocking
         .await
         .map_err(|error| task_join_error("prompt refine task join", error))??;
-    let refined = clean_refine_output(&raw);
+    // Magic-prompt isolates the JSON object (the web parses + validates it); refine cleans to prose.
+    let refined = if is_magic {
+        clean_json_output(&raw)
+    } else {
+        clean_refine_output(&raw)
+    };
     if refined.is_empty() {
         return Err(WorkerError::Engine(
             "The prompt-refinement model returned an empty prompt.".to_owned(),
@@ -403,7 +537,7 @@ pub(crate) async fn run_prompt_refine_job(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            "Prompt refined.",
+            done_message,
             Some(refine_result(&original_prompt, &refined)),
             backend,
         ),
@@ -521,6 +655,120 @@ mod tests {
         assert_eq!(
             clean_refine_output("<think>scheming</think>A vivid neon street at midnight."),
             "A vivid neon street at midnight."
+        );
+    }
+
+    #[test]
+    fn magic_section_extracts_system_and_user_blocks() {
+        let system = magic_section("SYSTEM");
+        assert!(
+            system.contains("structured JSON caption"),
+            "system has the contract intro"
+        );
+        assert!(
+            system.contains("compositional_deconstruction"),
+            "system names the schema"
+        );
+        // The [META] block above [SYSTEM] is not leaked into the system body.
+        assert!(!system.contains("thinking_mode"));
+
+        let user = magic_section("USER");
+        assert!(
+            user.contains("{{aspect_ratio}}"),
+            "user template has the aspect-ratio placeholder"
+        );
+        assert!(
+            user.contains("{{original_prompt}}"),
+            "user template has the prompt placeholder"
+        );
+
+        assert_eq!(magic_section("DOES_NOT_EXIST"), "");
+    }
+
+    #[test]
+    fn build_magic_prompt_messages_substitutes_template() {
+        let (system, user) = build_magic_prompt_messages("a red fox in the snow", "16:9");
+        assert!(system.contains("OUTPUT CONTRACT"));
+        assert!(user.contains("16:9"));
+        assert!(user.contains("a red fox in the snow"));
+        // Both placeholders are consumed.
+        assert!(!user.contains("{{"));
+    }
+
+    #[test]
+    fn clean_json_output_isolates_the_object() {
+        // Leading/trailing prose from a small model is dropped.
+        assert_eq!(
+            clean_json_output("Here is the caption: {\"a\": 1} — hope that helps!"),
+            "{\"a\": 1}"
+        );
+        // Code fences + a think block are stripped.
+        assert_eq!(
+            clean_json_output("<think>plan</think>```json\n{\"a\": 1}\n```"),
+            "{\"a\": 1}"
+        );
+        // Already-clean object passes through.
+        assert_eq!(clean_json_output("{\"a\": [1, 2]}"), "{\"a\": [1, 2]}");
+    }
+
+    /// Real-weight magic-prompt smoke (sc-5997): expands a plain idea into a JSON caption through the
+    /// actual `prompt_refine` Llama-3.2-3B and asserts the cleaned reply parses with the caption's
+    /// required section. `#[ignore]` — the weights live outside CI; run on a Mac with the model
+    /// staged in the HF cache:
+    ///   cargo test -p sceneworks-worker --lib -- --ignored magic_prompt_expands
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight: needs the Llama-3.2-3B prompt-refine model in the HF cache"]
+    fn magic_prompt_expands_plain_text_to_caption() {
+        use gen_core::{
+            CancelFlag, LoadSpec, Progress, TextLlmRequest, TextLlmSampling, WeightsSource,
+        };
+
+        let home = std::env::var("HOME").expect("HOME");
+        let snapshots = std::path::Path::new(&home).join(
+            ".cache/huggingface/hub/models--huihui-ai--Llama-3.2-3B-Instruct-abliterated/snapshots",
+        );
+        let weights_dir = std::fs::read_dir(&snapshots)
+            .expect("prompt-refine model staged in the HF cache")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("a snapshot dir");
+
+        let refiner = gen_core::load_textllm(
+            PROMPT_REFINE_ENGINE_ID,
+            &LoadSpec::new(WeightsSource::Dir(weights_dir)),
+        )
+        .expect("load prompt_refine");
+
+        let (system, user) = build_magic_prompt_messages(
+            "a red fox sitting in a snowy forest at golden hour",
+            "1:1",
+        );
+        let request = TextLlmRequest {
+            system,
+            prompt: user,
+            sampling: TextLlmSampling {
+                temperature: 0.4,
+                top_p: 0.9,
+                max_new_tokens: 2048,
+                seed: None,
+            },
+            cancel: CancelFlag::new(),
+        };
+        let mut noop = |_progress: Progress| {};
+        let output = refiner.generate(&request, &mut noop).expect("generate");
+        let json = clean_json_output(&output.text);
+        eprintln!("magic-prompt JSON:\n{json}");
+
+        let parsed: Value = serde_json::from_str(&json).expect("a valid JSON object");
+        let cd = parsed
+            .get("compositional_deconstruction")
+            .expect("has compositional_deconstruction");
+        assert!(cd.get("background").is_some(), "has a background");
+        assert!(
+            cd.get("elements").map(Value::is_array).unwrap_or(false),
+            "elements is an array"
         );
     }
 

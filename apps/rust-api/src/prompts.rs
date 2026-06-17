@@ -39,6 +39,21 @@ pub(crate) async fn create_prompt_refine_job(
             job_payload.insert("guide".to_owned(), Value::String(guide.to_owned()));
         }
     }
+    // Magic-prompt expansion (sc-5997): the worker swaps in Ideogram's caption system
+    // prompt and the aspect ratio steers its layout/bbox decisions.
+    if let Some(task) = payload.task.as_deref() {
+        if !task.trim().is_empty() {
+            job_payload.insert("task".to_owned(), Value::String(task.trim().to_owned()));
+        }
+    }
+    if let Some(aspect_ratio) = payload.aspect_ratio.as_deref() {
+        if !aspect_ratio.trim().is_empty() {
+            job_payload.insert(
+                "aspectRatio".to_owned(),
+                Value::String(aspect_ratio.trim().to_owned()),
+            );
+        }
+    }
 
     let job = create_generation_job(
         state,

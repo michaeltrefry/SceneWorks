@@ -1384,6 +1384,41 @@ export function App() {
     [token],
   );
 
+  // Magic-prompt expansion (epic 4725, sc-5997): same `prompts/refine` endpoint + native
+  // utility model, but `task: "magic_prompt"` swaps in Ideogram's caption system prompt and
+  // returns a JSON caption string (the caller parses + validates it). Reuses the refine job's
+  // poll-to-completion contract; captions can take longer, so the deadline is generous.
+  const magicPrompt = useCallback(
+    async ({ prompt, modelId, aspectRatio, guide, signal }) => {
+      const created = await apiFetch("/api/v1/prompts/refine", token, {
+        method: "POST",
+        signal,
+        body: JSON.stringify({ prompt, modelId, task: "magic_prompt", aspectRatio, guide }),
+      });
+      const jobId = created?.id;
+      if (!jobId) {
+        throw new Error("Could not start magic-prompt.");
+      }
+      const deadline = Date.now() + 180000;
+      while (Date.now() < deadline) {
+        await abortableDelay(1000, signal);
+        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
+        if (job.status === "completed") {
+          const caption = job.result?.refinedPrompt;
+          if (!caption) {
+            throw new Error("Magic-prompt returned an empty caption.");
+          }
+          return caption;
+        }
+        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
+          throw new Error(job.message || job.error || "Magic-prompt failed.");
+        }
+      }
+      throw new Error("Magic-prompt timed out. Is the refinement runtime running?");
+    },
+    [token],
+  );
+
   const createVqaJob = useCallback(
     async (asset, question, maxNewTokens) => {
       if (!activeProject) {
@@ -1747,6 +1782,7 @@ export function App() {
     createVideoUpscaleJob,
     createImageJob,
     refinePrompt,
+    magicPrompt,
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
@@ -1836,7 +1872,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
-    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, latestVideoAssets, recentImageAssets,
     recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
     rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,

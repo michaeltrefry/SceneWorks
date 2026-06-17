@@ -214,6 +214,35 @@ export function parseCaption(text) {
   }
 }
 
+// Turn a magic-prompt model reply (sc-5997) into a schema-clean caption: parse it,
+// drop the non-schema top-level `aspect_ratio` key the prompt emits, and (by default,
+// matching the reference) strip per-element bboxes — the model's box guesses are
+// unreliable and the user places boxes themselves. The result is validated by the
+// caller; serializeCaption drops any remaining unknown keys.
+export function parseMagicPromptCaption(rawText, { stripBboxes = true } = {}) {
+  const { caption, error } = parseCaption(rawText);
+  if (error) return { caption: null, error };
+  if (!caption || typeof caption !== "object" || Array.isArray(caption)) {
+    return { caption: null, error: "Magic-prompt did not return a JSON object." };
+  }
+  const out = { ...caption };
+  delete out.aspect_ratio;
+  const cd = out.compositional_deconstruction;
+  if (stripBboxes && cd && typeof cd === "object" && Array.isArray(cd.elements)) {
+    out.compositional_deconstruction = {
+      ...cd,
+      elements: cd.elements.map((el) => {
+        if (el && typeof el === "object" && "bbox" in el) {
+          const { bbox: _bbox, ...rest } = el;
+          return rest;
+        }
+        return el;
+      }),
+    };
+  }
+  return { caption: out, error: null };
+}
+
 // ----- verifier (faithful mirror of CaptionVerifier) -----------------------
 //
 // Returns structured issues `{ code, path, severity, message }`. `severity` is

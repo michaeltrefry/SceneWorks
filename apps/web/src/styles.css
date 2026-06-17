@@ -1852,6 +1852,15 @@ label {
   font-family: var(--font-mono);
 }
 
+/* Magic-prompt control in the structured builder's plain-text tab (sc-5997). */
+.structured-magic,
+.structured-magic-missing {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
 .suggestion-row {
   display: flex;
   flex-wrap: wrap;

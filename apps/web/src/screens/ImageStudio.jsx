@@ -8,7 +8,7 @@ import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
-import { emptyCaption, serializeCaption, validateCaption } from "../ideogramCaption.js";
+import { emptyCaption, parseMagicPromptCaption, serializeCaption, validateCaption } from "../ideogramCaption.js";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
@@ -170,6 +170,16 @@ function normalizeImageMode(mode) {
   return IMAGE_MODES.includes(mode) ? mode : "text_to_image";
 }
 
+// Greatest common divisor, for reducing a W×H resolution to an aspect ratio (sc-5997).
+function gcd(a, b) {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y) {
+    [x, y] = [y, x % y];
+  }
+  return x;
+}
+
 function recipeMode(recipe) {
   return normalizeImageMode(recipe?.mode);
 }
@@ -242,6 +252,7 @@ export function ImageStudio() {
     createImageJob,
     createPreset,
     refinePrompt,
+    magicPrompt,
     createModelDownloadJob,
     deleteAsset,
     purgeAsset,
@@ -306,6 +317,9 @@ export function ImageStudio() {
   // plain-text / magic-prompt seed.
   const [caption, setCaption] = useState(() => saved.structuredCaption ?? emptyCaption());
   const [promptMode, setPromptMode] = useState(saved.promptMode ?? "form");
+  // The magic-prompt backend (utility model id) that drafted the current caption, recorded in the
+  // structured-prompt recipe (sc-5997). Null until the user runs magic-prompt.
+  const [magicPromptBackend, setMagicPromptBackend] = useState(saved.magicPromptBackend ?? null);
   const setPromptFromUser = (value) => {
     promptEdited.current = true;
     setPrompt(value);
@@ -824,6 +838,29 @@ export function ImageStudio() {
   }, [launchRequest?.id]);
   const [width, height] = resolution.split("x").map((value) => Number(value));
 
+  // Magic-prompt expansion (sc-5997): expand the plain-text idea into an editable caption via the
+  // native utility model (same backend as Refine), recording which model drafted it. Returns the
+  // cleaned caption (aspect_ratio + bboxes stripped); the builder applies it and switches to the
+  // form. Only wired when a structured model is selected.
+  const magicModelMissing = refineModel?.installState === "missing";
+  const onMagicExpand = useCallback(
+    async (idea) => {
+      if (typeof magicPrompt !== "function") {
+        throw new Error("Magic-prompt is unavailable.");
+      }
+      const divisor = gcd(width, height) || 1;
+      const aspectRatio = Number.isFinite(width) && Number.isFinite(height) ? `${width / divisor}:${height / divisor}` : "1:1";
+      const raw = await magicPrompt({ prompt: idea, modelId: model, aspectRatio });
+      const { caption: expanded, error } = parseMagicPromptCaption(raw);
+      if (error || !expanded) {
+        throw new Error(error || "Magic-prompt returned an unusable caption.");
+      }
+      setMagicPromptBackend(PROMPT_REFINE_MODEL_ID);
+      return expanded;
+    },
+    [magicPrompt, model, width, height],
+  );
+
   // When restoring a snapshot, the saved count/resolution/negativePrompt already
   // reflect the user's last state — skip the one preset-default pass that fires as the
   // restored preset resolves so it doesn't overwrite them. "None" applies no defaults,
@@ -890,6 +927,7 @@ export function ImageStudio() {
     prompt,
     structuredCaption: caption,
     promptMode,
+    magicPromptBackend,
     count,
     advancedOpen,
     model,
@@ -1170,6 +1208,9 @@ export function ImageStudio() {
                 onModeChange={setPromptMode}
                 plainText={prompt}
                 onPlainTextChange={setPromptFromUser}
+                onMagicExpand={magicPrompt ? onMagicExpand : undefined}
+                magicModelMissing={magicModelMissing}
+                onDownloadMagicModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
               />
             ) : (
               <textarea

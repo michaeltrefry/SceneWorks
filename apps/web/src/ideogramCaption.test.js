@@ -11,6 +11,7 @@ import {
   normalizeHexColor,
   orderCaption,
   parseCaption,
+  parseMagicPromptCaption,
   runtimePromptFromRecipe,
   serializeCaption,
   STYLE_KEY_ORDER_NON_PHOTO,
@@ -290,6 +291,32 @@ describe("validateCaption — failure modes", () => {
     expect(result.ok).toBe(true);
     expect(result.warnings.some((w) => w.code === "empty_elements")).toBe(true);
     expect(result.warnings.some((w) => w.code === "missing_recommended")).toBe(true);
+  });
+});
+
+describe("parseMagicPromptCaption", () => {
+  // What the v1 magic-prompt emits: a top-level aspect_ratio + bboxes on elements.
+  const MAGIC_OUTPUT =
+    '{"aspect_ratio": "16:9", "high_level_description": "A red fox in the snow", "compositional_deconstruction": {"background": "a snowy forest", "elements": [{"type": "obj", "bbox": [250, 320, 950, 760], "desc": "a red fox"}]}}';
+
+  it("strips the non-schema aspect_ratio key and validates clean", () => {
+    const { caption, error } = parseMagicPromptCaption(MAGIC_OUTPUT);
+    expect(error).toBe(null);
+    expect("aspect_ratio" in caption).toBe(false);
+    expect(validateCaption(caption).ok).toBe(true);
+  });
+
+  it("strips element bboxes by default but keeps them when asked", () => {
+    const stripped = parseMagicPromptCaption(MAGIC_OUTPUT).caption;
+    expect("bbox" in stripped.compositional_deconstruction.elements[0]).toBe(false);
+
+    const kept = parseMagicPromptCaption(MAGIC_OUTPUT, { stripBboxes: false }).caption;
+    expect(kept.compositional_deconstruction.elements[0].bbox).toEqual([250, 320, 950, 760]);
+  });
+
+  it("errors on non-JSON and on non-object JSON", () => {
+    expect(parseMagicPromptCaption("not json").error).toBeTruthy();
+    expect(parseMagicPromptCaption("[1, 2]").error).toBeTruthy();
   });
 });
 
