@@ -9300,3 +9300,139 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
   text-decoration: underline;
 }
+
+/* Simple settings + Add models */
+.sw-settings {
+  max-width: 760px;
+}
+.sw-sect {
+  margin-bottom: 22px;
+}
+.sw-sect-h {
+  margin: 0 0 14px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.sw-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.sw-line-label b {
+  font-size: 14px;
+}
+.sw-line-label small {
+  display: block;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  margin-top: 2px;
+}
+.sw-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  flex: none;
+}
+.sw-toggle button {
+  border: none;
+  background: var(--surface);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 18px;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.sw-toggle button.on {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.sw-mrow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.sw-mrow:last-of-type {
+  border-bottom: none;
+}
+.sw-mi {
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+  background: var(--surface-hover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  flex: none;
+}
+.sw-mi svg {
+  width: 20px;
+  height: 20px;
+}
+.sw-mmeta {
+  flex: 1;
+  min-width: 0;
+}
+.sw-mmeta b {
+  font-size: 14px;
+}
+.sw-mmeta small {
+  display: block;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.sw-msize {
+  color: var(--text-faint);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.sw-installed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-strong);
+  font-weight: 700;
+  font-size: 13px;
+}
+.sw-installed svg {
+  width: 16px;
+  height: 16px;
+}
+.sw-btn-primary {
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--sw-aurora);
+  color: var(--accent-fg);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 18px;
+  cursor: pointer;
+}
+.sw-dl {
+  width: 160px;
+  flex: none;
+}
+.sw-dl .sw-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+.sw-dl .sw-bar i {
+  display: block;
+  height: 100%;
+  background: var(--sw-aurora);
+}
+.sw-dl small {
+  color: var(--text-faint);
+  font-size: 11px;
+}
