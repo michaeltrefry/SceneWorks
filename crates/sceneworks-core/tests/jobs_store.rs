@@ -2168,8 +2168,9 @@ fn mac_rust_supported_names_infra_job_types() {
     let kps = job_of(&store, JobType::KpsExtract, json!({}));
     assert!(mac_rust_supported(&kps).is_ok());
     // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489): the default engine
-    // (real-esrgan) is supported; the AuraSR engine is dropped on Mac (sc-3668). SeedVR2 is the
-    // native-MLX one-step diffusion upscaler (epic 4811 / sc-4815) and is also supported.
+    // (real-esrgan) is supported; the AuraSR engine is dropped on Mac (sc-3668) and off-Mac as an
+    // offered engine (sc-5499). SeedVR2 is the one-step diffusion upscaler (epic 4811 / sc-4815) and
+    // is also supported.
     let upscale = job_of(&store, JobType::ImageUpscale, json!({}));
     assert!(mac_rust_supported(&upscale).is_ok());
     let seedvr2 = job_of(
@@ -2185,7 +2186,7 @@ fn mac_rust_supported_names_infra_job_types() {
     );
     let aura_reason = mac_rust_supported(&aura).unwrap_err();
     assert!(aura_reason.feature.contains("AuraSR"));
-    assert_eq!(aura_reason.suggested_epic.as_deref(), Some("sc-3668"));
+    assert_eq!(aura_reason.suggested_epic.as_deref(), Some("sc-5499"));
     // JoyCaption dataset captioning is ported to the Rust/MLX worker (sc-3556).
     let caption = job_of(
         &store,
@@ -2547,10 +2548,11 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Real-ESRGAN upscaling is ported (sc-3489) → the tool is supported, no reason/epic.
     assert_eq!(epic("imageUpscale"), None);
     assert!(mac.features["imageUpscale"].supported);
-    // The AuraSR engine is dropped on Mac (sc-3668) → its per-engine feature is unsupported
-    // and names the spike; this must agree with the AuraSR arm of `mac_rust_supported`.
+    // The AuraSR engine is dropped on Mac (sc-3668) AND off-Mac as an offered engine (sc-5499) → its
+    // per-engine feature is unsupported on every platform and names the drop; this must agree with the
+    // AuraSR arm of `mac_rust_supported`.
     assert!(!mac.features["imageUpscaleAuraSr"].supported);
-    assert_eq!(epic("imageUpscaleAuraSr"), Some("sc-3668".to_owned()));
+    assert_eq!(epic("imageUpscaleAuraSr"), Some("sc-5499".to_owned()));
     // SeedVR2 is the native-MLX upscaler (epic 4811 / sc-4815) → supported on Mac, no reason/epic.
     assert!(mac.features["imageUpscaleSeedvr2"].supported);
     assert_eq!(epic("imageUpscaleSeedvr2"), None);
@@ -2599,6 +2601,10 @@ fn mac_capabilities_master_switch_and_infra_features() {
     let windows = mac_capabilities("windows", false);
     assert!(windows.features["imageUpscaleSeedvr2"].supported);
     assert!(windows.features["imageUpscaleSeedvr2"].reason.is_none());
+    // AuraSR is dropped as an offered engine off-Mac too (sc-5499): unsupported on Windows (and Linux),
+    // not just under active Mac gating — so the web picker hides it on every platform.
+    assert!(!windows.features["imageUpscaleAuraSr"].supported);
+    assert!(!inert.features["imageUpscaleAuraSr"].supported);
     // Training kernels with a native Rust trainer stay enabled; LoKr-on-Wan does not.
     assert!(mac
         .training

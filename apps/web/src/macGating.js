@@ -110,8 +110,13 @@ export function macFeatureBlock(caps, key) {
 
 // Whether a specific image_upscale engine should be hidden from the picker on this platform.
 // Two engines are platform-restricted (ids match the worker):
-//   * `aura-sr` — a torch-only GigaGAN DROPPED on Mac (sc-3668). Hidden only under active Mac
-//     gating; available on Windows/Linux. Real-ESRGAN is the cross-platform default.
+//   * `aura-sr` — a torch-only GigaGAN DROPPED on Mac (sc-3668) and now dropped as an offered engine
+//     on EVERY platform (sc-5499): it has no native (MLX/candle) path and the Python torch backend
+//     that served it off-Mac is retired in Phase 7 (epic 5483), so the picker hides it everywhere
+//     (users don't build on a path about to disappear). Gated off the platform-intrinsic
+//     `imageUpscaleAuraSr` capability (`supported: false` on every platform), so — like SeedVR2 — the
+//     check is gating-independent (hidden even pre-load, when caps haven't arrived). Real-ESRGAN is
+//     the cross-platform default upscaler.
 //   * `seedvr2` — the one-step diffusion upscaler (epic 4811 / sc-4815), the INVERSE of AuraSR:
 //     backed by native MLX on Mac and the Candle CUDA/NVIDIA port on Windows (sc-5928) + Linux
 //     (sc-5160 — candle is CPU+CUDA cross-platform, so Linux rides the Windows port). Gated off the
@@ -123,7 +128,7 @@ export function macUpscaleEngineBlocked(caps, engine) {
     return caps?.features?.imageUpscaleSeedvr2?.supported !== true;
   }
   if (engine === "aura-sr") {
-    return Boolean(macFeatureBlock(caps, "imageUpscaleAuraSr"));
+    return caps?.features?.imageUpscaleAuraSr?.supported !== true;
   }
   return false;
 }

@@ -1,9 +1,10 @@
 //! Pure-math unit tests for the Real-ESRGAN tiling port (sc-3489). No onnx weights
-//! needed — these lock the tiling/crop/manifest logic against `upscalers.py`.
+//! needed — these lock the tiling/crop/manifest logic against `upscalers.py`. They run on
+//! macOS and on the off-Mac candle lane (sc-5499), since the tiling path is now shared.
 
 use super::*;
-// `Rgb`/`RgbImage` back the Real-ESRGAN tiling/crop tests (Mac-only ort path) AND the SeedVR2
-// real-weight smoke (Mac MLX + the Windows/CUDA candle lane).
+// `Rgb`/`RgbImage` back the Real-ESRGAN tiling/crop tests + the off-Mac ort smoke (the `ort` path,
+// macOS + the candle lane) AND the SeedVR2 real-weight smoke (Mac MLX + the candle lane).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -11,7 +12,10 @@ use super::*;
 use image::{Rgb, RgbImage};
 use serde_json::json;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn tile_slices_single_when_image_fits() {
     // tile >= max(w,h) → one tile covering the whole image (upscalers.py).
@@ -29,7 +33,10 @@ fn tile_slices_single_when_image_fits() {
     assert_eq!(tile_slices(512, 512, 512).len(), 1);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn tile_slices_grid_row_major_clamped() {
     // 768x768 @ tile 512 → 2x2 grid, edge tiles clamped to bounds.
@@ -76,13 +83,19 @@ fn tile_slices_grid_row_major_clamped() {
     assert_eq!(covered, 768 * 768);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn tile_slices_zero_tile_is_single() {
     assert_eq!(tile_slices(100, 50, 0).len(), 1);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn crop_to_chw_layout_and_normalization() {
     let mut img = RgbImage::new(3, 2);
@@ -107,7 +120,10 @@ fn crop_to_chw_layout_and_normalization() {
     assert!((data[g_plane - 1] - 1.0).abs() < 1e-6); // R(2,1)=255 last in R plane
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn crop_to_chw_subregion() {
     let mut img = RgbImage::new(4, 4);
@@ -125,14 +141,20 @@ fn crop_to_chw_subregion() {
     assert!((data[g + 3] - 20.0 / 255.0).abs() < 1e-6);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn onnx_filename_per_factor() {
     assert_eq!(onnx_file(2), "real_esrgan_x2.onnx");
     assert_eq!(onnx_file(4), "real_esrgan_x4.onnx");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn manifest_onnx_resource_extracts_repo_file() {
     let entry = json!({
@@ -278,5 +300,72 @@ async fn seedvr2_upscale_real_weight_smoke() {
         faithful.as_raw(),
         softened.as_raw(),
         "softness must change the output (the request field is wired to the engine)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Real-ESRGAN off-Mac (sc-5499): a gated real-weight smoke on the candle lane's `ort`/CUDA path
+// ---------------------------------------------------------------------------
+
+/// Real-weight smoke for the off-Mac Real-ESRGAN `ort` path (sc-5499): drives the exact worker seam
+/// `upscale_blocking` → `Upscaler::load` (CUDA EP, CPU fallback) → tiled `Upscaler::upscale` on a real
+/// exported `real_esrgan_x{2,4}.onnx`, asserting the output is exactly `factor×` the input and is a
+/// real super-resolution (not an all-zero / identity buffer). Gated on the ONNX being present (skips in
+/// CI, which has no weights), like the SeedVR2 smoke. Point `SCENEWORKS_REALESRGAN_X{factor}_ONNX` at a
+/// local export (optionally `SCENEWORKS_TEST_UPSCALE_IMAGE` at a source image; else a synthetic gradient
+/// is used) and run with `cargo test -p sceneworks-worker --features backend-candle --lib -- --ignored
+/// real_esrgan_candle_real_weights_upscales`. `ORT_DYLIB_PATH` must point at an onnxruntime build.
+#[cfg(not(target_os = "macos"))]
+#[test]
+#[ignore = "real-weight: needs an exported real_esrgan ONNX (SCENEWORKS_REALESRGAN_X{factor}_ONNX) + an onnxruntime (ORT_DYLIB_PATH)"]
+fn real_esrgan_candle_real_weights_upscales() {
+    let factor: u8 = match std::env::var("SCENEWORKS_TEST_UPSCALE_FACTOR")
+        .ok()
+        .as_deref()
+    {
+        Some("4") => 4,
+        _ => 2,
+    };
+    let Some(onnx) = ["SCENEWORKS_REALESRGAN_X".to_owned() + &factor.to_string() + "_ONNX"]
+        .into_iter()
+        .chain(["SCENEWORKS_REALESRGAN_ONNX".to_owned()])
+        .find_map(|key| std::env::var(&key).ok().map(std::path::PathBuf::from))
+        .filter(|p| p.exists())
+    else {
+        eprintln!("SKIP: no Real-ESRGAN ONNX (set SCENEWORKS_REALESRGAN_X{factor}_ONNX)");
+        return;
+    };
+
+    // A real photo if provided, else a deterministic gradient (Real-ESRGAN is a deterministic conv,
+    // so a synthetic input still exercises the full graph + tiling end-to-end).
+    let src = match std::env::var("SCENEWORKS_TEST_UPSCALE_IMAGE").ok() {
+        Some(path) => image::open(&path)
+            .unwrap_or_else(|e| panic!("load SCENEWORKS_TEST_UPSCALE_IMAGE {path}: {e}"))
+            .to_rgb8(),
+        None => {
+            let mut img = RgbImage::new(64, 48);
+            for (x, y, pixel) in img.enumerate_pixels_mut() {
+                *pixel = Rgb([(x * 3) as u8, (y * 5) as u8, ((x + y) * 2 % 256) as u8]);
+            }
+            img
+        }
+    };
+    let (sw, sh) = (src.width(), src.height());
+
+    let out = upscale_blocking(onnx, factor, src, CancelFlag::new()).expect("Real-ESRGAN upscale");
+    assert_eq!(
+        (out.width(), out.height()),
+        (sw * u32::from(factor), sh * u32::from(factor)),
+        "output must be exactly factor× the source"
+    );
+    // not an all-zero buffer (the graph actually ran + wrote pixels).
+    assert!(
+        out.as_raw().iter().any(|&b| b != 0),
+        "upscaled image must not be all-black"
+    );
+    eprintln!(
+        "Real-ESRGAN x{factor}: {sw}x{sh} -> {}x{}",
+        out.width(),
+        out.height()
     );
 }

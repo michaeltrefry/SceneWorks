@@ -1,40 +1,45 @@
-//! Real-ESRGAN image upscaling on the Rust worker (epic 3482, sc-3489).
+//! Real-ESRGAN image upscaling on the Rust worker (epic 3482, sc-3489; off-Mac sc-5499).
 //!
 //! Ports the Python `scene_worker/upscalers.py` + `image_adapters.run_image_upscale`
 //! `image_upscale` job to Rust so the Image Editor upscale tool (epic 2427) keeps
-//! working on a Python-free Mac. The upscaler is Real-ESRGAN (RRDBNet x2/x4) run via
-//! `ort` (onnxruntime) with the CoreML execution provider — the same `ort` stack +
-//! bundled `libonnxruntime.dylib` sc-3487 ships for DWPose. The path-selection spike
-//! (`docs/sc-3489/spike-findings.md`) validated pixel parity vs the shipped torch
-//! upscaler (CoreML PSNR ~72–74 dB, visually identical) at ~9× the CPU-EP speed.
+//! working Python-free. The upscaler is Real-ESRGAN (RRDBNet x2/x4) run via `ort`
+//! (onnxruntime): the **CoreML** execution provider on macOS (sc-3489, the same `ort`
+//! stack + bundled `libonnxruntime.dylib` sc-3487 ships for DWPose) and the **CUDA**
+//! execution provider off-Mac on the candle GPU-worker lane (sc-5499, the Windows/Linux
+//! sibling — the same `ort`/CUDA pattern sc-5496 brought off-Mac for DWPose). Both fall
+//! back to a plain CPU session if the hardware EP can't initialise (reported honestly as
+//! `device = "cpu"`). The path-selection spike (`docs/sc-3489/spike-findings.md`)
+//! validated pixel parity vs the shipped torch upscaler (CoreML PSNR ~72–74 dB, visually
+//! identical) at ~9× the CPU-EP speed; the ONNX graph is identical off-Mac.
 //!
-//! macOS-only: the CoreML EP only means anything on Apple Silicon, and the Python
-//! torch Real-ESRGAN / AuraSR path stays the Windows/Linux backend. The tiling math
-//! (`tile_slices`, crop/place) is pure and unit-tested without the onnx weights; only
-//! the onnxruntime inference is gated.
+//! Backend split: the Real-ESRGAN `ort` path compiles on macOS (the MLX worker) and on
+//! the candle lane (`backend-candle`, off-Mac) — the same gate as the module. The tiling
+//! math (`tile_slices`, crop/place) is pure and unit-tested without the onnx weights;
+//! only the execution provider (`build_session`) is cfg-split. Off-Mac, Real-ESRGAN is
+//! served by the candle worker; the Python torch Real-ESRGAN path stays a co-resident
+//! fallback until Phase 7 (epic 5483) retires it.
 //!
-//! Engine scope: `engine=real-esrgan` (the default, the `ort`/CoreML path above) and
-//! `engine=seedvr2` (epic 4811 / sc-4815 — the native-MLX one-step diffusion super-resolution
-//! upscaler) are served here. SeedVR2 runs in-process via the `mlx-gen-seedvr2` registry generator,
-//! driven through the shared `with_cached_generator` seam (single-resident engine cache — it evicts
-//! any cached image-gen engine, bounding peak memory, which matters because the SeedVR2 image path
-//! has no spatial tiling yet). It takes a target resolution (factor → `round_to_16(src × factor)`)
-//! and an optional `--softness` pre-blur; `mac_only` (the Windows/Linux SeedVR2 backend is the
-//! separate Candle port, sc-5157). `aura-sr` (a 617M-param torch-only GigaGAN) was dropped on Mac
-//! after the sc-3668 port-or-drop spike — it is refused by the routing oracle
-//! (`upscale_job_is_mlx_eligible`) and hidden in the Mac UI, so it only runs on the Python worker on
-//! Windows/Linux.
+//! Engine scope: `engine=real-esrgan` (the default, the `ort` path above) and
+//! `engine=seedvr2` (epic 4811 / sc-4815 — the one-step diffusion super-resolution upscaler) are
+//! served here. SeedVR2 runs in-process via the registry generator (native MLX on Mac /
+//! `candle-gen-seedvr2` off-Mac, sc-5157), driven through the shared `with_cached_generator` seam
+//! (single-resident engine cache — it evicts any cached image-gen engine, bounding peak memory,
+//! which matters because the SeedVR2 image path has no spatial tiling yet). It takes a target
+//! resolution (factor → `round_to_16(src × factor)`) and an optional `--softness` pre-blur.
+//! `aura-sr` (a 617M-param torch-only GigaGAN) was dropped on Mac after the sc-3668 port-or-drop
+//! spike and is now dropped as an offered engine off-Mac too (sc-5499): it is refused by the routing
+//! oracle (`upscale_job_is_mlx_eligible` / `upscale_job_is_candle_eligible`) and hidden in the UI,
+//! so it only runs if explicitly submitted to the Python torch worker (retired in Phase 7).
 //!
 //! Tiling parity (matched to `upscalers.py:_run_tiled`):
 //!  - tile grid `tile_slices(w,h,512)`; per-tile crop padded by `tile_pad=16`
 //!    (clamped to image bounds); inner (unpadded) region copied back at factor scale.
 //!  - input RGB f32 CHW in `[0,1]`; output clamp `[0,1]` → round → u8.
 
-// `HashMap`/`Mutex`/`OnceLock` back the Real-ESRGAN per-factor session cache (Mac-only `ort` path).
-#[cfg(target_os = "macos")]
+// `HashMap`/`Mutex`/`OnceLock` back the Real-ESRGAN per-factor session cache (the `ort` path,
+// macOS + the off-Mac candle lane).
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
@@ -44,13 +49,14 @@ use gen_core::{
     WeightsSource,
 };
 use image::RgbImage;
-// Real-ESRGAN runs via `ort` + the CoreML execution provider — Mac-only (the candle Windows lane
-// serves SeedVR2, not Real-ESRGAN; Real-ESRGAN/AuraSR stay on the Python torch worker off-Mac).
+// Real-ESRGAN runs via `ort`: the CoreML EP on macOS (sc-3489) and the CUDA EP off-Mac on the
+// candle GPU-worker lane (sc-5499, the same pattern sc-5496 brought off-Mac for DWPose). `Session` /
+// `Tensor` are shared; only the execution provider is cfg-split in `build_session`.
+#[cfg(not(target_os = "macos"))]
+use ort::execution_providers::CUDAExecutionProvider;
 #[cfg(target_os = "macos")]
 use ort::execution_providers::CoreMLExecutionProvider;
-#[cfg(target_os = "macos")]
 use ort::session::Session;
-#[cfg(target_os = "macos")]
 use ort::value::Tensor;
 use serde_json::{json, Value};
 
@@ -62,11 +68,16 @@ use crate::{
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
 
-// Real-ESRGAN tiling (Mac-only `ort`/CoreML path).
-#[cfg(target_os = "macos")]
+// Real-ESRGAN tiling (the `ort` path, macOS + the off-Mac candle lane).
 const TILE_SIZE: usize = 512;
-#[cfg(target_os = "macos")]
 const TILE_PAD: usize = 16;
+/// The hardware execution provider this build registers before the CPU fallback for the
+/// Real-ESRGAN `ort` session: CoreML on macOS (sc-3489), CUDA off-Mac on the candle GPU-worker
+/// lane (sc-5499). Stored as `Upscaler.device` for observability.
+#[cfg(target_os = "macos")]
+const ACCEL_DEVICE: &str = "coreml";
+#[cfg(not(target_os = "macos"))]
+const ACCEL_DEVICE: &str = "cuda";
 const MAX_UPSCALE_TARGET_DIMENSION: u32 = 8192;
 const MAX_UPSCALE_TARGET_PIXELS: u64 =
     MAX_UPSCALE_TARGET_DIMENSION as u64 * MAX_UPSCALE_TARGET_DIMENSION as u64;
@@ -74,21 +85,19 @@ const CANCEL_MESSAGE: &str = "Image upscale canceled by user.";
 
 /// SceneWorks-owned HuggingFace repo hosting the pre-exported ONNX (reproducible from
 /// `scripts/spikes/sc3489_export_reference.py`). Public; downloaded on first use,
-/// parity with sc-3487's rtmlib weights. Overridable via the manifest `onnx` resource
-/// or the env pin `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
-#[cfg(target_os = "macos")]
+/// parity with sc-3487's rtmlib weights. The same export feeds the off-Mac CUDA EP
+/// (sc-5499). Overridable via the manifest `onnx` resource or the env pin
+/// `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
 const ONNX_REPO: &str = "SceneWorks/real-esrgan-onnx";
 
-#[cfg(target_os = "macos")]
 fn onnx_file(factor: u8) -> String {
     format!("real_esrgan_x{factor}.onnx")
 }
 
 // ---------------------------------------------------------------------------
-// pure tiling math (ported from upscalers.py; unit-tested without weights) — Real-ESRGAN, Mac-only
+// pure tiling math (ported from upscalers.py; unit-tested without weights) — Real-ESRGAN
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tile {
     x0: usize,
@@ -98,7 +107,6 @@ struct Tile {
 }
 
 /// `upscalers.py:tile_slices` — single tile if the image fits, else a row-major grid.
-#[cfg(target_os = "macos")]
 fn tile_slices(w: usize, h: usize, tile: usize) -> Vec<Tile> {
     if tile == 0 || tile >= w.max(h) {
         return vec![Tile {
@@ -127,7 +135,6 @@ fn tile_slices(w: usize, h: usize, tile: usize) -> Vec<Tile> {
 }
 
 /// CHW f32 `[0,1]` for the crop region `[x0,x1) × [y0,y1)` of an RGB image.
-#[cfg(target_os = "macos")]
 fn crop_to_chw(
     img: &RgbImage,
     x0: usize,
@@ -164,45 +171,58 @@ fn validate_upscale_target_dimensions(width: u32, height: u32) -> WorkerResult<(
 }
 
 // ---------------------------------------------------------------------------
-// onnxruntime upscaler (cached per-factor process-wide, like pose_jobs::DETECTOR) — Real-ESRGAN,
-// Mac-only (`ort`/CoreML). The candle Windows lane serves SeedVR2 (below), not Real-ESRGAN.
+// onnxruntime upscaler (cached per-factor process-wide, like pose_jobs::DETECTOR) — Real-ESRGAN
+// via `ort`: CoreML on macOS, CUDA off-Mac on the candle GPU-worker lane (both fall back to CPU).
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
 struct Upscaler {
     session: Session,
     #[allow(dead_code)]
     device: &'static str,
 }
 
-#[cfg(target_os = "macos")]
 static UPSCALERS: OnceLock<Mutex<HashMap<u8, Upscaler>>> = OnceLock::new();
 
-#[cfg(target_os = "macos")]
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
     WorkerError::Engine(format!("onnxruntime: {e}"))
 }
 
-#[cfg(target_os = "macos")]
-fn build_session(path: &Path, coreml: bool) -> WorkerResult<Session> {
+/// Build a session, optionally registering the platform hardware EP (CoreML on macOS,
+/// CUDA off-Mac on the candle lane). `accel == false` builds a plain CPU session (the fallback).
+fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
     let mut b = Session::builder().map_err(ort_err)?;
-    if coreml {
-        b = b
-            .with_execution_providers([CoreMLExecutionProvider::default().build()])
-            .map_err(ort_err)?;
+    if accel {
+        #[cfg(target_os = "macos")]
+        {
+            b = b
+                .with_execution_providers([CoreMLExecutionProvider::default().build()])
+                .map_err(ort_err)?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // `error_on_failure` so a CUDA provider that can't initialise (no GPU, or a
+            // cuDNN/CUDA mismatch in the loaded onnxruntime) surfaces as an error here —
+            // `Upscaler::load` then falls back to a CPU session and reports `device = "cpu"`
+            // honestly, instead of onnxruntime silently CPU-executing while we claim CUDA
+            // (mirrors `pose_jobs::build_session`, sc-5496).
+            b = b
+                .with_execution_providers([CUDAExecutionProvider::default()
+                    .build()
+                    .error_on_failure()])
+                .map_err(ort_err)?;
+        }
     }
     b.commit_from_file(path).map_err(ort_err)
 }
 
-#[cfg(target_os = "macos")]
 impl Upscaler {
-    /// Load the session, preferring CoreML and falling back to CPU if the provider
-    /// can't initialise (mirrors `pose_jobs::Detector::load`).
+    /// Load the session, preferring the hardware EP (CoreML on Mac / CUDA off-Mac) and
+    /// falling back to CPU if the provider can't initialise (mirrors `pose_jobs::Detector::load`).
     fn load(path: &Path) -> WorkerResult<Self> {
         match build_session(path, true) {
             Ok(session) => Ok(Self {
                 session,
-                device: "coreml",
+                device: ACCEL_DEVICE,
             }),
             Err(_) => Ok(Self {
                 session: build_session(path, false)?,
@@ -270,10 +290,9 @@ impl Upscaler {
     }
 }
 
-/// Blocking upscale: load+cache the factor's session (amortising the CoreML graph
+/// Blocking upscale: load+cache the factor's session (amortising the CoreML/CUDA graph
 /// compile across a batch), run it. All `ort` objects live inside this closure and
 /// never cross an await (mirrors `pose_jobs::detect_batch`).
-#[cfg(target_os = "macos")]
 fn upscale_blocking(
     onnx_path: PathBuf,
     factor: u8,
@@ -306,7 +325,6 @@ fn upscale_blocking(
 /// (`SCENEWORKS_REALESRGAN_X{factor}_ONNX`, then `SCENEWORKS_REALESRGAN_ONNX`), then the
 /// app cache `<data_dir>/cache/upscale/`, then a manifest `onnx` resource if the job
 /// carried one, else download from the default HF repo.
-#[cfg(target_os = "macos")]
 async fn ensure_onnx(
     api: &ApiClient,
     settings: &Settings,
@@ -360,7 +378,6 @@ async fn ensure_onnx(
 
 /// Pull a `{repo,file}` ONNX resource out of a job's `modelManifestEntry` if present:
 /// `resources.imageUpscalers.real-esrgan.x{factor}.onnx`.
-#[cfg(target_os = "macos")]
 fn manifest_onnx_resource(manifest_entry: &Value, factor: u8) -> Option<(String, String)> {
     let onnx = manifest_entry
         .get("resources")?
@@ -675,15 +692,16 @@ pub(crate) async fn run_image_upscale_job(
         .filter(|s| !s.is_empty())
         .unwrap_or("real-esrgan")
         .to_lowercase();
-    // Canonical engine id. The mlx worker serves Real-ESRGAN (`ort`/CoreML) and SeedVR2 (native
-    // MLX); aura-sr was dropped on Mac (sc-3668). The routing oracle (`upscale_job_is_mlx_eligible`)
-    // already refuses anything else for the mlx worker, so this match is a defensive guard.
+    // Canonical engine id. The Rust upscaler serves Real-ESRGAN (`ort`: CoreML on Mac / CUDA off-Mac,
+    // sc-3489 / sc-5499) and SeedVR2 (native MLX / candle). `aura-sr` was dropped on Mac (sc-3668) and
+    // as an offered engine off-Mac (sc-5499). The routing oracle (`upscale_job_is_mlx_eligible` /
+    // `upscale_job_is_candle_eligible`) already refuses anything else, so this match is a defensive guard.
     let engine_id = match engine.as_str() {
         "real-esrgan" | "realesrgan" | "real_esrgan" => "real-esrgan",
         "seedvr2" => "seedvr2",
         other => {
             return Err(WorkerError::InvalidPayload(format!(
-                "Rust upscaler supports engine=real-esrgan or engine=seedvr2 (got {other}); aura-sr is dropped on Mac, available on Windows/Linux (sc-3668)."
+                "Rust upscaler supports engine=real-esrgan or engine=seedvr2 (got {other}); aura-sr is dropped (sc-3668 / sc-5499) and runs only on the Python torch worker until Phase 7."
             )));
         }
     };
@@ -769,62 +787,53 @@ pub(crate) async fn run_image_upscale_job(
         )
         .await?
     } else {
-        // Real-ESRGAN runs via `ort`/CoreML — Mac-only. Off-Mac the candle worker serves only
-        // `engine=seedvr2` (the routing oracle refuses Real-ESRGAN here, sending it to the Python
-        // torch worker), so this branch is unreachable on the candle lane; keep it a clear error so
-        // the function compiles and a misroute fails loudly rather than silently.
-        #[cfg(target_os = "macos")]
-        {
-            update_job(
-                api,
-                &job.id,
-                progress_payload(
-                    JobStatus::Running,
-                    ProgressStage::Downloading,
-                    0.25,
-                    "Loading Real-ESRGAN weights.",
-                    None,
-                    None,
-                    None,
-                ),
-            )
-            .await?;
-            let onnx_path =
-                ensure_onnx(api, settings, http_client, job, factor, &manifest_entry).await?;
+        // Real-ESRGAN via `ort` — the CoreML EP on macOS (sc-3489), the CUDA EP off-Mac on the
+        // candle GPU-worker lane (sc-5499), both with a CPU fallback. The routing oracle
+        // (`upscale_job_is_candle_eligible` / `upscale_job_is_mlx_eligible`) admits Real-ESRGAN on
+        // both lanes; `engine=aura-sr` is refused before reaching here (defensive `engine_id` guard
+        // above), staying on the Python torch worker until Phase 7.
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Downloading,
+                0.25,
+                "Loading Real-ESRGAN weights.",
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+        let onnx_path =
+            ensure_onnx(api, settings, http_client, job, factor, &manifest_entry).await?;
 
-            update_job(
-                api,
-                &job.id,
-                progress_payload(
-                    JobStatus::Running,
-                    ProgressStage::Running,
-                    0.45,
-                    &format!("Upscaling {factor}x with Real-ESRGAN."),
-                    None,
-                    None,
-                    None,
-                ),
-            )
-            .await?;
-            let cancel = CancelFlag::new();
-            run_upscale_with_heartbeat(
-                api,
-                settings,
-                &job.id,
-                cancel.clone(),
-                tokio::task::spawn_blocking(move || {
-                    upscale_blocking(onnx_path, factor, source_image, cancel)
-                }),
-            )
-            .await?
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "engine={engine_id} is not served by the candle worker (it serves engine=seedvr2); \
-                 Real-ESRGAN / AuraSR run on the Python torch worker off-Mac"
-            )));
-        }
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Running,
+                0.45,
+                &format!("Upscaling {factor}x with Real-ESRGAN."),
+                None,
+                None,
+                None,
+            ),
+        )
+        .await?;
+        let cancel = CancelFlag::new();
+        run_upscale_with_heartbeat(
+            api,
+            settings,
+            &job.id,
+            cancel.clone(),
+            tokio::task::spawn_blocking(move || {
+                upscale_blocking(onnx_path, factor, source_image, cancel)
+            }),
+        )
+        .await?
     };
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 
