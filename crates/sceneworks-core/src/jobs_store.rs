@@ -5810,6 +5810,55 @@ mod candle_routing_tests {
         );
     }
 
+    // ---- Candle pose_detect (DWPose) lane (sc-5496, epic 5482) ----
+
+    /// A queued `pose_detect` job carrying `payload`.
+    fn pose_detect_job(payload: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_pose",
+            "type": "pose_detect",
+            "status": "queued",
+            "payload": payload,
+            "result": {},
+            "requestedGpu": "auto",
+            "progress": 0,
+            "stage": "queued",
+            "message": "",
+            "attempts": 1,
+            "cancelRequested": false,
+            "createdAt": "2026-06-16T00:00:00Z",
+            "updatedAt": "2026-06-16T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    }
+
+    /// sc-5496: the candle worker advertises `pose_detect` (the DWPose RTMW detector via the `ort` CUDA
+    /// EP) and claims a pose_detect job — the off-Mac sibling of the macOS `ort`/CoreML path. Like
+    /// kps_extract (and unlike SeedVR2), the Python rtmlib path CAN serve pose_detect, so there is NO
+    /// torch-refusal gate: a co-resident torch worker that advertises the capability still claims it (the
+    /// candle worker just runs it Python-free when it polls first; the Python path is retired wholesale in
+    /// Phase 7, epic 5483). A worker that never advertises the capability (e.g. a candle-disabled box)
+    /// refuses it.
+    #[test]
+    fn candle_worker_claims_pose_detect_no_torch_refusal() {
+        let payload = json!({ "sources": [{ "assetId": "a" }], "projectId": "p" });
+        let candle = gpu_worker(&["gpu", "pose_detect", "candle"]);
+        assert!(
+            worker_supports_job(&candle, &pose_detect_job(payload.clone())),
+            "candle worker should claim pose_detect"
+        );
+        let torch = gpu_worker(&["gpu", "pose_detect"]);
+        assert!(
+            worker_supports_job(&torch, &pose_detect_job(payload.clone())),
+            "torch worker still claims pose_detect (no refusal — it has the rtmlib path)"
+        );
+        let no_cap = gpu_worker(&["gpu", "image_generate", "candle"]);
+        assert!(
+            !worker_supports_job(&no_cap, &pose_detect_job(payload)),
+            "a worker not advertising pose_detect refuses it"
+        );
+    }
+
     // ---- Candle caption lane (sc-5098) ----
 
     /// A queued `training_caption` job carrying `payload`.

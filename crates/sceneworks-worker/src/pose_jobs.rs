@@ -8,10 +8,15 @@
 //! (`docs/sc-3487/spike-findings.md`) validated sub-pixel keypoint parity + matched
 //! latency vs the shipped rtmlib detector.
 //!
-//! macOS-only: the engine + CoreML EP only mean anything on Apple Silicon, and the
-//! Python rtmlib path stays the Windows/Linux backend. The keypoint conversion +
-//! geometry (`wholebody_to_openpose`, `squareify`, facing/bbox) are pure and unit-
-//! tested without the onnx weights; only the onnxruntime inference is gated.
+//! Available on macOS (CoreML EP) AND the off-Mac candle GPU-worker lane (sc-5496,
+//! epic 5482): the Windows/Linux/CUDA sibling runs the SAME RTMW detector + the SAME
+//! pure pre/post math — only the `ort` execution provider differs (CoreML on Mac, CUDA
+//! with a CPU fallback off-Mac). On a candle-disabled box the Python rtmlib path stays
+//! the Windows/Linux backend; the candle worker advertises `pose_detect` while the
+//! Python path stays a co-resident fallback (retired wholesale in Phase 7, epic 5483).
+//! The keypoint conversion + geometry (`wholebody_to_openpose`, `squareify`,
+//! facing/bbox) are pure and unit-tested without the onnx weights; only the
+//! onnxruntime inference is gated.
 //!
 //! Pipeline parity (matched to rtmlib source — see the spike doc):
 //!  - YOLOX: letterbox to 640 (ratio=min(640/h,640/w), pad 114, top-left), NO
@@ -26,6 +31,9 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_cached_file, DownloadContext};
 use image::RgbImage;
+#[cfg(not(target_os = "macos"))]
+use ort::execution_providers::CUDAExecutionProvider;
+#[cfg(target_os = "macos")]
 use ort::execution_providers::CoreMLExecutionProvider;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -55,6 +63,14 @@ const POSE_FILE: &str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx
 const DET_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip";
 const POSE_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip";
 const DETECTOR_ID: &str = "rtmw-dw-x-l/ort";
+
+/// The hardware execution provider this build registers before the CPU fallback:
+/// CoreML on macOS (sc-3487), CUDA off-Mac on the candle GPU-worker lane (sc-5496).
+/// Reported as the result `detector.device` for observability.
+#[cfg(target_os = "macos")]
+const ACCEL_DEVICE: &str = "coreml";
+#[cfg(not(target_os = "macos"))]
+const ACCEL_DEVICE: &str = "cuda";
 
 /// Default per-keypoint confidence floor for rendering/thresholding. rtmlib's RTMW
 /// SimCC scores are NOT in `[0,1]` (good keypoints observed ~4–8 in the spike), so
@@ -384,12 +400,30 @@ struct Detector {
 
 static DETECTOR: OnceLock<Mutex<Option<Detector>>> = OnceLock::new();
 
-fn build_session(path: &Path, coreml: bool) -> WorkerResult<Session> {
+/// Build a session, optionally registering the platform hardware EP (CoreML on macOS,
+/// CUDA off-Mac). `accel == false` builds a plain CPU session (the fallback).
+fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
     let mut b = Session::builder().map_err(ort_err)?;
-    if coreml {
-        b = b
-            .with_execution_providers([CoreMLExecutionProvider::default().build()])
-            .map_err(ort_err)?;
+    if accel {
+        #[cfg(target_os = "macos")]
+        {
+            b = b
+                .with_execution_providers([CoreMLExecutionProvider::default().build()])
+                .map_err(ort_err)?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // `error_on_failure` so a CUDA provider that can't initialise (no GPU, or a
+            // cuDNN/CUDA mismatch in the loaded onnxruntime) surfaces as an error here —
+            // `Detector::load` then falls back to a CPU session and reports `device =
+            // "cpu"` honestly, instead of onnxruntime silently CPU-executing while we
+            // still claim CUDA.
+            b = b
+                .with_execution_providers([CUDAExecutionProvider::default()
+                    .build()
+                    .error_on_failure()])
+                .map_err(ort_err)?;
+        }
     }
     b.commit_from_file(path).map_err(ort_err)
 }
@@ -417,8 +451,9 @@ fn run(
 }
 
 impl Detector {
-    /// Build the cached detector, preferring CoreML and falling back to CPU if the
-    /// provider can't initialise (mirrors Python `load_pose_detector`).
+    /// Build the cached detector, preferring the hardware EP (CoreML on Mac / CUDA
+    /// off-Mac) and falling back to CPU if the provider can't initialise (mirrors
+    /// Python `load_pose_detector`).
     fn load(det_path: &Path, pose_path: &Path) -> WorkerResult<Self> {
         match (
             build_session(det_path, true),
@@ -427,7 +462,7 @@ impl Detector {
             (Ok(det), Ok(pose)) => Ok(Self {
                 det,
                 pose,
-                device: "coreml",
+                device: ACCEL_DEVICE,
             }),
             _ => Ok(Self {
                 det: build_session(det_path, false)?,
