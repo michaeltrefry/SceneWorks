@@ -947,6 +947,13 @@ pub(crate) fn read_safetensors_header_for_api(
         SafetensorsHeaderError::InvalidHeader => {
             ApiError::bad_request(format!("LoRA {lora_id} has an invalid safetensors header"))
         }
+        SafetensorsHeaderError::IncompleteData { declared, actual } => {
+            ApiError::bad_request(format!(
+                "LoRA {lora_id} is incomplete or corrupt ({actual} bytes on disk, but its header \
+             declares at least {declared} bytes of tensor data); the file was likely truncated \
+             during download. Re-import the complete file."
+            ))
+        }
     })
 }
 
@@ -1032,6 +1039,13 @@ pub(crate) fn detect_family_from_local_path(source_path: &str) -> Result<Option<
         }
         SafetensorsHeaderError::InvalidHeader => {
             ApiError::bad_request("LoRA file has an invalid safetensors header".to_owned())
+        }
+        SafetensorsHeaderError::IncompleteData { declared, actual } => {
+            ApiError::bad_request(format!(
+            "LoRA file is incomplete or corrupt ({actual} bytes on disk, but its header declares \
+             at least {declared} bytes of tensor data); the file was likely truncated during \
+             download. Re-import the complete file."
+        ))
         }
     })?;
     Ok(detect_lora_family(&header))

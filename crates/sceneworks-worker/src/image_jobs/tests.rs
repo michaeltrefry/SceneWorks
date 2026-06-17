@@ -2731,6 +2731,45 @@ fn write_min_lora(path: &std::path::Path) {
     std::fs::write(path, buffer).unwrap();
 }
 
+/// A valid safetensors header that declares tensor data the file doesn't actually
+/// contain — i.e. a truncated/interrupted download (sc-6072).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn write_truncated_lora(path: &std::path::Path) {
+    let header = json!({
+        "__metadata__": { "format": "pt" },
+        "lora.down.weight": { "dtype": "F16", "shape": [16, 16], "data_offsets": [0, 512] },
+    });
+    let header_bytes = serde_json::to_vec(&header).unwrap();
+    let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+    buffer.extend_from_slice(&header_bytes);
+    // Declared 512 bytes of tensor data, but write none — the file is short.
+    std::fs::write(path, buffer).unwrap();
+}
+
+/// sc-6072: a truncated LoRA is rejected at adapter-classification time (the
+/// generation path's last gate before the engine) instead of reaching the MLX
+/// loader and surfacing the opaque "invalid data offsets" error.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn classify_adapter_rejects_truncated_safetensors() {
+    let dir = tempfile::tempdir().unwrap();
+    let lora_file = dir.path().join("truncated.safetensors");
+    write_truncated_lora(&lora_file);
+
+    let error = classify_adapter(&lora_file).expect_err("truncated LoRA must be rejected");
+    let message = error.to_string().to_ascii_lowercase();
+    assert!(
+        message.contains("incomplete") || message.contains("truncated"),
+        "error should name the incompleteness, got: {error}"
+    );
+}
+
 /// sc-6038: InstantID is a stock SDXL (RealVisXL) UNet, so a user-selected SDXL LoRA must resolve
 /// into a non-empty adapter set — the worker now feeds these into `InstantIdPaths.adapters` (they
 /// were previously dropped: `instantid.rs` never called `resolve_adapters`). Guards the worker half
