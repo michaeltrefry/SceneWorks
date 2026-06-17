@@ -200,6 +200,12 @@ use candle_gen_flux::{IpAdapterFlux, IpAdapterFluxPaths, IpAdapterFluxRequest};
 // named-type import the bespoke pose route (`image_jobs/qwen_control.rs`) drives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_qwen_image::{QwenControl, QwenControlPaths, QwenControlRequest};
+// Qwen-Image-Edit provider (sc-5487, epic 5480) — the candle (Windows/CUDA) reference-edit lane (the
+// last family of sc-5487; SDXL + FLUX.2-klein edit already shipped). Candle-only: macOS keeps the MLX
+// `qwen_image_edit` registry path. The named-type import the bespoke edit route
+// (`image_jobs/qwen_edit_candle.rs`) drives.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 // Kolors ControlNet (strict pose) provider (sc-5489, epic 5480) — the candle (Windows/CUDA) Kolors
 // sibling of the Qwen strict-pose lane, living in `candle-gen-kolors` (it reuses candle-gen-sdxl's
 // vendored UNet + the SDXL `ControlNet`, with the Kolors ChatGLM3 conditioning + leading-Euler sampler).
@@ -549,6 +555,23 @@ pub(crate) async fn run_image_generate_job(
         // before this an off-Mac klein edit had no real lane (it deferred to a torch worker that lacks
         // the model). Disjoint from the IP-Adapter / SDXL-edit lanes (different model family).
         generate_candle_flux2_edit_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && qwen_edit_candle_available(&request, settings) {
+        // Qwen-Image-Edit reference / dual-latent edit (sc-5487) — checked BEFORE `is_candle_engine`.
+        // `qwen_image_edit` is its OWN model id (not the `qwen_image` candle txt2img id), so it would
+        // not be caught by the txt2img branch; routed here (grouped with the edit lanes) to the bespoke
+        // candle `QwenEdit` stream. Off-Mac this was a torch fallback; candle now serves it. Disjoint
+        // from the Qwen strict-pose control lane below (that one is `qwen_image` + `advanced.poses`).
+        generate_candle_qwen_edit_stream(
             api,
             settings,
             job,
@@ -1179,6 +1202,11 @@ include!("image_jobs/sdxl_edit_candle.rs");
 // provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/flux2_edit_candle.rs");
+// Qwen-Image-Edit reference / dual-latent edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps
+// the MLX Qwen-Image-Edit path (qwen.rs); the candle `QwenEdit` is a bespoke provider, so this is
+// candle-exclusive.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/qwen_edit_candle.rs");
 // Kolors IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS
 // keeps the MLX Kolors IP path (kolors.rs, the registry `Reference` route); the candle `IpAdapterKolors`
 // is a bespoke provider, so this is candle-exclusive.

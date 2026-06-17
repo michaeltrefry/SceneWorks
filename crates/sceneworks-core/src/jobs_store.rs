@@ -3323,6 +3323,19 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     {
         return true;
     }
+    // Qwen-Image-Edit reference / dual-latent edit (sc-5487, epic 5480): a non-lightning Qwen-Image-Edit
+    // `edit_image` job with a source image is the bespoke candle `QwenEdit` lane
+    // (`generate_candle_qwen_edit_stream`), NOT txt2img — and `qwen_image_edit*` are not candle txt2img
+    // ids (the gate below only knows `qwen_image`), so they would fall through to torch. Branch it out
+    // first. Off-Mac this was a torch fallback. The `-2511_lightning` distill needs a LoRA the candle
+    // provider lacks, so it is excluded (stays MLX/torch). Mirrors the worker's `qwen_edit_candle_available`.
+    if matches!(
+        model,
+        "qwen_image_edit" | "qwen_image_edit_2509" | "qwen_image_edit_2511"
+    ) && qwen_edit_candle_eligible(&job.payload)
+    {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
@@ -3676,6 +3689,22 @@ fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// worker's `flux2_edit_candle_available` gate (minus the local weight-resolve check) so the router and
 /// worker agree. Candle-only — macOS keeps the MLX `flux2_klein_9b_edit` registry path.
 fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Qwen-Image-Edit candle-routing conditions (sc-5487, epic 5480). The candle `QwenEdit` provider
+/// serves `edit_image` mode with a `sourceAssetId` on the non-lightning Qwen-Image-Edit family —
+/// dual-latent reference editing (no mask / inpaint / outpaint; that masked shape is the SDXL edit
+/// lane's). Same payload predicate as `flux2_edit_candle_eligible`, gated to the qwen-edit family by the
+/// caller. Mirrors the worker's `qwen_edit_candle_available` gate (minus the local weight-resolve check)
+/// so the router and worker agree. Candle-only — macOS keeps the MLX `qwen_image_edit` registry path.
+fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
@@ -5231,6 +5260,38 @@ mod candle_routing_tests {
             "model": "flux2_klein_9b_kv",
             "mode": "edit_image",
             "sourceAssetId": "asset_1"
+        }))));
+        // sc-5487: a Qwen-Image-Edit edit (`edit_image` + a source) is now the candle `QwenEdit` lane
+        // (dual-latent reference editing). Off-Mac this was a torch fallback; the candle worker CLAIMS
+        // it for the non-lightning variants (all map to the single edit engine model).
+        for model in [
+            "qwen_image_edit",
+            "qwen_image_edit_2509",
+            "qwen_image_edit_2511",
+        ] {
+            assert!(
+                worker_supports_job(
+                    &candle,
+                    &image_generate_job(json!({
+                        "model": model,
+                        "mode": "edit_image",
+                        "sourceAssetId": "asset_1"
+                    }))
+                ),
+                "candle worker should claim {model} edit (sc-5487)"
+            );
+        }
+        // The -2511_lightning distill needs the 4-step LoRA the candle provider lacks → NOT claimed by
+        // candle; it stays on the MLX/torch path.
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "qwen_image_edit_2511_lightning",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1"
+        }))));
+        // A Qwen-Image-Edit job with no source image is not the edit lane → not claimed (would defer).
+        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "qwen_image_edit",
+            "mode": "edit_image"
         }))));
     }
 
