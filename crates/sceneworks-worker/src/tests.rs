@@ -647,6 +647,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     // values that used to live on each MlxModel row.
     let expected: &[(&str, bool, bool)] = &[
         ("z_image_turbo", false, false),
+        // Ideogram 4 (epic 4725): asymmetric-CFG guidance (supports_guidance=true) with no user
+        // negative prompt (the "negative" is a fixed unconditional DiT, not a prompt).
+        ("ideogram_4", true, false),
         ("z_image_edit", false, false),
         ("flux_schnell", false, false),
         ("flux_dev", true, false),
