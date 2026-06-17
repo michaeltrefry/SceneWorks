@@ -4278,6 +4278,58 @@ details[open] > summary.lora-scope-group-heading::before,
   align-items: start;
 }
 
+/* Archived characters view (sc-6066): a recoverable home for soft-archived
+   characters, visually separated from the active roster. */
+.archived-characters {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+}
+
+.archived-toggle {
+  justify-self: start;
+}
+
+.archived-list {
+  display: grid;
+  gap: 8px;
+}
+
+.archived-characters .muted {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.archived-character-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.archived-character-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.archived-character-name {
+  font-weight: 600;
+}
+
+.archived-character-meta {
+  margin-right: auto;
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
 .preset-layout {
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);

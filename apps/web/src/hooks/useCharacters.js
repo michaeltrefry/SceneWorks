@@ -84,6 +84,40 @@ export function useCharacters({ token, activeProject, setError, requestedGpu, se
     [withCharacterApi, token],
   );
 
+  // Restore an archived character (sc-6066). Archive is a soft flag, so the existing
+  // update endpoint un-archives via `{ archived: false }`. The active roster
+  // (`characters`) is fetched without archived ones, so the restored character isn't
+  // in it — add it back rather than mapping an existing entry.
+  const unarchiveCharacter = useCallback(
+    async (characterId) =>
+      withCharacterApi(async (projectId) => {
+        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}`, token, {
+          method: "PATCH",
+          body: JSON.stringify({ archived: false }),
+        });
+        setCharacters((items) => [updated, ...items.filter((item) => item.id !== updated.id)]);
+        return updated;
+      }),
+    [withCharacterApi, token],
+  );
+
+  // Fetch the project's archived characters for the dedicated "Archived" view
+  // (sc-6066). The list endpoint returns both active and archived when
+  // `include_archived=true`; the active roster is shown elsewhere, so keep only the
+  // archived ones here. Does not touch the active `characters` state.
+  const listArchivedCharacters = useCallback(
+    async ({ signal } = {}) =>
+      withCharacterApi(async (projectId) => {
+        const items = await apiFetch(
+          `/api/v1/projects/${projectId}/characters?include_archived=true`,
+          token,
+          { signal },
+        );
+        return (items ?? []).filter((item) => item.archived);
+      }),
+    [withCharacterApi, token],
+  );
+
   const addCharacterReference = useCallback(
     async (characterId, payload) =>
       withCharacterApi(async (projectId) => {
@@ -218,6 +252,8 @@ export function useCharacters({ token, activeProject, setError, requestedGpu, se
     createCharacter,
     updateCharacter,
     archiveCharacter,
+    unarchiveCharacter,
+    listArchivedCharacters,
     addCharacterReference,
     updateCharacterReference,
     removeCharacterReference,

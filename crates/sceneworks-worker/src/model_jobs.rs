@@ -1234,22 +1234,46 @@ pub(crate) async fn hf_cli_program() -> Option<&'static str> {
 
 /// Locates the first `.safetensors` under `dir`, reads its header, and
 /// runs the architecture detector. Returns `Ok(None)` when no header is
-/// available or the signature is inconclusive. Returns `Err(message)`
-/// only when a file was found but its header is unreadable or malformed —
-/// the caller surfaces that message via `fail_job`.
-pub(crate) fn detect_family_in_target_dir(dir: &Path) -> Result<Option<String>, String> {
+/// available or the signature is inconclusive. Returns the structured
+/// [`SafetensorsHeaderError`] when a file was found but its header is
+/// unreadable, malformed, or fronts a truncated/incomplete file — the caller
+/// turns it into a message via [`lora_family_detection_error`] and discards the
+/// bad file.
+pub(crate) fn detect_family_in_target_dir(
+    dir: &Path,
+) -> Result<Option<String>, SafetensorsHeaderError> {
     let Some(safetensors_path) = first_safetensors_path(dir) else {
         return Ok(None);
     };
-    let header = read_safetensors_header(&safetensors_path).map_err(|error| match error {
+    let header = read_safetensors_header(&safetensors_path)?;
+    Ok(detect_lora_family(&header))
+}
+
+/// Actionable failure message for a LoRA-import safetensors inspection error.
+pub(crate) fn lora_family_detection_error(error: &SafetensorsHeaderError) -> String {
+    match error {
         SafetensorsHeaderError::Io(io_error) => {
-            format!("Unable to inspect downloaded LoRA file: {io_error}")
+            format!("Unable to inspect imported LoRA file: {io_error}")
         }
         SafetensorsHeaderError::InvalidHeader => {
-            "Downloaded LoRA file has an invalid safetensors header.".to_owned()
+            "Imported LoRA file has an invalid safetensors header.".to_owned()
         }
-    })?;
-    Ok(detect_lora_family(&header))
+        SafetensorsHeaderError::IncompleteData { declared, actual } => format!(
+            "Imported LoRA file is incomplete or corrupt ({actual} bytes on disk, but its header \
+             declares at least {declared} bytes of tensor data) — the download was likely \
+             interrupted. Re-import the complete file."
+        ),
+    }
+}
+
+/// Whether a safetensors inspection error means the file on disk is itself bad
+/// (a valid-but-truncated or malformed file) rather than a transient read
+/// failure — i.e. it should be discarded so it can't be picked up as installed.
+pub(crate) fn safetensors_file_is_unusable(error: &SafetensorsHeaderError) -> bool {
+    matches!(
+        error,
+        SafetensorsHeaderError::InvalidHeader | SafetensorsHeaderError::IncompleteData { .. }
+    )
 }
 
 pub(crate) async fn run_lora_import_job(
@@ -1384,7 +1408,16 @@ pub(crate) async fn run_lora_import_job(
 
     let detected_family = match detect_family_in_target_dir(&target_dir) {
         Ok(detected) => detected,
-        Err(detail) => {
+        Err(error) => {
+            // A truncated/corrupt file must not linger: `lora_is_installed` (API side)
+            // treats any `*.safetensors` under the dir as installed, so a rejected
+            // partial would still look selectable. Discard it before failing (sc-6072).
+            if safetensors_file_is_unusable(&error) {
+                if let Some(bad_file) = first_safetensors_path(&target_dir) {
+                    let _ = tokio::fs::remove_file(&bad_file).await;
+                }
+            }
+            let detail = lora_family_detection_error(&error);
             return fail_job(api, &job.id, "LoRA import failed.", Some(detail)).await;
         }
     };
@@ -1474,6 +1507,11 @@ pub(crate) fn model_family_detection_error(error: SafetensorsHeaderError) -> Str
         SafetensorsHeaderError::InvalidHeader => {
             "Imported model file has an invalid safetensors header.".to_owned()
         }
+        SafetensorsHeaderError::IncompleteData { declared, actual } => format!(
+            "Imported model file is incomplete or corrupt ({actual} bytes on disk, but its header \
+             declares at least {declared} bytes of tensor data) — the download was likely \
+             interrupted. Re-download the complete file."
+        ),
     }
 }
 
@@ -1551,6 +1589,11 @@ pub(crate) async fn reconcile_downloaded_model_family(
                 SafetensorsHeaderError::InvalidHeader => {
                     "Downloaded model file has an invalid safetensors header.".to_owned()
                 }
+                SafetensorsHeaderError::IncompleteData { declared, actual } => format!(
+                    "Downloaded model file is incomplete or corrupt ({actual} bytes on disk, but \
+                     its header declares at least {declared} bytes of tensor data) — the download \
+                     was likely interrupted. Re-download the complete file."
+                ),
             };
             fail_job(api, &job.id, "Model download failed.", Some(detail)).await?;
             Ok(false)
@@ -1782,6 +1825,54 @@ pub(crate) async fn run_model_import_job(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    /// sc-6072: `safetensors_file_is_unusable` selects exactly the cases where the
+    /// file on disk is itself bad (so the import path discards it) versus a transient
+    /// read failure (kept for a retry).
+    #[test]
+    fn safetensors_file_is_unusable_classifies_variants() {
+        assert!(!safetensors_file_is_unusable(&SafetensorsHeaderError::Io(
+            std::io::Error::other("transient")
+        )));
+        assert!(safetensors_file_is_unusable(
+            &SafetensorsHeaderError::InvalidHeader
+        ));
+        assert!(safetensors_file_is_unusable(
+            &SafetensorsHeaderError::IncompleteData {
+                declared: 1024,
+                actual: 16,
+            }
+        ));
+    }
+
+    /// sc-6072: a truncated `.safetensors` in the import target dir is rejected by the
+    /// import-time detector with an actionable, file-incompleteness message.
+    #[test]
+    fn detect_family_in_target_dir_rejects_truncated_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let header = json!({
+            "__metadata__": { "format": "pt" },
+            "lora.down.weight": { "dtype": "F16", "shape": [16, 16], "data_offsets": [0, 512] },
+        });
+        let header_bytes = serde_json::to_vec(&header).expect("serialize");
+        let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        buffer.extend_from_slice(&header_bytes);
+        // Declares 512 bytes of tensor data but writes none — truncated download.
+        std::fs::write(dir.path().join("lora.safetensors"), buffer).expect("write");
+
+        let error = detect_family_in_target_dir(dir.path())
+            .expect_err("a truncated file must not be accepted");
+        assert!(
+            matches!(error, SafetensorsHeaderError::IncompleteData { .. }),
+            "expected IncompleteData, got {error:?}"
+        );
+        assert!(safetensors_file_is_unusable(&error));
+        let message = lora_family_detection_error(&error).to_ascii_lowercase();
+        assert!(
+            message.contains("incomplete") && message.contains("re-import"),
+            "message should be actionable, got: {message}"
+        );
+    }
 
     /// Resolve a HuggingFace cache snapshot dir for `models--<dir>` (test helper).
     fn hf_snapshot(model_dir: &str) -> PathBuf {

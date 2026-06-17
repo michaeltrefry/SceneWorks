@@ -19,6 +19,7 @@ const ACTION_KEYS = {
   usePersonTracks: ["refreshPersonTracks", "createPersonDetectionJob", "createPersonTrackJob", "saveTrackCorrections"],
   useCharacters: [
     "refreshCharacters", "createCharacter", "updateCharacter", "archiveCharacter",
+    "unarchiveCharacter", "listArchivedCharacters",
     "addCharacterReference", "createCharacterLook", "attachCharacterLora", "createCharacterTestJob",
   ],
 };

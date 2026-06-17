@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CharacterAngleSet,
   CharacterAssets,
@@ -49,6 +49,8 @@ export function CharacterStudio() {
     createCharacter,
     updateCharacter,
     archiveCharacter,
+    unarchiveCharacter,
+    listArchivedCharacters,
     addCharacterReference,
     updateCharacterReference,
     removeCharacterReference,
@@ -131,6 +133,15 @@ export function CharacterStudio() {
   const [testCount, setTestCount] = useState(4);
   const [testResolution, setTestResolution] = useState("1024x1024");
   const [creatingDataset, setCreatingDataset] = useState(false);
+  // Archived-characters view (sc-6066). Archived characters aren't in the active
+  // `characters` roster (it's fetched without them), so this view lazily fetches
+  // them on open and offers a Restore action. Lives here so an archive/restore can
+  // refresh it.
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [archivedCharacters, setArchivedCharacters] = useState([]);
+  const [archivedLoading, setArchivedLoading] = useState(false);
+  const [archivedError, setArchivedError] = useState("");
+  const [restoringId, setRestoringId] = useState("");
 
   // Active tab + per-workspace persistence (epic 2293). The component is keyed by
   // workspace in App.jsx, so this reads the right snapshot per workspace on mount
@@ -284,6 +295,70 @@ export function CharacterStudio() {
     event.preventDefault();
     if (selectedCharacter) {
       await updateCharacter(selectedCharacter.id, draft);
+    }
+  }
+
+  // sc-6066: lazily load archived characters for the Archived view. `withCharacterApi`
+  // (inside the hook) routes failures to the shared error banner and returns null.
+  const loadArchived = useCallback(async () => {
+    if (typeof listArchivedCharacters !== "function") {
+      return;
+    }
+    setArchivedLoading(true);
+    setArchivedError("");
+    try {
+      const items = await listArchivedCharacters();
+      setArchivedCharacters(items ?? []);
+    } catch (err) {
+      setArchivedError(err?.message ?? "Could not load archived characters.");
+    } finally {
+      setArchivedLoading(false);
+    }
+  }, [listArchivedCharacters]);
+
+  // Fetch when the section is opened (and again if the project changes while open —
+  // `loadArchived` identity tracks the active project through the hook).
+  useEffect(() => {
+    if (archivedOpen) {
+      loadArchived();
+    }
+  }, [archivedOpen, loadArchived]);
+
+  // sc-6066: archiving is destructive-feeling (the character vanishes from the list),
+  // so confirm first — a single misclick shouldn't silently hide a character.
+  async function handleArchiveSelected() {
+    if (!selectedCharacter) {
+      return;
+    }
+    if (
+      typeof window !== "undefined" &&
+      typeof window.confirm === "function" &&
+      !window.confirm(
+        `Archive "${selectedCharacter.name || "this character"}"? It will be hidden from the active list. You can restore it later from "Show archived characters".`,
+      )
+    ) {
+      return;
+    }
+    await archiveCharacter(selectedCharacter.id);
+    if (archivedOpen) {
+      await loadArchived();
+    }
+  }
+
+  // sc-6066: restore an archived character back to the active roster and select it.
+  async function handleRestoreCharacter(characterId) {
+    if (typeof unarchiveCharacter !== "function") {
+      return;
+    }
+    setRestoringId(characterId);
+    try {
+      const restored = await unarchiveCharacter(characterId);
+      if (restored) {
+        setArchivedCharacters((items) => items.filter((item) => item.id !== restored.id));
+        setSelectedCharacterId(restored.id);
+      }
+    } finally {
+      setRestoringId("");
     }
   }
 
@@ -509,7 +584,7 @@ export function CharacterStudio() {
                   <button className="primary-action" type="submit">
                     Save
                   </button>
-                  <button className="secondary-action" onClick={() => archiveCharacter(selectedCharacter.id)} type="button">
+                  <button className="secondary-action" onClick={handleArchiveSelected} type="button">
                     Archive
                   </button>
                   <button
@@ -717,6 +792,53 @@ export function CharacterStudio() {
           </section>
         )}
       </div>
+
+      {/* Archived characters (sc-6066): archive is a recoverable soft flag, so give it
+          a home. Lazily fetched, visually separated from the active roster, with a
+          Restore action. Excluded from the active selector and all pickers. */}
+      {activeProject ? (
+        <section className="archived-characters" aria-label="Archived characters">
+          <button
+            aria-expanded={archivedOpen}
+            className="secondary-action archived-toggle"
+            onClick={() => setArchivedOpen((open) => !open)}
+            type="button"
+          >
+            {archivedOpen ? "Hide archived characters" : "Show archived characters"}
+          </button>
+          {archivedOpen ? (
+            <div className="archived-list">
+              {archivedLoading ? (
+                <p className="muted">Loading archived characters…</p>
+              ) : archivedError ? (
+                <p className="error-text">{archivedError}</p>
+              ) : archivedCharacters.length === 0 ? (
+                <p className="muted">No archived characters.</p>
+              ) : (
+                <ul className="archived-character-list">
+                  {archivedCharacters.map((character) => (
+                    <li className="archived-character-row" key={character.id}>
+                      <span className="archived-character-name">{character.name || "Untitled character"}</span>
+                      <span className="archived-character-meta">
+                        {typeLabel(character.type)} · {character.references?.length ?? 0} ref
+                        {(character.references?.length ?? 0) === 1 ? "" : "s"}
+                      </span>
+                      <button
+                        className="secondary-action"
+                        disabled={restoringId === character.id}
+                        onClick={() => handleRestoreCharacter(character.id)}
+                        type="button"
+                      >
+                        {restoringId === character.id ? "Restoring…" : "Restore"}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
     </section>
   );
 }

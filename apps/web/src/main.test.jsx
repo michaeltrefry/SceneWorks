@@ -2457,6 +2457,93 @@ describe("SceneWorks app shell", () => {
     expect(container.querySelector("#character-panel-poses").hidden).toBe(false);
   });
 
+  it("confirms before archiving and lets you view and restore archived characters (sc-6066)", async () => {
+    const archiveCharacter = vi.fn();
+    const unarchiveCharacter = vi.fn(async (id) => ({
+      id,
+      name: "Old Hero",
+      type: "creature",
+      references: [],
+      approvedReferences: [],
+      looks: [],
+      loras: [],
+    }));
+    const listArchivedCharacters = vi.fn(async () => [
+      { id: "char-archived", name: "Old Hero", type: "creature", references: [{ assetId: "a" }] },
+    ]);
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      archiveCharacter,
+      unarchiveCharacter,
+      listArchivedCharacters,
+      assets: [],
+      attachCharacterLora: () => {},
+      characters: [{ id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] }],
+      createCharacter: () => {},
+      createCharacterLook: () => {},
+      createCharacterTestJob: () => {},
+      deleteAsset: () => {},
+      deleteCharacterLook: () => {},
+      detachCharacterLora: () => {},
+      imageModels: [],
+      latestImageAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      sendCharacterToImage: () => {},
+      sendCharacterToVideo: () => {},
+      purgeAsset: () => {},
+      removeCharacterReference: () => {},
+      updateAssetStatus: () => {},
+      updateCharacter: () => {},
+      updateCharacterLook: () => {},
+      updateCharacterLora: () => {},
+      updateCharacterReference: () => {},
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+
+    const archiveButton = () =>
+      [...container.querySelectorAll("#character-panel-character button")].find((button) => button.textContent === "Archive");
+
+    // Declining the confirm leaves the character untouched.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await act(async () => {
+      archiveButton().click();
+    });
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(archiveCharacter).not.toHaveBeenCalled();
+
+    // Confirming archives it.
+    confirmSpy.mockReturnValue(true);
+    await act(async () => {
+      archiveButton().click();
+    });
+    expect(archiveCharacter).toHaveBeenCalledWith("char-1");
+
+    // The archived view is hidden until opened, then lazily fetches archived characters.
+    expect(container.querySelector(".archived-character-list")).toBeNull();
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Show archived characters").click();
+    });
+    await settle();
+    expect(listArchivedCharacters).toHaveBeenCalled();
+    expect(container.querySelector(".archived-character-list").textContent).toContain("Old Hero");
+
+    // Restore returns it to the active roster.
+    await act(async () => {
+      [...container.querySelectorAll(".archived-character-row button")].find((button) => button.textContent === "Restore").click();
+    });
+    await settle();
+    expect(unarchiveCharacter).toHaveBeenCalledWith("char-archived");
+    expect(container.querySelector(".archived-character-list")).toBeNull();
+
+    confirmSpy.mockRestore();
+  });
+
   it("surfaces character videos alongside images in the Assets tab (sc-2296)", async () => {
     const assets = [
       { id: "img-1", type: "image", displayName: "Still", projectId: "project-1", recipe: { normalizedSettings: { characterId: "char-1" } } },

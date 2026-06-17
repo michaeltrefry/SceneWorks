@@ -740,6 +740,13 @@ pub(crate) fn model_family_inspection_error(error: SafetensorsHeaderError) -> Ap
         SafetensorsHeaderError::InvalidHeader => {
             ApiError::bad_request("Model file has an invalid safetensors header".to_owned())
         }
+        SafetensorsHeaderError::IncompleteData { declared, actual } => {
+            ApiError::bad_request(format!(
+            "Model file is incomplete or corrupt ({actual} bytes on disk, but its header declares \
+             at least {declared} bytes of tensor data); the file was likely truncated during \
+             download. Re-download the complete file."
+        ))
+        }
     }
 }
 

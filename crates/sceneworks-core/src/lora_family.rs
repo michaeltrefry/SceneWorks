@@ -26,6 +26,12 @@ pub enum SafetensorsHeaderError {
     /// The file did not contain a valid safetensors header (too short,
     /// implausible length, or non-JSON contents).
     InvalidHeader,
+    /// The header parsed cleanly but the file is too small to hold the tensor
+    /// data the header declares — the file is truncated/incomplete (e.g. an
+    /// interrupted download). `declared` is the minimum size the header implies
+    /// (`8 + header_len + max(tensor data_offsets end)`), `actual` is the size
+    /// on disk.
+    IncompleteData { declared: u64, actual: u64 },
 }
 
 impl std::fmt::Display for SafetensorsHeaderError {
@@ -33,6 +39,11 @@ impl std::fmt::Display for SafetensorsHeaderError {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
             Self::InvalidHeader => formatter.write_str("invalid safetensors header"),
+            Self::IncompleteData { declared, actual } => write!(
+                formatter,
+                "incomplete or truncated safetensors: file is {actual} bytes but the header \
+                 declares tensor data requiring at least {declared} bytes"
+            ),
         }
     }
 }
@@ -60,7 +71,48 @@ pub fn read_safetensors_header(path: &Path) -> Result<Value, SafetensorsHeaderEr
     let mut header = vec![0_u8; header_len_usize];
     file.read_exact(&mut header)
         .map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    serde_json::from_slice::<Value>(&header).map_err(|_| SafetensorsHeaderError::InvalidHeader)
+    let header = serde_json::from_slice::<Value>(&header)
+        .map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
+    // A valid header can still front a truncated/incomplete file (an interrupted
+    // download): the data section must be large enough to hold every tensor the
+    // header declares. The tensor `data_offsets` are relative to the byte buffer
+    // that begins right after the 8-byte length and the header JSON, so the file
+    // must be at least `8 + header_len + max(data_offsets end)` bytes. Without this
+    // the bad file is accepted at import and only fails cryptically at load time
+    // ("invalid data offsets exceeding the size of the file"). See sc-6072.
+    let declared = 8_u64
+        .saturating_add(header_len)
+        .saturating_add(max_tensor_data_end(&header));
+    if metadata.len() < declared {
+        return Err(SafetensorsHeaderError::IncompleteData {
+            declared,
+            actual: metadata.len(),
+        });
+    }
+    Ok(header)
+}
+
+/// The largest `data_offsets` end across all tensor entries in a parsed
+/// safetensors header — i.e. the length of the tensor data section the header
+/// declares. The `__metadata__` key and any entry without a well-formed
+/// two-element `data_offsets` array contribute nothing (they carry no tensor
+/// bytes). Returns 0 for a header with no tensors.
+fn max_tensor_data_end(header: &Value) -> u64 {
+    let Some(entries) = header.as_object() else {
+        return 0;
+    };
+    entries
+        .iter()
+        .filter(|(key, _)| key.as_str() != "__metadata__")
+        .filter_map(|(_, tensor)| {
+            tensor
+                .get("data_offsets")
+                .and_then(Value::as_array)
+                .and_then(|offsets| offsets.get(1))
+                .and_then(Value::as_u64)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Returns the first `.safetensors` file at or below `path`. When `path`
@@ -1725,6 +1777,80 @@ mod tests {
         .expect("write index");
         let family = detect_model_family(temp.path()).expect("detect");
         assert!(family.is_none());
+    }
+
+    /// Write a safetensors file whose header declares a single tensor spanning
+    /// `[0, declared_data_len)` but whose data section on disk is only
+    /// `actual_data_len` bytes — so `declared_data_len > actual_data_len`
+    /// reproduces a truncated/interrupted download.
+    fn write_safetensors_with_data(path: &Path, declared_data_len: u64, actual_data_len: u64) {
+        let mut header = serde_json::Map::new();
+        header.insert("__metadata__".to_owned(), json!({"format": "pt"}));
+        header.insert(
+            "lora.weight".to_owned(),
+            json!({"dtype": "F16", "shape": [1], "data_offsets": [0, declared_data_len]}),
+        );
+        let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("serialize header");
+        let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        buffer.extend_from_slice(&header_bytes);
+        buffer.resize(buffer.len() + actual_data_len as usize, 0_u8);
+        std::fs::write(path, buffer).expect("write safetensors");
+    }
+
+    #[test]
+    fn read_safetensors_header_accepts_complete_data_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("complete.safetensors");
+        write_safetensors_with_data(&path, 32, 32);
+        read_safetensors_header(&path).expect("complete file is accepted");
+    }
+
+    #[test]
+    fn read_safetensors_header_accepts_trailing_padding() {
+        // A file larger than the declared data section (trailing padding) is not
+        // "incomplete"; only truncation is rejected.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("padded.safetensors");
+        write_safetensors_with_data(&path, 32, 64);
+        read_safetensors_header(&path).expect("over-long file is accepted");
+    }
+
+    #[test]
+    fn read_safetensors_header_rejects_truncated_data_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("truncated.safetensors");
+        // Header declares 1024 bytes of tensor data, but only 16 are present.
+        write_safetensors_with_data(&path, 1024, 16);
+        match read_safetensors_header(&path) {
+            Err(SafetensorsHeaderError::IncompleteData { declared, actual }) => {
+                assert!(
+                    actual < declared,
+                    "actual {actual} should be below declared minimum {declared}"
+                );
+            }
+            other => panic!("expected IncompleteData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_safetensors_header_accepts_empty_tensors() {
+        // The `write_safetensors` helper emits empty tensors (`data_offsets [0, 0]`);
+        // a header-only file with no tensor bytes is complete.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("empty.safetensors");
+        write_safetensors(&path, &["lora.weight".to_owned()]);
+        read_safetensors_header(&path).expect("empty-tensor file is accepted");
+    }
+
+    #[test]
+    fn max_tensor_data_end_skips_metadata_and_takes_max() {
+        let header = json!({
+            "__metadata__": {"format": "pt"},
+            "a": {"dtype": "F16", "shape": [1], "data_offsets": [0, 100]},
+            "b": {"dtype": "F16", "shape": [1], "data_offsets": [100, 420]},
+        });
+        assert_eq!(max_tensor_data_end(&header), 420);
+        assert_eq!(max_tensor_data_end(&json!({"__metadata__": {"x": "y"}})), 0);
     }
 
     #[test]
