@@ -5,7 +5,6 @@ import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { PreviewOverlay } from "./components/PreviewOverlay.jsx";
 import { fallbackModels, terminalStatuses } from "./constants.js";
-import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset } from "./presetUtils.js";
 import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
@@ -18,7 +17,7 @@ import { AppContext } from "./context/AppContext.js";
 import { PreviewContext } from "./context/PreviewContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { ACCENTS, DEFAULT_ACCENT, isAccentId } from "./accents.js";
-import { getViewTitle, navSections, renderActiveView } from "./routes.jsx";
+import { getViewTitle, navSections, renderActiveView, RouteFallback } from "./routes.jsx";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -39,6 +38,10 @@ const AUTH_LOCKED = "locked";
 const AUTH_VERIFYING = "verifying";
 const AUTH_AUTHENTICATED = "authenticated";
 const DEFAULT_ASSET_PAGE_LIMIT = 200;
+
+const SetupWizard = React.lazy(() =>
+  import("./screens/SetupWizard.jsx").then((module) => ({ default: module.SetupWizard })),
+);
 
 function mergeAssetsById(current, incoming) {
   const merged = new Map(current.map((asset) => [asset.id, asset]));
@@ -2108,14 +2111,16 @@ export function App() {
         ) : null}
 
         {showAuthUnlock ? null : showSetupWizard ? (
-          <SetupWizard
-            jobs={jobs}
-            models={models}
-            onComplete={completeSetupWizard}
-            onCreateProject={createProject}
-            onDownloadModel={createModelDownloadJob}
-            onOpenQueue={() => setActiveView("Queue")}
-          />
+          <React.Suspense fallback={<RouteFallback label="Loading setup…" />}>
+            <SetupWizard
+              jobs={jobs}
+              models={models}
+              onComplete={completeSetupWizard}
+              onCreateProject={createProject}
+              onDownloadModel={createModelDownloadJob}
+              onOpenQueue={() => setActiveView("Queue")}
+            />
+          </React.Suspense>
         ) : setupGateLoading ? null : needsFirstProject ? (
           <FirstRunProjectGate disabled={!authenticated} onCreate={createProject} />
         ) : (

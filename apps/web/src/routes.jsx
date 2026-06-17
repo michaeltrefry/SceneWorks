@@ -1,26 +1,35 @@
 import React from "react";
 import { Icon } from "./components/Icons.jsx";
-import { LibraryScreen } from "./screens/LibraryScreen.jsx";
-import { PoseLibraryScreen } from "./screens/PoseLibraryScreen.jsx";
-import { KeyPointLibraryScreen } from "./screens/KeyPointLibraryScreen.jsx";
-import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
-import { ImageStudio } from "./screens/ImageStudio.jsx";
-import { DocumentStudio } from "./screens/DocumentStudio.jsx";
-import { VideoStudio } from "./screens/VideoStudio.jsx";
-import { TrainingDataSetsLibrary, TrainingStudio } from "./screens/TrainingStudio.jsx";
-import { CharacterStudio } from "./screens/CharacterStudio.jsx";
-import { EditorScreen } from "./screens/EditorScreen.jsx";
-import { QueueScreen } from "./screens/QueueScreen.jsx";
-import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
-import { SettingsScreen } from "./screens/SettingsScreen.jsx";
-import { LogsScreen } from "./screens/LogsScreen.jsx";
-import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 
 // View metadata lives outside App so simple mode can swap or filter routes
 // without changing the stateful shell that owns data loading and providers.
-const ImageEditor = React.lazy(() =>
-  import("./screens/ImageEditor.jsx").then((module) => ({ default: module.ImageEditor })),
-);
+function lazyScreen(importer, exportName) {
+  return React.lazy(() => importer().then((module) => ({ default: module[exportName] })));
+}
+
+const loadTrainingScreens = () => import("./screens/TrainingStudio.jsx");
+
+const LibraryScreen = lazyScreen(() => import("./screens/LibraryScreen.jsx"), "LibraryScreen");
+const PoseLibraryScreen = lazyScreen(() => import("./screens/PoseLibraryScreen.jsx"), "PoseLibraryScreen");
+const KeyPointLibraryScreen = lazyScreen(() => import("./screens/KeyPointLibraryScreen.jsx"), "KeyPointLibraryScreen");
+const ModelManagerScreen = lazyScreen(() => import("./screens/ModelManagerScreen.jsx"), "ModelManagerScreen");
+const ImageStudio = lazyScreen(() => import("./screens/ImageStudio.jsx"), "ImageStudio");
+const DocumentStudio = lazyScreen(() => import("./screens/DocumentStudio.jsx"), "DocumentStudio");
+const VideoStudio = lazyScreen(() => import("./screens/VideoStudio.jsx"), "VideoStudio");
+const TrainingDataSetsLibrary = lazyScreen(loadTrainingScreens, "TrainingDataSetsLibrary");
+const TrainingStudio = lazyScreen(loadTrainingScreens, "TrainingStudio");
+const CharacterStudio = lazyScreen(() => import("./screens/CharacterStudio.jsx"), "CharacterStudio");
+const EditorScreen = lazyScreen(() => import("./screens/EditorScreen.jsx"), "EditorScreen");
+const ImageEditor = lazyScreen(() => import("./screens/ImageEditor.jsx"), "ImageEditor");
+const QueueScreen = lazyScreen(() => import("./screens/QueueScreen.jsx"), "QueueScreen");
+const PresetManagerScreen = lazyScreen(() => import("./screens/PresetManagerScreen.jsx"), "PresetManagerScreen");
+const SettingsScreen = lazyScreen(() => import("./screens/SettingsScreen.jsx"), "SettingsScreen");
+const LogsScreen = lazyScreen(() => import("./screens/LogsScreen.jsx"), "LogsScreen");
+const LicensesScreen = lazyScreen(() => import("./screens/LicensesScreen.jsx"), "LicensesScreen");
+
+export function RouteFallback({ label = "Loading view…" } = {}) {
+  return <section className="main-surface">{label}</section>;
+}
 
 export const navSections = [
   {
@@ -108,11 +117,7 @@ const viewRegistry = {
   ImageEditor: {
     title: "Image Editor",
     blurb: "Crop, upscale and refine a single image on a canvas.",
-    render: ({ activeProjectId }) => (
-      <React.Suspense fallback={<section className="main-surface">Loading editor…</section>}>
-        <ImageEditor key={activeProjectId ?? "default"} />
-      </React.Suspense>
-    ),
+    render: ({ activeProjectId }) => <ImageEditor key={activeProjectId ?? "default"} />,
   },
   Characters: {
     title: "Characters",
@@ -156,5 +161,9 @@ export function getViewTitle(viewId) {
 }
 
 export function renderActiveView(viewId, options) {
-  return viewRegistry[viewId]?.render(options) ?? null;
+  const view = viewRegistry[viewId];
+  if (!view) {
+    return null;
+  }
+  return <React.Suspense fallback={<RouteFallback />}>{view.render(options)}</React.Suspense>;
 }
