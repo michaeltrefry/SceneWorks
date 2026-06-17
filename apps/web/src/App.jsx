@@ -3,23 +3,8 @@ import { apiFetch, eventUrl, isAbortError } from "./api.js";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
-import { FullscreenPreview } from "./components/assetPanels.jsx";
+import { PreviewOverlay } from "./components/PreviewOverlay.jsx";
 import { fallbackModels, terminalStatuses } from "./constants.js";
-import { LibraryScreen } from "./screens/LibraryScreen.jsx";
-import { PoseLibraryScreen } from "./screens/PoseLibraryScreen.jsx";
-import { KeyPointLibraryScreen } from "./screens/KeyPointLibraryScreen.jsx";
-import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
-import { ImageStudio } from "./screens/ImageStudio.jsx";
-import { DocumentStudio } from "./screens/DocumentStudio.jsx";
-import { VideoStudio } from "./screens/VideoStudio.jsx";
-import { TrainingDataSetsLibrary, TrainingStudio } from "./screens/TrainingStudio.jsx";
-import { CharacterStudio } from "./screens/CharacterStudio.jsx";
-import { EditorScreen } from "./screens/EditorScreen.jsx";
-import { QueueScreen } from "./screens/QueueScreen.jsx";
-import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
-import { SettingsScreen } from "./screens/SettingsScreen.jsx";
-import { LogsScreen } from "./screens/LogsScreen.jsx";
-import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset } from "./presetUtils.js";
 import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
@@ -30,8 +15,10 @@ import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { AppContext } from "./context/AppContext.js";
+import { PreviewContext } from "./context/PreviewContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { ACCENTS, DEFAULT_ACCENT, isAccentId } from "./accents.js";
+import { getViewTitle, navSections, renderActiveView } from "./routes.jsx";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -46,6 +33,11 @@ import { buildWorkersById } from "./workers.js";
 // to the origin — can't be relied on across launches).
 const isDesktopShell = typeof window !== "undefined" && !!window.__TAURI__;
 const tauriInvoke = (command, args) => window.__TAURI__.core.invoke(command, args);
+const TOKEN_STORAGE_KEY = "sceneworks-token";
+const AUTH_CHECKING = "checking";
+const AUTH_LOCKED = "locked";
+const AUTH_VERIFYING = "verifying";
+const AUTH_AUTHENTICATED = "authenticated";
 
 function isActiveWorker(worker) {
   return worker.status !== "offline";
@@ -177,75 +169,6 @@ function buildLocalJobStack(rememberedIds, jobs, activeProjectId, isGenerationJo
   });
   return Array.from(byId.values()).sort(sortOldest).slice(-localJobStackLimit);
 }
-
-// Lazy-load the canvas editor so Konva (canvas-based, heavy) stays out of the
-// initial bundle and the jsdom test path — it only loads when the view is opened.
-const ImageEditor = React.lazy(() =>
-  import("./screens/ImageEditor.jsx").then((module) => ({ default: module.ImageEditor })),
-);
-
-const navSections = [
-  {
-    label: "Workspace",
-    items: [
-      { id: "Image", icon: Icon.Image },
-      { id: "Video", icon: Icon.Video },
-      // Character Studio is a generative studio (sc-2300) — it sits with Image/Video,
-      // below Video and above Training, not in the Library section.
-      { id: "Characters", icon: Icon.Character },
-      { id: "Document", icon: Icon.Wand },
-      { id: "Train", icon: Icon.Train },
-      { id: "ImageEditor", label: "Image Editor", icon: Icon.ImageEditor },
-      { id: "Editor", label: "Video Editor", icon: Icon.Editor },
-    ],
-  },
-  {
-    label: "Library",
-    items: [
-      { id: "Library", label: "Assets", icon: Icon.Library },
-      { id: "LibraryDataSets", label: "Data Sets", icon: Icon.Train },
-      { id: "Poses", label: "Pose Library", icon: Icon.Character },
-      { id: "Keypoints", label: "Key Point Library", icon: Icon.Character },
-      { id: "Presets", icon: Icon.Preset },
-      { id: "Models", icon: Icon.Model },
-    ],
-  },
-  {
-    label: "System",
-    items: [
-      { id: "Queue", icon: Icon.Queue },
-      { id: "Logs", icon: Icon.Logs },
-      { id: "Settings", icon: Icon.Sliders },
-      { id: "Licenses", icon: Icon.Info },
-    ],
-  },
-];
-
-const viewTitles = {
-  Library: { title: "Assets", blurb: "Browse stills and clips across all your projects." },
-  LibraryDataSets: { title: "Data Sets", blurb: "Create and caption training datasets." },
-  Poses: { title: "Pose Library", blurb: "Manage whole-body pose skeletons and create new ones from photos." },
-  Keypoints: {
-    title: "Key Point Library",
-    blurb: "Capture face-angle framing presets and compose angle-set collections for character turnarounds.",
-  },
-  Image: { title: "Image Studio", blurb: "Describe what you want — we'll render variations side by side." },
-  Video: { title: "Video Studio", blurb: "Bring stills to life, or render new clips from scratch." },
-  Document: { title: "Document Studio", blurb: "Generate interleaved text-image documents — guides, storyboards, tutorials." },
-  Train: { title: "Training Studio", blurb: "Build datasets and prepare LoRA training plans." },
-  Editor: { title: "Video Editor", blurb: "Cut, sequence and export your timeline." },
-  ImageEditor: { title: "Image Editor", blurb: "Crop, upscale and refine a single image on a canvas." },
-  Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
-  Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
-  Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
-  Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
-  Logs: { title: "Logs", blurb: "This session's activity — routing decisions, worker phases and errors." },
-  Settings: { title: "Settings", blurb: "Paths, service tokens, and detected GPU." },
-  Licenses: {
-    title: "Licenses",
-    blurb: "Third-party components bundled with SceneWorks and their license notices.",
-  },
-};
 
 function readStoredTheme() {
   if (typeof window === "undefined") {
@@ -462,8 +385,14 @@ function FirstRunProjectGate({ onCreate, disabled }) {
 
 export function App() {
   const [health, setHealth] = useState(null);
-  const [access, setAccess] = useState({ authRequired: false });
-  const [token, setToken] = useState(() => window.localStorage.getItem("sceneworks-token") ?? "");
+  const [access, setAccess] = useState(null);
+  const [authState, setAuthState] = useState(AUTH_CHECKING);
+  const [tokenInput, setTokenInput] = useState(() => window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? "");
+  const [verifiedToken, setVerifiedToken] = useState("");
+  const verifiedTokenRef = useRef("");
+  const [authMessage, setAuthMessage] = useState("");
+  const token = verifiedToken;
+  const authenticated = authState === AUTH_AUTHENTICATED;
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   // Desktop first-run wizard gate: null = unknown (still reading on desktop),
@@ -515,10 +444,10 @@ export function App() {
     );
     setPreviewAsset(asset);
   }, []);
-  const closePreview = () => {
+  const closePreview = useCallback(() => {
     setPreviewScopeIds(null);
     setPreviewAsset(null);
-  };
+  }, []);
   const [studioLaunch, setStudioLaunch] = useState(null);
   // sc-4198: a small notices store replaces the single `error` string that used to
   // double as a message bus — the fragile "lora import:"/"lora training:" startsWith
@@ -539,6 +468,43 @@ export function App() {
   // Back-compat: the existing setError(msg)/setError("") call sites map onto the
   // "general" notice kind — a truthy message replaces it, "" dismisses only it.
   const setError = useCallback((message) => pushNotice("general", message), [pushNotice]);
+  const lockAuth = useCallback((message = "Enter a valid pairing token to continue.") => {
+    setTokenInput((input) => input || verifiedTokenRef.current);
+    setVerifiedToken("");
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+    setAuthMessage(message);
+    setAuthState(AUTH_LOCKED);
+  }, []);
+  const verifyToken = useCallback(
+    async (candidate, { persist = false } = {}) => {
+      const trimmed = String(candidate ?? "").trim();
+      if (!trimmed) {
+        lockAuth("Enter a pairing token to continue.");
+        return false;
+      }
+      setAuthState(AUTH_VERIFYING);
+      setAuthMessage("");
+      try {
+        await apiFetch("/api/v1/auth/verify", trimmed, { method: "POST" });
+        if (persist) {
+          window.localStorage.setItem(TOKEN_STORAGE_KEY, trimmed);
+        }
+        setVerifiedToken(trimmed);
+        setTokenInput(trimmed);
+        setAuthState(AUTH_AUTHENTICATED);
+        setAuthMessage("");
+        setError("");
+        return true;
+      } catch {
+        window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+        setVerifiedToken("");
+        setAuthState(AUTH_LOCKED);
+        setAuthMessage("That pairing token was not accepted. Enter a new token to continue.");
+        return false;
+      }
+    },
+    [lockAuth, setError],
+  );
   const [theme, setTheme] = useState(readStoredTheme);
   // Apply a theme and persist it through the API. localStorage gives an instant
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
@@ -732,7 +698,9 @@ export function App() {
     createVideoJob,
   });
 
-  const authenticated = useMemo(() => !access.authRequired || token.length > 0, [access, token]);
+  useEffect(() => {
+    verifiedTokenRef.current = verifiedToken;
+  }, [verifiedToken]);
   const imageModels = useMemo(() => {
     const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
@@ -936,9 +904,34 @@ export function App() {
       .catch((err) => setError(err.message));
 
     apiFetch("/api/v1/access", "")
-      .then(setAccess)
+      .then((result) => {
+        setAccess(result);
+        if (!result.authRequired) {
+          setVerifiedToken("");
+          setAuthState(AUTH_AUTHENTICATED);
+          setAuthMessage("");
+          return;
+        }
+        const savedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? "";
+        setTokenInput(savedToken);
+        if (savedToken) {
+          verifyToken(savedToken, { persist: true });
+        } else {
+          lockAuth("Enter the pairing token to unlock SceneWorks.");
+        }
+      })
       .catch((err) => setError(err.message));
-  }, []);
+  }, [lockAuth, setError, verifyToken]);
+
+  useEffect(() => {
+    const onAuthRequired = () => {
+      if (access?.authRequired) {
+        lockAuth("Your pairing token was rejected. Enter a new token to continue.");
+      }
+    };
+    window.addEventListener("sceneworks:auth-required", onAuthRequired);
+    return () => window.removeEventListener("sceneworks:auth-required", onAuthRequired);
+  }, [access?.authRequired, lockAuth]);
 
   useEffect(() => {
     if (!isDesktopShell) {
@@ -1081,7 +1074,7 @@ export function App() {
     async function connect() {
       let ticket = "";
       try {
-        if (access.authRequired) {
+        if (access?.authRequired) {
           const response = await apiFetch("/api/v1/jobs/events/ticket", token, { method: "POST" });
           ticket = response.ticket;
         }
@@ -1127,7 +1120,7 @@ export function App() {
       }
       events?.close();
     };
-  }, [access.authRequired, authenticated, token]);
+  }, [access?.authRequired, authenticated, token]);
 
   async function refreshData() {
     const fetchInitial = async (label, path, fallback, optional = false) => {
@@ -1229,11 +1222,9 @@ export function App() {
   refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
 
 
-  function saveToken(event) {
+  async function saveToken(event) {
     event.preventDefault();
-    window.localStorage.setItem("sceneworks-token", token);
-    setError("");
-    refreshData();
+    await verifyToken(tokenInput, { persist: true });
   }
 
   async function completeSetupWizard() {
@@ -1517,7 +1508,7 @@ export function App() {
 
   // "Edit" from the fullscreen preview: open Image Studio in edit mode with this
   // image as the source, preselecting the family-matched edit model when possible.
-  function sendAssetToImageEdit(asset) {
+  const sendAssetToImageEdit = useCallback((asset) => {
     if (!asset) {
       return;
     }
@@ -1530,13 +1521,13 @@ export function App() {
       model: editModelForAsset(asset, imageModels),
     });
     setActiveView("Image");
-  }
+  }, [imageModels]);
 
   function recipeForAsset(asset) {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
-  function sendAssetRecipeToImage(asset) {
+  const sendAssetRecipeToImage = useCallback((asset) => {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
       return;
@@ -1551,7 +1542,7 @@ export function App() {
       recipe,
     });
     setActiveView("Image");
-  }
+  }, [closePreview]);
 
   const sendAssetToVideo = useCallback((asset, mode = null) => {
     if (!asset) {
@@ -1714,7 +1705,7 @@ export function App() {
     [token],
   );
 
-  const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
+  const titleInfo = getViewTitle(activeView);
   // Activity dots only — counts live in the topbar so nav button textContent stays clean.
   const activeIndicators = {
     Editor: timelines.length > 0,
@@ -1723,6 +1714,7 @@ export function App() {
   // First-run gate: until at least one workspace exists, replace the studio area
   // with a create prompt so navigation never lands on dead, project-scoped controls.
   const needsFirstProject = authenticated && projectsLoaded && projects.length === 0;
+  const showAuthUnlock = access?.authRequired && authState !== AUTH_AUTHENTICATED;
   // Desktop first-run wizard (sc-1473): supersedes the project gate while the
   // completion marker is unset. `null` means we're still reading the marker on
   // desktop — hold the studio/gate back briefly to avoid a flash.
@@ -1894,9 +1886,32 @@ export function App() {
     attachCharacterLora, updateCharacterLora, detachCharacterLora, createCharacterTestJob,
     sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary,
   ]);
+  const previewContextValue = useMemo(() => ({
+    previewedAsset,
+    previewNavigation,
+    previewDirectionRef,
+    setPreviewAsset,
+    closePreview,
+    deleteAsset,
+    purgeAsset,
+    updateAssetStatus,
+    sendAssetToImageEdit,
+    sendAssetRecipeToImage,
+  }), [
+    previewedAsset,
+    previewNavigation,
+    setPreviewAsset,
+    closePreview,
+    deleteAsset,
+    purgeAsset,
+    updateAssetStatus,
+    sendAssetToImageEdit,
+    sendAssetRecipeToImage,
+  ]);
 
   return (
     <AppContext.Provider value={appContextValue}>
+    <PreviewContext.Provider value={previewContextValue}>
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
@@ -1999,25 +2014,28 @@ export function App() {
           <p className="notice error" key={notice.kind}>{notice.message}</p>
         ))}
 
-        {access.authRequired && !window.localStorage.getItem("sceneworks-token") ? (
+        {showAuthUnlock ? (
           <section className="auth-band">
             <form onSubmit={saveToken}>
               <label htmlFor="token">Pairing token</label>
               <div className="form-row">
                 <input
                   id="token"
-                  onChange={(event) => setToken(event.target.value)}
+                  onChange={(event) => setTokenInput(event.target.value)}
                   placeholder="Enter local token"
                   type="password"
-                  value={token}
+                  value={tokenInput}
                 />
-                <button type="submit">Unlock</button>
+                <button disabled={authState === AUTH_VERIFYING} type="submit">
+                  {authState === AUTH_VERIFYING ? "Verifying…" : "Unlock"}
+                </button>
               </div>
+              {authMessage ? <p className="auth-message">{authMessage}</p> : null}
             </form>
           </section>
         ) : null}
 
-        {showSetupWizard ? (
+        {showAuthUnlock ? null : showSetupWizard ? (
           <SetupWizard
             jobs={jobs}
             models={models}
@@ -2029,109 +2047,13 @@ export function App() {
         ) : setupGateLoading ? null : needsFirstProject ? (
           <FirstRunProjectGate disabled={!authenticated} onCreate={createProject} />
         ) : (
-          <>
-        {activeView === "Library" ? (
-          <LibraryScreen />
-        ) : null}
-
-        {activeView === "LibraryDataSets" ? (
-          <TrainingDataSetsLibrary />
-        ) : null}
-
-        {activeView === "Poses" ? (
-          <PoseLibraryScreen />
-        ) : null}
-
-        {activeView === "Keypoints" ? (
-          <KeyPointLibraryScreen />
-        ) : null}
-
-        {activeView === "Image" ? (
-          <ImageStudio key={activeProject?.id ?? "default"} />
-        ) : null}
-
-        {activeView === "Video" ? (
-          <VideoStudio key={activeProject?.id ?? "default"} />
-        ) : null}
-
-        {activeView === "Document" ? (
-          <DocumentStudio />
-        ) : null}
-
-        {activeView === "Train" ? (
-          <TrainingStudio />
-        ) : null}
-
-        {activeView === "Presets" ? (
-          <PresetManagerScreen />
-        ) : null}
-
-        {activeView === "Queue" ? (
-          <QueueScreen />
-        ) : null}
-
-        {activeView === "Models" ? (
-          <ModelManagerScreen />
-        ) : null}
-
-        {activeView === "Editor" ? (
-          <EditorScreen />
-        ) : null}
-
-        {activeView === "ImageEditor" ? (
-          <React.Suspense fallback={<section className="main-surface">Loading editor…</section>}>
-            <ImageEditor key={activeProject?.id ?? "default"} />
-          </React.Suspense>
-        ) : null}
-
-        {activeView === "Characters" ? (
-          <CharacterStudio key={activeProject?.id ?? "default"} />
-        ) : null}
-        {activeView === "Settings" ? <SettingsScreen /> : null}
-        {activeView === "Logs" ? <LogsScreen /> : null}
-        {activeView === "Licenses" ? <LicensesScreen /> : null}
-          </>
+          renderActiveView(activeView, { activeProjectId: activeProject?.id })
         )}
       </section>
 
-      {previewedAsset ? (
-        <FullscreenPreview
-          asset={previewedAsset}
-          deleteAsset={async (asset) => {
-            // Stay in the preview and advance to the neighbour in the direction
-            // the user was scrolling (falling back to the other side, then to
-            // closing once nothing is left).
-            const { previous, next } = previewNavigation;
-            const target =
-              previewDirectionRef.current === "previous" ? previous ?? next : next ?? previous;
-            await deleteAsset(asset);
-            // Advance within the launch collection; close (and drop the scope)
-            // once it is exhausted.
-            if (target) {
-              setPreviewAsset(target);
-            } else {
-              closePreview();
-            }
-          }}
-          nextAsset={previewNavigation.next}
-          onClose={closePreview}
-          onEditImage={sendAssetToImageEdit}
-          onPreviewAsset={(asset, direction) => {
-            if (direction) {
-              previewDirectionRef.current = direction;
-            }
-            setPreviewAsset(asset);
-          }}
-          onUseRecipe={sendAssetRecipeToImage}
-          previousAsset={previewNavigation.previous}
-          purgeAsset={async (asset) => {
-            await purgeAsset(asset);
-            closePreview();
-          }}
-          updateAssetStatus={updateAssetStatus}
-        />
-      ) : null}
+      <PreviewOverlay />
     </main>
+    </PreviewContext.Provider>
     </AppContext.Provider>
   );
 }

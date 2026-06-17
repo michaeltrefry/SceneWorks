@@ -186,7 +186,9 @@ class FakeEventSource {
     this.listeners[event] = handler;
   }
 
-  close() {}
+  close() {
+    this.closed = true;
+  }
 }
 
 function response(payload) {
@@ -642,6 +644,12 @@ describe("SceneWorks app shell", () => {
     const baseFetch = global.fetch.getMockImplementation();
     global.fetch = vi.fn((url, options = {}) => {
       const path = new URL(url).pathname;
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: true }));
+      }
+      if (path.endsWith("/auth/verify")) {
+        return Promise.resolve(response({ ok: true }));
+      }
       if (path.endsWith("/api/v1/logs")) {
         logsTokens.push(new Headers(options.headers).get("X-SceneWorks-Token"));
         return Promise.resolve(response([]));
@@ -662,6 +670,176 @@ describe("SceneWorks app shell", () => {
 
     expect(logsTokens.length).toBeGreaterThan(0);
     expect(logsTokens.every((value) => value === "pair-tok-123")).toBe(true);
+  });
+
+  it("verifies a valid saved pairing token before loading protected data and SSE", async () => {
+    window.localStorage.setItem("sceneworks-token", "saved-token");
+    const requests = [];
+    let resolveVerify;
+    const verifyPromise = new Promise((resolve) => {
+      resolveVerify = resolve;
+    });
+    const baseFetch = global.fetch.getMockImplementation();
+    global.fetch = vi.fn((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests.push({ path, token: new Headers(options.headers).get("X-SceneWorks-Token") });
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: true }));
+      }
+      if (path.endsWith("/auth/verify")) {
+        return verifyPromise.then(() => response({ ok: true }));
+      }
+      return baseFetch(url, options);
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(requests.some((request) => request.path.endsWith("/projects"))).toBe(false);
+    expect(FakeEventSource.instances).toHaveLength(0);
+
+    await act(async () => {
+      resolveVerify();
+      await verifyPromise;
+    });
+    await settle();
+
+    expect(requests.find((request) => request.path.endsWith("/auth/verify"))?.token).toBe("saved-token");
+    expect(requests.find((request) => request.path.endsWith("/projects"))?.token).toBe("saved-token");
+    expect(requests.find((request) => request.path.endsWith("/jobs/events/ticket"))?.token).toBe("saved-token");
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it("rejects an invalid saved pairing token and shows the unlock UI", async () => {
+    window.localStorage.setItem("sceneworks-token", "bad-token");
+    const requests = [];
+    const baseFetch = global.fetch.getMockImplementation();
+    global.fetch = vi.fn((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests.push(path);
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: true }));
+      }
+      if (path.endsWith("/auth/verify")) {
+        return Promise.resolve(errorResponse(401, "nope"));
+      }
+      return baseFetch(url, options);
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Pairing token");
+    expect(container.textContent).toContain("not accepted");
+    expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
+    expect(requests.some((path) => path.endsWith("/projects"))).toBe(false);
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it("unlocks after pairing token submit succeeds", async () => {
+    const requests = [];
+    const baseFetch = global.fetch.getMockImplementation();
+    global.fetch = vi.fn((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests.push({ path, token: new Headers(options.headers).get("X-SceneWorks-Token") });
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: true }));
+      }
+      if (path.endsWith("/auth/verify")) {
+        return Promise.resolve(response({ ok: true }));
+      }
+      return baseFetch(url, options);
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await changeField(container.querySelector("#token"), "submitted-token");
+    await act(async () => {
+      container.querySelector(".auth-band form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    expect(container.textContent).not.toContain("Pairing token");
+    expect(window.localStorage.getItem("sceneworks-token")).toBe("submitted-token");
+    expect(requests.find((request) => request.path.endsWith("/auth/verify"))?.token).toBe("submitted-token");
+    expect(requests.find((request) => request.path.endsWith("/projects"))?.token).toBe("submitted-token");
+  });
+
+  it("keeps the unlock UI when pairing token submit fails", async () => {
+    const requests = [];
+    const baseFetch = global.fetch.getMockImplementation();
+    global.fetch = vi.fn((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests.push(path);
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: true }));
+      }
+      if (path.endsWith("/auth/verify")) {
+        return Promise.resolve(errorResponse(401, "nope"));
+      }
+      return baseFetch(url, options);
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await changeField(container.querySelector("#token"), "wrong-token");
+    await act(async () => {
+      container.querySelector(".auth-band form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Pairing token");
+    expect(container.textContent).toContain("not accepted");
+    expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
+    expect(requests.some((path) => path.endsWith("/projects"))).toBe(false);
+  });
+
+  it("recovers from a protected API 401 by returning to the unlock UI", async () => {
+    window.localStorage.setItem("sceneworks-token", "expired-token");
+    let projectsCalls = 0;
+    const baseFetch = global.fetch.getMockImplementation();
+    global.fetch = vi.fn((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: true }));
+      }
+      if (path.endsWith("/auth/verify")) {
+        return Promise.resolve(response({ ok: true }));
+      }
+      if (path.endsWith("/projects")) {
+        projectsCalls += 1;
+        return projectsCalls === 1
+          ? Promise.resolve(errorResponse(401, "expired"))
+          : Promise.resolve(response([{ id: "project-1", name: "Project One" }]));
+      }
+      return baseFetch(url, options);
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Pairing token");
+    expect(container.textContent).toContain("rejected");
+    expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
+    expect(FakeEventSource.instances.every((source) => source.closed)).toBe(true);
+    expect(container.querySelector("#token").value).toBe("expired-token");
   });
 
   it("gates the studios behind workspace creation when no projects exist", async () => {

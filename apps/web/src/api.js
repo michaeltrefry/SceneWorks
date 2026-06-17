@@ -17,6 +17,14 @@ export function isAbortError(err) {
   return err?.name === "AbortError";
 }
 
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 // `options` is forwarded to fetch, so callers can pass an AbortController
 // `signal` to cancel a request (e.g. a stale project-scoped load).
 export async function apiFetch(path, token, options = {}) {
@@ -32,7 +40,11 @@ export async function apiFetch(path, token, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
   if (!response.ok) {
     const detail = await response.json().catch(() => ({}));
-    throw new Error(detail.detail ?? `Request failed with ${response.status}`);
+    const error = new ApiError(detail.detail ?? `Request failed with ${response.status}`, response.status);
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("sceneworks:auth-required", { detail: { path } }));
+    }
+    throw error;
   }
   return response.json();
 }
