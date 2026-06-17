@@ -44,6 +44,10 @@ pub struct ImageRequest {
     pub character_look_id: Option<String>,
     pub source_asset_id: Option<String>,
     pub reference_asset_id: Option<String>,
+    /// Multiple reference images for a multi-reference edit (sc-6211). Plural companion to the
+    /// singular `reference_asset_id`; the FLUX.2-dev multi-image Image-Studio picker sends these.
+    /// Empty for every single-reference / character flow (which keeps using `reference_asset_id`).
+    pub reference_asset_ids: Vec<String>,
     pub mask_asset_id: Option<String>,
     /// One of crop/pad/outpaint/stretch (default crop).
     pub fit_mode: String,
@@ -75,6 +79,7 @@ impl ImageRequest {
             character_look_id: optional_id(payload, "characterLookId"),
             source_asset_id: optional_id(payload, "sourceAssetId"),
             reference_asset_id: optional_id(payload, "referenceAssetId"),
+            reference_asset_ids: string_list(payload, "referenceAssetIds"),
             mask_asset_id: optional_id(payload, "maskAssetId"),
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
             model_manifest_entry: object_or_empty(payload, "modelManifestEntry"),
@@ -157,6 +162,24 @@ fn int_array(payload: &JsonObject, key: &str) -> Vec<i64> {
                         .as_i64()
                         .or_else(|| value.as_str()?.trim().parse().ok())
                 })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Collect a JSON string array into trimmed, non-empty owned strings (sc-6211, mirrors the video
+/// request's `referenceAssetIds` parsing). Absent / non-array / all-blank → empty.
+fn string_list(payload: &JsonObject, key: &str) -> Vec<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
                 .collect()
         })
         .unwrap_or_default()

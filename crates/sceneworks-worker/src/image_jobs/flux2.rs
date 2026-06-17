@@ -68,10 +68,28 @@ fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
     }
 }
 
-/// Reference asset ids for a FLUX.2 edit: the character-flow `referenceAssetId`, else
-/// the Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
-/// `ref_id = referenceAssetId or (sourceAssetId if edit_image)`.
+/// Upper bound on reference images for a multi-reference edit (sc-6211). Even with the engine's
+/// sequence-gated activation chunking (sc-6266), the FLUX.2-dev edit stays activation-bound: 4
+/// references at 1024² peak ~93 GB and 5 would exceed the 96 GB floor (measured). The per-machine
+/// `flux2_dev_edit_memory_guard` rejects over-budget combinations with an actionable message; this
+/// caps absurd inputs (and bounds the DiT sequence) before that.
+const MAX_EDIT_REFERENCES: usize = 4;
+
+/// Reference asset ids for a FLUX.2 edit. The FLUX.2-dev multi-image picker (sc-6211) sends the
+/// plural `referenceAssetIds` — take all of them in order, capped at [`MAX_EDIT_REFERENCES`]. With no
+/// plural list it falls back to the single-reference flows: the character `referenceAssetId`, else the
+/// Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
+/// `ref_id = referenceAssetId or (sourceAssetId if edit_image)`, plus the new multi-reference set.
 fn flux2_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        // Parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
+        return request
+            .reference_asset_ids
+            .iter()
+            .take(MAX_EDIT_REFERENCES)
+            .cloned()
+            .collect();
+    }
     if let Some(id) = request
         .reference_asset_id
         .as_deref()
@@ -117,33 +135,34 @@ fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
 }
 
 /// Estimated peak unified-memory footprint (GB) of a FLUX.2-dev edit at `width`×`height` with
-/// `reference_count` reference images — the input to the sc-6124 multi-reference memory guard. The
-/// dev edit is activation-bound: the DiT attends over the target latent plus every reference latent,
-/// each ≈⌈W/16⌉·⌈H/16⌉ tokens (VAE ×8, patch ×2), so the peak scales with the total sequence length.
-/// Anchored on the sc-5923 worker-layer measurements (Q4 packed, `/usr/bin/time -l` peak on a 128 GB
-/// Mac): single-reference 1024² ~81 GB, two-reference 1024² ~104 GB — a linear-in-tokens fit over
-/// those two edit points (`BASE + PER_TOKEN·(1 + refs)·tokens_per_image`). Only used on the
-/// multi-reference branch (`reference_count >= 2`); txt2img and single-reference are covered directly
-/// by the declared `minMemoryGb`, and the cheaper txt2img per-token slope is intentionally out of
-/// scope here (the fit is calibrated to the heavier edit sequence the guard actually gates).
+/// `reference_count` reference images — the input to the multi-reference memory guard. The dev edit is
+/// activation-bound: the DiT attends over the target latent plus every reference latent, each
+/// ≈⌈W/16⌉·⌈H/16⌉ tokens (VAE ×8, patch ×2), so the peak scales with the total sequence length.
+/// Re-anchored for sc-6211 on the **chunked** worker-layer measurements (Q4 packed, `/usr/bin/time
+/// -l` peak on a 128 GB Mac, with the sc-6266 engine sequence-gated activation chunking ON): a
+/// two-reference 1024² edit ~81 GB and a four-reference 1024² edit ~93 GB — a linear-in-tokens fit
+/// over those two chunked edit points (`BASE + PER_TOKEN·(1 + refs)·tokens_per_image`). The chunked
+/// slope (~0.0015 GB/token) is ~3.8× gentler than the pre-chunking sc-5923 fit (0.005615), which is
+/// why the two-reference edit now fits under 96. Only used on the multi-reference branch
+/// (`reference_count >= 2`); txt2img and single-reference are covered directly by the declared
+/// `minMemoryGb`.
 fn flux2_dev_edit_peak_gb(reference_count: usize, width: u32, height: u32) -> f64 {
-    const BASE_GB: f64 = 35.0;
-    const PER_TOKEN_GB: f64 = 0.005_615; // (104 − 81) GB / (12288 − 8192) tokens, sc-5923.
+    const BASE_GB: f64 = 62.9;
+    const PER_TOKEN_GB: f64 = 0.001_489; // (93 − 81) GB / (20480 − 12288) tokens, sc-6211 (chunked).
     let tokens_per_image = (f64::from(width) / 16.0).ceil() * (f64::from(height) / 16.0).ceil();
     let total_tokens = (1.0 + reference_count as f64) * tokens_per_image;
     BASE_GB + PER_TOKEN_GB * total_tokens
 }
 
-/// Prevent a silent OOM on a FLUX.2-dev **multi-reference** edit (sc-6124). The default reachable
-/// surface (txt2img + single-reference edit) fits the declared `minMemoryGb` (96), but a
-/// multi-reference edit adds each reference's latent tokens to the DiT sequence and is
-/// activation-bound — two references at 1024² peak ~104 GB (sc-5923), above the floor. It runs on a
-/// 128 GB Mac but would be SIGKILL'd mid-render on a 96–104 GB machine. When the estimated peak plus
-/// a fixed runtime/OS headroom exceeds the machine's unified memory, reject with an actionable
-/// message instead. `reference_count < 2` and a failed RAM probe (`available_gb == None`)
-/// short-circuit to `Ok`, so the guard is inert for every path reachable today (the worker assembles
-/// at most one user reference; this fires only once a multi-image edit picker feeds two or more) and
-/// never blocks a machine that can actually fit the edit.
+/// Prevent a silent OOM on a FLUX.2-dev **multi-reference** edit. With the sc-6266 engine activation
+/// chunking a two-reference 1024² edit now peaks ~81 GB (sc-6211) and fits the declared `minMemoryGb`
+/// (96); but the edit stays activation-bound, so more references / higher resolution still grow the
+/// footprint (three-reference 1024² ~87 GB, four ~93 GB, five+ over 96). When the estimated peak plus
+/// a fixed runtime/OS headroom exceeds the machine's unified memory, reject with an actionable message
+/// instead of being SIGKILL'd mid-render. `reference_count < 2` and a failed RAM probe (`available_gb
+/// == None`) short-circuit to `Ok`, so the guard never touches txt2img / single-reference and never
+/// blocks a machine that can actually fit the edit. (Pre-sc-6266 this rejected the two-reference edit
+/// outright on a 96 GB Mac — the ~104 GB un-chunked peak; the re-anchored estimate now passes it.)
 fn flux2_dev_edit_memory_guard(
     reference_count: usize,
     width: u32,
@@ -156,9 +175,10 @@ fn flux2_dev_edit_memory_guard(
     let Some(available_gb) = available_gb else {
         return Ok(());
     };
-    // The measured 2-reference/1024² config (~104 GB) completed on a 128 GB Mac, so require the
-    // estimated peak plus a fixed headroom for the OS + MLX Metal transient allocations.
-    const HEADROOM_GB: f64 = 16.0;
+    // Headroom for the OS + other apps + MLX Metal transient allocations on top of the (accurate,
+    // chunked) estimate. 12 GB passes the canonical two-reference 1024² edit (~81 GB) on a 96 GB Mac
+    // while rejecting the genuinely-too-tight three+/high-resolution combinations.
+    const HEADROOM_GB: f64 = 12.0;
     let needed_gb = flux2_dev_edit_peak_gb(reference_count, width, height);
     if available_gb + f64::EPSILON < needed_gb + HEADROOM_GB {
         return Err(WorkerError::InvalidPayload(format!(

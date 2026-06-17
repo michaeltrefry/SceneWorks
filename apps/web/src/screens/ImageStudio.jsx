@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
+import { AssetPickerField, ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -341,6 +341,12 @@ export function ImageStudio() {
   const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
   const [resolution, setResolution] = useState(saved.resolution ?? "1024x1024");
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
+  // Multi-image reference set for a multi-reference edit (sc-6211, FLUX.2-dev). Drives the plural
+  // `referenceAssetIds` payload when the model declares `ui.multiReference` and the user is in
+  // edit_image mode (replaces the single source picker). Empty for every other model/mode.
+  const [referenceAssetIds, setReferenceAssetIds] = useState(() =>
+    Array.isArray(saved.referenceAssetIds) ? saved.referenceAssetIds : [],
+  );
   // Edit fit mode (epic 2551): how the source is fitted to the output W×H. Never stretch.
   const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
   const [characterId, setCharacterId] = useState("");
@@ -569,6 +575,10 @@ export function ImageStudio() {
   const poseLibrary = Boolean(selectedModel?.ui?.poseLibrary);
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
   const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
+  // Whether the model supports multi-image reference editing (sc-6211) — edit_image mode shows a
+  // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
+  // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
+  const multiReference = Boolean(selectedModel?.ui?.multiReference);
   // Mac UI gating (sc-3486): disable the per-model feature controls the selected model can't run
   // in the Rust/MLX flow on Mac, so the user never reaches a `mlx_unsupported` error after submit.
   const macEditBlock = macModelFeatureBlock(selectedModel, macCapabilities, "edit");
@@ -966,6 +976,7 @@ export function ImageStudio() {
     negativePrompt,
     resolution,
     fitMode,
+    referenceAssetIds,
     ipAdapterScale,
     controlnetScale,
     trueCfgScale,
@@ -1097,7 +1108,14 @@ export function ImageStudio() {
         recipePresetId: selectedPreset?.id ?? null,
         characterId: mode === "character_image" ? characterId || null : null,
         characterLookId: mode === "character_image" ? characterLookId || null : null,
-        sourceAssetId: mode === "edit_image" ? sourceAssetId || null : null,
+        // edit_image: a single source image, except for a multi-reference model (sc-6211,
+        // FLUX.2-dev) whose source picker is replaced by the multi-image reference picker below.
+        sourceAssetId: mode === "edit_image" && !multiReference ? sourceAssetId || null : null,
+        // Multi-reference edit (sc-6211): the plural reference set the FLUX.2-dev edit conditions on.
+        // Only sent in edit_image mode for a multiReference model; the worker routes a non-empty list
+        // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit).
+        referenceAssetIds:
+          mode === "edit_image" && multiReference && referenceAssetIds.length ? referenceAssetIds : undefined,
         // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
         // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
         fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
@@ -1315,17 +1333,33 @@ export function ImageStudio() {
           <div className="studio-source-band">
             {mode === "edit_image" ? (
               <>
-                <ImageEditSourcePickerField
-                  assets={editImageAssets}
-                  buttonLabel="Select image"
-                  characters={characters}
-                  emptyLabel="No source image selected"
-                  importAsset={importAsset}
-                  label="Source image"
-                  onChange={setSourceAssetId}
-                  projectId={activeProject?.id}
-                  value={sourceAssetId}
-                />
+                {multiReference ? (
+                  // sc-6211: FLUX.2-dev multi-reference edit — pick 1–N reference images that the
+                  // model combines/edits (Conditioning::MultiReference). Sends the plural
+                  // `referenceAssetIds`; a single pick reduces to the normal single-reference edit.
+                  <AssetPickerField
+                    assets={editImageAssets}
+                    buttonLabel="Select images"
+                    changeLabel="Edit references"
+                    emptyLabel="No reference images selected"
+                    label="Reference images"
+                    multiple
+                    onChange={setReferenceAssetIds}
+                    values={referenceAssetIds}
+                  />
+                ) : (
+                  <ImageEditSourcePickerField
+                    assets={editImageAssets}
+                    buttonLabel="Select image"
+                    characters={characters}
+                    emptyLabel="No source image selected"
+                    importAsset={importAsset}
+                    label="Source image"
+                    onChange={setSourceAssetId}
+                    projectId={activeProject?.id}
+                    value={sourceAssetId}
+                  />
+                )}
                 <FitModeControl
                   value={effectiveFitMode(fitMode, editInpaintCapable)}
                   onChange={setFitMode}

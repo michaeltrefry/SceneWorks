@@ -2360,25 +2360,27 @@ fn flux2_edit_engine_id_maps_variants() {
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
 }
 
-// ---- sc-6124: FLUX.2-dev multi-reference edit memory guard -----------------------------------
+// ---- sc-6124 / sc-6211: FLUX.2-dev multi-reference edit memory guard --------------------------
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_dev_edit_peak_gb_tracks_sc5923_measurements() {
-    // sc-5923 worker-layer peaks (Q4, 1024², /usr/bin/time -l): single-ref ~81, 2-ref ~104 GB.
-    let single = flux2_dev_edit_peak_gb(1, 1024, 1024);
-    let double = flux2_dev_edit_peak_gb(2, 1024, 1024);
+fn flux2_dev_edit_peak_gb_tracks_chunked_measurements() {
+    // sc-6211 worker-layer peaks with the sc-6266 chunking ON (Q4, 1024², /usr/bin/time -l):
+    // 2-ref ~81 GB, 4-ref ~93 GB. (Pre-chunking sc-5923 had 2-ref ~104 — the re-anchored fit is
+    // ~3.8× gentler per token, which is why the 2-ref edit now fits 96.)
+    let two = flux2_dev_edit_peak_gb(2, 1024, 1024);
+    let four = flux2_dev_edit_peak_gb(4, 1024, 1024);
     assert!(
-        (single - 81.0).abs() < 2.0,
-        "single-reference estimate {single} GB ≉ measured ~81"
+        (two - 81.0).abs() < 2.0,
+        "two-reference estimate {two} GB ≉ measured ~81"
     );
     assert!(
-        (double - 104.0).abs() < 2.0,
-        "two-reference estimate {double} GB ≉ measured ~104"
+        (four - 93.0).abs() < 2.0,
+        "four-reference estimate {four} GB ≉ measured ~93"
     );
     // Monotonic in both reference count and resolution.
-    assert!(double > single);
-    assert!(flux2_dev_edit_peak_gb(2, 768, 768) < double);
+    assert!(four > two);
+    assert!(flux2_dev_edit_peak_gb(2, 768, 768) < two);
 }
 
 #[cfg(target_os = "macos")]
@@ -2388,17 +2390,19 @@ fn flux2_dev_edit_memory_guard_gates_multiref_on_small_machines() {
     // small machine, and regardless of the RAM probe.
     assert!(flux2_dev_edit_memory_guard(1, 1024, 1024, Some(64.0)).is_ok());
     assert!(flux2_dev_edit_memory_guard(0, 1024, 1024, Some(64.0)).is_ok());
-    // Two references at 1024² (~104 GB peak): fits a 128 GB Mac, rejected on a 96 GB one.
+    // sc-6211: the chunked two-reference 1024² edit (~81 GB) now PASSES on a 96 GB Mac (the whole
+    // point of this story) and of course on a 128 GB one.
+    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, Some(96.0)).is_ok());
     assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, Some(128.0)).is_ok());
-    let err = flux2_dev_edit_memory_guard(2, 1024, 1024, Some(96.0)).unwrap_err();
+    // Four references at 1024² (~93 GB peak) is too tight for a 96 GB machine but fits a 128 GB one.
+    let err = flux2_dev_edit_memory_guard(4, 1024, 1024, Some(96.0)).unwrap_err();
     assert!(
         matches!(&err, WorkerError::InvalidPayload(msg) if msg.contains("multi-reference")),
         "expected an actionable multi-reference rejection, got {err:?}"
     );
-    // Dropping to 768² brings the two-reference edit (~74 GB) back under a 96 GB budget.
-    assert!(flux2_dev_edit_memory_guard(2, 768, 768, Some(96.0)).is_ok());
+    assert!(flux2_dev_edit_memory_guard(4, 1024, 1024, Some(128.0)).is_ok());
     // A failed RAM probe is lenient (don't block a possibly-fine job).
-    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, None).is_ok());
+    assert!(flux2_dev_edit_memory_guard(4, 1024, 1024, None).is_ok());
 }
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
@@ -2650,6 +2654,44 @@ fn flux2_edit_reference_ids_prefers_reference_then_source() {
     })))
     .is_empty());
     assert!(flux2_edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
+    // sc-6211: the multi-image picker sends `referenceAssetIds` — all of them, in order, win over the
+    // singular fields.
+    assert_eq!(
+        flux2_edit_reference_ids(&request(json!({
+            "projectId": "p",
+            "referenceAssetIds": ["a", "b", "c"],
+            "referenceAssetId": "singular_ignored"
+        }))),
+        vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+    );
+    // Capped at MAX_EDIT_REFERENCES (4) — a 6-image pick keeps the first four.
+    assert_eq!(
+        flux2_edit_reference_ids(&request(json!({
+            "projectId": "p",
+            "referenceAssetIds": ["a", "b", "c", "d", "e", "f"]
+        })))
+        .len(),
+        MAX_EDIT_REFERENCES
+    );
+    // A single pick in the plural picker reduces to the single-reference path.
+    assert_eq!(
+        flux2_edit_reference_ids(&request(json!({
+            "projectId": "p", "referenceAssetIds": ["only"]
+        }))),
+        vec!["only".to_owned()]
+    );
+    // Empty plural list falls back to the singular reference flow.
+    assert_eq!(
+        flux2_edit_reference_ids(&request(json!({
+            "projectId": "p", "referenceAssetIds": [], "referenceAssetId": "ref_1"
+        }))),
+        vec!["ref_1".to_owned()]
+    );
 }
 
 #[cfg(target_os = "macos")]

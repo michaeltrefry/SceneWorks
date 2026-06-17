@@ -1254,18 +1254,16 @@
       // (sc-2365) — so minMemoryGb 96 (128 GB Macs only). The convert pre-quantizes
       // transformer + text_encoder and symlinks the (identical-to-klein) VAE +
       // tokenizer + model_index.json from the gated source snapshot.
-      // sc-5923 worker-layer footprint (Q4, 1024², /usr/bin/time -l peak): T2I ~74 GB,
-      // single-reference edit ~81 GB — both within 96, so minMemoryGb stays 96. A
-      // multi-reference (2-image) edit peaks ~104 GB (> 96, activation-bound on the longer
-      // ref sequence): it runs on a 128 GB Mac but would OOM a 96–104 GB one. That path is
-      // currently UI-latent (no multi-image picker; the worker assembles at most one user
-      // reference, and dev poses route to the flux2_dev_control engine, sc-6055). sc-6124
-      // reconciles this WITHOUT inflating the global floor (which would gate the common 74 GB
-      // T2I path behind 128 GB-only): the worker `flux2_dev_edit_memory_guard` rejects a
-      // multi-reference dev edit whose estimated peak + headroom exceeds the machine's unified
-      // memory (so no silent OOM), leaving 96 honest for the reachable surface. Making the
-      // multi-reference edit a first-class sub-96 GB mode (engine activation-chunking) is the
-      // tracked follow-up, gated on a future multi-image edit picker.
+      // Worker-layer footprint (Q4, 1024², /usr/bin/time -l peak): T2I ~74 GB, single-reference
+      // edit ~81 GB — both within 96. Multi-reference edit (sc-6211): with the engine's
+      // sequence-gated activation chunking (sc-6266) a 2-image edit peaks ~81 GB and a 4-image
+      // ~93 GB (down from ~104 GB un-chunked, sc-5923) — so the canonical multi-reference edit is
+      // now a first-class sub-96 GB mode, reachable via the Image-Studio multi-image picker
+      // (ui.multiReference). minMemoryGb stays 96 (inflating it would gate the common 74 GB T2I
+      // path behind 128 GB-only). The edit is still activation-bound, so the worker
+      // `flux2_dev_edit_memory_guard` (re-anchored on the chunked curve) rejects the genuinely
+      // over-budget combinations (≥3 references / higher resolution that exceed the machine's
+      // unified memory) with an actionable message instead of a silent OOM.
       "mlx": {
         "minMemoryGb": 96,
         "quantize": 4,
@@ -1326,6 +1324,14 @@
         // advanced.enhancePrompt; the worker threads it into the dev GenerationRequest (off by
         // default; every other model ignores the field).
         "promptEnhance": true,
+        // Multi-image reference editing (sc-6211): Image Studio shows a multi-select reference
+        // picker (vs the single-image picker) for the edit/reference flow. The picker sends the
+        // plural `referenceAssetIds`; the worker conditions the FLUX.2-dev edit on all of them
+        // (Conditioning::MultiReference). The DiT's sequence-gated activation chunking (sc-6266)
+        // keeps a 2-reference 1024² edit under 96 GB; the worker memory guard rejects per-machine
+        // over-budget combinations. Only FLUX.2-dev exposes this today (the only multi-reference-
+        // capable image model with the sub-96 GB chunking).
+        "multiReference": true,
         "promptGuide": {
           "title": "FLUX.2 [dev] Prompt Guide",
           "path": "/prompt-guides/flux2-dev.md",
