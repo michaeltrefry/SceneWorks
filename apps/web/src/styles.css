@@ -9118,3 +9118,52 @@ details[open] > summary.lora-scope-group-heading::before,
   height: 100%;
   object-fit: cover;
 }
+.sw-grid-video {
+  grid-template-columns: repeat(2, 1fr);
+}
+.sw-grid-video .sw-shot {
+  aspect-ratio: 16 / 9;
+}
+
+/* Make a video — "Start from" chooser */
+.sw-startfrom {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.sw-sf {
+  text-align: left;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 14px 16px;
+  cursor: pointer;
+  font-family: var(--font-ui);
+}
+.sw-sf:hover {
+  border-color: var(--text);
+}
+.sw-sf.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.sw-sf b {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text);
+}
+.sw-sf b svg {
+  width: 18px;
+  height: 18px;
+}
+.sw-sf span {
+  display: block;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.sw-pickwrap {
+  margin-top: 18px;
+}

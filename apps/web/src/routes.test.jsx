@@ -19,8 +19,9 @@ describe("route visibility by interface mode", () => {
   it("shows the simple create routes only in simple mode", () => {
     const simpleIds = getNavigationSections("simple").flatMap((section) => section.items.map((item) => item.id));
 
-    expect(simpleIds).toEqual(["MakePicture", "Library", "Queue", "Settings"]);
+    expect(simpleIds).toEqual(["MakePicture", "MakeVideo", "Library", "Queue", "Settings"]);
     expect(isViewVisibleInMode("MakePicture", "simple")).toBe(true);
+    expect(isViewVisibleInMode("MakeVideo", "simple")).toBe(true);
     expect(isViewVisibleInMode("Train", "simple")).toBe(false);
     expect(isViewVisibleInMode("MakePicture", "advanced")).toBe(false);
   });

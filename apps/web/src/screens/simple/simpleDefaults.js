@@ -35,6 +35,26 @@ export const UPSCALE_OPTIONS = [
 // Fallback resolution menu when a model doesn't advertise `limits.resolutions`.
 export const FALLBACK_RESOLUTIONS = ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"];
 
+// Friendly "Movement" chips for Make a video → the worker's `advanced.motion`
+// vocabulary (see MOTIONS in VideoStudio). Kept to a calm subset.
+export const VIDEO_MOTIONS = [
+  { id: "static", label: "Hold steady", motion: "static" },
+  { id: "push", label: "Push in", motion: "slow push-in" },
+  { id: "pull", label: "Pull out", motion: "pull out" },
+  { id: "pan", label: "Pan across", motion: "pan right" },
+  { id: "handheld", label: "Handheld", motion: "handheld" },
+];
+
+// Quality tiers → the worker's `quality` value (jobTypes qualityChoices).
+export const QUALITY_CHOICES = [
+  { id: "fast", label: "Draft (fast)" },
+  { id: "balanced", label: "Balanced" },
+  { id: "best", label: "Final (slow)" },
+];
+
+export const FALLBACK_VIDEO_RESOLUTIONS = ["1280x720", "768x1280", "768x768"];
+export const FALLBACK_DURATIONS = [4, 6, 8];
+
 // Compose the prompt the engine receives: the user's words plus the look's
 // descriptive suffix (deduped if the user already typed it).
 export function composePrompt(prompt, look) {

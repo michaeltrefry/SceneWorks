@@ -647,7 +647,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(window.localStorage.getItem("sceneworks-ui-mode")).toBe("simple");
-    expect(navLabels(container, "Create")).toEqual(["Make a picture"]);
+    expect(navLabels(container, "Create")).toEqual(["Make a picture", "Make a video"]);
     expect(navLabels(container, "Yours")).toEqual(["My creations", "In progress", "Settings"]);
     expect(navLabels(container, "Workspace")).toEqual([]);
     expect(container.textContent).not.toContain("Training Studio");
