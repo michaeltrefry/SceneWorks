@@ -171,6 +171,63 @@ fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
     }
 }
 
+/// Estimated peak unified-memory footprint (GB) of a FLUX.2-dev edit at `width`×`height` with
+/// `reference_count` reference images — the input to the sc-6124 multi-reference memory guard. The
+/// dev edit is activation-bound: the DiT attends over the target latent plus every reference latent,
+/// each ≈⌈W/16⌉·⌈H/16⌉ tokens (VAE ×8, patch ×2), so the peak scales with the total sequence length.
+/// Anchored on the sc-5923 worker-layer measurements (Q4 packed, `/usr/bin/time -l` peak on a 128 GB
+/// Mac): single-reference 1024² ~81 GB, two-reference 1024² ~104 GB — a linear-in-tokens fit over
+/// those two edit points (`BASE + PER_TOKEN·(1 + refs)·tokens_per_image`). Only used on the
+/// multi-reference branch (`reference_count >= 2`); txt2img and single-reference are covered directly
+/// by the declared `minMemoryGb`, and the cheaper txt2img per-token slope is intentionally out of
+/// scope here (the fit is calibrated to the heavier edit sequence the guard actually gates).
+fn flux2_dev_edit_peak_gb(reference_count: usize, width: u32, height: u32) -> f64 {
+    const BASE_GB: f64 = 35.0;
+    const PER_TOKEN_GB: f64 = 0.005_615; // (104 − 81) GB / (12288 − 8192) tokens, sc-5923.
+    let tokens_per_image = (f64::from(width) / 16.0).ceil() * (f64::from(height) / 16.0).ceil();
+    let total_tokens = (1.0 + reference_count as f64) * tokens_per_image;
+    BASE_GB + PER_TOKEN_GB * total_tokens
+}
+
+/// Prevent a silent OOM on a FLUX.2-dev **multi-reference** edit (sc-6124). The default reachable
+/// surface (txt2img + single-reference edit) fits the declared `minMemoryGb` (96), but a
+/// multi-reference edit adds each reference's latent tokens to the DiT sequence and is
+/// activation-bound — two references at 1024² peak ~104 GB (sc-5923), above the floor. It runs on a
+/// 128 GB Mac but would be SIGKILL'd mid-render on a 96–104 GB machine. When the estimated peak plus
+/// a fixed runtime/OS headroom exceeds the machine's unified memory, reject with an actionable
+/// message instead. `reference_count < 2` and a failed RAM probe (`available_gb == None`)
+/// short-circuit to `Ok`, so the guard is inert for every path reachable today (the worker assembles
+/// at most one user reference; this fires only once a multi-image edit picker feeds two or more) and
+/// never blocks a machine that can actually fit the edit.
+fn flux2_dev_edit_memory_guard(
+    reference_count: usize,
+    width: u32,
+    height: u32,
+    available_gb: Option<f64>,
+) -> WorkerResult<()> {
+    if reference_count < 2 {
+        return Ok(());
+    }
+    let Some(available_gb) = available_gb else {
+        return Ok(());
+    };
+    // The measured 2-reference/1024² config (~104 GB) completed on a 128 GB Mac, so require the
+    // estimated peak plus a fixed headroom for the OS + MLX Metal transient allocations.
+    const HEADROOM_GB: f64 = 16.0;
+    let needed_gb = flux2_dev_edit_peak_gb(reference_count, width, height);
+    if available_gb + f64::EPSILON < needed_gb + HEADROOM_GB {
+        return Err(WorkerError::InvalidPayload(format!(
+            "FLUX.2-dev multi-reference edit at {width}×{height} with {reference_count} reference \
+             images needs ~{needed} GB of unified memory (with headroom) but this machine has \
+             ~{available} GB. Lower the output resolution, use a single reference image, or run on \
+             a Mac with more memory.",
+            needed = needed_gb.round() as i64,
+            available = available_gb.round() as i64,
+        )));
+    }
+    Ok(())
+}
+
 /// Generate one FLUX.2 edit image conditioned on `conditioning` (the reference set).
 /// Distilled klein: guidance 1.0, no negative prompt.
 #[allow(clippy::too_many_arguments)]
@@ -292,6 +349,20 @@ async fn generate_flux2_edit_stream(
                 fit_engine_image(reference, request.width, request.height, &request.fit_mode)
             })
             .collect::<WorkerResult<Vec<_>>>()?;
+    }
+
+    // sc-6124: guard the activation-bound FLUX.2-dev *multi-reference* edit against a silent OOM on
+    // machines below its real requirement. The reachable surface (txt2img + single-reference edit)
+    // fits the declared `minMemoryGb` (96); a second reference adds ~4096 latent tokens to the DiT
+    // stream and pushes the 1024² peak to ~104 GB (sc-5923), over the floor. Single-reference and
+    // txt2img short-circuit, so this is inert until a multi-image edit picker feeds ≥2 references.
+    if engine_id == "flux2_dev_edit" {
+        flux2_dev_edit_memory_guard(
+            references.len(),
+            request.width,
+            request.height,
+            crate::gpu::total_unified_memory_gb().await,
+        )?;
     }
 
     // sc-3030 per-iteration grouping: a Character-Studio angle set (11 shared-seed,

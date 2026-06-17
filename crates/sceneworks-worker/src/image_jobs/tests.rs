@@ -2354,6 +2354,47 @@ fn flux2_edit_engine_id_maps_variants() {
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
 }
 
+// ---- sc-6124: FLUX.2-dev multi-reference edit memory guard -----------------------------------
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_dev_edit_peak_gb_tracks_sc5923_measurements() {
+    // sc-5923 worker-layer peaks (Q4, 1024², /usr/bin/time -l): single-ref ~81, 2-ref ~104 GB.
+    let single = flux2_dev_edit_peak_gb(1, 1024, 1024);
+    let double = flux2_dev_edit_peak_gb(2, 1024, 1024);
+    assert!(
+        (single - 81.0).abs() < 2.0,
+        "single-reference estimate {single} GB ≉ measured ~81"
+    );
+    assert!(
+        (double - 104.0).abs() < 2.0,
+        "two-reference estimate {double} GB ≉ measured ~104"
+    );
+    // Monotonic in both reference count and resolution.
+    assert!(double > single);
+    assert!(flux2_dev_edit_peak_gb(2, 768, 768) < double);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_dev_edit_memory_guard_gates_multiref_on_small_machines() {
+    // Single reference / txt2img always pass — covered by the declared minMemoryGb — even on a
+    // small machine, and regardless of the RAM probe.
+    assert!(flux2_dev_edit_memory_guard(1, 1024, 1024, Some(64.0)).is_ok());
+    assert!(flux2_dev_edit_memory_guard(0, 1024, 1024, Some(64.0)).is_ok());
+    // Two references at 1024² (~104 GB peak): fits a 128 GB Mac, rejected on a 96 GB one.
+    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, Some(128.0)).is_ok());
+    let err = flux2_dev_edit_memory_guard(2, 1024, 1024, Some(96.0)).unwrap_err();
+    assert!(
+        matches!(&err, WorkerError::InvalidPayload(msg) if msg.contains("multi-reference")),
+        "expected an actionable multi-reference rejection, got {err:?}"
+    );
+    // Dropping to 768² brings the two-reference edit (~74 GB) back under a 96 GB budget.
+    assert!(flux2_dev_edit_memory_guard(2, 768, 768, Some(96.0)).is_ok());
+    // A failed RAM probe is lenient (don't block a possibly-fine job).
+    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, None).is_ok());
+}
+
 // ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
 
 #[cfg(target_os = "macos")]

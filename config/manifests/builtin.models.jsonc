@@ -1251,10 +1251,17 @@
       // transformer + text_encoder and symlinks the (identical-to-klein) VAE +
       // tokenizer + model_index.json from the gated source snapshot.
       // sc-5923 worker-layer footprint (Q4, 1024², /usr/bin/time -l peak): T2I ~74 GB,
-      // single-reference edit ~81 GB — both within 96. Multi-reference (2-image) edit
-      // peaks ~104 GB (> 96, activation-bound on the longer ref sequence); that path is
-      // currently UI-latent for dev (no multi-image picker; pose routes to the
-      // flux2_dev_control engine, sc-6055) and is tracked for an engine/guard fix.
+      // single-reference edit ~81 GB — both within 96, so minMemoryGb stays 96. A
+      // multi-reference (2-image) edit peaks ~104 GB (> 96, activation-bound on the longer
+      // ref sequence): it runs on a 128 GB Mac but would OOM a 96–104 GB one. That path is
+      // currently UI-latent (no multi-image picker; the worker assembles at most one user
+      // reference, and dev poses route to the flux2_dev_control engine, sc-6055). sc-6124
+      // reconciles this WITHOUT inflating the global floor (which would gate the common 74 GB
+      // T2I path behind 128 GB-only): the worker `flux2_dev_edit_memory_guard` rejects a
+      // multi-reference dev edit whose estimated peak + headroom exceeds the machine's unified
+      // memory (so no silent OOM), leaving 96 honest for the reachable surface. Making the
+      // multi-reference edit a first-class sub-96 GB mode (engine activation-chunking) is the
+      // tracked follow-up, gated on a future multi-image edit picker.
       "mlx": {
         "minMemoryGb": 96,
         "quantize": 4,
