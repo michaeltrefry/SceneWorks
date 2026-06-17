@@ -1,0 +1,156 @@
+import React, { act, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import StructuredPromptBuilder from "./StructuredPromptBuilder.jsx";
+import { emptyCaption, serializeCaption, validateCaption } from "../ideogramCaption.js";
+
+// Native-setter trick so React's onChange fires for controlled inputs/textareas.
+function setValue(el, value) {
+  const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function click(el) {
+  el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+}
+
+function blur(el) {
+  // React 18 delegates onBlur via the bubbling `focusout` event.
+  el.dispatchEvent(new Event("focusout", { bubbles: true }));
+}
+
+describe("StructuredPromptBuilder", () => {
+  let container;
+  let root;
+  let snap;
+
+  // Stateful wrapper so we can drive the controlled component and read back the
+  // caption it builds.
+  function Harness({ initialMode = "form", initialCaption }) {
+    const [caption, setCaption] = useState(initialCaption ?? emptyCaption());
+    const [mode, setMode] = useState(initialMode);
+    const [plain, setPlain] = useState("");
+    const validation = validateCaption(caption, { plainText: plain });
+    snap = { caption, mode, plain, validation };
+    return (
+      <StructuredPromptBuilder
+        caption={caption}
+        onCaptionChange={setCaption}
+        validation={validation}
+        mode={mode}
+        onModeChange={setMode}
+        plainText={plain}
+        onPlainTextChange={setPlain}
+      />
+    );
+  }
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    snap = null;
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  const byPlaceholder = (prefix) => container.querySelector(`[placeholder^="${prefix}"]`);
+  const buttonByText = (text) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+
+  async function mount(props = {}) {
+    await act(async () => root.render(<Harness {...props} />));
+  }
+
+  it("builds a valid, key-ordered caption from the form fields", async () => {
+    await mount();
+    await act(async () => setValue(byPlaceholder("One sentence"), "A red fox in the snow"));
+    await act(async () => setValue(byPlaceholder("The scene behind"), "A snowy pine forest"));
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "a red fox sitting upright"));
+
+    expect(snap.validation.ok).toBe(true);
+    expect(serializeCaption(snap.caption)).toBe(
+      '{"high_level_description": "A red fox in the snow", "compositional_deconstruction": {"background": "A snowy pine forest", "elements": [{"type": "obj", "desc": "a red fox sitting upright"}]}}',
+    );
+  });
+
+  it("orders text-element keys (type, bbox, text, desc) when toggled to Text with a box", async () => {
+    await mount();
+    await act(async () => setValue(byPlaceholder("The scene behind"), "bg"));
+    await act(async () => click(buttonByText("+ Text")));
+    await act(async () => setValue(byPlaceholder("The exact characters"), "HELLO"));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "bold serif headline"));
+    await act(async () => click(buttonByText("+ Bounding box")));
+
+    expect(snap.validation.ok).toBe(true);
+    expect(serializeCaption(snap.caption)).toBe(
+      '{"compositional_deconstruction": {"background": "bg", "elements": [{"type": "text", "bbox": [0, 0, 1000, 1000], "text": "HELLO", "desc": "bold serif headline"}]}}',
+    );
+  });
+
+  it("commits a normalized palette on blur (lowercase -> uppercase, dedup)", async () => {
+    await mount();
+    await act(async () => setValue(byPlaceholder("The scene behind"), "bg"));
+    await act(async () => click(buttonByText("+ Object")));
+    const palette = byPlaceholder("#RRGGBB");
+    await act(async () => setValue(palette, "#ff0000, #00ff00 #ff0000"));
+    await act(async () => blur(palette));
+
+    const el = snap.caption.compositional_deconstruction.elements[0];
+    expect(el.color_palette).toEqual(["#FF0000", "#00FF00"]);
+  });
+
+  it("shows the live ordered-JSON preview and applies raw-JSON edits", async () => {
+    await mount({ initialMode: "json" });
+    const editor = container.querySelector('textarea[aria-label="JSON caption"]');
+    expect(editor).toBeTruthy();
+
+    const edited = '{"compositional_deconstruction": {"background": "new bg", "elements": []}}';
+    await act(async () => setValue(editor, edited));
+    expect(snap.caption.compositional_deconstruction.background).toBe("new bg");
+
+    // Invalid JSON surfaces an error and preserves the last valid caption.
+    await act(async () => setValue(editor, "{not json"));
+    expect(container.querySelector(".structured-error")).toBeTruthy();
+    expect(snap.caption.compositional_deconstruction.background).toBe("new bg");
+  });
+
+  it("renders the plain-text fallback and forwards edits", async () => {
+    await mount({ initialMode: "plain" });
+    const plain = container.querySelector('textarea[aria-label="Plain prompt"]');
+    expect(plain).toBeTruthy();
+    await act(async () => setValue(plain, "a fox in the snow"));
+    expect(snap.plain).toBe("a fox in the snow");
+    // No JSON preview in plain mode.
+    expect(container.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
+  });
+
+  it("switches modes via the segmented control", async () => {
+    await mount();
+    const jsonTab = [...container.querySelectorAll(".structured-mode button")].find(
+      (b) => b.textContent.trim() === "JSON",
+    );
+    await act(async () => click(jsonTab));
+    expect(snap.mode).toBe("json");
+  });
+
+  it("reports blocking validation errors in the preview (out-of-range bbox)", async () => {
+    const bad = {
+      compositional_deconstruction: {
+        background: "bg",
+        elements: [{ type: "obj", bbox: [0, 0, 5000, 10], desc: "d" }],
+      },
+    };
+    await mount({ initialCaption: bad });
+    expect(snap.validation.ok).toBe(false);
+    expect(container.querySelector(".structured-issues-error")).toBeTruthy();
+  });
+});

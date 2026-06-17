@@ -7,6 +7,8 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
+import { emptyCaption, serializeCaption, validateCaption } from "../ideogramCaption.js";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
@@ -297,6 +299,13 @@ export function ImageStudio() {
   // prompt never clobbers their own wording. A restored prompt counts as edited so
   // re-entering character mode doesn't overwrite it.
   const promptEdited = useRef(saved.prompt != null);
+  // Structured JSON-caption prompt (Ideogram 4, epic 4725). `caption` is the
+  // typed model from ideogramCaption.js; `promptMode` selects the builder form,
+  // raw-JSON edit, or the plain-text fallback. Only used when the selected model
+  // declares `structuredPrompt`; the plain `prompt` state doubles as the
+  // plain-text / magic-prompt seed.
+  const [caption, setCaption] = useState(() => saved.structuredCaption ?? emptyCaption());
+  const [promptMode, setPromptMode] = useState(saved.promptMode ?? "form");
   const setPromptFromUser = (value) => {
     promptEdited.current = true;
     setPrompt(value);
@@ -553,6 +562,28 @@ export function ImageStudio() {
   // the IP-Adapter reference-strength slider (sc-2017).
   const variationStrength = selectedModel?.ui?.variationStrength;
   const hideReferenceStrength = Boolean(selectedModel?.ui?.hideReferenceStrength);
+  // Structured JSON-caption surface (Ideogram 4, epic 4725). When the model
+  // declares `structuredPrompt`, the prompt hero swaps the plain textarea for the
+  // builder and the engine receives the canonically-ordered JSON caption string.
+  const structuredPromptModel = Boolean(selectedModel?.structuredPrompt);
+  const captionValidation = useMemo(
+    () => (structuredPromptModel ? validateCaption(caption, { plainText: prompt }) : null),
+    [structuredPromptModel, caption, prompt],
+  );
+  // Structured mode is active when a structured model is selected and the user
+  // isn't in the plain-text fallback tab.
+  const structuredActive = structuredPromptModel && promptMode !== "plain";
+  // A non-empty caption: at least a high-level description, a background, or one
+  // element carrying content — guards Generate against the empty-but-valid skeleton.
+  const captionHasContent = useMemo(() => {
+    if (!structuredActive) return false;
+    const cd = caption?.compositional_deconstruction ?? {};
+    if (String(caption?.high_level_description ?? "").trim()) return true;
+    if (String(cd.background ?? "").trim()) return true;
+    return (Array.isArray(cd.elements) ? cd.elements : []).some(
+      (el) => (el?.desc && String(el.desc).trim()) || (el?.type === "text" && el?.text && String(el.text).trim()),
+    );
+  }, [structuredActive, caption]);
   // Reset the reference tuning to the selected model's declared defaults whenever the
   // model changes, so InstantID starts at its tuned 0.8/0.8 and Kolors at 0.6, and the
   // view angle never carries over to a model that doesn't support it. Skip the mount
@@ -857,6 +888,8 @@ export function ImageStudio() {
   useStudioSettingsWriter("image", activeProject?.id ?? null, {
     mode,
     prompt,
+    structuredCaption: caption,
+    promptMode,
     count,
     advancedOpen,
     model,
@@ -979,9 +1012,12 @@ export function ImageStudio() {
         mode === "character_image" && referenceAssetId && poseLibrary && selectedPoseIds.length
           ? selectedPoseIds.map((id) => poseById[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
           : [];
+      // Structured models send the canonically-ordered JSON caption as the
+      // prompt; plain-text mode (and every other model) sends the literal prompt.
+      const promptToSend = structuredActive ? serializeCaption(caption) : prompt;
       const job = await createImageJob({
         mode,
-        prompt,
+        prompt: promptToSend,
         negativePrompt,
         model,
         count: posePayload.length ? 1 : count,
@@ -1066,7 +1102,9 @@ export function ImageStudio() {
   const generateDisabled =
     submitting ||
     !activeProject ||
-    !prompt.trim() ||
+    // Structured models gate on a valid, non-empty caption; everyone else on a
+    // non-empty prompt. (Plain-text fallback falls through to the prompt check.)
+    (structuredActive ? !captionValidation?.ok || !captionHasContent : !prompt.trim()) ||
     (mode === "character_image" && !characterId) ||
     Boolean(macActiveModeBlock) ||
     !presetValidationResult.ok ||
@@ -1122,46 +1160,64 @@ export function ImageStudio() {
             </div>
           </div>
 
-          <div className="prompt-input-row">
-            <textarea
-              aria-label="Prompt"
-              className="prompt-input"
-              onChange={(event) => setPromptFromUser(event.target.value)}
-              onKeyDown={onPromptKeyDown}
-              placeholder="Describe your shot — subject, lighting, mood, lens…"
-              value={prompt}
-            />
+          <div className={`prompt-input-row${structuredPromptModel ? " structured" : ""}`}>
+            {structuredPromptModel ? (
+              <StructuredPromptBuilder
+                caption={caption}
+                onCaptionChange={setCaption}
+                validation={captionValidation}
+                mode={promptMode}
+                onModeChange={setPromptMode}
+                plainText={prompt}
+                onPlainTextChange={setPromptFromUser}
+              />
+            ) : (
+              <textarea
+                aria-label="Prompt"
+                className="prompt-input"
+                onChange={(event) => setPromptFromUser(event.target.value)}
+                onKeyDown={onPromptKeyDown}
+                placeholder="Describe your shot — subject, lighting, mood, lens…"
+                value={prompt}
+              />
+            )}
             <button className="prompt-cta" disabled={generateDisabled} type="submit">
               <Icon.Sparkle size={14} />
               {submitting ? "Queueing…" : "Generate"}
             </button>
           </div>
 
-          <RefinePromptControl
-            guidePath={promptGuide.path}
-            modelId={model}
-            onApply={setPromptFromUser}
-            prompt={prompt}
-            refinePrompt={refinePrompt}
-            refineModel={refineModel}
-            onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
-            workflow="image"
-          />
+          {/* Plain-text refine + scene suggestions only make sense for free-text
+              prompts; structured models get the builder + (later) magic-prompt. */}
+          {structuredPromptModel ? null : (
+            <>
+              <RefinePromptControl
+                guidePath={promptGuide.path}
+                modelId={model}
+                onApply={setPromptFromUser}
+                prompt={prompt}
+                refinePrompt={refinePrompt}
+                refineModel={refineModel}
+                onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
+                workflow="image"
+              />
 
-          <div className="suggestion-row">
-            <span className="suggestion-row-label">Try:</span>
-            {suggestions.map((suggestion) => (
-              <button
-                className="suggestion"
-                key={suggestion}
-                onClick={() => setPromptFromUser(suggestion)}
-                type="button"
-              >
-                <Icon.Sparkle size={11} />
-                {suggestion}
-              </button>
-            ))}
-          </div>
+              <div className="suggestion-row">
+                <span className="suggestion-row-label">Try:</span>
+                {suggestions.map((suggestion) => (
+                  <button
+                    className="suggestion"
+                    key={suggestion}
+                    onClick={() => setPromptFromUser(suggestion)}
+                    type="button"
+                  >
+                    <Icon.Sparkle size={11} />
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         {mode === "edit_image" || mode === "character_image" ? (

@@ -1542,6 +1542,229 @@ label {
   box-shadow: none;
 }
 
+/* Ideogram 4 structured JSON-caption builder (epic 4725, sc-5994). The
+   structured row stacks the full-width builder above a full-width Generate CTA. */
+.prompt-input-row.structured {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.structured-prompt-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.structured-mode {
+  align-self: flex-start;
+}
+
+.structured-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.structured-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.structured-field > span,
+.structured-bbox-label {
+  color: color-mix(in oklch, var(--text) 70%, transparent);
+}
+
+.structured-field input[type="text"],
+.structured-field input[type="number"],
+.structured-textarea,
+.structured-json-input,
+.structured-plain .prompt-input {
+  font-weight: 400;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.structured-textarea {
+  min-height: 56px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.45;
+}
+
+.structured-field input:focus,
+.structured-textarea:focus,
+.structured-json-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.structured-style {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 12px 12px;
+  margin: 0;
+}
+
+.structured-style legend {
+  padding: 0 4px;
+}
+
+.structured-checkline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.structured-style-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.structured-kind {
+  align-self: flex-start;
+}
+
+.structured-elements {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.structured-elements-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.structured-element {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+}
+
+.structured-element-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.structured-bbox-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.structured-bbox-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.structured-bbox-row input {
+  width: 72px;
+}
+
+.structured-link {
+  background: none;
+  border: 0;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.structured-link:hover {
+  text-decoration: underline;
+}
+
+.structured-hint {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: color-mix(in oklch, var(--text) 60%, transparent);
+}
+
+.structured-json-input {
+  min-height: 180px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.structured-preview {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.structured-preview-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: color-mix(in oklch, var(--text) 60%, transparent);
+  margin-bottom: 6px;
+}
+
+.structured-preview pre {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.structured-issues {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+
+.structured-issues-error {
+  color: var(--danger);
+}
+
+.structured-issues-warn {
+  color: var(--warm);
+}
+
+.structured-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
 .suggestion-row {
   display: flex;
   flex-wrap: wrap;
