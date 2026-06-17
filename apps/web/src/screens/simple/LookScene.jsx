@@ -1,10 +1,10 @@
 import React from "react";
 
-// Static "look exemplar" art: one canonical subject (a cabin at dusk) rendered
+// Fallback "look exemplar" art: one canonical subject (a cabin at dusk) rendered
 // as an inline SVG whose palette is driven by per-look CSS variables (see the
-// [data-ui-mode="simple"] .look-* rules in styles.css). This is the Phase-7
-// placeholder — TODO(sc-simple-looks): replace with engine-rendered, cached
-// thumbnails (one canonical prompt per look) plus a "Refresh looks" re-roll.
+// [data-ui-mode="simple"] .look-* rules in styles.css). Shown until an engine-
+// rendered exemplar exists for the look — see useLookExemplars + LookTile, which
+// render and cache one image per look with a "Refresh looks" re-roll.
 export function LookScene({ className = "" }) {
   return (
     <svg

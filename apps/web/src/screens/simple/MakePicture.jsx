@@ -3,7 +3,8 @@ import { useAppContext } from "../../context/AppContext.js";
 import { Icon } from "../../components/Icons.jsx";
 import { AssetThumbnail } from "../../components/assetMedia.jsx";
 import { pickClosestResolution, parseResolution } from "../../resolutionMatch.js";
-import { LookScene } from "./LookScene.jsx";
+import { LookTile } from "./LookTile.jsx";
+import { useLookExemplars } from "./useLookExemplars.js";
 import {
   LOOKS,
   SHAPES,
@@ -42,6 +43,7 @@ export function MakePicture() {
   const [describing, setDescribing] = useState(false);
   const [notice, setNotice] = useState("");
 
+  const looks = useLookExemplars();
   const model = imageModels[0] ?? null;
   const modelId = model?.id ?? "z_image_turbo";
   const look = useMemo(() => LOOKS.find((entry) => entry.id === lookId) ?? null, [lookId]);
@@ -122,8 +124,13 @@ export function MakePicture() {
           </div>
 
           <div className="sw-field">
-            <h3 className="sw-q">
-              Pick a look <span className="sw-opt">— optional</span>
+            <h3 className="sw-q sw-look-head">
+              <span>Pick a look <span className="sw-opt">— optional</span></span>
+              {looks.canRender ? (
+                <button type="button" className="sw-refresh" onClick={() => looks.refresh()} disabled={looks.refreshing}>
+                  <Icon.Sparkle /> {looks.refreshing ? "Rendering…" : looks.hasAny ? "Refresh looks" : "Preview looks"}
+                </button>
+              ) : null}
             </h3>
             <div className="sw-tiles">
               {LOOKS.map((entry) => (
@@ -134,7 +141,7 @@ export function MakePicture() {
                   aria-pressed={lookId === entry.id}
                   onClick={() => setLookId((current) => (current === entry.id ? null : entry.id))}
                 >
-                  <LookScene />
+                  <LookTile asset={looks.assetForLook(entry.id)} pending={Boolean(looks.pending[entry.id])} />
                   <span>{entry.label}</span>
                 </button>
               ))}

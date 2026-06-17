@@ -9722,3 +9722,53 @@ details[open] > summary.lora-scope-group-heading::before,
 .sw-teach-hint {
   margin-top: 14px;
 }
+
+/* Engine-rendered look exemplars */
+.sw-look-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sw-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  border-radius: var(--r-pill);
+  padding: 6px 12px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+.sw-refresh:hover {
+  border-color: var(--accent);
+}
+.sw-refresh[disabled] {
+  opacity: 0.6;
+  cursor: default;
+}
+.sw-refresh svg {
+  width: 14px;
+  height: 14px;
+}
+.sw-look-img {
+  object-fit: cover;
+}
+.sw-look-pending {
+  background: linear-gradient(100deg, var(--surface-hover) 30%, var(--accent-soft) 50%, var(--surface-hover) 70%);
+  background-size: 220% 100%;
+  animation: sw-look-shimmer 1.2s ease-in-out infinite;
+}
+@keyframes sw-look-shimmer {
+  0% { background-position: 180% 0; }
+  100% { background-position: -40% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sw-look-pending {
+    animation: none;
+  }
+}

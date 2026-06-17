@@ -5,7 +5,8 @@ import { AssetThumbnail } from "../../components/assetMedia.jsx";
 import { AssetPickerField } from "../../components/AssetPicker.jsx";
 import { effectiveFitMode } from "../../components/FitModeControl.jsx";
 import { pickClosestResolution, parseResolution } from "../../resolutionMatch.js";
-import { LookScene } from "./LookScene.jsx";
+import { LookTile } from "./LookTile.jsx";
+import { useLookExemplars } from "./useLookExemplars.js";
 import {
   LOOKS,
   SHAPES,
@@ -48,6 +49,7 @@ export function MakeVideo() {
   const [describing, setDescribing] = useState(false);
   const [notice, setNotice] = useState("");
 
+  const looks = useLookExemplars();
   const model = videoModels[0] ?? null;
   const modelId = model?.id ?? "";
   const motion = useMemo(() => VIDEO_MOTIONS.find((entry) => entry.id === motionId) ?? VIDEO_MOTIONS[0], [motionId]);
@@ -217,8 +219,13 @@ export function MakeVideo() {
           </div>
 
           <div className="sw-field">
-            <h3 className="sw-q">
-              Look <span className="sw-opt">— optional</span>
+            <h3 className="sw-q sw-look-head">
+              <span>Look <span className="sw-opt">— optional</span></span>
+              {looks.canRender ? (
+                <button type="button" className="sw-refresh" onClick={() => looks.refresh()} disabled={looks.refreshing}>
+                  <Icon.Sparkle /> {looks.refreshing ? "Rendering…" : looks.hasAny ? "Refresh looks" : "Preview looks"}
+                </button>
+              ) : null}
             </h3>
             <div className="sw-tiles">
               {LOOKS.map((entry) => (
@@ -229,7 +236,7 @@ export function MakeVideo() {
                   aria-pressed={lookId === entry.id}
                   onClick={() => setLookId((current) => (current === entry.id ? null : entry.id))}
                 >
-                  <LookScene />
+                  <LookTile asset={looks.assetForLook(entry.id)} pending={Boolean(looks.pending[entry.id])} />
                   <span>{entry.label}</span>
                 </button>
               ))}
