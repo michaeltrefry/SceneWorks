@@ -25,6 +25,22 @@ const GATED_MODEL = {
   ui: { description: "Gated FLUX model." },
 };
 
+// A gated model re-hosted on the SceneWorks HF org: access is requested at the
+// download repo, but the license terms live on the original source repo (sc-5999).
+const REHOSTED_GATED_MODEL = {
+  id: "ideogram_4",
+  name: "Ideogram 4",
+  type: "image",
+  family: "ideogram",
+  installState: "missing",
+  downloadable: true,
+  gated: true,
+  credentialHost: "huggingface.co",
+  licenseUrl: "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
+  downloads: [{ provider: "huggingface", repo: "SceneWorks/ideogram-4-mlx", files: ["q4/*"] }],
+  ui: { description: "Gated re-hosted model." },
+};
+
 const PLAIN_MODEL = {
   id: "z_image_turbo",
   name: "Z-Image-Turbo",
@@ -116,16 +132,31 @@ describe("ModelManagerScreen gated-model notice", () => {
     await click(settingsButton);
     expect(setActiveView).toHaveBeenCalledWith("Settings");
 
-    const license = container.querySelector(".model-gated-actions a");
-    expect(license?.getAttribute("href")).toBe(
+    // licenseUrl is the gated repo itself (no separate re-host), so a single
+    // request-access link points there — no duplicate "Review license" link.
+    const links = [...container.querySelectorAll(".model-gated-actions a")];
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe("Request access on Hugging Face");
+    expect(links[0].getAttribute("href")).toBe(
       "https://huggingface.co/black-forest-labs/FLUX.1-dev",
     );
+  });
+
+  it("links the re-hosted repo for access plus the source license when they differ (sc-5999)", async () => {
+    await render([REHOSTED_GATED_MODEL]);
+    const links = [...container.querySelectorAll(".model-gated-actions a")];
+    const access = links.find((anchor) => anchor.textContent === "Request access on Hugging Face");
+    const license = links.find((anchor) => anchor.textContent === "Review license");
+    expect(access?.getAttribute("href")).toBe("https://huggingface.co/SceneWorks/ideogram-4-mlx");
+    expect(license?.getAttribute("href")).toBe("https://huggingface.co/ideogram-ai/ideogram-4-fp8");
   });
 
   it("softens the notice once a matching credential is present", async () => {
     credentials = [{ host: "huggingface.co", label: "Hugging Face", scheme: "bearer", present: true }];
     await render([GATED_MODEL]);
-    expect(container.textContent).toContain("ready to download");
+    // A saved token still requires requesting access on the repo, so the softened
+    // notice nudges that step rather than implying the download is unblocked.
+    expect(container.textContent).toContain("request access on the model page");
     expect(container.textContent).not.toContain("Add token in Settings");
   });
 

@@ -128,20 +128,36 @@ function loraGroupKey(lora) {
   return lora.family ?? extractFamilies(lora)[0] ?? "";
 }
 
+// The Hugging Face page of a gated model's primary download repo — where the user
+// clicks "Agree and access" to be granted access with their token (sc-5999). Derived
+// from the first HF download repo (or the mlx repo), so it covers every gated model
+// without a per-model manifest field. Falls back to `licenseUrl` when no repo is known.
+function gatedRepoUrl(model) {
+  const host = model.credentialHost || "huggingface.co";
+  const repo =
+    (model.downloads ?? []).find((entry) => entry.provider === "huggingface" && entry.repo)?.repo ??
+    model.mlx?.repo;
+  return repo ? `https://${host}/${repo}` : null;
+}
+
 // Gated models (e.g. FLUX.1 [dev]) need an accepted license + a saved credential
 // before a download can succeed. The catalog flags these with `gated`/
 // `credentialHost`/`licenseUrl` (sc-1898). When the matching credential is already
 // present we soften the notice to a ready state; otherwise we point the user at the
 // Settings credential screen. `present` is undefined while presence is still
 // unknown (e.g. the credential list hasn't loaded) — we still show the link then.
-function GatedModelNotice({ host, licenseUrl, present, onOpenSettings }) {
+// `repoUrl` links the gated repo so the user can request access (sc-5999); shown
+// alongside `licenseUrl` only when the license lives on a different page (e.g.
+// Ideogram 4, whose terms are on the source repo but access is on the SceneWorks repo).
+function GatedModelNotice({ host, repoUrl, licenseUrl, present, onOpenSettings }) {
   const hostLabel = host || "the required service";
+  const showSeparateLicense = licenseUrl && licenseUrl !== repoUrl;
   return (
     <div className={present ? "model-gated-notice ready" : "model-gated-notice"}>
       <p className={present ? "inline-success" : "inline-warning"}>
         {present
-          ? `Credential for ${hostLabel} saved — ready to download.`
-          : `Gated download. Add a ${hostLabel} token, then accept the model's license before downloading.`}
+          ? `Credential for ${hostLabel} saved — request access on the model page, then download.`
+          : `Gated download. Add a ${hostLabel} token, then request access on the model page and accept the license before downloading.`}
       </p>
       <div className="model-gated-actions">
         {present ? null : (
@@ -149,7 +165,12 @@ function GatedModelNotice({ host, licenseUrl, present, onOpenSettings }) {
             Add token in Settings
           </button>
         )}
-        {licenseUrl ? (
+        {repoUrl ? (
+          <a href={repoUrl} target="_blank" rel="noreferrer noopener">
+            Request access on Hugging Face
+          </a>
+        ) : null}
+        {showSeparateLicense ? (
           <a href={licenseUrl} target="_blank" rel="noreferrer noopener">
             Review license
           </a>
@@ -580,6 +601,7 @@ export function ModelManagerScreen() {
         {gated && !installed ? (
           <GatedModelNotice
             host={model.credentialHost}
+            repoUrl={gatedRepoUrl(model) ?? model.licenseUrl ?? null}
             licenseUrl={model.licenseUrl}
             present={credentialPresent}
             onOpenSettings={() => setActiveView("Settings")}
