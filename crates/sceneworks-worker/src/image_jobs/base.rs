@@ -796,7 +796,7 @@ pub(crate) fn load_reference_image(
     // than a bare join — matching the media-jobs reads and keeping a poisoned
     // sidecar from reading an arbitrary file as the reference (sc-4278 / F-MLXW-14).
     let path = crate::safe_project_path(project_path, rel)?;
-    let decoded = image::open(&path)
+    let decoded = crate::image_decode::decode_image_any(&path)
         .map_err(|error| {
             WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
         })?

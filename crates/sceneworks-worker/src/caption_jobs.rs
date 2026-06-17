@@ -555,7 +555,7 @@ fn resolve_caption_weights_dir(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn load_caption_image(path: &Path) -> WorkerResult<Image> {
-    let decoded = image::open(path)
+    let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
             WorkerError::InvalidPayload(format!("caption image {}: {error}", path.display()))
         })?

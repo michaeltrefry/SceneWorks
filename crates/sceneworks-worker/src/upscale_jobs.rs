@@ -737,7 +737,7 @@ pub(crate) async fn run_image_upscale_job(
             ))
         })?;
 
-    let source_image = image::open(&source_path)
+    let source_image = crate::image_decode::decode_image_any(&source_path)
         .map_err(|e| WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}")))?
         .to_rgb8();
     let (src_w, src_h) = (source_image.width(), source_image.height());

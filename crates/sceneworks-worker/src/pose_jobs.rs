@@ -546,7 +546,7 @@ fn detect_batch(
             out.push(None);
             continue;
         };
-        let img = match image::open(&path) {
+        let img = match crate::image_decode::decode_image_any(&path) {
             Ok(img) => img.to_rgb8(),
             Err(_) => {
                 out.push(None);

@@ -222,7 +222,7 @@ pub(crate) fn load_track_masks(
             .filter(|path| path.exists());
         match stored {
             Some(path) => {
-                let loaded = image::open(&path)
+                let loaded = crate::image_decode::decode_image_any(&path)
                     .map_err(|error| {
                         WorkerError::InvalidPayload(format!(
                             "replacement mask {}: {error}",

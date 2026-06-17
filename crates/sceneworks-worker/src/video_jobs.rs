@@ -1188,7 +1188,7 @@ async fn decode_seedvr2_source_frames(
                 paths.sort();
                 let mut frames = Vec::with_capacity(paths.len());
                 for path in paths {
-                    let image = image::open(&path)
+                    let image = crate::image_decode::decode_image_any(&path)
                         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
                         .to_rgb8();
                     frames.push(rgb_image_to_engine(image));
@@ -2147,7 +2147,7 @@ async fn extract_clip_boundary_frame(
         result?;
         let path = out.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
-            let decoded = image::open(&path)
+            let decoded = crate::image_decode::decode_image_any(&path)
                 .map_err(|error| {
                     WorkerError::InvalidPayload(format!(
                         "boundary conditioning frame {}: {error}",
@@ -4535,7 +4535,7 @@ async fn extract_clip_frames(
             paths.sort();
             let mut frames = Vec::with_capacity(paths.len());
             for path in paths {
-                let decoded = image::open(&path)
+                let decoded = crate::image_decode::decode_image_any(&path)
                     .map_err(|error| {
                         WorkerError::InvalidPayload(format!(
                             "conditioning frame {}: {error}",
@@ -5654,7 +5654,7 @@ async fn select_anchor_frames(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn decode_png_image(path: &Path) -> WorkerResult<Image> {
-    let decoded = image::open(path)
+    let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
             WorkerError::InvalidPayload(format!("source frame {}: {error}", path.display()))
         })?

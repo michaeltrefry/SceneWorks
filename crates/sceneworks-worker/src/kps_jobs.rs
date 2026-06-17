@@ -259,13 +259,14 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
         // Decode by CONTENT, not file extension: staged uploads land as `upload-<uuid>.tmp`
         // (the API's generic temp-file writer keeps no extension), so `image::open` — which
         // picks the codec from the extension — would reject a perfectly valid JPEG/PNG. Read
-        // the bytes and let `load_from_memory` sniff the format from the magic bytes.
+        // the bytes and let the decoder sniff the format from the magic bytes; `decode_image_bytes_any`
+        // additionally transcodes a valid-but-unsupported format (AVIF/HEIC/...) to PNG (sc-6143).
         let source_path =
             normalize_app_managed_cache_path(settings, path, "pose-uploads", "kps sourcePath")?;
         let bytes = std::fs::read(&source_path).map_err(|error| {
             WorkerError::InvalidPayload(format!("kps extraction source {path}: {error}"))
         })?;
-        let decoded = image::load_from_memory(&bytes)
+        let decoded = crate::image_decode::decode_image_bytes_any(&bytes)
             .map_err(|error| {
                 WorkerError::InvalidPayload(format!("kps extraction source {path}: {error}"))
             })?

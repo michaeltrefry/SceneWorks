@@ -73,6 +73,10 @@ mod model_jobs;
 use model_jobs::*;
 mod media_jobs;
 use media_jobs::*;
+// Image-decode backstop (sc-6143): transcodes a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/
+// BMP/GIF) to PNG at decode time. Compiles on all targets; the transcoder is the shared
+// `sceneworks_core::media_convert` routine (sips on macOS, ffmpeg elsewhere).
+mod image_decode;
 mod image_jobs;
 use image_jobs::*;
 // SenseNova-U1 understanding + interleave jobs (epic 3180, sc-3905 — Path B). VQA + Document

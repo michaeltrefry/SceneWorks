@@ -745,7 +745,7 @@ pub(crate) fn detect_people_blocking(
     image_path: PathBuf,
     conf: f32,
 ) -> WorkerResult<DetectResult> {
-    let img = image::open(&image_path)
+    let img = crate::image_decode::decode_image_any(&image_path)
         .map_err(|e| WorkerError::InvalidPayload(format!("person frame open: {e}")))?
         .to_rgb8();
     let (width, height) = (img.width(), img.height());
@@ -898,7 +898,7 @@ pub(crate) fn detect_people_blocking(
     image_path: PathBuf,
     conf: f32,
 ) -> WorkerResult<DetectResult> {
-    let img = image::open(&image_path)
+    let img = crate::image_decode::decode_image_any(&image_path)
         .map_err(|e| WorkerError::InvalidPayload(format!("person frame open: {e}")))?
         .to_rgb8();
     let (width, height) = (img.width(), img.height());

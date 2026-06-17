@@ -277,7 +277,7 @@ pub(crate) fn segment_track_blocking(
     let mut frames: Vec<Array> = Vec::with_capacity(clip_frame_paths.len());
     let (mut width, mut height) = (0u32, 0u32);
     for path in &clip_frame_paths {
-        let img = image::open(path)
+        let img = crate::image_decode::decode_image_any(path)
             .map_err(|e| WorkerError::InvalidPayload(format!("person frame open: {e}")))?
             .to_rgb8();
         if width == 0 {

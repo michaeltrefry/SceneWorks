@@ -436,15 +436,26 @@ impl ProjectStore {
             ));
         }
 
+        // sc-6143: training reads dataset images straight through the engine (no worker decode
+        // backstop on this path), so normalize a valid-but-unsupported format to lossless PNG here
+        // — the only lever that makes AVIF/HEIC training images decode.
+        let normalized = normalize_image_upload(
+            &upload.source_path,
+            &content_type,
+            &upload.filename,
+            &upload_dir,
+        )?;
+        let content_type = normalized.content_type.clone();
+
         let upload_id = format!("dataset_upload_{}", random_hex(16)?);
-        let extension = upload_extension(&upload.filename, &content_type);
+        let extension = normalized.extension.clone();
         let suffix = &upload_id[upload_id.len().saturating_sub(8)..];
         let filename = format!(
             "{}-{suffix}{extension}",
             safe_filename(&upload.filename, &upload_id)
         );
         let media_path = upload_dir.join(filename);
-        move_or_copy_file(&upload.source_path, &media_path)?;
+        move_normalized_upload(&normalized, &upload.source_path, &media_path)?;
         let media_rel = relative_string(&project_path, &media_path)?;
         let display_name = Path::new(&upload.filename)
             .file_name()
@@ -1166,16 +1177,27 @@ impl ProjectStore {
             ));
         }
 
+        // sc-6143: transcode a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless
+        // PNG before storing, so every downstream decode site, thumbnail, and preview reads a format
+        // it supports. Supported formats and videos pass through unchanged.
+        let normalized = normalize_image_upload(
+            &upload.source_path,
+            &content_type,
+            &upload.filename,
+            &upload_dir,
+        )?;
+        let content_type = normalized.content_type.clone();
+
         let asset_id = format!("asset_{}", random_hex(16)?);
         let created_at = utc_now();
-        let extension = upload_extension(&upload.filename, &content_type);
+        let extension = normalized.extension.clone();
         let suffix = &asset_id[asset_id.len().saturating_sub(8)..];
         let filename = format!(
             "{}-{suffix}{extension}",
             safe_filename(&upload.filename, &asset_id)
         );
         let media_path = upload_dir.join(filename);
-        move_or_copy_file(&upload.source_path, &media_path)?;
+        move_normalized_upload(&normalized, &upload.source_path, &media_path)?;
         let media_rel = relative_string(&project_path, &media_path)?;
         let display_name = Path::new(&upload.filename)
             .file_name()
@@ -3159,21 +3181,95 @@ fn build_document_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Va
 /// Sniff a still-image format from its magic bytes → `(extension, mime)`, or `None` when the
 /// header isn't a format the library retains. Used to label a captured keypoint source correctly
 /// regardless of the staged temp file's (extension-less) name.
+/// Recognize a natively-decodable image (png/jpeg/webp) from its magic bytes, returning the
+/// `(extension, mime)` to store it under. Returns `None` for any other format — the keypoint path's
+/// callers then fall back to the extension/PNG. Delegates to the shared [`crate::media_convert`]
+/// sniffer so there is one source of truth for image magic bytes (sc-6143).
 fn sniff_image_format(path: &Path) -> Option<(&'static str, &'static str)> {
-    let mut header = [0u8; 12];
-    let mut file = fs::File::open(path).ok()?;
-    let read = std::io::Read::read(&mut file, &mut header).ok()?;
-    let header = &header[..read];
-    if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Some(("jpg", "image/jpeg"));
+    let kind = crate::media_convert::sniff_image_kind_at(path)?;
+    kind.is_natively_supported().then(|| kind.canonical())
+}
+
+/// The outcome of import-time image normalization (sc-6143): the path whose bytes should be moved
+/// into the asset store, plus the mime type and file extension to record. When `transcoded_temp` is
+/// set, the move consumes that temp PNG (not the original upload), so the caller must remove the
+/// original source itself.
+struct NormalizedUpload {
+    source_path: PathBuf,
+    content_type: String,
+    extension: String,
+    transcoded_temp: Option<PathBuf>,
+}
+
+/// Normalize a valid-but-unsupported image upload (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG
+/// before it is stored, so every downstream decode site, thumbnail, and preview stays on a format
+/// it can read (sc-6143). The format is sniffed by content, never the extension, so a `.png` that is
+/// really AVIF is still handled. Already-supported formats (png/jpeg/webp) and non-image uploads
+/// pass through untouched — no temp file, no re-encode, no quality loss.
+fn normalize_image_upload(
+    source_path: &Path,
+    content_type: &str,
+    filename: &str,
+    work_dir: &Path,
+) -> ProjectStoreResult<NormalizedUpload> {
+    let passthrough = || NormalizedUpload {
+        source_path: source_path.to_path_buf(),
+        content_type: content_type.to_owned(),
+        extension: upload_extension(filename, content_type),
+        transcoded_temp: None,
+    };
+    if !content_type.starts_with("image/") {
+        return Ok(passthrough());
     }
-    if header.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
-        return Some(("png", "image/png"));
+    let Some(kind) = crate::media_convert::sniff_image_kind_at(source_path) else {
+        // Unrecognized magic (e.g. SVG) — leave it as-is; we can't transcode what we can't sniff.
+        return Ok(passthrough());
+    };
+    if kind.is_natively_supported() {
+        // Already decodable: keep the bytes (no re-encode) but record the format we actually
+        // detected, so a mislabeled extension (a `.avif` that is really PNG) is corrected.
+        let (extension, mime) = kind.canonical();
+        return Ok(NormalizedUpload {
+            source_path: source_path.to_path_buf(),
+            content_type: mime.to_owned(),
+            extension: format!(".{extension}"),
+            transcoded_temp: None,
+        });
     }
-    if header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WEBP" {
-        return Some(("webp", "image/webp"));
+    let temp_png = work_dir.join(format!("upload-transcode-{}.png", random_hex(8)?));
+    crate::media_convert::transcode_to_png(source_path, &temp_png).map_err(|error| {
+        let _ = fs::remove_file(&temp_png);
+        ProjectStoreError::BadRequest(format!(
+            "Could not convert {} image to a supported format: {error}",
+            kind.label()
+        ))
+    })?;
+    Ok(NormalizedUpload {
+        source_path: temp_png.clone(),
+        content_type: "image/png".to_owned(),
+        extension: ".png".to_owned(),
+        transcoded_temp: Some(temp_png),
+    })
+}
+
+/// Move a (possibly transcoded) upload into place, cleaning up the transcode temp on a move failure
+/// and the now-orphaned original on success. Shared by the asset + training-dataset import paths.
+fn move_normalized_upload(
+    normalized: &NormalizedUpload,
+    original_source: &Path,
+    media_path: &Path,
+) -> ProjectStoreResult<()> {
+    if let Err(error) = move_or_copy_file(&normalized.source_path, media_path) {
+        if let Some(temp) = &normalized.transcoded_temp {
+            let _ = fs::remove_file(temp);
+        }
+        return Err(error);
     }
-    None
+    // A transcode moved the temp PNG into place, so the original upload was never consumed — drop it.
+    if normalized.transcoded_temp.is_some() {
+        let _ = fs::remove_file(original_source);
+    }
+    Ok(())
 }
 
 fn parse_normalized_kps(value: Option<&Value>) -> ProjectStoreResult<Vec<Value>> {
@@ -4472,6 +4568,104 @@ mod tests {
             .expect("source still present");
         assert_eq!(source_after["lineage"]["sourceAssetId"], Value::Null);
         assert!(source_after.get("extra").is_none());
+    }
+
+    /// sc-6143: a natively-supported image is stored byte-for-byte (no transcode, no re-encode),
+    /// even when its declared content type is wrong — classification is by content.
+    #[test]
+    fn import_asset_leaves_supported_format_unchanged() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Keep").expect("project creates");
+
+        // Valid PNG signature + arbitrary tail; declared (wrongly) as AVIF.
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(b"the rest of a png");
+        let src = temp_dir.path().join("misnamed.avif");
+        std::fs::write(&src, &bytes).expect("source writes");
+
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "misnamed.avif".to_owned(),
+                    content_type: Some("image/avif".to_owned()),
+                    source_path: src,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("imports");
+
+        // Recorded as PNG (its real format), and the stored bytes are untouched.
+        assert_eq!(asset["file"]["mimeType"], json!("image/png"));
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let stored = project_path.join(asset["file"]["path"].as_str().expect("path"));
+        assert_eq!(std::fs::read(&stored).expect("read stored"), bytes);
+    }
+
+    /// sc-6143: a valid-but-unsupported image (BMP here) is transcoded to lossless PNG at import,
+    /// the original upload temp is cleaned up, and the user-facing display name is retained.
+    /// macOS-only (real `sips`); the ffmpeg path is covered by the worker tests.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn import_asset_transcodes_unsupported_bmp_to_png() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Convert").expect("project creates");
+
+        // A valid 1×1 24-bit BMP — not in the worker's png/jpeg/webp `image` build.
+        let mut bmp = Vec::new();
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&58u32.to_le_bytes());
+        bmp.extend_from_slice(&0u16.to_le_bytes());
+        bmp.extend_from_slice(&0u16.to_le_bytes());
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&1i32.to_le_bytes());
+        bmp.extend_from_slice(&1i32.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&2835i32.to_le_bytes());
+        bmp.extend_from_slice(&2835i32.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&[0x20, 0x40, 0x80, 0x00]);
+
+        let src = temp_dir.path().join("photo.bmp");
+        std::fs::write(&src, &bmp).expect("source writes");
+
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "photo.bmp".to_owned(),
+                    content_type: Some("image/bmp".to_owned()),
+                    source_path: src.clone(),
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("imports");
+
+        // Stored as PNG: mime, extension, and actual on-disk magic bytes.
+        assert_eq!(asset["file"]["mimeType"], json!("image/png"));
+        let rel = asset["file"]["path"].as_str().expect("path");
+        assert!(rel.ends_with(".png"), "stored as png, got {rel}");
+        assert_eq!(asset["type"], json!("image"));
+        // Display name keeps the user's original filename.
+        assert_eq!(asset["displayName"], json!("photo.bmp"));
+
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let stored = std::fs::read(project_path.join(rel)).expect("read stored");
+        assert_eq!(
+            crate::media_convert::sniff_image_kind(&stored),
+            Some(crate::media_convert::ImageKind::Png)
+        );
+        // The original upload temp was consumed (transcode moved the PNG, not the BMP).
+        assert!(!src.exists(), "original upload temp removed");
     }
 
     #[test]
