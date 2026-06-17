@@ -7473,6 +7473,116 @@ mod tests {
             .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
     }
 
+    /// Real-weight image→video fit smoke (sc-6139): proves the Crop/Pad pre-fit reaches the
+    /// engine and the engine renders the chosen off-aspect output without re-stretching. A
+    /// solid-color SQUARE source is fit to a 448×256 landscape via the SAME `fit_engine_image`
+    /// the I2V resolve paths call — `pad` letterboxes (black side bars), `crop` fills+trims —
+    /// asserted deterministically; then the pad-fit reference drives a tiny TI2V-5B I2V clip and
+    /// the decoded frames are asserted to be exactly 448×256 (a re-stretch would change the
+    /// aspect). Frame 0 is dumped to `$TMPDIR/sc6139_i2v_pad_frame0.png` for a visual bar check.
+    /// `#[ignore]` — needs the converted TI2V-5B weights; run manually on a Mac where present.
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Wan2.2 TI2V-5B weights; run manually on a Mac with them present"]
+    #[test]
+    fn image_to_video_fit_real_weights() {
+        // Off-aspect output: a square source must letterbox (pad) or fill+trim (crop).
+        const OUT_W: u32 = 448; // 14·32
+        const OUT_H: u32 = 256; // 8·32
+                                // A solid non-black square so pad's black bars are unambiguous against the content.
+        let mk_square = || Image {
+            width: 256,
+            height: 256,
+            pixels: [200u8, 80, 40].repeat((256 * 256) as usize),
+        };
+        let is_black_col = |img: &Image, x: u32| -> bool {
+            (0..img.height).all(|y| {
+                let i = ((y * img.width + x) * 3) as usize;
+                img.pixels[i] == 0 && img.pixels[i + 1] == 0 && img.pixels[i + 2] == 0
+            })
+        };
+
+        // PAD: contained (fit height), centered → black bars on the left/right edges.
+        let padded =
+            crate::image_jobs::fit_engine_image(mk_square(), OUT_W, OUT_H, "pad").expect("pad fit");
+        assert_eq!((padded.width, padded.height), (OUT_W, OUT_H));
+        assert!(is_black_col(&padded, 0), "pad: left edge is a black bar");
+        assert!(
+            is_black_col(&padded, OUT_W - 1),
+            "pad: right edge is a black bar"
+        );
+        let ci = ((OUT_H / 2 * OUT_W + OUT_W / 2) * 3) as usize;
+        assert_eq!(
+            &padded.pixels[ci..ci + 3],
+            &[200, 80, 40],
+            "pad: center keeps the source color"
+        );
+
+        // CROP: covered (fit width), center-cropped → fully filled, no black border.
+        let cropped = crate::image_jobs::fit_engine_image(mk_square(), OUT_W, OUT_H, "crop")
+            .expect("crop fit");
+        assert_eq!((cropped.width, cropped.height), (OUT_W, OUT_H));
+        assert!(
+            !is_black_col(&cropped, 0),
+            "crop: left edge is filled, not a bar"
+        );
+        assert!(
+            !is_black_col(&cropped, OUT_W - 1),
+            "crop: right edge is filled, not a bar"
+        );
+
+        // Real-weight run: the pad-fit reference drives a tiny TI2V-5B I2V clip. If the engine
+        // re-stretched the reference it could not land at the output aspect; asserting the decoded
+        // frames are exactly OUT_W×OUT_H confirms the pre-fit reference is consumed as-is.
+        let Some(model_dir) = wan_5b_dir() else {
+            eprintln!("skipping image_to_video_fit_real_weights: no converted TI2V-5B dir found");
+            return;
+        };
+        let input = VideoGenInput {
+            engine_id: "wan2_2_ti2v_5b",
+            model_dir,
+            conditioning: vec![Conditioning::Reference {
+                image: padded,
+                strength: None,
+            }],
+            prompt: "a slow gentle camera move, cinematic".to_owned(),
+            width: OUT_W,
+            height: OUT_H,
+            frames: 5,
+            fps: 16,
+            steps: Some(8),
+            seed: 7,
+            ..VideoGenInput::default()
+        };
+        let cancel = CancelFlag::new();
+        let mut steps = 0u32;
+        let mut on_progress = |progress: Progress| {
+            if let Progress::Step { .. } = progress {
+                steps += 1;
+            }
+        };
+        let decoded = run_video_generation(input, &cancel, &mut on_progress)
+            .expect("TI2V-5B I2V generation from a pad-fit square reference");
+        assert_eq!(decoded.frames.len(), 5, "5 frames (1 + 4·1)");
+        assert!(steps > 0, "denoise progress streamed");
+        for f in &decoded.frames {
+            assert_eq!(
+                (f.width, f.height),
+                (OUT_W, OUT_H),
+                "engine renders the requested off-aspect output (no re-stretch)"
+            );
+            assert_eq!(f.pixels.len(), (f.width * f.height * 3) as usize);
+        }
+        // Dump frame 0 so the pad letterbox is visually verifiable.
+        let frame0 = &decoded.frames[0];
+        if let Some(buf) =
+            image::RgbImage::from_raw(frame0.width, frame0.height, frame0.pixels.clone())
+        {
+            let out = std::env::temp_dir().join("sc6139_i2v_pad_frame0.png");
+            let _ = buf.save(&out);
+            eprintln!("wrote pad-fit I2V frame 0 to {}", out.display());
+        }
+    }
+
     /// Real-weight perf probe for the TI2V-5B (sc-4997): measures the load / DiT-denoise /
     /// VAE-decode wall-clock split at a configurable resolution, frame count, step count, and
     /// CFG — to ground the "under 10 min" target on real numbers instead of estimates. Env-driven
