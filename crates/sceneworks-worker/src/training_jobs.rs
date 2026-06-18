@@ -649,118 +649,142 @@ async fn consume_training_events(
     let mut latest_step: u32 = 0;
     let mut latest_samples: Vec<Value> = Vec::new();
 
-    while let Some(event) = rx.recv().await {
-        if canceled {
-            continue; // drain remaining events so the blocking sender never blocks.
-        }
-        match event {
-            TrainEvent::Progress(progress) => {
-                // Poll cancel on the long training band only (cheap stages fly by).
-                if matches!(progress, TrainingProgress::Training { .. })
-                    && last_cancel_check.elapsed() >= Duration::from_secs(2)
-                {
+    // Heartbeat + cancel-poll on a fixed interval, not only when the engine emits
+    // training progress. Long model-load, checkpoint, preview-sample, or unusually
+    // slow step phases can otherwise go silent long enough for the API stale-worker
+    // sweep to interrupt the job.
+    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            maybe_event = rx.recv() => {
+                let Some(event) = maybe_event else {
+                    break;
+                };
+                if canceled {
+                    continue; // drain remaining events so the blocking sender never blocks.
+                }
+                match event {
+                    TrainEvent::Progress(progress) => {
+                        // Poll cancel on the long training band only (cheap stages fly by).
+                        if matches!(progress, TrainingProgress::Training { .. })
+                            && last_cancel_check.elapsed() >= Duration::from_secs(2)
+                        {
+                            last_cancel_check = Instant::now();
+                            if cancel_requested_peek(api, &job.id).await {
+                                begin_training_cancel(api, &job.id, &cancel, backend).await;
+                                canceled = true;
+                                continue;
+                            }
+                        }
+                        if let TrainingProgress::Checkpoint { step } = progress {
+                            checkpoints.push(json!({ "step": step }));
+                        }
+                        // sc-5637 — a preview sample: persist it as a project asset and stream the updated
+                        // sample lists (cumulative + this-cadence) so Training Studio shows it live. Handled
+                        // here (not in `map_training_progress`) because it writes a file + carries a result
+                        // payload. Best-effort: a write failure logs and is skipped, never failing the run.
+                        if let TrainingProgress::Sample {
+                            step,
+                            index,
+                            total,
+                            prompt,
+                            image,
+                        } = progress
+                        {
+                            match write_training_sample(
+                                sample_output_dir.as_deref(),
+                                sample_project_root.as_deref(),
+                                &sample_stem,
+                                step,
+                                index,
+                                &prompt,
+                                &image,
+                                sample_cfg.sample_steps,
+                                sample_cfg.sample_guidance_scale,
+                            ) {
+                                Ok(record) => {
+                                    let record = Value::Object(record);
+                                    if step != latest_step {
+                                        latest_step = step;
+                                        latest_samples.clear();
+                                    }
+                                    all_samples.push(record.clone());
+                                    latest_samples.push(record);
+                                    let result = training_samples_result(
+                                        &all_samples,
+                                        &latest_samples,
+                                        &sample_cfg.sample_prompts,
+                                        sample_cfg.sample_steps,
+                                        sample_cfg.sample_guidance_scale,
+                                    );
+                                    update_job(
+                                        api,
+                                        &job.id,
+                                        training_progress(
+                                            JobStatus::Running,
+                                            ProgressStage::Training,
+                                            train_fraction(step, total_steps.max(step)),
+                                            &format!("Rendered preview {index}/{total} at step {step}."),
+                                            Some(result),
+                                            backend,
+                                        ),
+                                    )
+                                    .await?;
+                                }
+                                Err(error) => eprintln!(
+                                    "[sc-5637] worker failed to persist training preview at step {step} \
+                                     (index {index}): {error} — skipping, training continues"
+                                ),
+                            }
+                            heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                            continue;
+                        }
+                        let (status, stage, fraction, message) =
+                            map_training_progress(progress, total_steps);
+                        update_job(
+                            api,
+                            &job.id,
+                            training_progress(status, stage, fraction, &message, None, backend),
+                        )
+                        .await?;
+                        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    }
+                    TrainEvent::Done(output) => {
+                        let result = training_result(
+                            plan,
+                            &output,
+                            &checkpoints,
+                            &all_samples,
+                            &sample_cfg.sample_prompts,
+                            sample_cfg.sample_steps,
+                            sample_cfg.sample_guidance_scale,
+                        );
+                        update_job(
+                            api,
+                            &job.id,
+                            training_progress(
+                                JobStatus::Completed,
+                                ProgressStage::Completed,
+                                1.0,
+                                &format!("Trained LoRA saved as {}.", plan.output.file_name),
+                                Some(result),
+                                backend,
+                            ),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                if !canceled && last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
                     if cancel_requested_peek(api, &job.id).await {
                         begin_training_cancel(api, &job.id, &cancel, backend).await;
                         canceled = true;
-                        continue;
                     }
                 }
-                if let TrainingProgress::Checkpoint { step } = progress {
-                    checkpoints.push(json!({ "step": step }));
-                }
-                // sc-5637 — a preview sample: persist it as a project asset and stream the updated
-                // sample lists (cumulative + this-cadence) so Training Studio shows it live. Handled
-                // here (not in `map_training_progress`) because it writes a file + carries a result
-                // payload. Best-effort: a write failure logs and is skipped, never failing the run.
-                if let TrainingProgress::Sample {
-                    step,
-                    index,
-                    total,
-                    prompt,
-                    image,
-                } = progress
-                {
-                    match write_training_sample(
-                        sample_output_dir.as_deref(),
-                        sample_project_root.as_deref(),
-                        &sample_stem,
-                        step,
-                        index,
-                        &prompt,
-                        &image,
-                        sample_cfg.sample_steps,
-                        sample_cfg.sample_guidance_scale,
-                    ) {
-                        Ok(record) => {
-                            let record = Value::Object(record);
-                            if step != latest_step {
-                                latest_step = step;
-                                latest_samples.clear();
-                            }
-                            all_samples.push(record.clone());
-                            latest_samples.push(record);
-                            let result = training_samples_result(
-                                &all_samples,
-                                &latest_samples,
-                                &sample_cfg.sample_prompts,
-                                sample_cfg.sample_steps,
-                                sample_cfg.sample_guidance_scale,
-                            );
-                            update_job(
-                                api,
-                                &job.id,
-                                training_progress(
-                                    JobStatus::Running,
-                                    ProgressStage::Training,
-                                    train_fraction(step, total_steps.max(step)),
-                                    &format!("Rendered preview {index}/{total} at step {step}."),
-                                    Some(result),
-                                    backend,
-                                ),
-                            )
-                            .await?;
-                        }
-                        Err(error) => eprintln!(
-                            "[sc-5637] worker failed to persist training preview at step {step} \
-                             (index {index}): {error} — skipping, training continues"
-                        ),
-                    }
-                    continue;
-                }
-                let (status, stage, fraction, message) =
-                    map_training_progress(progress, total_steps);
-                update_job(
-                    api,
-                    &job.id,
-                    training_progress(status, stage, fraction, &message, None, backend),
-                )
-                .await?;
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-            }
-            TrainEvent::Done(output) => {
-                let result = training_result(
-                    plan,
-                    &output,
-                    &checkpoints,
-                    &all_samples,
-                    &sample_cfg.sample_prompts,
-                    sample_cfg.sample_steps,
-                    sample_cfg.sample_guidance_scale,
-                );
-                update_job(
-                    api,
-                    &job.id,
-                    training_progress(
-                        JobStatus::Completed,
-                        ProgressStage::Completed,
-                        1.0,
-                        &format!("Trained LoRA saved as {}.", plan.output.file_name),
-                        Some(result),
-                        backend,
-                    ),
-                )
-                .await?;
             }
         }
     }
