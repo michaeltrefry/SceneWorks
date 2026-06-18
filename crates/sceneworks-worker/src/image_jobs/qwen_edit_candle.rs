@@ -19,22 +19,40 @@
 
 /// Qwen-Image-Edit denoise steps default (the production, non-distilled variants).
 const QWEN_EDIT_CANDLE_DEFAULT_STEPS: u32 = 30;
+/// Qwen-Image-Edit-2511-Lightning few-step distill: 4-step default, matching the 4-step distill LoRA (sc-6220).
+const QWEN_EDIT_CANDLE_LIGHTNING_STEPS: u32 = 4;
 /// True-CFG guidance default.
 const QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 4.0;
 /// The adapter/engine id recorded on candle Qwen-Image-Edit assets + telemetry.
 const QWEN_EDIT_CANDLE_ENGINE: &str = "candle_qwen_edit";
 /// Default Qwen-Image-Edit base repo when the manifest omits `repo`.
 const QWEN_EDIT_CANDLE_DEFAULT_REPO: &str = "Qwen/Qwen-Image-Edit";
+/// The Qwen-Image-Edit-2511 base repo — the Lightning distill is `-2511` + the lightx2v LoRA (sc-6220).
+const QWEN_EDIT_CANDLE_2511_REPO: &str = "Qwen/Qwen-Image-Edit-2511";
+/// The lightx2v Qwen-Image-Edit-2511-Lightning distill LoRA (4-step bf16), fetched lazily into the HF
+/// cache on first use — mirrors the MLX `qwen_edit_lightning` (sc-3398) repo/file.
+const QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO: &str = "lightx2v/Qwen-Image-Edit-2511-Lightning";
+const QWEN_EDIT_CANDLE_LIGHTNING_LORA_FILE: &str =
+    "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors";
 
-/// Qwen-Image-Edit model ids the candle edit route accepts. All non-lightning variants map to the
-/// single edit engine model (the architecture is identical; `-2511` only flips `zero_cond_t`, which
-/// `QwenEdit` auto-detects from `transformer/config.json`). The `-2511_lightning` distill needs the
-/// 4-step LoRA — `QwenEdit` has no LoRA support — so it stays on the MLX / torch path.
+/// Qwen-Image-Edit model ids the candle edit route accepts. The base variants map to the single edit
+/// engine (the architecture is identical; `-2511` only flips `zero_cond_t`, which `QwenEdit` auto-detects
+/// from `transformer/config.json`). The `-2511_lightning` distill is the same `-2511` base with the
+/// lightx2v 4-step LoRA folded into the MMDiT at load + the CFG-off static-shift lightning schedule (sc-6220).
 fn is_qwen_edit_candle_model(model: &str) -> bool {
     matches!(
         model,
-        "qwen_image_edit" | "qwen_image_edit_2509" | "qwen_image_edit_2511"
+        "qwen_image_edit"
+            | "qwen_image_edit_2509"
+            | "qwen_image_edit_2511"
+            | "qwen_image_edit_2511_lightning"
     )
+}
+
+/// The Qwen-Image-Edit-2511-Lightning few-step distill variant (sc-6220): `QwenEdit` folds the lightx2v
+/// LoRA into the MMDiT at load and runs the CFG-off lightning schedule (4 steps).
+fn is_qwen_edit_lightning(model: &str) -> bool {
+    model == "qwen_image_edit_2511_lightning"
 }
 
 /// True when this is a candle-eligible Qwen edit job: a Qwen-Image-Edit `edit_image` job with a source
@@ -43,15 +61,21 @@ fn qwen_edit_candle_mode(request: &ImageRequest) -> bool {
     request.mode == "edit_image" && non_empty(&request.source_asset_id)
 }
 
-/// The Qwen-Image-Edit base repo for this request: manifest `repo` else the default.
+/// The Qwen-Image-Edit base repo for this request: manifest `repo` else the family default — the
+/// Lightning distill's base is `-2511` (sc-6220); the other variants default to the `Qwen-Image-Edit` alias.
 fn qwen_edit_candle_repo(request: &ImageRequest) -> String {
+    let default = if is_qwen_edit_lightning(&request.model) {
+        QWEN_EDIT_CANDLE_2511_REPO
+    } else {
+        QWEN_EDIT_CANDLE_DEFAULT_REPO
+    };
     request
         .model_manifest_entry
         .get("repo")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(QWEN_EDIT_CANDLE_DEFAULT_REPO)
+        .unwrap_or(default)
         .to_owned()
 }
 
@@ -83,11 +107,20 @@ fn resolve_qwen_edit_candle_base(
 fn qwen_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_qwen_edit_candle_model(&request.model)
         && qwen_edit_candle_mode(request)
-        && matches!(resolve_qwen_edit_candle_base(request, settings), Ok(Some(_)))
+        && matches!(
+            resolve_qwen_edit_candle_base(request, settings),
+            Ok(Some(_))
+        )
 }
 
-/// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (30).
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → family default
+/// (Lightning → 4, else 30).
 fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
+    let default = if is_qwen_edit_lightning(&request.model) {
+        QWEN_EDIT_CANDLE_LIGHTNING_STEPS
+    } else {
+        QWEN_EDIT_CANDLE_DEFAULT_STEPS
+    };
     let parse = |value: &Value| {
         value
             .as_u64()
@@ -99,7 +132,7 @@ fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
         .and_then(parse)
         .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
         .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(QWEN_EDIT_CANDLE_DEFAULT_STEPS)
+        .unwrap_or(default)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (4.0), clamped.
@@ -164,6 +197,85 @@ fn load_qwen_edit_source(
     )
 }
 
+/// Ensure the lightx2v distill LoRA (`file` from HuggingFace `repo`) is materialized in the shared HF
+/// hub cache, returning its absolute path (sc-6220). Fast-paths when already cached; else fetches just
+/// that one file into the standard `models--<org>--<name>` layout (deduping with the Python loader +
+/// other tools, sc-1904). The candle off-Mac twin of the MLX `qwen.rs::ensure_distill_lora_cached`
+/// (sc-3398) — fully qualified because this file is `include!`d into the candle `image_jobs` build,
+/// which does not import the MLX download helpers.
+async fn ensure_qwen_lightning_lora_cached(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    repo: &str,
+    file: &str,
+) -> WorkerResult<PathBuf> {
+    // Fast path: already materialized in the hub cache (the common case after first use).
+    if let Some(snapshot_dir) =
+        crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, repo)
+    {
+        let candidate = snapshot_dir.join(file);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    let repo_dir = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Unable to resolve Hugging Face cache path for {repo}."
+            ))
+        })?;
+    let revision = "main";
+    let client = reqwest::Client::new();
+    let snapshot = crate::downloads::HuggingFaceSnapshot::resolve(
+        &client,
+        settings,
+        repo,
+        revision,
+        &[file.to_owned()],
+    )
+    .await?;
+    if snapshot.files.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Distill LoRA {file} not found in Hugging Face repo {repo}."
+        )));
+    }
+    let mut progress = crate::downloads::DownloadProgress::new(
+        repo,
+        crate::directory_size(&repo_dir.join("blobs")).await,
+        snapshot.total_bytes(),
+        crate::progress_report_interval(settings),
+    );
+    crate::downloads::download_snapshot_into_cache(
+        &crate::downloads::DownloadContext {
+            api,
+            client: &client,
+            settings,
+            job_id: &job.id,
+            cancel_message: "Generation canceled while fetching the Lightning distill LoRA.",
+            fresh_download: false,
+        },
+        &repo_dir,
+        revision,
+        &snapshot,
+        &mut progress,
+    )
+    .await?;
+    let snapshot_dir = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, repo)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Hugging Face snapshot for {repo} missing after download."
+            ))
+        })?;
+    let path = snapshot_dir.join(file);
+    if !path.is_file() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Distill LoRA {file} missing from the {repo} snapshot after download."
+        )));
+    }
+    Ok(path)
+}
+
 /// Real candle Qwen-Image-Edit generation: resolve the source + base on the async side, then load
 /// `QwenEdit` once + generate each image on the blocking thread. The provider condition-resizes the
 /// reference internally, so the source is passed as-is (no render-size pre-fit). `request.count` edits
@@ -189,10 +301,42 @@ async fn generate_candle_qwen_edit_stream(
     let (width, height) = (request.width, request.height);
     let reference = load_qwen_edit_source(request, project_path, settings)?;
 
+    let lightning = is_qwen_edit_lightning(&request.model);
     let steps = qwen_edit_candle_steps(request);
-    let guidance = qwen_edit_candle_guidance(request);
+    // Lightning is CFG-distilled → run CFG-off (guidance 1.0); the provider forces a single forward when
+    // `lightning` is set, so guidance is recorded for telemetry only there.
+    let guidance = if lightning {
+        1.0
+    } else {
+        qwen_edit_candle_guidance(request)
+    };
     let repo = qwen_edit_candle_repo(request);
-    let raw_settings = qwen_edit_candle_raw_settings(request, &repo, steps, guidance);
+    // The lightx2v distill LoRA, lazily fetched into the HF cache — `QwenEdit` folds it into the MMDiT at
+    // load (sc-6220). Empty for the production (multi-step true-CFG) variants.
+    let adapters: Vec<AdapterSpec> = if lightning {
+        let lora = ensure_qwen_lightning_lora_cached(
+            api,
+            settings,
+            job,
+            QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO,
+            QWEN_EDIT_CANDLE_LIGHTNING_LORA_FILE,
+        )
+        .await?;
+        vec![AdapterSpec::new(lora, 1.0, AdapterKind::Lora)]
+    } else {
+        Vec::new()
+    };
+    let mut raw_settings = qwen_edit_candle_raw_settings(request, &repo, steps, guidance);
+    // Record the Lightning recipe for telemetry / A-B parity (matches the MLX `distillLora` key format).
+    if lightning {
+        raw_settings.insert("sampler".to_owned(), Value::String("lightning".to_owned()));
+        raw_settings.insert(
+            "distillLora".to_owned(),
+            Value::String(format!(
+                "{QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO}/{QWEN_EDIT_CANDLE_LIGHTNING_LORA_FILE}"
+            )),
+        );
+    }
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same source.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -206,8 +350,11 @@ async fn generate_candle_qwen_edit_stream(
         "qwen_edit",
         0,
         move || {
-            let model = QwenEdit::load(&QwenEditPaths { root: qwen_base })
-                .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
+            let model = QwenEdit::load(&QwenEditPaths {
+                root: qwen_base,
+                adapters,
+            })
+            .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
             Ok((model, reference))
         },
         move |(model, reference), tx, cancel| {
@@ -223,9 +370,11 @@ async fn generate_candle_qwen_edit_stream(
                     steps: steps as usize,
                     guidance,
                     seed: seed as u64,
+                    lightning,
                     cancel: cancel.clone(),
                 };
-                let result = model.generate(&req, std::slice::from_ref(&reference), &mut *on_progress);
+                let result =
+                    model.generate(&req, std::slice::from_ref(&reference), &mut *on_progress);
                 let out = match result {
                     Ok(out) => out,
                     Err(_) if cancel.is_cancelled() => return Ok(None),

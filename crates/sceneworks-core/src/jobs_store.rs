@@ -3404,11 +3404,15 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // `edit_image` job with a source image is the bespoke candle `QwenEdit` lane
     // (`generate_candle_qwen_edit_stream`), NOT txt2img — and `qwen_image_edit*` are not candle txt2img
     // ids (the gate below only knows `qwen_image`), so they would fall through to torch. Branch it out
-    // first. Off-Mac this was a torch fallback. The `-2511_lightning` distill needs a LoRA the candle
-    // provider lacks, so it is excluded (stays MLX/torch). Mirrors the worker's `qwen_edit_candle_available`.
+    // first. Off-Mac this was a torch fallback. The `-2511_lightning` distill is the same `-2511` base
+    // with the lightx2v 4-step LoRA folded into the MMDiT at load (sc-6220), so it routes to candle too.
+    // Mirrors the worker's `qwen_edit_candle_available`.
     if matches!(
         model,
-        "qwen_image_edit" | "qwen_image_edit_2509" | "qwen_image_edit_2511"
+        "qwen_image_edit"
+            | "qwen_image_edit_2509"
+            | "qwen_image_edit_2511"
+            | "qwen_image_edit_2511_lightning"
     ) && qwen_edit_candle_eligible(&job.payload)
     {
         return true;
@@ -5387,11 +5391,13 @@ mod candle_routing_tests {
         }))));
         // sc-5487: a Qwen-Image-Edit edit (`edit_image` + a source) is now the candle `QwenEdit` lane
         // (dual-latent reference editing). Off-Mac this was a torch fallback; the candle worker CLAIMS
-        // it for the non-lightning variants (all map to the single edit engine model).
+        // it. The `-2511_lightning` distill (sc-6220) is the same `-2511` base with the lightx2v 4-step
+        // LoRA folded into the MMDiT at load, so it is candle-claimed too.
         for model in [
             "qwen_image_edit",
             "qwen_image_edit_2509",
             "qwen_image_edit_2511",
+            "qwen_image_edit_2511_lightning",
         ] {
             assert!(
                 worker_supports_job(
@@ -5402,16 +5408,9 @@ mod candle_routing_tests {
                         "sourceAssetId": "asset_1"
                     }))
                 ),
-                "candle worker should claim {model} edit (sc-5487)"
+                "candle worker should claim {model} edit (sc-5487 / sc-6220)"
             );
         }
-        // The -2511_lightning distill needs the 4-step LoRA the candle provider lacks → NOT claimed by
-        // candle; it stays on the MLX/torch path.
-        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
-            "model": "qwen_image_edit_2511_lightning",
-            "mode": "edit_image",
-            "sourceAssetId": "asset_1"
-        }))));
         // A Qwen-Image-Edit job with no source image is not the edit lane → not claimed (would defer).
         assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
             "model": "qwen_image_edit",
