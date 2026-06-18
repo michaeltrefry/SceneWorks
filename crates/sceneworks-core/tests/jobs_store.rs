@@ -2614,6 +2614,9 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Person detect/track is ported (sc-3488 / sc-3633/3634/3709) → supported, no epic.
     assert_eq!(epic("personDetect"), None);
     assert!(mac.features["personDetect"].supported);
+    // Smart-select segmentation is native-MLX SAM3 on Mac (sc-6105) → supported, no epic.
+    assert_eq!(epic("imageSegment"), None);
+    assert!(mac.features["imageSegment"].supported);
     assert_eq!(epic("datasetCaptioning"), None);
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability gap entry at all.
     assert!(!mac.features.contains_key("lycoris"));
@@ -2624,10 +2627,11 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Video upscale is net-new on Mac (epic 4811 / sc-4816, native-MLX SeedVR2) → supported, no epic.
     assert_eq!(epic("videoUpscale"), None);
     assert!(mac.features["videoUpscale"].supported);
-    // datasetCaptioning + imageUpscale + imageUpscaleSeedvr2 + personDetect + poseFromPhoto +
-    // videoUpscale are the ported (supported) infra features; the rest stay gated until their port
-    // lands. poseFromPhoto joined the supported set in sc-4206 (DWPose ported, sc-3487);
-    // imageUpscaleSeedvr2 in sc-4815, videoUpscale in sc-4816 (both native-MLX SeedVR2, epic 4811).
+    // datasetCaptioning + imageSegment + imageUpscale + imageUpscaleSeedvr2 + personDetect +
+    // poseFromPhoto + videoUpscale are the ported (supported) infra features; the rest stay gated
+    // until their port lands. poseFromPhoto joined the supported set in sc-4206 (DWPose ported,
+    // sc-3487); imageUpscaleSeedvr2 in sc-4815, videoUpscale in sc-4816 (both native-MLX SeedVR2,
+    // epic 4811); imageSegment in sc-6105 (native-MLX SAM3 smart-select).
     assert!(mac
         .features
         .iter()
@@ -2635,6 +2639,7 @@ fn mac_capabilities_master_switch_and_infra_features() {
             !matches!(
                 key.as_str(),
                 "datasetCaptioning"
+                    | "imageSegment"
                     | "imageUpscale"
                     | "imageUpscaleSeedvr2"
                     | "personDetect"

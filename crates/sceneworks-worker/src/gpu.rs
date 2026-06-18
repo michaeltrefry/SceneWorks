@@ -565,6 +565,13 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // works on a Python-free Mac. Only `engine=real-esrgan` (the default) is
         // served here; `aura-sr` stays on the Python worker (routing oracle).
         WorkerCapability::ImageUpscale,
+        // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
+        // segmentation, served in-process by `segment_jobs::run_image_segment_job` (the
+        // box-PVS path of the sc-4926 SAM3 stack). The Image Editor smart-select tool's
+        // backend: a box prompt → a binary inpaint mask asset. Advertised ONLY here (no
+        // torch/candle SAM3 image path), so a segment job routes to the Mac worker by
+        // construction.
+        WorkerCapability::ImageSegment,
         // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
         // (`mlx-gen-seedvr2`), served in-process by `video_jobs::run_video_upscale_job` —
         // SceneWorks' first video upscaler. Decodes the source clip, runs the temporal-chunked

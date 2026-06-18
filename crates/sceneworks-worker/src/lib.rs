@@ -175,6 +175,11 @@ mod person_segment;
 // Windows/Linux backend until a parallel candle backport (cf. epic 3792).
 #[cfg(target_os = "macos")]
 mod person_segment_sam3;
+// Smart-select image segmentation (epic 6087, sc-6105): the `image_segment` job runs SAM3
+// box-prompt segmentation in-process to produce an inpaint mask asset for the Image Editor.
+// macOS-only like its `person_segment_sam3` (SAM3) dependency; no torch/candle image-segment path.
+#[cfg(target_os = "macos")]
+mod segment_jobs;
 // SCAIL-2 color-coded segmentation-mask painting (epic 5439, sc-5448): turns native SAM3
 // per-person masks into the palette-painted RGB masks the SCAIL-2 engine consumes. macOS-only
 // like its SAM3 dependency.
@@ -904,6 +909,16 @@ async fn run_utility_job(
         JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
             .await
             .map_err(|error| ("Image upscale failed.", error)),
+        // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
+        // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
+        // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by
+        // `mlx_gpu`), so off-Mac this arm is absent and a segment job is never claimed there.
+        #[cfg(target_os = "macos")]
+        JobType::ImageSegment => {
+            segment_jobs::run_image_segment_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Smart-select segmentation failed.", error))
+        }
         // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
         // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
         // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.

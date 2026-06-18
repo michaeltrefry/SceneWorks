@@ -240,6 +240,12 @@ string_enum! {
         // tile ControlNet run over feathered tiles to add micro-texture; GPU-required
         // like generation. Composes after image_upscale (creative upscale).
         ImageDetail => "image_detail",
+        // Smart-select segmentation of an existing image asset (Image Editor, epic 6087
+        // / sc-6105): a box prompt → a binary inpaint mask asset (white-on-black PNG at
+        // source dims) the editor loads into the sc-2436 mask layer. Native-MLX SAM3 on
+        // the macOS Rust worker (zero-Python, the box-PVS path of the sc-4926 SAM3 stack);
+        // GPU-required like generation, mac-only (no torch SAM3 image path yet).
+        ImageSegment => "image_segment",
         // Standalone upscale of an existing VIDEO asset (Video Studio, epic 4811 /
         // sc-4816) — SceneWorks' first video upscaler. Native-MLX SeedVR2 one-step
         // super-resolution on the macOS Rust worker (zero-Python, epic 3482): decode
@@ -361,6 +367,11 @@ string_enum! {
         // backend is available (runtime.py); the Rust utility worker never emits it.
         // See jobs_store::job_requires_gpu.
         ImageDetail => "image_detail",
+        // Smart-select segmentation (Image Editor, epic 6087 / sc-6105). Advertised
+        // ONLY by the macOS MLX worker (native SAM3, `gpu.rs mlx_gpu`); no torch/candle
+        // worker emits it, so a box-prompt segment job routes to the Mac worker by
+        // construction. See jobs_store::job_requires_gpu / mac_rust_supported.
+        ImageSegment => "image_segment",
         // Standalone VIDEO upscale (Video Studio, epic 4811 / sc-4816). Advertised by
         // the macOS Rust/MLX worker (native SeedVR2, zero-Python); no Python-worker
         // backend (mac-only). GPU-required. See jobs_store::worker_supports_job.

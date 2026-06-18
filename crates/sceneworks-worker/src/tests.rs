@@ -623,6 +623,9 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::PoseDetect,
         WorkerCapability::KpsExtract,
         WorkerCapability::ImageUpscale,
+        // sc-6105: smart-select segmentation (native-MLX SAM3 box-prompt) — Mac-only, advertised
+        // only here so an `image_segment` job routes to the MLX worker by construction.
+        WorkerCapability::ImageSegment,
         WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,
         WorkerCapability::PersonTrack,

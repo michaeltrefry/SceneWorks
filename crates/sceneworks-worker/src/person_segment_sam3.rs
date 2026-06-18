@@ -28,7 +28,9 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use mlx_gen::weights::Weights;
-use mlx_gen_sam3::{Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput};
+use mlx_gen_sam3::{
+    Sam3ImageSegmenter, Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput,
+};
 use mlx_rs::Array;
 
 use crate::{Settings, WorkerError, WorkerResult};
@@ -344,6 +346,138 @@ pub(crate) fn segment_track_blocking(
     Ok(masks)
 }
 
+/// Normalize an `[x1, y1, x2, y2]` pixel box (clamped to the image) to SAM3's `[cx, cy, w, h]`
+/// ∈ [0, 1]. SAM3 squashes the image to a fixed 1008² square (NOT aspect-preserving), so a box's
+/// normalized source coordinates equal its normalized model-input coordinates — no letterbox math.
+fn normalize_box_cxcywh(box_xyxy: [f32; 4], width: u32, height: u32) -> [f32; 4] {
+    let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+    let x1 = box_xyxy[0].min(box_xyxy[2]).clamp(0.0, w);
+    let y1 = box_xyxy[1].min(box_xyxy[3]).clamp(0.0, h);
+    let x2 = box_xyxy[0].max(box_xyxy[2]).clamp(0.0, w);
+    let y2 = box_xyxy[1].max(box_xyxy[3]).clamp(0.0, h);
+    [
+        ((x1 + x2) * 0.5 / w).clamp(0.0, 1.0),
+        ((y1 + y2) * 0.5 / h).clamp(0.0, 1.0),
+        ((x2 - x1) / w).clamp(0.0, 1.0),
+        ((y2 - y1) / h).clamp(0.0, 1.0),
+    ]
+}
+
+/// Smart-select (epic 6087, sc-6105): segment whatever lies under a single box prompt on ONE still
+/// image with the native-MLX SAM3 box-prompted PVS path ([`Sam3ImageSegmenter::segment_with_boxes`],
+/// epic 4910 sc-4923). `box_xyxy` is in source-image pixel coords; `concept` is the optional text
+/// concept paired with the box (empty = rely on the geometric prompt). Returns one binary mask
+/// (row-major `width*height`, `0`/`255`, white = the selected region) at the source dims — the
+/// `maskAssetId` the editor's inpaint flow (sc-2436/2476) consumes. Errors when SAM3 returns no
+/// instance for the box. Loads the segmenter from the shared (cached) SAM3 checkpoint and quantizes
+/// it (Q8 default); run under `spawn_blocking` (MLX is synchronous + holds the autorelease pool).
+pub(crate) fn segment_box_blocking(
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    image: image::RgbImage,
+    box_xyxy: [f32; 4],
+    concept: &str,
+    threshold: f32,
+    mask_threshold: f32,
+) -> WorkerResult<Vec<u8>> {
+    let (width, height) = (image.width(), image.height());
+    if width == 0 || height == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "smart-select source image has zero dimension".into(),
+        ));
+    }
+    let pixels = input_tensor(&image);
+
+    // Cached checkpoint (poison-recovery), shared with the video path — both consume the same
+    // facebook/sam3 weight map (mirrors person_segment / sc-4277 F-MLXW-13).
+    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        let weights = Weights::from_file(&model_path)
+            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+        *guard = Some(weights);
+    }
+    let weights = guard.as_ref().expect("weights loaded");
+
+    let mut model = Sam3ImageSegmenter::from_weights(weights)
+        .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
+    if let Some(bits) = quant_bits() {
+        model
+            .quantize(bits)
+            .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
+    }
+    let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+    let (input_ids, text_mask) = tokenizer
+        .encode(concept)
+        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+
+    let cxcywh = normalize_box_cxcywh(box_xyxy, width, height);
+    let boxes = Array::from_slice(&cxcywh, &[1, 1, 4]);
+    let box_labels = [1i32]; // a single positive box prompt
+
+    let instances = model
+        .segment_with_boxes(
+            &pixels,
+            &input_ids,
+            &text_mask,
+            &boxes,
+            &box_labels,
+            (width as f32, height as f32),
+            threshold,
+            mask_threshold,
+        )
+        .map_err(|e| WorkerError::Engine(format!("sam3 segment_with_boxes: {e}")))?;
+
+    // Pick the instance whose MASK has the most foreground inside the prompt box. SAM3 PVS returns
+    // the box-echo query (its box ≈ the prompt, but the mask can be degenerate) alongside the
+    // model's own detections (real masks, different boxes); selecting by box-IoU can land on the
+    // empty echo. Mask-in-box intersection is robust for both a tight box (the echo's own real
+    // mask) and a loose box (the best-overlapping real detection). Instance masks are 0/1 at the
+    // 288² grid; the squashed grid maps directly to the normalized frame (uniform 1008² resize).
+    let nx1 = (box_xyxy[0].min(box_xyxy[2]) / width as f32).clamp(0.0, 1.0);
+    let ny1 = (box_xyxy[1].min(box_xyxy[3]) / height as f32).clamp(0.0, 1.0);
+    let nx2 = (box_xyxy[0].max(box_xyxy[2]) / width as f32).clamp(0.0, 1.0);
+    let ny2 = (box_xyxy[1].max(box_xyxy[3]) / height as f32).clamp(0.0, 1.0);
+    let mut best: Option<(u64, usize, Vec<f32>)> = None;
+    for inst in &instances {
+        let grid = inst.mask.shape()[0] as usize;
+        let m: Vec<f32> = inst
+            .mask
+            .as_dtype(mlx_rs::Dtype::Float32)
+            .map_err(|e| WorkerError::Engine(format!("sam3 mask read: {e}")))?
+            .as_slice::<f32>()
+            .to_vec();
+        let mut inside = 0u64;
+        for gy in 0..grid {
+            for gx in 0..grid {
+                if m[gy * grid + gx] > 0.0 {
+                    let cx = (gx as f32 + 0.5) / grid as f32;
+                    let cy = (gy as f32 + 0.5) / grid as f32;
+                    if cx >= nx1 && cx < nx2 && cy >= ny1 && cy < ny2 {
+                        inside += 1;
+                    }
+                }
+            }
+        }
+        if best.as_ref().map_or(true, |(b, _, _)| inside > *b) {
+            best = Some((inside, grid, m));
+        }
+    }
+    let (_, grid, grid_mask) = best.filter(|(inside, _, _)| *inside > 0).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "SAM3 found no object in the selection box — try a tighter box or use the brush."
+                .into(),
+        )
+    })?;
+    // Reuse the >0 binarize + resize-to-source path (inverts the 1008² squash back to the frame).
+    Ok(mask_to_frame(&grid_mask, grid, width, height))
+}
+
 /// Every tracked person's per-frame mask + a stable left-to-right paint order — the input to the
 /// SCAIL-2 color-mask painter (sc-5448). Unlike [`segment_track_blocking`] (which selects ONE person
 /// via ByteTrack anchors for replace_person), this keeps EVERY SAM3 object so each person can be
@@ -479,6 +613,26 @@ pub(crate) fn segment_all_persons_in_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_box_maps_xyxy_pixels_to_unit_cxcywh() {
+        // A 100×200 box at (10,20) on a 200×400 image → center (60,120), size (100,200).
+        let b = normalize_box_cxcywh([10.0, 20.0, 110.0, 220.0], 200, 400);
+        assert!((b[0] - 0.30).abs() < 1e-6, "cx {}", b[0]); // 60/200
+        assert!((b[1] - 0.30).abs() < 1e-6, "cy {}", b[1]); // 120/400
+        assert!((b[2] - 0.50).abs() < 1e-6, "w {}", b[2]); // 100/200
+        assert!((b[3] - 0.50).abs() < 1e-6, "h {}", b[3]); // 200/400
+    }
+
+    #[test]
+    fn normalize_box_orders_corners_and_clamps_to_image() {
+        // Reversed corners + out-of-bounds → ordered + clamped to [0,1].
+        let b = normalize_box_cxcywh([300.0, -50.0, 50.0, 500.0], 200, 400);
+        assert!(b.iter().all(|&v| (0.0..=1.0).contains(&v)), "{b:?}");
+        // x spans [50,200] (clamped from 300) → cx = 125/200 = 0.625, w = 150/200 = 0.75
+        assert!((b[0] - 0.625).abs() < 1e-6, "cx {}", b[0]);
+        assert!((b[2] - 0.75).abs() < 1e-6, "w {}", b[2]);
+    }
 
     #[test]
     fn quant_bits_defaults_to_q8_and_honors_overrides() {
@@ -664,5 +818,86 @@ mod tests {
             );
             eprintln!("frame {i}: fg_frac={frac:.3} containment={containment:.3}");
         }
+    }
+
+    /// Real-weights smoke for the smart-select box path (sc-6105): preprocess →
+    /// `Sam3ImageSegmenter::segment_with_boxes` → pick-best-instance → mask at the source dims,
+    /// against the stock `facebook/sam3` checkpoint. Proves a single box prompt segments the object
+    /// under it (the backend of the sc-3751 canvas tool). `#[ignore]`d (needs the 3.2 GB weights +
+    /// GPU); run with:
+    ///   SCENEWORKS_SAM3_WEIGHTS=<facebook/sam3 snapshot dir> \
+    ///   SCENEWORKS_SAM3_SMOKE_IMAGE=<jpg/png with a clear subject, e.g. zidane.jpg 1280×720> \
+    ///   [SCENEWORKS_SAM3_SMOKE_CONCEPT=<optional text concept>] \
+    ///   cargo test -p sceneworks-worker --release sam3_real_weights_box_segment_smoke -- --ignored --nocapture
+    #[test]
+    #[ignore = "real SAM3 weights + GPU; set SCENEWORKS_SAM3_WEIGHTS + SCENEWORKS_SAM3_SMOKE_IMAGE"]
+    fn sam3_real_weights_box_segment_smoke() {
+        let snap = std::env::var("SCENEWORKS_SAM3_WEIGHTS")
+            .expect("set SCENEWORKS_SAM3_WEIGHTS to a facebook/sam3 snapshot dir");
+        let dir = {
+            let p = PathBuf::from(&snap);
+            if p.is_file() {
+                p.parent().unwrap().to_path_buf()
+            } else {
+                p
+            }
+        };
+        let model = dir.join(MODEL_FILE);
+        let tokenizer = dir.join(TOKENIZER_FILE);
+        let image_path = PathBuf::from(
+            std::env::var("SCENEWORKS_SAM3_SMOKE_IMAGE")
+                .expect("set SCENEWORKS_SAM3_SMOKE_IMAGE to an image with a clear subject"),
+        );
+        let image = crate::image_decode::decode_image_any(&image_path)
+            .expect("decode smoke image")
+            .to_rgb8();
+        let (w, h) = (image.width(), image.height());
+
+        // A box around the prominent foreground subject (zidane.jpg: the central/right player), in
+        // source pixels. The concept defaults to empty (geometric prompt only).
+        let concept = std::env::var("SCENEWORKS_SAM3_SMOKE_CONCEPT").unwrap_or_default();
+        // Default box tightly bounds zidane.jpg's right-hand player; override with
+        // SCENEWORKS_SAM3_SMOKE_BOX="x1,y1,x2,y2" (source pixels) for a different image. A tight box
+        // around ONE object is the realistic smart-select gesture (a loose box spanning multiple
+        // objects is ambiguous by design).
+        let box_xyxy = std::env::var("SCENEWORKS_SAM3_SMOKE_BOX")
+            .ok()
+            .and_then(|s| {
+                let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                (v.len() == 4).then(|| [v[0], v[1], v[2], v[3]])
+            })
+            .unwrap_or([
+                w as f32 * 0.581,
+                h as f32 * 0.058,
+                w as f32 * 0.894,
+                h as f32 * 0.989,
+            ]);
+        let mask = segment_box_blocking(model, tokenizer, image, box_xyxy, &concept, 0.5, 0.5)
+            .expect("segment_box_blocking");
+
+        assert_eq!(mask.len(), (w * h) as usize, "mask size = source dims");
+        assert!(mask.iter().all(|&v| v == 0 || v == 255), "mask is binary");
+        let fg = mask.iter().filter(|&&v| v > 127).count();
+        let frac = fg as f64 / (w * h) as f64;
+        assert!(
+            (0.02..0.90).contains(&frac),
+            "foreground fraction {frac:.3} implausible (empty or whole-frame)"
+        );
+        // Most emitted foreground sits inside the prompt box.
+        let (x1, y1, x2, y2) = (box_xyxy[0], box_xyxy[1], box_xyxy[2], box_xyxy[3]);
+        let inside = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| mask[(y * w + x) as usize] > 127)
+            .filter(|&(x, y)| {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                px >= x1 && px < x2 && py >= y1 && py < y2
+            })
+            .count();
+        let containment = inside as f64 / fg.max(1) as f64;
+        assert!(
+            containment > 0.5,
+            "mask containment in box {containment:.3} too low (wrong object?)"
+        );
+        eprintln!("box-segment smoke: fg_frac={frac:.3} containment={containment:.3} dims={w}x{h}");
     }
 }
