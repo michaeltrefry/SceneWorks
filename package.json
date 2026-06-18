@@ -11,6 +11,7 @@
     "check": "node scripts/check-scaffold.mjs",
     "check:compose": "node scripts/check-compose-config.mjs",
     "check:health": "node scripts/check-health.mjs",
+    "hooks:install": "git config core.hooksPath scripts/git-hooks",
     "check:docker:rust-api": "node scripts/check-docker-api-runtime.mjs",
     "rust:fmt": "cargo fmt --all -- --check",
     "rust:lint": "cargo clippy --all-targets -- -D warnings",

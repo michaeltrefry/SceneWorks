@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMRT)"
+
+if ! printf '%s\n' "$staged_files" | grep -Eq '(^|/)([^/]+\.rs|Cargo\.toml|rustfmt\.toml)$|^\.cargo/.*\.toml$'; then
+  exit 0
+fi
+
+echo "Running rustfmt check for staged Rust changes..."
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo is required to run rustfmt checks. Install Rust or add cargo to PATH."
+  exit 1
+fi
+
+if ! npm run rust:fmt; then
+  echo
+  echo "rustfmt check failed. Run 'cargo fmt --all' and stage the formatting changes."
+  exit 1
+fi

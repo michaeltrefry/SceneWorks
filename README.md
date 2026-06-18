@@ -80,6 +80,13 @@ Or run the full Rust verification sequence:
 npm run rust:check
 ```
 
+Optionally install local Git hooks that run `npm run rust:fmt` before commits
+touching Rust files:
+
+```powershell
+npm run hooks:install
+```
+
 To point host-mode workers at the API, start the Rust API binary on port 8000
 and run each worker with `SCENEWORKS_API_URL=http://localhost:8000`. In Docker
 Compose, workers are wired to the `api` service automatically. The
