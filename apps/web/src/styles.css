@@ -6133,6 +6133,57 @@ details[open] > summary.lora-scope-group-heading::before,
   max-width: 200px;
 }
 
+/* Reference-image conditioning (sc-6107): a compact row of reference thumbnails + an add button,
+   shown only for a FLUX.2 multiReference edit model. */
+.image-editor-refs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.image-editor-ref-chip {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-2, var(--surface));
+}
+
+.image-editor-ref-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.image-editor-ref-chip > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.image-editor-ref-chip > button {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  line-height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 /* Detail-enhance bar (sc-2438): backbone picker + strength/structure sliders. */
 .image-editor-detailbar .image-editor-editmodel {
   max-width: 200px;

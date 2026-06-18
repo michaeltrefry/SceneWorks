@@ -44,6 +44,7 @@ export function buildEditJobBody({
   requestedGpu,
   sourceAssetId,
   maskAssetId,
+  referenceAssetIds = null,
   model,
   prompt,
   seed,
@@ -72,7 +73,28 @@ export function buildEditJobBody({
   // Inpaint mask (sc-2436): only sent for inpaint-capable models with a painted
   // region; the worker confines the edit to it. Omitted entirely otherwise.
   if (maskAssetId) body.maskAssetId = maskAssetId;
+  // Multi-reference edit (sc-6107): a FLUX.2 `multiReference` model conditions the edit jointly on
+  // the working image + the user's reference image(s). The list already leads with the working
+  // scratch id (see `editReferenceIds`); the worker prefers a non-empty `referenceAssetIds` over
+  // `sourceAssetId`, so the working image must ride in the list or it's dropped from the edit.
+  if (referenceAssetIds && referenceAssetIds.length) body.referenceAssetIds = referenceAssetIds;
   return body;
+}
+
+// Upper bound on images in a FLUX.2 multi-reference edit, matching the worker's MAX_EDIT_REFERENCES
+// (image_jobs/flux2.rs). The working image takes one slot, so the editor allows up to 3 user refs.
+export const MAX_EDIT_REFERENCES = 4;
+
+// Compose the multi-reference edit's `referenceAssetIds`: the working image (staged as the scratch
+// source) FIRST so it anchors the edit, then the user's reference images — trimmed, de-duped, and
+// capped at `max` total. The worker prefers a non-empty `referenceAssetIds` list over `sourceAssetId`
+// (image_jobs/flux2.rs `flux2_edit_reference_ids`), so the working scratch id must lead the list or
+// the working image is dropped from the joint conditioning. Pure. Empty source → empty list.
+export function editReferenceIds(sourceAssetId, refIds, max = MAX_EDIT_REFERENCES) {
+  const ids = [sourceAssetId, ...(refIds ?? [])]
+    .map((id) => (typeof id === "string" ? id.trim() : ""))
+    .filter(Boolean);
+  return Array.from(new Set(ids)).slice(0, max);
 }
 
 // Output aspect presets for the editor's canvas-extend / outpaint control (sc-2556).
@@ -820,6 +842,12 @@ export function ImageEditor() {
   const selectDrawingRef = useRef(false);
   const selectStartRef = useRef(null);
 
+  // Reference-image conditioning (sc-6107): user-attached library images that jointly condition the
+  // AI Edit alongside the working image, on a FLUX.2 `multiReference` edit model. The working image is
+  // added at run time (it's staged as a scratch source), so this holds only the user's picks.
+  const [refAssetIds, setRefAssetIds] = useState([]); // string[] of library asset ids
+  const [refPickerOpen, setRefPickerOpen] = useState(false);
+
   // Box layout tool (sc-6090): colored rectangles drawn over the working image in
   // image-pixel coords. They drive the color-keyed edit path (sc-6093) and the
   // Ideogram bbox path (sc-6095). Session-only overlay state — boxes are not baked
@@ -856,6 +884,14 @@ export function ImageEditor() {
   // The chosen edit model + whether it accepts an inpaint mask (gates the mask tool).
   const selectedEditModel = editModels.find((model) => model.id === editModel) ?? null;
   const canMask = modelIsInpaintCapable(selectedEditModel);
+  // Whether the edit model conditions on extra reference images (FLUX.2 multi-reference edit, sc-6107):
+  // the manifest tags it `ui.multiReference`. Gates the reference picker; off-models hide it entirely.
+  const multiRefCapable = Boolean(selectedEditModel?.ui?.multiReference);
+  // Drop any attached references when the model can't use them (switched away from a multiReference
+  // model), so a stale selection never rides a job that would ignore it.
+  useEffect(() => {
+    if (!multiRefCapable && refAssetIds.length) setRefAssetIds([]);
+  }, [multiRefCapable, refAssetIds.length]);
 
   // Leave paint mode (restoring Stage panning) when the edit tool is closed or the
   // model can't inpaint — otherwise the canvas would stay in a paint state with no UI.
@@ -968,6 +1004,9 @@ export function ImageEditor() {
     setMaskSubTool("brush");
     setSelectDraft(null);
     selectDrawingRef.current = false;
+    // A new editing session starts with no attached reference images (sc-6107).
+    setRefAssetIds([]);
+    setRefPickerOpen(false);
     // Boxes are in image-pixel coords → a new bitmap (open/crop/upscale/AI op) invalidates them.
     setBoxes([]);
     setSelectedBoxId(null);
@@ -1826,6 +1865,10 @@ export function ImageEditor() {
           requestedGpu,
           sourceAssetId: scratch.id,
           maskAssetId: maskScratch?.id,
+          // Multi-reference edit (sc-6107): lead with the working scratch image, then the user's
+          // references. Only for a multiReference model with at least one attached reference.
+          referenceAssetIds:
+            multiRefCapable && refAssetIds.length ? editReferenceIds(scratch.id, refAssetIds) : null,
           model: editModel,
           prompt,
           seed: editSeed,
@@ -2671,6 +2714,35 @@ export function ImageEditor() {
                     ) : null}
                   </>
                 ) : null}
+                {multiRefCapable ? (
+                  <span className="image-editor-refs" aria-label="Reference images">
+                    <span className="image-editor-slider-label">Reference</span>
+                    {refAssetIds.map((id) => {
+                      const asset = imageAssets.find((item) => item.id === id);
+                      return (
+                        <span className="image-editor-ref-chip" key={id}>
+                          {asset ? <img alt="" src={assetUrl(asset)} /> : <span>?</span>}
+                          <button
+                            aria-label="Remove reference"
+                            onClick={() => setRefAssetIds((prev) => prev.filter((other) => other !== id))}
+                            title="Remove reference"
+                            type="button"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      );
+                    })}
+                    <button
+                      disabled={refAssetIds.length >= MAX_EDIT_REFERENCES - 1}
+                      onClick={() => setRefPickerOpen(true)}
+                      title="Condition the edit on reference image(s) — identity/style alongside the working image"
+                      type="button"
+                    >
+                      + Reference
+                    </button>
+                  </span>
+                ) : null}
                 <button className="primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
                   {canMask && (maskHasContent(maskLines) || maskBaseImage) ? "Inpaint" : "Edit"}
                 </button>
@@ -2943,6 +3015,40 @@ export function ImageEditor() {
             if (file && confirmDiscardEdits()) openFile(file);
           }}
           title="Open image"
+        />
+      ) : null}
+
+      {refPickerOpen ? (
+        <DatasetAddDialog
+          assets={assets ?? []}
+          characters={characters ?? []}
+          confirmLabel="Add"
+          eyebrow="Reference"
+          fileAccept="image/*"
+          fileHint="Drag a reference image here, or"
+          // Hide images already attached as references so the library tab only offers new picks.
+          memberIds={refAssetIds}
+          onAdd={(ids) => {
+            setRefPickerOpen(false);
+            setRefAssetIds((prev) =>
+              Array.from(new Set([...prev, ...ids])).slice(0, MAX_EDIT_REFERENCES - 1),
+            );
+          }}
+          onClose={() => setRefPickerOpen(false)}
+          onImport={async (files) => {
+            // Upload dropped images into the project, then attach them as references (sc-6107).
+            setRefPickerOpen(false);
+            const imported = await Promise.all(
+              Array.from(files ?? []).map((file) => importAsset(file).catch(() => null)),
+            );
+            const ids = imported.filter(Boolean).map((asset) => asset.id);
+            if (ids.length) {
+              setRefAssetIds((prev) =>
+                Array.from(new Set([...prev, ...ids])).slice(0, MAX_EDIT_REFERENCES - 1),
+              );
+            }
+          }}
+          title="Add reference image"
         />
       ) : null}
 

@@ -2966,6 +2966,55 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
 }
 
 #[tokio::test]
+async fn image_job_route_threads_reference_asset_ids() {
+    // sc-6358 / sc-6107 regression guard: the multi-reference edit picker sends a top-level
+    // `referenceAssetIds` array. The typed ImageJobRequest must carry the plural list through to the
+    // job payload — without the field, serde drops the unknown key on deserialize and `to_json_object`
+    // never forwards it, so the worker's `flux2_edit_reference_ids` never sees the references and the
+    // FLUX.2 multi-reference edit silently no-ops (the original sc-6211 defect).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, edit_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "edit_image",
+            "prompt": "in the style of the references",
+            "sourceAssetId": "work-scratch",
+            "referenceAssetIds": ["work-scratch", "ref-a", "ref-b"],
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(edit_job["type"], "image_edit");
+    assert_eq!(
+        edit_job["payload"]["referenceAssetIds"],
+        json!(["work-scratch", "ref-a", "ref-b"])
+    );
+
+    // A request that doesn't send the list still serializes a present (empty) array — the worker's
+    // `string_list` treats missing/empty identically, so this never surprises a single-reference edit.
+    let (status, plain_job) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "edit_image",
+            "prompt": "make it dusk",
+            "sourceAssetId": "asset-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(plain_job["payload"]["referenceAssetIds"], json!([]));
+}
+
+#[tokio::test]
 async fn image_and_video_job_routes_normalize_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

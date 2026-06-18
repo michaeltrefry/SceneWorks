@@ -70,6 +70,8 @@ import {
   rectToSegmentBox,
   tintMaskRgbaInPlace,
   MASK_PREVIEW_RGBA,
+  editReferenceIds,
+  MAX_EDIT_REFERENCES,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 
@@ -797,6 +799,45 @@ describe("AI prompt edit", () => {
     expect("maskAssetId" in buildEditJobBody(base)).toBe(false);
     expect("maskAssetId" in buildEditJobBody({ ...base, maskAssetId: undefined })).toBe(false);
     expect(buildEditJobBody({ ...base, maskAssetId: "asset_mask" }).maskAssetId).toBe("asset_mask");
+  });
+
+  it("includes referenceAssetIds only when a non-empty reference list is supplied (sc-6107)", () => {
+    const base = {
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "work_scratch",
+      model: "flux2_dev",
+      prompt: "x",
+      width: 10,
+      height: 10,
+    };
+    expect("referenceAssetIds" in buildEditJobBody(base)).toBe(false);
+    expect("referenceAssetIds" in buildEditJobBody({ ...base, referenceAssetIds: [] })).toBe(false);
+    expect(
+      buildEditJobBody({ ...base, referenceAssetIds: ["work_scratch", "ref_a"] }).referenceAssetIds,
+    ).toEqual(["work_scratch", "ref_a"]);
+  });
+});
+
+describe("reference conditioning (sc-6107)", () => {
+  it("leads the multi-reference list with the working scratch image, then de-dupes + caps", () => {
+    // Working image first (the worker prefers referenceAssetIds over sourceAssetId, so it must ride
+    // in the list), then the user's picks.
+    expect(editReferenceIds("work", ["a", "b"])).toEqual(["work", "a", "b"]);
+    // De-dupe (a user re-picking the working image, or the same ref twice) preserving first order.
+    expect(editReferenceIds("work", ["a", "work", "a", "b"])).toEqual(["work", "a", "b"]);
+    // Capped at MAX_EDIT_REFERENCES total (the worker's MAX_EDIT_REFERENCES).
+    expect(editReferenceIds("work", ["a", "b", "c", "d", "e"])).toEqual(
+      ["work", "a", "b", "c", "d", "e"].slice(0, MAX_EDIT_REFERENCES),
+    );
+    expect(editReferenceIds("work", ["a", "b", "c", "d", "e"]).length).toBe(MAX_EDIT_REFERENCES);
+  });
+
+  it("trims blanks and tolerates a missing source / empty refs", () => {
+    expect(editReferenceIds("  work  ", [" a ", "", "  "])).toEqual(["work", "a"]);
+    expect(editReferenceIds("", ["a", "b"])).toEqual(["a", "b"]);
+    expect(editReferenceIds("", [])).toEqual([]);
+    expect(editReferenceIds("work", null)).toEqual(["work"]);
   });
 });
 

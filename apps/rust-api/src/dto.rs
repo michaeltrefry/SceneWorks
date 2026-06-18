@@ -399,6 +399,15 @@ pub(crate) struct ImageJobRequest {
     // "many images from one reference" flow. ip_adapter_scale rides in `advanced`.
     #[serde(default)]
     pub(crate) reference_asset_id: Option<String>,
+    // Multi-image reference set for a FLUX.2 multi-reference edit (sc-6211 / sc-6107): every id is a
+    // reference image that jointly conditions the edit (DiT token concat → Conditioning::MultiReference),
+    // distinct from the single `reference_asset_id`. Threaded to the worker payload as-is; the worker's
+    // `flux2_edit_reference_ids` consumes a non-empty list (capped at MAX_EDIT_REFERENCES) and prefers it
+    // over `source_asset_id`. Must be a typed field: without it serde drops the unknown top-level key on
+    // deserialize and `to_json_object` never forwards it, so the references never reach the worker
+    // (sc-6358). Mirrors VideoJobRequest.reference_asset_ids.
+    #[serde(default)]
+    pub(crate) reference_asset_ids: Vec<String>,
     // Optional inpaint mask asset (sc-2476): white = edit region. Honored only by
     // inpaint-capable models (the `image_inpaint` capability, SDXL family); others
     // ignore it and run the whole-image edit. Threaded to the worker payload as-is.
