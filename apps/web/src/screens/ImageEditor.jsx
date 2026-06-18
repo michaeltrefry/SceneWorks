@@ -619,6 +619,53 @@ function blobToImage(blob) {
   });
 }
 
+// ── Undo/redo history (sc-6106) ────────────────────────────────────────────
+// A bounded, backend-free history over opaque working-image snapshots. The
+// reducer is pure — it only shuffles snapshots between the past (undo) and future
+// (redo) stacks; the caller owns capturing a snapshot (the working bitmap blob +
+// box/provenance overlay state) and restoring one (decode + install). Snapshots
+// hold a Blob, never a live object URL, so an evicted snapshot is plain garbage —
+// there is nothing to revoke, which keeps the "no leak of evicted snapshots"
+// guarantee trivial. The stack depth is bounded so retained bitmaps stay capped.
+export const HISTORY_LIMIT = 30;
+
+export function emptyHistory() {
+  return { past: [], future: [] };
+}
+
+// Push the current snapshot onto the undo stack and drop the redo stack. Call at
+// the START of an operation, before the working state mutates, with a snapshot of
+// the pre-operation state. Bounded to the `limit` most-recent entries.
+export function historyCheckpoint(history, snapshot, limit = HISTORY_LIMIT) {
+  return { past: [...history.past, snapshot].slice(-limit), future: [] };
+}
+
+// Step back one operation. `present` is the current on-screen snapshot, captured
+// fresh by the caller so a later redo restores exactly what is on screen now.
+// Returns the next history plus the snapshot to restore (`restore` is null when
+// there is nothing to undo, in which case `history` is returned unchanged).
+export function historyUndo(history, present, limit = HISTORY_LIMIT) {
+  if (!history.past.length) return { history, restore: null };
+  const restore = history.past[history.past.length - 1];
+  return {
+    history: { past: history.past.slice(0, -1), future: [present, ...history.future].slice(0, limit) },
+    restore,
+  };
+}
+
+// Step forward one operation, symmetric to historyUndo.
+export function historyRedo(history, present, limit = HISTORY_LIMIT) {
+  if (!history.future.length) return { history, restore: null };
+  const [restore, ...rest] = history.future;
+  return {
+    history: { past: [...history.past, present].slice(-limit), future: rest },
+    restore,
+  };
+}
+
+export const canUndo = (history) => history.past.length > 0;
+export const canRedo = (history) => history.future.length > 0;
+
 export function ImageEditor() {
   const {
     activeProject,
@@ -769,6 +816,31 @@ export function ImageEditor() {
   const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 
+  // Undo/redo (sc-6106): a bounded snapshot history over the working-image session.
+  // The stacks live in a ref for synchronous reads inside the commit handlers; the
+  // can-undo/redo flags are mirrored into state so the toolbar buttons re-render.
+  const historyRef = useRef(emptyHistory());
+  const [historyFlags, setHistoryFlags] = useState({ canUndo: false, canRedo: false });
+  // The Blob of the current working bitmap — a snapshot reuses it (no re-encode) and
+  // restore() compares against it to skip a needless decode/refit for overlay-only steps.
+  const workingBlobRef = useRef(null);
+  // Live mirrors of the snapshot-relevant state so a synchronous checkpoint can
+  // capture the pre-operation state without stale-closure surprises.
+  const editsRef = useRef(edits);
+  const dirtyRef = useRef(dirty);
+  const savedAssetIdRef = useRef(savedAssetId);
+  const boxesRef = useRef(boxes);
+  const boxColorRef = useRef(boxColor);
+  const workingSourceRef = useRef(null);
+  const aiOpRef = useRef(aiOp);
+  useEffect(() => { editsRef.current = edits; }, [edits]);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+  useEffect(() => { savedAssetIdRef.current = savedAssetId; }, [savedAssetId]);
+  useEffect(() => { boxesRef.current = boxes; }, [boxes]);
+  useEffect(() => { boxColorRef.current = boxColor; }, [boxColor]);
+  useEffect(() => { aiOpRef.current = aiOp; }, [aiOp]);
+  useEffect(() => { if (working) workingSourceRef.current = working.source; }, [working]);
+
   const imageAssets = (assets ?? []).filter(assetCanRenderAsImage);
 
   // Track the container size so the Konva stage fills the available canvas area.
@@ -837,22 +909,141 @@ export function ImageEditor() {
     });
   }, []);
 
+  // ── Undo/redo plumbing (sc-6106) ──────────────────────────────────────────
+  // A snapshot is the working bitmap blob plus the overlay/provenance state that
+  // installWorkingImage would otherwise reset (boxes, edit chain, dirty flag).
+  const captureSnapshot = useCallback(
+    () => ({
+      blob: workingBlobRef.current,
+      source: workingSourceRef.current,
+      edits: editsRef.current,
+      dirty: dirtyRef.current,
+      savedAssetId: savedAssetIdRef.current,
+      boxes: boxesRef.current,
+      boxColor: boxColorRef.current,
+      boxIdSeq: boxIdRef.current,
+    }),
+    [],
+  );
+
+  const syncHistoryFlags = useCallback(() => {
+    setHistoryFlags({ canUndo: canUndo(historyRef.current), canRedo: canRedo(historyRef.current) });
+  }, []);
+
+  // Record a step: push the pre-operation snapshot onto the undo stack. Call this
+  // BEFORE the working state mutates (crop/color/AI result, or a box change).
+  const checkpoint = useCallback(() => {
+    if (!workingBlobRef.current) return;
+    historyRef.current = historyCheckpoint(historyRef.current, captureSnapshot());
+    syncHistoryFlags();
+  }, [captureSnapshot, syncHistoryFlags]);
+
+  // Start a fresh history for a newly opened session (clears both stacks).
+  const resetHistory = useCallback(
+    (blob, source) => {
+      workingBlobRef.current = blob;
+      workingSourceRef.current = source;
+      historyRef.current = emptyHistory();
+      syncHistoryFlags();
+    },
+    [syncHistoryFlags],
+  );
+
+  // Re-apply a snapshot's overlay/provenance state, keeping the live mirrors in
+  // sync immediately so an undo→undo chain reads the right "present" each step.
+  const applyHistoryAux = useCallback((snap) => {
+    setEdits(snap.edits);
+    editsRef.current = snap.edits;
+    setDirty(snap.dirty);
+    dirtyRef.current = snap.dirty;
+    setSavedAssetId(snap.savedAssetId);
+    savedAssetIdRef.current = snap.savedAssetId;
+    setBoxes(snap.boxes);
+    boxesRef.current = snap.boxes;
+    setBoxColor(snap.boxColor);
+    boxColorRef.current = snap.boxColor;
+    setSelectedBoxId(null);
+    boxIdRef.current = snap.boxIdSeq;
+  }, []);
+
+  const restoreSnapshot = useCallback(
+    async (snap) => {
+      if (!snap) return;
+      try {
+        // Overlay-only steps (box edits) keep the same bitmap → skip the decode and
+        // the view refit; only bitmap ops (crop/color/AI) re-install the image.
+        if (snap.blob && snap.blob !== workingBlobRef.current) {
+          const { image, objectUrl } = await blobToImage(snap.blob);
+          installWorkingImage(image, objectUrl, snap.source);
+          workingBlobRef.current = snap.blob;
+          workingSourceRef.current = snap.source;
+        }
+        applyHistoryAux(snap);
+      } catch (err) {
+        setStatus({ loading: false, error: err.message || "Could not restore that step." });
+      }
+    },
+    [installWorkingImage, applyHistoryAux],
+  );
+
+  const undo = useCallback(async () => {
+    if (aiOpRef.current || !workingBlobRef.current) return;
+    const { history: next, restore } = historyUndo(historyRef.current, captureSnapshot());
+    if (!restore) return;
+    historyRef.current = next;
+    syncHistoryFlags();
+    await restoreSnapshot(restore);
+  }, [captureSnapshot, restoreSnapshot, syncHistoryFlags]);
+
+  const redo = useCallback(async () => {
+    if (aiOpRef.current || !workingBlobRef.current) return;
+    const { history: next, restore } = historyRedo(historyRef.current, captureSnapshot());
+    if (!restore) return;
+    historyRef.current = next;
+    syncHistoryFlags();
+    await restoreSnapshot(restore);
+  }, [captureSnapshot, restoreSnapshot, syncHistoryFlags]);
+
+  // Cmd/Ctrl+Z = undo, Shift+Cmd/Ctrl+Z or Ctrl+Y = redo. Ignored while focus is
+  // in a text field so the browser's native text undo (e.g. a box's description)
+  // is not hijacked.
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const tag = event.target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable) return;
+      const key = event.key?.toLowerCase();
+      if (key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+      } else if (key === "y") {
+        event.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [undo, redo]);
+
   const openFromBlob = useCallback(
     async (blob, source) => {
       setStatus({ loading: true, error: "" });
       try {
         const { image, objectUrl } = await blobToImage(blob);
         installWorkingImage(image, objectUrl, source);
-        // A freshly opened image is a clean session — clear edit/provenance state.
+        // A freshly opened image is a clean session — clear edit/provenance state
+        // and start a fresh undo/redo history rooted at this bitmap (sc-6106).
         setEdits([]);
         setDirty(false);
         setSavedAssetId(null);
+        resetHistory(blob, source);
         setStatus({ loading: false, error: "" });
       } catch (err) {
         setStatus({ loading: false, error: err.message || "Could not open image" });
       }
     },
-    [installWorkingImage],
+    [installWorkingImage, resetHistory],
   );
 
   const openAsset = useCallback(
@@ -1029,10 +1220,12 @@ export function ImageEditor() {
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) return;
     const { image, objectUrl } = await blobToImage(blob);
+    checkpoint();
     installWorkingImage(image, objectUrl, working.source);
+    workingBlobRef.current = blob;
     setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh }]);
     setDirty(true);
-  }, [working, cropRect, installWorkingImage]);
+  }, [working, cropRect, installWorkingImage, checkpoint]);
 
   // Bind the transformer to the crop rect whenever crop mode is active.
   useEffect(() => {
@@ -1088,10 +1281,12 @@ export function ImageEditor() {
     if (!blob) return;
     const baked = { ...colorAdjust };
     const { image, objectUrl } = await blobToImage(blob);
+    checkpoint();
     installWorkingImage(image, objectUrl, working.source);
+    workingBlobRef.current = blob;
     setEdits((prev) => [...prev, { op: "color", ...baked }]);
     setDirty(true);
-  }, [working, colorAdjust, installWorkingImage]);
+  }, [working, colorAdjust, installWorkingImage, checkpoint]);
 
   // ── Box layout tool (sc-6090) ─────────────────────────────────────────────
   function selectBoxTool() {
@@ -1139,6 +1334,7 @@ export function ImageEditor() {
     if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
     const rect = clampRectToCanvas(draft, working.width, working.height);
     const id = nextBoxId();
+    checkpoint();
     setBoxes((prev) => [...prev, makeBox(id, rect, boxColor)]);
     setSelectedBoxId(id);
   }
@@ -1158,6 +1354,7 @@ export function ImageEditor() {
       working.height,
     );
     node.setAttrs(rect);
+    checkpoint();
     updateBoxRect(id, rect);
   }
 
@@ -1171,6 +1368,7 @@ export function ImageEditor() {
     node.scaleX(1);
     node.scaleY(1);
     node.setAttrs(rect);
+    checkpoint();
     updateBoxRect(id, rect);
   }
 
@@ -1179,6 +1377,9 @@ export function ImageEditor() {
   // box stays valid per `isValidHexColor` even from a lowercase <input type=color>.
   function chooseBoxColor(color) {
     const value = color.toUpperCase();
+    // Recoloring the active box is an undoable step; setting the color for future
+    // boxes (no selection) is not — it changes no committed state.
+    if (selectedBoxId) checkpoint();
     setBoxColor(value);
     if (selectedBoxId) {
       setBoxes((prev) => prev.map((box) => (box.id === selectedBoxId ? { ...box, color: value } : box)));
@@ -1187,12 +1388,14 @@ export function ImageEditor() {
 
   function deleteBox(id) {
     if (!id) return;
+    checkpoint();
     setBoxes((prev) => prev.filter((box) => box.id !== id));
     boxNodeRefs.current.delete(id);
     setSelectedBoxId((cur) => (cur === id ? null : cur));
   }
 
   function clearBoxes() {
+    if (boxes.length) checkpoint();
     setBoxes([]);
     boxNodeRefs.current.clear();
     setSelectedBoxId(null);
@@ -1526,8 +1729,11 @@ export function ImageEditor() {
         if (resultAsset) {
           const res = await fetch(assetUrl(resultAsset));
           if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
-          const { image, objectUrl } = await blobToImage(await res.blob());
+          const blob = await res.blob();
+          const { image, objectUrl } = await blobToImage(blob);
+          checkpoint();
           installWorkingImage(image, objectUrl, source);
+          workingBlobRef.current = blob;
           if (edit) setEdits((prev) => [...prev, edit]);
           setDirty(true);
         } else {
@@ -1541,7 +1747,7 @@ export function ImageEditor() {
         if (resultAsset) purgeAsset(resultAsset).catch(() => {});
       }
     })();
-  }, [aiOp, jobs, installWorkingImage, purgeAsset]);
+  }, [aiOp, jobs, installWorkingImage, purgeAsset, checkpoint]);
 
   // ── Save / export (sc-2434) ───────────────────────────────────────────────
   // Persist the working image as a NEW Library asset, never overwriting the
@@ -1658,6 +1864,24 @@ export function ImageEditor() {
           ) : null}
           {working ? (
             <>
+              <button
+                className="image-editor-undo"
+                disabled={!historyFlags.canUndo || Boolean(aiOp)}
+                onClick={undo}
+                title="Undo (⌘Z)"
+                type="button"
+              >
+                Undo
+              </button>
+              <button
+                className="image-editor-redo"
+                disabled={!historyFlags.canRedo || Boolean(aiOp)}
+                onClick={redo}
+                title="Redo (⇧⌘Z / Ctrl+Y)"
+                type="button"
+              >
+                Redo
+              </button>
               <button onClick={runDownload} title="Download a PNG to your computer" type="button">
                 Download
               </button>
