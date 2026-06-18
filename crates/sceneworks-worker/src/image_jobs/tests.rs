@@ -3923,3 +3923,107 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
         eprintln!("ideogram {label}: {w}x{h} RGB8, {steps_seen} steps observed");
     }
 }
+
+/// Real-weight Ideogram 4 **edit** e2e (sc-6303): drives the worker's `generate_one` with a source
+/// `Reference` (img2img/Remix) and a `Reference` + `Mask` (inpaint) through the production engine
+/// load, so the worker's `[Reference, Mask]` conditioning assembly is consumed by the engine's edit
+/// path end-to-end. Mechanics only (low steps); engine-level correctness (keep-vs-repaint) is the
+/// mlx-gen `edit_smoke`. Run:
+/// `cargo test -p sceneworks-worker --lib -- --ignored ideogram_4_real_weights_edit --nocapture`.
+#[cfg(target_os = "macos")]
+#[ignore = "loads the real Ideogram 4 snapshot; run manually on a Mac with SceneWorks/ideogram-4-mlx cached"]
+#[test]
+fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
+    let Some(dir) = ideogram_dir() else {
+        eprintln!(
+            "skipping ideogram_4_real_weights_edit: no SceneWorks/ideogram-4-mlx q4 snapshot found"
+        );
+        return;
+    };
+    let env_u32 = |key: &str, default: u32| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    };
+    let steps = env_u32("IDEOGRAM4_SMOKE_STEPS", 8);
+    let res = env_u32("IDEOGRAM4_SMOKE_RES", 512);
+
+    let model = mlx_model("ideogram_4").unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "ideogram_4", "prompt": "p", "advanced": {},
+        "modelManifestEntry": { "mlx": { "quantize": 4 } },
+    }));
+    let (quant, _bits) = resolve_quant(&req);
+    let guidance = resolve_guidance(&req, &model);
+    let generator = load_engine("ideogram_4", dir, quant, Vec::new(), None).unwrap();
+    let cancel = gen_core::CancelFlag::new();
+    let enhance = PromptEnhance::default();
+    const CAPTION_JSON: &str = "{\"high_level_description\": \"A photograph of a red fox sitting in a snowy forest at golden hour.\", \"compositional_deconstruction\": {\"background\": \"A snowy pine forest at golden hour.\", \"elements\": [{\"type\": \"obj\", \"bbox\": [250, 320, 950, 760], \"desc\": \"A red fox sitting upright in the snow, facing the camera.\"}]}}";
+
+    // Synthetic RGB8 source (gradient) + a left-half-white inpaint mask, both res×res.
+    let source = Image {
+        width: res,
+        height: res,
+        pixels: (0..res * res)
+            .flat_map(|i| {
+                [
+                    (255 * (i % res) / res) as u8,
+                    (255 * (i / res) / res) as u8,
+                    128u8,
+                ]
+            })
+            .collect(),
+    };
+    let mask = Image {
+        width: res,
+        height: res,
+        pixels: (0..res * res)
+            .flat_map(|i| {
+                let v = if i % res < res / 2 { 255u8 } else { 0u8 };
+                [v, v, v]
+            })
+            .collect(),
+    };
+
+    let run = |reference: Option<&(Image, f32)>, edit_mask: Option<&Image>, label: &str| {
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = generate_one(
+            generator.as_ref(),
+            CAPTION_JSON,
+            res,
+            res,
+            42,
+            steps,
+            guidance,
+            None,
+            reference,
+            edit_mask,
+            None,
+            None,
+            None,
+            None,
+            &enhance,
+            &cancel,
+            &mut |p| {
+                if let gen_core::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap_or_else(|error| panic!("ideogram edit {label} failed: {error}"));
+        assert_eq!(pixels.len(), (w * h * 3) as usize, "{label}: RGB8 buffer");
+        assert!(w == res && h == res, "{label}: {res}² output");
+        assert!(steps_seen >= 1, "{label}: denoise progress");
+        assert!(
+            pixels.windows(2).any(|x| x[0] != x[1]),
+            "{label}: non-constant image"
+        );
+        eprintln!("ideogram edit {label}: {w}x{h} RGB8, {steps_seen} steps observed");
+    };
+
+    // img2img (Remix): source Reference only.
+    run(Some(&(source.clone(), 0.6)), None, "img2img");
+    // inpaint (Edit): source Reference + Mask (white half repaints, black half keeps).
+    run(Some(&(source, 0.85)), Some(&mask), "inpaint");
+}
