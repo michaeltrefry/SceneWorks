@@ -333,9 +333,14 @@ pub struct Settings {
     /// Whether the MLX (Apple Silicon) tensor backend is enabled when deriving the worker's
     /// advertised capabilities from the linked engine registry (sc-3723). Default `true`.
     pub backend_mlx_enabled: bool,
-    /// Whether the candle (Windows/CUDA) tensor backend is enabled for capability derivation
-    /// (sc-3723). Default `false` — no candle provider crate ships yet; flipping this on once
-    /// one is linked lights up its descriptors with no further worker change.
+    /// Whether the candle (Windows/CUDA + Linux/NVIDIA) tensor backend is enabled for capability
+    /// derivation (sc-3723). **Defaults to on whenever the worker is built `--features
+    /// backend-candle`** (sc-5502, epic 5483 Phase-7 cutover): the candle providers are at parity
+    /// off-Mac, so a candle build advertises them by default — no `SCENEWORKS_BACKEND_CANDLE_ENABLED`
+    /// needed. A non-candle build (Mac mlx, the desktop installer with no CUDA, any CPU/Linux build
+    /// without the feature) defaults `false` and links no candle crate, so this is inert there. The
+    /// env var still overrides either way (set `0` to force a candle build back onto the Python
+    /// torch fallback during a staged rollout).
     pub backend_candle_enabled: bool,
 }
 
@@ -391,7 +396,12 @@ impl Settings {
                 .is_ok_and(|value| value.trim() == "1"),
             utility_workers: env_u64_any(&["SCENEWORKS_UTILITY_WORKERS"], 4).max(1) as usize,
             backend_mlx_enabled: env_bool("SCENEWORKS_BACKEND_MLX_ENABLED", true),
-            backend_candle_enabled: env_bool("SCENEWORKS_BACKEND_CANDLE_ENABLED", false),
+            // Phase-7 cutover (sc-5502): a candle build defaults the backend ON (the providers are at
+            // off-Mac parity); a non-candle build defaults it off. The env var overrides either way.
+            backend_candle_enabled: env_bool(
+                "SCENEWORKS_BACKEND_CANDLE_ENABLED",
+                cfg!(feature = "backend-candle"),
+            ),
         }
     }
 }
