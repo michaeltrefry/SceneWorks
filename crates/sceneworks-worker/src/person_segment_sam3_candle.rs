@@ -12,9 +12,10 @@
 //! Off-Mac + `backend-candle` only (`candle-gen-sam3` builds candle/CUDA). It loads the **stock
 //! `facebook/sam3` checkpoint directly** (`model.safetensors` + `tokenizer.json`; no conversion).
 //! Affine quant (`Sam3VideoModel::quantize`, sc-6246) is available via `SCENEWORKS_SAM3_QUANT`
-//! (`q8`/`q4`), but the off-Mac default is **dense** — candle's GGUF `QMatMul` returns NaN on Blackwell
-//! sm_120 (sc-6248), and dense is bit-exact (every parity test cosine ≈ 1.0). The pure association/mask
-//! helpers are shared line-for-line with the MLX module; only the tensor/inference seam is candle.
+//! (`q8`/`q4`), but the off-Mac default is **dense** — quantizing SAM3's PE vision ViT backbone NaNs
+//! (its massive activations overflow GGUF's f16 quant scale, sc-6361; NOT a candle/Blackwell bug —
+//! candle GGUF quant is correct on sm_120), and dense is bit-exact and fits the box. The pure
+//! association/mask helpers are shared line-for-line with the MLX module; only the seam is candle.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -52,17 +53,18 @@ const CONCEPT_PROMPT: &str = "person";
 pub(crate) type BoxNorm = (f64, f64, f64, f64);
 
 /// Affine-quantization level for the segmenter, from `SCENEWORKS_SAM3_QUANT`: **dense by default**
-/// off-Mac (candle's Blackwell quant is broken, sc-6248); `q8`/`q4` opt back in where supported.
-/// `None` = no quantization (dense F32).
+/// off-Mac (quantizing SAM3's PE vision backbone NaNs — its massive activations overflow GGUF's f16
+/// quant scale, sc-6361, not a candle/Blackwell bug); `q8`/`q4` opt back in. `None` = dense F32.
 fn quant_level() -> Option<Quant> {
     parse_quant(&std::env::var("SCENEWORKS_SAM3_QUANT").unwrap_or_default())
 }
 
 /// Parse the `SCENEWORKS_SAM3_QUANT` value (split out so the mapping is unit-testable). The default
-/// off-Mac is **dense** (`None`): candle's GGUF `QMatMul` returns NaN on Blackwell sm_120 (sc-6248),
-/// so Q8/Q4 collapse the SAM3 person masks while the dense path is bit-exact and ~3.4 GB fits the
-/// GPU-worker box. `q8`/`q4` remain opt-in for hardware where candle's quant kernels work; `off`/
-/// `f32`/`none`/unset/unrecognized all stay dense.
+/// off-Mac is **dense** (`None`): quantizing SAM3's PE vision ViT backbone produces NaN masks — its
+/// massive activations overflow GGUF's f16 q8_1 block scale (sc-6361), hardware-agnostic and NOT a
+/// candle/Blackwell bug (candle GGUF quant is correct on sm_120; the heads quantize fine, only the
+/// backbone breaks). Dense is bit-exact and ~3.4 GB fits the GPU-worker box, so quant buys ~nothing
+/// for SAM3. `q8`/`q4` remain opt-in; `off`/`f32`/`none`/unset/unrecognized all stay dense.
 fn parse_quant(value: &str) -> Option<Quant> {
     match value.trim().to_ascii_lowercase().as_str() {
         "q4" | "4" => Some(Quant::Q4),
@@ -308,8 +310,8 @@ pub(crate) fn segment_track_blocking(
     // Fresh model per clip (clean tracking state) + tokenize the concept once.
     let mut model = Sam3VideoModel::from_weights(weights)
         .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
-    // Quantize (Q8 default) for a smaller footprint; the dense path is parity-preserving, so
-    // `SCENEWORKS_SAM3_QUANT=off` leaves the F32 result unchanged.
+    // Optional quant (opt-in via `SCENEWORKS_SAM3_QUANT`); off-Mac defaults to dense (sc-6361), so
+    // unset leaves the F32 result unchanged.
     if let Some(quant) = quant_level() {
         model
             .quantize(quant)
@@ -353,7 +355,7 @@ mod tests {
         assert_eq!(
             parse_quant(""),
             None,
-            "unset → dense (candle Blackwell quant broken, sc-6248)"
+            "unset → dense (SAM3 backbone quant overflows GGUF f16 scale, sc-6361)"
         );
         assert_eq!(parse_quant("q8"), Some(Quant::Q8), "explicit opt-in");
         assert_eq!(parse_quant("8"), Some(Quant::Q8));
