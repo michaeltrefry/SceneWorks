@@ -6321,6 +6321,13 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
+/* Layout-caption modal (sc-6096) hosts the full StructuredPromptBuilder → wider + scrollable. */
+.image-editor-caption-modal {
+  width: 560px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
 .image-editor-linkbtn {
   padding: 0;
   border: none;

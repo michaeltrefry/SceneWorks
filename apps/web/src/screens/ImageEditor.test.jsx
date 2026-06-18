@@ -59,8 +59,9 @@ import {
   colorName,
   composeColorPrompt,
   boxesToIdeogramElements,
+  buildLayoutCaption,
 } from "./ImageEditor.jsx";
-import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
+import { verifyCaption, serializeCaption, validateCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
 // tool scaffold, and the load affordances). The Konva <Stage> only mounts once a
@@ -479,6 +480,34 @@ describe("boxes → Ideogram elements[] adapter (Workstream A, sc-6095)", () => 
       100,
     );
     expect(els[0].color_palette).toEqual(["#FF0000", "#00FF00"]);
+  });
+});
+
+describe("generate-with-Ideogram from a box layout (Workstream A, sc-6096)", () => {
+  const boxes = [{ id: "box_1", type: "obj", desc: "a sports car", rect: { x: 100, y: 200, width: 300, height: 400 } }];
+
+  it("makes the boxes the authoritative spatial elements[], preserving non-spatial fields", () => {
+    const base = {
+      high_level_description: "a car on a street",
+      compositional_deconstruction: {
+        background: "a city street",
+        elements: [{ type: "obj", desc: "STALE element that should be replaced" }],
+      },
+    };
+    const caption = buildLayoutCaption(base, boxes, 1000, 1000);
+    expect(caption.high_level_description).toBe("a car on a street");
+    expect(caption.compositional_deconstruction.background).toBe("a city street");
+    // Boxes override whatever elements the caption held.
+    expect(caption.compositional_deconstruction.elements).toEqual([
+      { type: "obj", bbox: [200, 100, 600, 400], desc: "a sports car" },
+    ]);
+  });
+
+  it("produces a verifier-clean caption that serializes for the t2i prompt", () => {
+    const caption = buildLayoutCaption(undefined, boxes, 1000, 1000); // no base → empty skeleton
+    expect(verifyCaption(caption).filter((i) => i.severity === "error")).toEqual([]);
+    expect(validateCaption(caption).ok).toBe(true);
+    expect(serializeCaption(caption)).toContain('{"type": "obj", "bbox": [200, 100, 600, 400], "desc": "a sports car"}');
   });
 });
 

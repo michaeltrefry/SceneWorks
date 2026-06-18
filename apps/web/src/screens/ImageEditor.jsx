@@ -7,7 +7,16 @@ import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock, macUpscaleEngineBlocked } fr
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
-import { makeObjElement, makeTextElement, normalizeHexColor } from "../ideogramCaption.js";
+import {
+  makeObjElement,
+  makeTextElement,
+  normalizeHexColor,
+  emptyCaption,
+  serializeCaption,
+  validateCaption,
+  buildStructuredPromptRecipe,
+} from "../ideogramCaption.js";
+import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
@@ -601,6 +610,25 @@ export function boxesToIdeogramElements(boxes, imgW, imgH) {
   });
 }
 
+// ── Generate with Ideogram from a box layout (Workstream A, sc-6096) ──────────
+// Merge the visually-drawn boxes into a caption as the AUTHORITATIVE spatial
+// `elements[]`: the boxes own `compositional_deconstruction.elements`; the rest of
+// the caption (high_level_description / style_description / background) comes from
+// the StructuredPromptBuilder. Pure — so caption assembly is unit-tested without
+// the canvas. The serialized result is sent as the t2i `prompt` (epic 4725 path).
+export function buildLayoutCaption(baseCaption, boxes, imgW, imgH) {
+  const base = baseCaption ?? emptyCaption();
+  const cd = base.compositional_deconstruction ?? { background: "", elements: [] };
+  return {
+    ...base,
+    compositional_deconstruction: {
+      ...cd,
+      background: cd.background ?? "",
+      elements: boxesToIdeogramElements(boxes, imgW, imgH),
+    },
+  };
+}
+
 // Decode a blob into an HTMLImageElement via a same-origin object: URL. Asset
 // files are served cross-origin from the API in local dev, so loading the bytes
 // this way (rather than an <img crossOrigin> against the file URL) guarantees the
@@ -680,6 +708,10 @@ export function ImageEditor() {
   // AI prompt edit (sc-2435): an edit-capable model + instruction + optional seed,
   // run against the working image through the existing edit_image flow.
   const editModels = editCapableModels(imageModels);
+  // Structured-prompt (Ideogram) t2i models for the box-layout generate path (sc-6096).
+  const structuredImageModels = (imageModels ?? []).filter((model) => model?.structuredPrompt);
+  // The box tool's Generate offers both: structured t2i (bbox layout) + edit (color-keyed).
+  const boxGenModels = [...structuredImageModels, ...editModels];
   const [editModel, setEditModel] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [editSeed, setEditSeed] = useState("");
@@ -725,12 +757,32 @@ export function ImageEditor() {
   const [layoutAspect, setLayoutAspect] = useState("1:1");
   const [layoutSize, setLayoutSize] = useState(1024);
 
+  // Generate-with-Ideogram from a box layout (sc-6096). The box tool's Generate
+  // model picker offers structured-prompt (Ideogram, t2i) models alongside the
+  // edit-capable ones (sc-6093 color-keyed). For a structured model the boxes are
+  // the spatial elements and `boxCaption` holds the non-spatial caption fields,
+  // authored in a reused StructuredPromptBuilder modal.
+  const [boxModel, setBoxModel] = useState("");
+  const [boxCaption, setBoxCaption] = useState(emptyCaption);
+  const [boxPromptMode, setBoxPromptMode] = useState("form");
+  const [captionModalOpen, setCaptionModalOpen] = useState(false);
+
   // Default the edit-model selection to the first edit-capable model once the model
   // list loads, and recover if the current pick stops being edit-capable.
   useEffect(() => {
     const caps = editCapableModels(imageModels);
     if (caps.length && !caps.some((model) => model.id === editModel)) setEditModel(caps[0].id);
   }, [imageModels, editModel]);
+
+  // Default/self-heal the box-tool generate model — prefer a structured t2i model
+  // (the box layout's primary path) over edit-capable ones.
+  useEffect(() => {
+    const list = [
+      ...(imageModels ?? []).filter((model) => model?.structuredPrompt),
+      ...editCapableModels(imageModels),
+    ];
+    if (list.length && !list.some((model) => model.id === boxModel)) setBoxModel(list[0].id);
+  }, [imageModels, boxModel]);
 
   // Same default/self-heal for the detail backbone.
   useEffect(() => {
@@ -829,6 +881,9 @@ export function ImageEditor() {
     setBoxDraft(null);
     boxNodeRefs.current.clear();
     boxDrawingRef.current = false;
+    // A new working image starts a fresh layout caption (sc-6096).
+    setBoxCaption(emptyCaption());
+    setCaptionModalOpen(false);
     setWorking({
       image,
       width: image.naturalWidth,
@@ -1223,8 +1278,10 @@ export function ImageEditor() {
   // Bake the boxes and run them through the existing edit_image flow on the chosen
   // edit model (sc-6093). The baked PNG is the pass-through source; runAiOp stages
   // it as scratch and purges it with the result, so it never lands in the Library.
+  // Color-keyed path (sc-6093): bake the boxes onto the working image → edit_image
+  // on the chosen edit model.
   async function runBoxEdit() {
-    if (!boxes.length || !editModel || !working || aiOp) return;
+    if (!boxes.length || !boxModel || !working || aiOp) return;
     const prompt = editPrompt.trim();
     let sourceFile;
     try {
@@ -1236,14 +1293,14 @@ export function ImageEditor() {
     runAiOp({
       label: "edit",
       endpoint: "/api/v1/image/jobs",
-      edit: { op: "boxLayout", model: editModel, prompt, boxes: boxes.length },
+      edit: { op: "boxLayout", model: boxModel, prompt, boxes: boxes.length },
       sourceFile,
       buildBody: (scratch) =>
         buildEditJobBody({
           project: activeProject,
           requestedGpu,
           sourceAssetId: scratch.id,
-          model: editModel,
+          model: boxModel,
           prompt,
           seed: editSeed,
           width: working.width,
@@ -1251,6 +1308,50 @@ export function ImageEditor() {
           fitMode: "crop",
         }),
     });
+  }
+
+  // Ideogram t2i path (sc-6096): the boxes are the spatial elements[] of a
+  // structured caption; submit a from-scratch text-to-image generation (no source
+  // image) and replace the working image with the laid-out result.
+  async function runBoxGenerate() {
+    if (!boxes.length || !boxModel || !working || aiOp) return;
+    const caption = buildLayoutCaption(boxCaption, boxes, working.width, working.height);
+    const validation = validateCaption(caption, { plainText: editPrompt });
+    if (!validation.ok) {
+      setStatus({ loading: false, error: `Caption invalid: ${validation.errors[0]?.message ?? "fix the layout caption"}` });
+      return;
+    }
+    const promptToSend = serializeCaption(caption);
+    runAiOp({
+      label: "generate",
+      endpoint: "/api/v1/image/jobs",
+      stageSource: false,
+      edit: { op: "ideogramLayout", model: boxModel, boxes: boxes.length },
+      buildBody: () => ({
+        projectId: activeProject.id,
+        projectName: activeProject.name ?? null,
+        requestedGpu,
+        mode: "text_to_image",
+        model: boxModel,
+        prompt: promptToSend,
+        negativePrompt: "",
+        width: working.width,
+        height: working.height,
+        seed: editSeed === "" || editSeed == null ? null : Number(editSeed),
+        count: 1,
+        // Structured-prompt recipe round-trip (sc-6147): the worker echoes `advanced`
+        // into the asset recipe, so a generated image can later rehydrate the builder.
+        advanced: { structuredPrompt: buildStructuredPromptRecipe({ intent: editPrompt, caption, edited: true }) },
+      }),
+    });
+  }
+
+  // Box-tool Generate dispatch: a structured-prompt model → Ideogram t2i layout;
+  // otherwise the color-keyed bake→edit path.
+  const boxModelIsStructured = Boolean(boxGenModels.find((model) => model.id === boxModel)?.structuredPrompt);
+  function onBoxGenerate() {
+    if (boxModelIsStructured) runBoxGenerate();
+    else runBoxEdit();
   }
 
   // The stage's pointer events drive both the mask brush (edit tool) and box
@@ -1395,16 +1496,25 @@ export function ImageEditor() {
   // track it. The watcher below loads the result back and purges scratch + result —
   // intermediates never persist; only Save (sc-2434) lands a Library asset.
   const runAiOp = useCallback(
-    async ({ buildBody, label, edit, endpoint = "/api/v1/jobs", maskFile = null, sourceFile = null }) => {
+    async ({
+      buildBody,
+      label,
+      edit,
+      endpoint = "/api/v1/jobs",
+      maskFile = null,
+      sourceFile = null,
+      stageSource = true,
+    }) => {
       if (!working || aiOp || !activeProject) return;
       setStatus({ loading: false, error: "" });
       // Stage the source (and, for a masked edit, the mask) as scratch assets. The
       // source defaults to the working bitmap, but callers can pass a derived PNG —
-      // e.g. the box-baked pass-through (sc-6093) — to edit that instead.
-      let scratch;
+      // e.g. the box-baked pass-through (sc-6093) — to edit that instead, or set
+      // stageSource:false for a from-scratch generation (t2i, sc-6096) with no source.
+      let scratch = null;
       let maskScratch = null;
       try {
-        scratch = await importAsset(sourceFile ?? (await workingImageToFile()), { throwOnError: true });
+        if (stageSource) scratch = await importAsset(sourceFile ?? (await workingImageToFile()), { throwOnError: true });
         if (maskFile) maskScratch = await importAsset(maskFile, { throwOnError: true });
       } catch (err) {
         if (scratch) purgeAsset(scratch).catch(() => {});
@@ -1633,6 +1743,9 @@ export function ImageEditor() {
   // The auto-composed color-keyed prompt from the current boxes (sc-6094). Used to
   // pre-fill the prompt field on demand; "" when no box is describable yet.
   const composedPrompt = composeColorPrompt(boxes);
+
+  // Live validation for the layout-caption builder modal (sc-6096).
+  const boxCaptionValidation = validateCaption(boxCaption, { plainText: editPrompt });
 
   return (
     <section className="main-surface image-editor-surface">
@@ -2278,45 +2391,63 @@ export function ImageEditor() {
               <span className="image-editor-cropdims">Drag on the image to draw a box</span>
             )}
             {boxes.length ? (
-              editModels.length ? (
+              boxGenModels.length ? (
                 <>
                   <select
-                    aria-label="Box edit model"
+                    aria-label="Box generate model"
                     className="image-editor-editmodel"
-                    onChange={(event) => setEditModel(event.target.value)}
-                    value={editModel}
+                    onChange={(event) => setBoxModel(event.target.value)}
+                    value={boxModel}
                   >
-                    {editModels.map((model) => (
+                    {boxGenModels.map((model) => (
                       <option key={model.id} value={model.id}>
-                        {model.label ?? model.id}
+                        {(model.label ?? model.id) + (model.structuredPrompt ? " (layout)" : " (color edit)")}
                       </option>
                     ))}
                   </select>
-                  <button
-                    disabled={!composedPrompt}
-                    onClick={() => setEditPrompt(composedPrompt)}
-                    title="Compose a prompt from the boxes' colors + descriptions (editable)"
-                    type="button"
-                  >
-                    Auto prompt
-                  </button>
-                  <input
-                    aria-label="Box edit prompt"
-                    className="image-editor-editprompt"
-                    onChange={(event) => setEditPrompt(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !aiOp && editModel) runBoxEdit();
-                    }}
-                    placeholder="Describe the edit (e.g. replace the red region with…)"
-                    type="text"
-                    value={editPrompt}
-                  />
-                  <button className="primary" disabled={!!aiOp || !editModel} onClick={runBoxEdit} type="button">
+                  {boxModelIsStructured ? (
+                    // Ideogram t2i layout (sc-6096): the boxes are the elements; the
+                    // caption's non-spatial fields are authored in the builder modal.
+                    <button
+                      onClick={() => {
+                        setBoxCaption((prev) => buildLayoutCaption(prev, boxes, working.width, working.height));
+                        setCaptionModalOpen(true);
+                      }}
+                      title="Edit the layout caption (description, style, background)"
+                      type="button"
+                    >
+                      Caption…
+                    </button>
+                  ) : (
+                    // Color-keyed edit (sc-6093/6094): auto-composed editable prompt.
+                    <>
+                      <button
+                        disabled={!composedPrompt}
+                        onClick={() => setEditPrompt(composedPrompt)}
+                        title="Compose a prompt from the boxes' colors + descriptions (editable)"
+                        type="button"
+                      >
+                        Auto prompt
+                      </button>
+                      <input
+                        aria-label="Box edit prompt"
+                        className="image-editor-editprompt"
+                        onChange={(event) => setEditPrompt(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && !aiOp && boxModel) onBoxGenerate();
+                        }}
+                        placeholder="Describe the edit (e.g. replace the red region with…)"
+                        type="text"
+                        value={editPrompt}
+                      />
+                    </>
+                  )}
+                  <button className="primary" disabled={!!aiOp || !boxModel} onClick={onBoxGenerate} type="button">
                     Generate
                   </button>
                 </>
               ) : (
-                <span className="image-editor-cropdims">No edit-capable models installed</span>
+                <span className="image-editor-cropdims">No image models installed</span>
               )
             ) : null}
             <button disabled={!selectedBoxId} onClick={() => deleteBox(selectedBoxId)} type="button">
@@ -2429,7 +2560,9 @@ export function ImageEditor() {
                     ? "Editing…"
                     : aiOp.label === "detail"
                       ? "Enhancing detail…"
-                      : "Working…"}
+                      : aiOp.label === "generate"
+                        ? "Generating…"
+                        : "Working…"}
               </p>
               <p className="image-editor-busy-msg">
                 {activeAiJob?.message ||
@@ -2536,6 +2669,52 @@ export function ImageEditor() {
               </button>
               <button className="primary" onClick={createBlankLayout} type="button">
                 Create
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {captionModalOpen ? (
+        <div
+          className="image-editor-modal-backdrop"
+          onClick={() => setCaptionModalOpen(false)}
+          role="presentation"
+        >
+          <div
+            aria-label="Layout caption"
+            className="image-editor-modal image-editor-caption-modal"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <h3 className="image-editor-modal-title">Layout caption</h3>
+            <p className="image-editor-modal-dims">
+              Your {boxes.length} box{boxes.length === 1 ? "" : "es"} are the layout — add a description, style &amp;
+              background. (Ideogram is trained on structured captions; plain text alone under-conditions.)
+            </p>
+            <StructuredPromptBuilder
+              caption={boxCaption}
+              onCaptionChange={setBoxCaption}
+              validation={boxCaptionValidation}
+              mode={boxPromptMode}
+              onModeChange={setBoxPromptMode}
+              plainText={editPrompt}
+              onPlainTextChange={setEditPrompt}
+            />
+            <div className="image-editor-modal-actions">
+              <button onClick={() => setCaptionModalOpen(false)} type="button">
+                Close
+              </button>
+              <button
+                className="primary"
+                disabled={!!aiOp || !boxModel}
+                onClick={() => {
+                  setCaptionModalOpen(false);
+                  runBoxGenerate();
+                }}
+                type="button"
+              >
+                Generate
               </button>
             </div>
           </div>
