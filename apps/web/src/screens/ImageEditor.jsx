@@ -7,6 +7,7 @@ import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock, macUpscaleEngineBlocked } fr
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
+import { makeObjElement, makeTextElement, normalizeHexColor } from "../ideogramCaption.js";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
@@ -326,6 +327,280 @@ function cropOverlayRects(imgW, imgH, rect) {
   ];
 }
 
+// ── Box layout (Workstream A, sc-6089) ───────────────────────────────────────
+// The colored-box layout tool lets the user draw labeled rectangles that drive
+// generation two ways: a structured `bbox` for Ideogram 4 (epic 4725) and a
+// color-keyed region prompt for any edit model. A box is a pure data record in
+// image-pixel coords:
+//   { id, rect:{x,y,width,height}, color:"#RRGGBB", type:"obj"|"text",
+//     desc, text? /* type==="text" */, colorPalette?:["#RRGGBB",…] /* ≤5 */ }
+// The conversion/validation below is pure (no React/Konva) so the box tool, the
+// Ideogram elements adapter (sc-6095), and the color-keyed path (sc-6093/6094)
+// all share one source of truth.
+export const BOX_TYPES = ["obj", "text"];
+
+// Ideogram's structured-caption palette limits (epic 4725 S3): ≤5 colors per
+// element, ≤16 across the whole document.
+export const MAX_BOX_PALETTE = 5;
+export const MAX_DOCUMENT_PALETTE = 16;
+
+// Uppercase `#RRGGBB` only — the Ideogram S3 contract is case-sensitive, so a
+// lowercase value is invalid (the per-box metadata editor, sc-6091, normalizes
+// user input to uppercase before storing). Pure.
+const HEX_COLOR_RE = /^#[0-9A-F]{6}$/;
+export function isValidHexColor(color) {
+  return typeof color === "string" && HEX_COLOR_RE.test(color);
+}
+
+// Normalize one pixel coordinate to Ideogram's 0–1000 grid (origin top-left),
+// rounded to an integer and clamped to the canvas. Guards a zero/absent dim.
+function normBboxCoord(px, dim) {
+  if (!dim) return 0;
+  return clamp(Math.round((px / dim) * 1000), 0, 1000);
+}
+
+// rect {x,y,width,height} (image-pixel coords) → `[y_min, x_min, y_max, x_max]`,
+// integers normalized 0–1000, origin top-left, clamped to the canvas. Component
+// order matches epic 4725 S3 exactly. Robust to flipped (negative-size) rects.
+export function rectToBbox(rect, imgW, imgH) {
+  const x0 = normBboxCoord(rect.x, imgW);
+  const x1 = normBboxCoord(rect.x + rect.width, imgW);
+  const y0 = normBboxCoord(rect.y, imgH);
+  const y1 = normBboxCoord(rect.y + rect.height, imgH);
+  return [Math.min(y0, y1), Math.min(x0, x1), Math.max(y0, y1), Math.max(x0, x1)];
+}
+
+// Inverse of `rectToBbox` for round-tripping a stored bbox back onto a canvas of
+// the given size. Returns image-pixel coords (unrounded, like `centeredCropRect`);
+// the 0–1000 quantization means the round-trip is exact only to grid resolution.
+export function bboxToRect([yMin, xMin, yMax, xMax], imgW, imgH) {
+  return {
+    x: (xMin / 1000) * imgW,
+    y: (yMin / 1000) * imgH,
+    width: ((xMax - xMin) / 1000) * imgW,
+    height: ((yMax - yMin) / 1000) * imgH,
+  };
+}
+
+// A per-element palette is valid when it is ≤5 uppercase `#RRGGBB` colors. An
+// absent palette is valid (it's optional). Pure.
+export function boxPaletteIsValid(palette) {
+  if (palette == null) return true;
+  if (!Array.isArray(palette)) return false;
+  return palette.length <= MAX_BOX_PALETTE && palette.every(isValidHexColor);
+}
+
+// The document-level palette: the de-duplicated union of every box's per-element
+// `colorPalette`, order-preserving (Ideogram key order is quality-relevant, S3). Pure.
+export function documentPalette(boxes) {
+  const seen = [];
+  for (const box of boxes ?? []) {
+    for (const color of box?.colorPalette ?? []) {
+      if (!seen.includes(color)) seen.push(color);
+    }
+  }
+  return seen;
+}
+
+// The document palette must stay ≤16 colors overall (epic 4725 S3). Pure.
+export function documentPaletteIsValid(boxes) {
+  return documentPalette(boxes).length <= MAX_DOCUMENT_PALETTE;
+}
+
+// A box is valid for serialization when it has positive geometry, a known type,
+// a non-empty description, and — for text elements — a non-empty literal string.
+// Color/palette validity is checked separately (`isValidHexColor`/`boxPaletteIsValid`)
+// since the color-keyed path needs only color + desc, not a full Ideogram element. Pure.
+export function boxIsValid(box) {
+  if (!box || !box.rect) return false;
+  if (!(box.rect.width > 0) || !(box.rect.height > 0)) return false;
+  if (!BOX_TYPES.includes(box.type)) return false;
+  if (typeof box.desc !== "string" || box.desc.trim() === "") return false;
+  if (box.type === "text" && (typeof box.text !== "string" || box.text.trim() === "")) return false;
+  return true;
+}
+
+// ── Box drawing tool (Workstream A, sc-6090) ─────────────────────────────────
+// A small palette of distinct, nameable colors for the box tool, plus a custom
+// `#RRGGBB`. All entries are uppercase #RRGGBB (valid per `isValidHexColor`) so a
+// drawn box is well-formed for the color-keyed path and the Ideogram adapter.
+export const BOX_PALETTE = [
+  { name: "Red", value: "#FF0000" },
+  { name: "Green", value: "#00C853" },
+  { name: "Blue", value: "#2962FF" },
+  { name: "Yellow", value: "#FFD600" },
+  { name: "Orange", value: "#FF6D00" },
+  { name: "Purple", value: "#AA00FF" },
+  { name: "Cyan", value: "#00B8D4" },
+  { name: "Pink", value: "#FF4081" },
+];
+
+// Smallest box (image pixels) a drag must cover to commit — a click or tiny
+// smudge is discarded rather than creating a degenerate box.
+export const MIN_BOX_PX = 8;
+
+// Axis-aligned rect spanning two points (image-pixel coords). Pure — the drag
+// direction (up-left vs down-right) is normalized to a positive-size rect.
+export function rectFromPoints(a, b) {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.abs(a.x - b.x),
+    height: Math.abs(a.y - b.y),
+  };
+}
+
+// Clamp a rect to the canvas, keeping width/height ≥ minPx and the rect fully
+// inside [0,imgW]×[0,imgH]. Mirrors the crop tool's clamp but pure (takes dims).
+export function clampRectToCanvas(rect, imgW, imgH, minPx = MIN_BOX_PX) {
+  const width = clamp(rect.width, minPx, imgW);
+  const height = clamp(rect.height, minPx, imgH);
+  return {
+    width,
+    height,
+    x: clamp(rect.x, 0, imgW - width),
+    y: clamp(rect.y, 0, imgH - height),
+  };
+}
+
+// Build a new box record (the sc-6089 model) from a drawn rect + color. Metadata
+// (type/desc/text/colorPalette) starts at safe defaults; the per-box metadata
+// editor (sc-6091) fills it in. `id` is supplied by the caller (session-unique).
+export function makeBox(id, rect, color) {
+  return { id, rect, color, type: "obj", desc: "", text: "", colorPalette: [] };
+}
+
+// A semi-transparent CSS rgba() fill from a `#RRGGBB` color for the box overlay.
+// Pure; falls back to a neutral fill if the color isn't a valid 6-digit hex.
+export function boxFillStyle(hex, alpha) {
+  if (!isValidHexColor(hex)) return `rgba(127,127,127,${alpha})`;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// ── Per-box metadata (Workstream A, sc-6091) ─────────────────────────────────
+// Append a color to a per-element palette (uppercased), ignoring duplicates,
+// invalid hex, and anything past the ≤5 cap. Pure; returns the same array
+// reference when nothing changes so callers can no-op cheaply.
+export function addPaletteColor(palette, color, max = MAX_BOX_PALETTE) {
+  const list = palette ?? [];
+  const value = typeof color === "string" ? color.toUpperCase() : color;
+  if (!isValidHexColor(value) || list.includes(value) || list.length >= max) return list;
+  return [...list, value];
+}
+
+// Remove a color from a per-element palette. Pure; returns a new array.
+export function removePaletteColor(palette, color) {
+  return (palette ?? []).filter((entry) => entry !== color);
+}
+
+// What a box still needs to serialize as a valid Ideogram element (S3): a
+// description, the literal text for a text element, and a valid ≤5 palette.
+// Returns a human list of what's missing ("" when ready). The color-keyed edit
+// path only needs color + desc, so this does NOT gate that path. Pure.
+export function boxMetadataGaps(box) {
+  if (!box) return [];
+  const gaps = [];
+  if (typeof box.desc !== "string" || box.desc.trim() === "") gaps.push("a description");
+  if (box.type === "text" && (typeof box.text !== "string" || box.text.trim() === "")) gaps.push("the literal text");
+  if (!boxPaletteIsValid(box.colorPalette)) gaps.push("a valid color palette (≤5)");
+  return gaps;
+}
+
+// ── Blank-canvas "New layout" (Workstream A, sc-6092) ────────────────────────
+// A from-scratch substrate for layout-from-nothing (Ideogram text-to-image). The
+// dimensions obey Ideogram's constraints: multiples of 16 within [256, 2048].
+export const BLANK_CANVAS_MIN = 256;
+export const BLANK_CANVAS_MAX = 2048;
+export const BLANK_CANVAS_SIZES = [512, 768, 1024, 1536, 2048];
+
+// Snap a pixel dimension to a multiple of 16 within [256, 2048] (Ideogram limits).
+function snapCanvasDim(px) {
+  return clamp(Math.round(px / 16) * 16, BLANK_CANVAS_MIN, BLANK_CANVAS_MAX);
+}
+
+// Target W×H for a blank layout from an aspect preset + a long-side size. Both
+// dims are multiples of 16 in [256, 2048]. "match"/unknown aspect → square. Pure.
+export function blankCanvasDims(aspectKey, longSide) {
+  const ratio = editOutputAspectRatio(aspectKey) ?? 1;
+  let width;
+  let height;
+  if (ratio >= 1) {
+    width = longSide;
+    height = longSide / ratio;
+  } else {
+    height = longSide;
+    width = longSide * ratio;
+  }
+  return { width: snapCanvasDim(width), height: snapCanvasDim(height) };
+}
+
+// ── Bake → pass-through edit (Workstream A, sc-6093) ─────────────────────────
+// Paint each box as a solid colored rectangle onto a 2D context — the color-keyed
+// region signal the edit model reads ("replace the {color} region with …"). The
+// caller draws the working image first; this overlays the boxes. Pure given the
+// context, so the paint order/coords are unit-testable without a real canvas.
+export function paintBoxesOnContext(ctx, boxes) {
+  for (const box of boxes ?? []) {
+    ctx.fillStyle = box.color;
+    ctx.fillRect(box.rect.x, box.rect.y, box.rect.width, box.rect.height);
+  }
+}
+
+// ── Auto color-prompt (Workstream A, sc-6094) ────────────────────────────────
+// Friendly color name for a palette/custom hex — palette colors get their name
+// lowercased (#FF0000 → "red"); anything else falls back to the hex itself so the
+// prompt still references a concrete color. Pure.
+export function colorName(hex) {
+  const found = BOX_PALETTE.find((entry) => entry.value === hex);
+  return found ? found.name.toLowerCase() : hex;
+}
+
+// Compose an editable color-keyed edit prompt from the boxes: one clause per
+// described box, referencing it by its visible color so the model maps region →
+// element. Boxes missing the needed text (obj → desc; text → literal) are skipped.
+// Pure; "" when nothing is describable yet. The user can edit the result freely.
+export function composeColorPrompt(boxes) {
+  const clauses = [];
+  for (const box of boxes ?? []) {
+    const name = colorName(box.color);
+    if (box.type === "text") {
+      const text = (box.text ?? "").trim();
+      if (!text) continue;
+      const desc = (box.desc ?? "").trim();
+      clauses.push(`place the text "${text}" in the ${name} region${desc ? ` (${desc})` : ""}`);
+    } else {
+      const desc = (box.desc ?? "").trim();
+      if (!desc) continue;
+      clauses.push(`replace the ${name} region with ${desc}`);
+    }
+  }
+  if (!clauses.length) return "";
+  return `${clauses.map((clause) => clause.charAt(0).toUpperCase() + clause.slice(1)).join(". ")}.`;
+}
+
+// ── Boxes → Ideogram elements[] adapter (Workstream A, sc-6095) ──────────────
+// Convert the editor's boxes into Ideogram 4 structured-caption `elements[]`
+// (epic 4725 S3 contract), one element per box, via ideogramCaption.js's factories
+// so the canonical key order is guaranteed (obj: type,bbox,desc,color_palette;
+// text: type,bbox,text,desc,color_palette). bbox is the 0–1000 grid from
+// `rectToBbox`; palette entries are normalized to uppercase #RRGGBB and dropped if
+// empty/invalid (an empty palette is omitted entirely). Pure — this supplies only
+// the spatial elements; the non-spatial caption fields are epic 4725's (S3/S4/S7).
+export function boxesToIdeogramElements(boxes, imgW, imgH) {
+  return (boxes ?? []).map((box) => {
+    const bbox = rectToBbox(box.rect, imgW, imgH);
+    const palette = (box.colorPalette ?? []).map(normalizeHexColor).filter(Boolean);
+    const color_palette = palette.length ? palette : null;
+    if (box.type === "text") {
+      return makeTextElement({ bbox, text: box.text ?? "", desc: box.desc ?? "", color_palette });
+    }
+    return makeObjElement({ bbox, desc: box.desc ?? "", color_palette });
+  });
+}
+
 // Decode a blob into an HTMLImageElement via a same-origin object: URL. Asset
 // files are served cross-origin from the API in local dev, so loading the bytes
 // this way (rather than an <img crossOrigin> against the file URL) guarantees the
@@ -430,6 +705,26 @@ export function ImageEditor() {
   const [maskErase, setMaskErase] = useState(false);
   const maskPaintingRef = useRef(false);
 
+  // Box layout tool (sc-6090): colored rectangles drawn over the working image in
+  // image-pixel coords. They drive the color-keyed edit path (sc-6093) and the
+  // Ideogram bbox path (sc-6095). Session-only overlay state — boxes are not baked
+  // into the working bitmap here, so they don't mark the session dirty.
+  const [boxes, setBoxes] = useState([]); // [{ id, rect, color, type, desc, text, colorPalette }]
+  const [selectedBoxId, setSelectedBoxId] = useState(null);
+  const [boxColor, setBoxColor] = useState(BOX_PALETTE[0].value);
+  const [boxDraft, setBoxDraft] = useState(null); // live rect during a drag-draw
+  const boxDrawingRef = useRef(false);
+  const boxStartRef = useRef(null);
+  const boxIdRef = useRef(0);
+  const boxNodeRefs = useRef(new Map()); // id → Konva node, for transformer binding
+  const boxTransformerRef = useRef(null);
+
+  // Blank-canvas "New layout" (sc-6092): a from-scratch substrate for box layout
+  // (Ideogram text-to-image). The modal picks an aspect + long-side size → W×H.
+  const [newLayoutOpen, setNewLayoutOpen] = useState(false);
+  const [layoutAspect, setLayoutAspect] = useState("1:1");
+  const [layoutSize, setLayoutSize] = useState(1024);
+
   // Default the edit-model selection to the first edit-capable model once the model
   // list loads, and recover if the current pick stops being edit-capable.
   useEffect(() => {
@@ -528,6 +823,12 @@ export function ImageEditor() {
     // A new working bitmap invalidates the mask (dims/content changed).
     setMaskLines([]);
     setMaskMode(false);
+    // Boxes are in image-pixel coords → a new bitmap (open/crop/upscale/AI op) invalidates them.
+    setBoxes([]);
+    setSelectedBoxId(null);
+    setBoxDraft(null);
+    boxNodeRefs.current.clear();
+    boxDrawingRef.current = false;
     setWorking({
       image,
       width: image.naturalWidth,
@@ -590,6 +891,34 @@ export function ImageEditor() {
     },
     [openFromBlob],
   );
+
+  // Start a working-image session on a fresh blank (white) canvas (sc-6092). It
+  // reuses the same session model as Open, then jumps into the box tool — the
+  // point of a blank layout is to draw boxes and generate from them.
+  const newBlankLayout = useCallback(
+    async ({ width, height }) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, width, height);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+      if (!blob) {
+        setStatus({ loading: false, error: "Could not create the canvas." });
+        return;
+      }
+      await openFromBlob(blob, { kind: "blank", name: "Untitled layout" });
+      setTool("boxes");
+    },
+    [openFromBlob],
+  );
+
+  async function createBlankLayout() {
+    if (!confirmDiscardEdits()) return;
+    setNewLayoutOpen(false);
+    await newBlankLayout(blankCanvasDims(layoutAspect, layoutSize));
+  }
 
   function handleDrop(event) {
     event.preventDefault();
@@ -764,6 +1093,190 @@ export function ImageEditor() {
     setDirty(true);
   }, [working, colorAdjust, installWorkingImage]);
 
+  // ── Box layout tool (sc-6090) ─────────────────────────────────────────────
+  function selectBoxTool() {
+    if (working) setTool("boxes");
+  }
+
+  const nextBoxId = () => `box_${(boxIdRef.current += 1)}`;
+
+  // Konva node registry so the transformer can bind to the selected box; the ref
+  // callback removes a node when its box unmounts (tool switch / delete).
+  const registerBoxNode = (id, node) => {
+    if (node) boxNodeRefs.current.set(id, node);
+    else boxNodeRefs.current.delete(id);
+  };
+
+  function boxPointerDown(event) {
+    if (tool !== "boxes" || !working) return;
+    // Only a click on the canvas background starts a new box — clicks on an
+    // existing box (select/drag) or a transformer handle (resize) are left alone.
+    const stage = event.target.getStage();
+    const name = event.target?.name?.() ?? "";
+    const onBackground = event.target === stage || name === "editor-image" || name === "editor-bg";
+    if (!onBackground) return;
+    const pt = stagePointToImage(event);
+    if (!pt) return;
+    boxDrawingRef.current = true;
+    boxStartRef.current = pt;
+    setSelectedBoxId(null);
+    setBoxDraft({ x: pt.x, y: pt.y, width: 0, height: 0 });
+  }
+
+  function boxPointerMove(event) {
+    if (!boxDrawingRef.current) return;
+    const pt = stagePointToImage(event);
+    if (!pt) return;
+    setBoxDraft(rectFromPoints(boxStartRef.current, pt));
+  }
+
+  function boxPointerUp() {
+    if (!boxDrawingRef.current) return;
+    boxDrawingRef.current = false;
+    const draft = boxDraft;
+    setBoxDraft(null);
+    // Discard a click / sub-minimum smudge; otherwise commit a new colored box.
+    if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
+    const rect = clampRectToCanvas(draft, working.width, working.height);
+    const id = nextBoxId();
+    setBoxes((prev) => [...prev, makeBox(id, rect, boxColor)]);
+    setSelectedBoxId(id);
+  }
+
+  const updateBoxRect = (id, rect) =>
+    setBoxes((prev) => prev.map((box) => (box.id === id ? { ...box, rect } : box)));
+
+  // Patch a box's metadata (sc-6091): type / desc / text / colorPalette.
+  const updateBox = (id, patch) =>
+    setBoxes((prev) => prev.map((box) => (box.id === id ? { ...box, ...patch } : box)));
+
+  function handleBoxDragEnd(id, event) {
+    const node = event.target;
+    const rect = clampRectToCanvas(
+      { x: node.x(), y: node.y(), width: node.width(), height: node.height() },
+      working.width,
+      working.height,
+    );
+    node.setAttrs(rect);
+    updateBoxRect(id, rect);
+  }
+
+  function handleBoxTransformEnd(id, event) {
+    const node = event.target;
+    const rect = clampRectToCanvas(
+      { x: node.x(), y: node.y(), width: node.width() * node.scaleX(), height: node.height() * node.scaleY() },
+      working.width,
+      working.height,
+    );
+    node.scaleX(1);
+    node.scaleY(1);
+    node.setAttrs(rect);
+    updateBoxRect(id, rect);
+  }
+
+  // Selecting a palette color sets the color for new boxes and recolors the
+  // selected box (the palette acts on the active box). Stored uppercase so the
+  // box stays valid per `isValidHexColor` even from a lowercase <input type=color>.
+  function chooseBoxColor(color) {
+    const value = color.toUpperCase();
+    setBoxColor(value);
+    if (selectedBoxId) {
+      setBoxes((prev) => prev.map((box) => (box.id === selectedBoxId ? { ...box, color: value } : box)));
+    }
+  }
+
+  function deleteBox(id) {
+    if (!id) return;
+    setBoxes((prev) => prev.filter((box) => box.id !== id));
+    boxNodeRefs.current.delete(id);
+    setSelectedBoxId((cur) => (cur === id ? null : cur));
+  }
+
+  function clearBoxes() {
+    setBoxes([]);
+    boxNodeRefs.current.clear();
+    setSelectedBoxId(null);
+    setBoxDraft(null);
+  }
+
+  // Rasterize the working image + the colored boxes into one PNG File (sc-6093).
+  // This is an ephemeral pass-through reference — staged as scratch, never saved
+  // to the Library — that the edit model reads as color-keyed regions.
+  function bakeBoxesToFile() {
+    return new Promise((resolve, reject) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = working.width;
+      canvas.height = working.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(working.image, 0, 0);
+      paintBoxesOnContext(ctx, boxes);
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          reject(new Error("Could not bake the boxes."));
+          return;
+        }
+        resolve(new File([blob], "boxed.png", { type: "image/png" }));
+      }, "image/png");
+    });
+  }
+
+  // Bake the boxes and run them through the existing edit_image flow on the chosen
+  // edit model (sc-6093). The baked PNG is the pass-through source; runAiOp stages
+  // it as scratch and purges it with the result, so it never lands in the Library.
+  async function runBoxEdit() {
+    if (!boxes.length || !editModel || !working || aiOp) return;
+    const prompt = editPrompt.trim();
+    let sourceFile;
+    try {
+      sourceFile = await bakeBoxesToFile();
+    } catch (err) {
+      setStatus({ loading: false, error: `Could not bake boxes: ${err.message || err}` });
+      return;
+    }
+    runAiOp({
+      label: "edit",
+      endpoint: "/api/v1/image/jobs",
+      edit: { op: "boxLayout", model: editModel, prompt, boxes: boxes.length },
+      sourceFile,
+      buildBody: (scratch) =>
+        buildEditJobBody({
+          project: activeProject,
+          requestedGpu,
+          sourceAssetId: scratch.id,
+          model: editModel,
+          prompt,
+          seed: editSeed,
+          width: working.width,
+          height: working.height,
+          fitMode: "crop",
+        }),
+    });
+  }
+
+  // The stage's pointer events drive both the mask brush (edit tool) and box
+  // drawing (boxes tool); each handler no-ops unless its tool/mode is active.
+  function handleStagePointerDown(event) {
+    maskPointerDown(event);
+    boxPointerDown(event);
+  }
+  function handleStagePointerMove(event) {
+    maskPointerMove(event);
+    boxPointerMove(event);
+  }
+  function handleStagePointerUp(event) {
+    maskPointerUp(event);
+    boxPointerUp(event);
+  }
+
+  // Bind the transformer to the selected box whenever the box tool is active.
+  useEffect(() => {
+    const transformer = boxTransformerRef.current;
+    if (tool !== "boxes" || !transformer) return;
+    const node = selectedBoxId ? boxNodeRefs.current.get(selectedBoxId) : null;
+    transformer.nodes(node ? [node] : []);
+    transformer.getLayer()?.batchDraw();
+  }, [tool, selectedBoxId, boxes]);
+
   // ── Inpaint mask brush (sc-2436) ──────────────────────────────────────────
   // Pointer position in image-pixel coords (undo the stage pan/zoom), clamped.
   function stagePointToImage(event) {
@@ -882,14 +1395,16 @@ export function ImageEditor() {
   // track it. The watcher below loads the result back and purges scratch + result —
   // intermediates never persist; only Save (sc-2434) lands a Library asset.
   const runAiOp = useCallback(
-    async ({ buildBody, label, edit, endpoint = "/api/v1/jobs", maskFile = null }) => {
+    async ({ buildBody, label, edit, endpoint = "/api/v1/jobs", maskFile = null, sourceFile = null }) => {
       if (!working || aiOp || !activeProject) return;
       setStatus({ loading: false, error: "" });
-      // Stage the working bitmap (and, for a masked edit, the mask) as scratch assets.
+      // Stage the source (and, for a masked edit, the mask) as scratch assets. The
+      // source defaults to the working bitmap, but callers can pass a derived PNG —
+      // e.g. the box-baked pass-through (sc-6093) — to edit that instead.
       let scratch;
       let maskScratch = null;
       try {
-        scratch = await importAsset(await workingImageToFile(), { throwOnError: true });
+        scratch = await importAsset(sourceFile ?? (await workingImageToFile()), { throwOnError: true });
         if (maskFile) maskScratch = await importAsset(maskFile, { throwOnError: true });
       } catch (err) {
         if (scratch) purgeAsset(scratch).catch(() => {});
@@ -1107,6 +1622,18 @@ export function ImageEditor() {
 
   const activeAiJob = aiOp ? jobs?.find((item) => item.id === aiOp.jobId) : null;
 
+  // The box currently selected for metadata editing (sc-6091), and what it still
+  // needs to be a valid Ideogram element (surfaced as a hint, not a hard block).
+  const selectedBox = selectedBoxId ? boxes.find((box) => box.id === selectedBoxId) ?? null : null;
+  const selectedBoxGaps = boxMetadataGaps(selectedBox);
+
+  // Live W×H preview for the New-layout modal (sc-6092).
+  const layoutDims = blankCanvasDims(layoutAspect, layoutSize);
+
+  // The auto-composed color-keyed prompt from the current boxes (sc-6094). Used to
+  // pre-fill the prompt field on demand; "" when no box is describable yet.
+  const composedPrompt = composeColorPrompt(boxes);
+
   return (
     <section className="main-surface image-editor-surface">
       <div className="image-editor-bar">
@@ -1116,6 +1643,9 @@ export function ImageEditor() {
         <div className="image-editor-bar-actions">
           <button className={working ? "" : "primary"} onClick={() => setPickerOpen(true)} type="button">
             Open
+          </button>
+          <button onClick={() => setNewLayoutOpen(true)} title="Start a blank canvas for box layout" type="button">
+            New layout
           </button>
           {working && working.source.assetId ? (
             <button
@@ -1156,19 +1686,19 @@ export function ImageEditor() {
       >
         {working && stageSize.width > 0 && stageSize.height > 0 ? (
           <Stage
-            draggable={tool !== "crop" && !maskMode}
+            draggable={tool !== "crop" && tool !== "boxes" && !maskMode}
             height={stageSize.height}
             onDragEnd={(event) => {
               if (event.target !== event.target.getStage()) return;
               const stage = event.target.getStage();
               setView((prev) => ({ ...prev, x: stage.x(), y: stage.y() }));
             }}
-            onMouseDown={maskPointerDown}
-            onMouseMove={maskPointerMove}
-            onMouseUp={maskPointerUp}
-            onTouchStart={maskPointerDown}
-            onTouchMove={maskPointerMove}
-            onTouchEnd={maskPointerUp}
+            onMouseDown={handleStagePointerDown}
+            onMouseMove={handleStagePointerMove}
+            onMouseUp={handleStagePointerUp}
+            onTouchStart={handleStagePointerDown}
+            onTouchMove={handleStagePointerMove}
+            onTouchEnd={handleStagePointerUp}
             onWheel={handleWheel}
             scaleX={view.scale}
             scaleY={view.scale}
@@ -1180,6 +1710,7 @@ export function ImageEditor() {
               <Rect
                 fill="#ffffff"
                 height={working.height}
+                name="editor-bg"
                 shadowBlur={12}
                 shadowColor="rgba(0,0,0,0.35)"
                 width={working.width}
@@ -1191,6 +1722,7 @@ export function ImageEditor() {
                 filters={[konvaColorFilter]}
                 height={working.height}
                 image={working.image}
+                name="editor-image"
                 ref={imageNodeRef}
                 width={working.width}
                 x={0}
@@ -1258,6 +1790,57 @@ export function ImageEditor() {
                 ))}
               </Layer>
             ) : null}
+            {tool === "boxes" ? (
+              // Box layout overlay (sc-6090): colored rects + a transformer on the
+              // selected box + the dashed live-draw preview. Image-pixel coords, so
+              // it pans/zooms with the canvas like the crop rect and mask.
+              <Layer>
+                {boxes.map((box) => (
+                  <Rect
+                    draggable
+                    fill={boxFillStyle(box.color, 0.18)}
+                    height={box.rect.height}
+                    key={box.id}
+                    name="layout-box"
+                    onClick={() => setSelectedBoxId(box.id)}
+                    onDragEnd={(event) => handleBoxDragEnd(box.id, event)}
+                    onMouseDown={() => setSelectedBoxId(box.id)}
+                    onTap={() => setSelectedBoxId(box.id)}
+                    onTransformEnd={(event) => handleBoxTransformEnd(box.id, event)}
+                    ref={(node) => registerBoxNode(box.id, node)}
+                    stroke={box.color}
+                    strokeScaleEnabled={false}
+                    strokeWidth={selectedBoxId === box.id ? 3 : 2}
+                    width={box.rect.width}
+                    x={box.rect.x}
+                    y={box.rect.y}
+                  />
+                ))}
+                {boxDraft ? (
+                  <Rect
+                    dash={[6, 4]}
+                    fill={boxFillStyle(boxColor, 0.18)}
+                    height={boxDraft.height}
+                    listening={false}
+                    stroke={boxColor}
+                    strokeScaleEnabled={false}
+                    strokeWidth={2}
+                    width={boxDraft.width}
+                    x={boxDraft.x}
+                    y={boxDraft.y}
+                  />
+                ) : null}
+                <Transformer
+                  anchorSize={8}
+                  borderStroke="#ffffff"
+                  boundBoxFunc={(oldBox, newBox) =>
+                    newBox.width < MIN_BOX_PX || newBox.height < MIN_BOX_PX ? oldBox : newBox
+                  }
+                  ref={boxTransformerRef}
+                  rotateEnabled={false}
+                />
+              </Layer>
+            ) : null}
           </Stage>
         ) : (
           <div className="image-editor-empty">
@@ -1267,6 +1850,13 @@ export function ImageEditor() {
               <>
                 <p className="image-editor-empty-title">Open an image to start editing</p>
                 <p className="image-editor-empty-hint">Drag &amp; drop an image here, or click Open.</p>
+                <p className="image-editor-empty-hint">
+                  Or{" "}
+                  <button className="image-editor-linkbtn" onClick={() => setNewLayoutOpen(true)} type="button">
+                    start a blank layout
+                  </button>{" "}
+                  to compose with boxes.
+                </p>
               </>
             )}
           </div>
@@ -1326,6 +1916,15 @@ export function ImageEditor() {
               type="button"
             >
               AI Edit
+            </button>
+            <button
+              className={tool === "boxes" ? "image-editor-tool active" : "image-editor-tool"}
+              disabled={!!aiOp}
+              onClick={selectBoxTool}
+              title="Box layout — draw colored regions (color-keyed edit / Ideogram bbox)"
+              type="button"
+            >
+              Boxes
             </button>
             {UPCOMING_TOOLS.map((upcoming) => (
               <button
@@ -1632,6 +2231,194 @@ export function ImageEditor() {
           </div>
         ) : null}
 
+        {tool === "boxes" && working ? (
+          <div className="image-editor-cropbar image-editor-boxbar">
+            <div className="image-editor-box-palette" role="group" aria-label="Box color">
+              {BOX_PALETTE.map((entry) => (
+                <button
+                  aria-label={entry.name}
+                  aria-pressed={boxColor === entry.value}
+                  className={boxColor === entry.value ? "image-editor-swatch active" : "image-editor-swatch"}
+                  key={entry.value}
+                  onClick={() => chooseBoxColor(entry.value)}
+                  style={{ background: entry.value }}
+                  title={entry.name}
+                  type="button"
+                />
+              ))}
+              <label className="image-editor-swatch image-editor-swatch-custom" title="Custom color">
+                <input
+                  aria-label="Custom box color"
+                  onChange={(event) => chooseBoxColor(event.target.value)}
+                  type="color"
+                  value={boxColor.toLowerCase()}
+                />
+              </label>
+            </div>
+            {boxes.length ? (
+              <div className="image-editor-box-list" role="group" aria-label="Boxes">
+                {boxes.map((box, index) => {
+                  const incomplete = boxMetadataGaps(box).length > 0;
+                  return (
+                    <button
+                      className={`image-editor-box-chip${selectedBoxId === box.id ? " active" : ""}${incomplete ? " incomplete" : ""}`}
+                      key={box.id}
+                      onClick={() => setSelectedBoxId(box.id)}
+                      title={box.desc ? `${index + 1}: ${box.desc}` : `Box ${index + 1} — needs a description`}
+                      type="button"
+                    >
+                      <span className="image-editor-box-dot" style={{ background: box.color }} />
+                      {index + 1}
+                      {incomplete ? <span className="image-editor-box-chip-flag" aria-hidden="true">!</span> : null}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <span className="image-editor-cropdims">Drag on the image to draw a box</span>
+            )}
+            {boxes.length ? (
+              editModels.length ? (
+                <>
+                  <select
+                    aria-label="Box edit model"
+                    className="image-editor-editmodel"
+                    onChange={(event) => setEditModel(event.target.value)}
+                    value={editModel}
+                  >
+                    {editModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label ?? model.id}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    disabled={!composedPrompt}
+                    onClick={() => setEditPrompt(composedPrompt)}
+                    title="Compose a prompt from the boxes' colors + descriptions (editable)"
+                    type="button"
+                  >
+                    Auto prompt
+                  </button>
+                  <input
+                    aria-label="Box edit prompt"
+                    className="image-editor-editprompt"
+                    onChange={(event) => setEditPrompt(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !aiOp && editModel) runBoxEdit();
+                    }}
+                    placeholder="Describe the edit (e.g. replace the red region with…)"
+                    type="text"
+                    value={editPrompt}
+                  />
+                  <button className="primary" disabled={!!aiOp || !editModel} onClick={runBoxEdit} type="button">
+                    Generate
+                  </button>
+                </>
+              ) : (
+                <span className="image-editor-cropdims">No edit-capable models installed</span>
+              )
+            ) : null}
+            <button disabled={!selectedBoxId} onClick={() => deleteBox(selectedBoxId)} type="button">
+              Delete
+            </button>
+            <button disabled={!boxes.length} onClick={clearBoxes} type="button">
+              Clear
+            </button>
+            <button onClick={() => setTool("move")} type="button">
+              Cancel
+            </button>
+          </div>
+        ) : null}
+
+        {tool === "boxes" && selectedBox ? (
+          <div className="image-editor-boxmeta" aria-label="Box details">
+            <div className="image-editor-boxmeta-title">
+              <span className="image-editor-box-dot" style={{ background: selectedBox.color }} />
+              Box {boxes.indexOf(selectedBox) + 1}
+            </div>
+            <div className="image-editor-boxmeta-types" role="group" aria-label="Element type">
+              <button
+                className={selectedBox.type === "obj" ? "active" : ""}
+                onClick={() => updateBox(selectedBox.id, { type: "obj" })}
+                type="button"
+              >
+                Object
+              </button>
+              <button
+                className={selectedBox.type === "text" ? "active" : ""}
+                onClick={() => updateBox(selectedBox.id, { type: "text" })}
+                type="button"
+              >
+                Text
+              </button>
+            </div>
+            <label className="image-editor-boxmeta-field">
+              <span>Description</span>
+              <input
+                aria-label="Box description"
+                onChange={(event) => updateBox(selectedBox.id, { desc: event.target.value })}
+                placeholder="What is in this region?"
+                type="text"
+                value={selectedBox.desc ?? ""}
+              />
+            </label>
+            {selectedBox.type === "text" ? (
+              <label className="image-editor-boxmeta-field">
+                <span>Text</span>
+                <input
+                  aria-label="Literal text"
+                  onChange={(event) => updateBox(selectedBox.id, { text: event.target.value })}
+                  placeholder="Literal text to render"
+                  type="text"
+                  value={selectedBox.text ?? ""}
+                />
+              </label>
+            ) : null}
+            <div className="image-editor-boxmeta-field">
+              <span>
+                Element colors ({(selectedBox.colorPalette ?? []).length}/{MAX_BOX_PALETTE})
+              </span>
+              <div className="image-editor-box-palette">
+                {(selectedBox.colorPalette ?? []).map((color) => (
+                  <button
+                    aria-label={`Remove ${color}`}
+                    className="image-editor-swatch"
+                    key={color}
+                    onClick={() =>
+                      updateBox(selectedBox.id, { colorPalette: removePaletteColor(selectedBox.colorPalette, color) })
+                    }
+                    style={{ background: color }}
+                    title={`Remove ${color}`}
+                    type="button"
+                  />
+                ))}
+                {(selectedBox.colorPalette ?? []).length < MAX_BOX_PALETTE ? (
+                  <label className="image-editor-swatch image-editor-swatch-custom" title="Add color">
+                    <input
+                      aria-label="Add element color"
+                      onChange={(event) =>
+                        updateBox(selectedBox.id, {
+                          colorPalette: addPaletteColor(selectedBox.colorPalette, event.target.value),
+                        })
+                      }
+                      type="color"
+                    />
+                  </label>
+                ) : null}
+              </div>
+            </div>
+            {selectedBoxGaps.length ? (
+              <p className="image-editor-boxmeta-hint">
+                For Ideogram layout this box still needs {selectedBoxGaps.join(", ")}. The color-keyed edit path only
+                needs a color + description.
+              </p>
+            ) : (
+              <p className="image-editor-boxmeta-ready">Ready for Ideogram layout ✓</p>
+            )}
+          </div>
+        ) : null}
+
         {aiOp ? (
           <div className="image-editor-busy">
             <div className="image-editor-busy-card">
@@ -1700,6 +2487,59 @@ export function ImageEditor() {
           }}
           title="Open image"
         />
+      ) : null}
+
+      {newLayoutOpen ? (
+        <div
+          className="image-editor-modal-backdrop"
+          onClick={() => setNewLayoutOpen(false)}
+          role="presentation"
+        >
+          <div
+            aria-label="New blank layout"
+            className="image-editor-modal"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <h3 className="image-editor-modal-title">New blank layout</h3>
+            <div className="image-editor-modal-field">
+              <span>Aspect</span>
+              <div className="image-editor-ratios" role="group" aria-label="Layout aspect">
+                {EDIT_OUTPUT_ASPECTS.filter((aspect) => aspect.key !== "match").map((aspect) => (
+                  <button
+                    className={layoutAspect === aspect.key ? "active" : ""}
+                    key={aspect.key}
+                    onClick={() => setLayoutAspect(aspect.key)}
+                    type="button"
+                  >
+                    {aspect.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <label className="image-editor-modal-field">
+              <span>Size (long side)</span>
+              <select onChange={(event) => setLayoutSize(Number(event.target.value))} value={layoutSize}>
+                {BLANK_CANVAS_SIZES.map((size) => (
+                  <option key={size} value={size}>
+                    {size}px
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="image-editor-modal-dims">
+              {layoutDims.width} × {layoutDims.height}px
+            </p>
+            <div className="image-editor-modal-actions">
+              <button onClick={() => setNewLayoutOpen(false)} type="button">
+                Cancel
+              </button>
+              <button className="primary" onClick={createBlankLayout} type="button">
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </section>
   );
