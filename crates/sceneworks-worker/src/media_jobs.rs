@@ -825,8 +825,12 @@ async fn assemble_real_person_track(
 }
 
 /// Render dimensions of the sampled track frames (`render_frame_png` above), and therefore the
-/// size of the masks the SAM2 video predictor emits.
-#[cfg(target_os = "macos")]
+/// size of the masks the SAM segmenter emits. Shared by the macOS (SAM2/SAM3) and off-Mac candle
+/// (SAM3, sc-6247) segmentation passes.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const TRACK_FRAME_SIZE: (u32, u32) = (1280, 720);
 
 /// Generate the selected person's track masks with the native-MLX SAM2 **video predictor**
@@ -1004,8 +1008,11 @@ async fn segment_assembly_frames(
 /// Encode each `(assembly_idx, rel, out_path, pixels)` mask as an `L` (8-bit grayscale) PNG,
 /// returning the `(assembly_idx, rel)` of the frames that were written. A single frame's failure is
 /// non-fatal (matches Python's per-frame `except: continue`); it keeps `mask: null` and falls back
-/// to a box mask at replacement time.
-#[cfg(target_os = "macos")]
+/// to a box mask at replacement time. Shared by the macOS and off-Mac candle segmentation passes.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn write_track_mask_pngs(
     width: u32,
     height: u32,
@@ -1023,14 +1030,145 @@ fn write_track_mask_pngs(
     written
 }
 
+/// Off-Mac candle SAM3 segmentation pass (sc-6247): the Windows/CUDA sibling of the macOS
+/// [`segment_assembly_frames`], driving `candle-gen-sam3`'s text-concept (PCS) video pipeline to
+/// write a per-frame mask for each detected target frame. SAM3 is the only off-Mac segmenter (no
+/// SAM2 box-prompt fallback — that's the native-MLX `mlx-gen-sam2`); any unavailability degrades to
+/// box-derived masks (handled by the replacement loader), never failing a track that already located
+/// the person. Mirrors the macOS orchestration exactly.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
+async fn segment_assembly_frames(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    project_path: &std::path::Path,
+    track_id: &str,
+    frames: &[crate::person_track::TrackFrame],
+    frame_paths: &[PathBuf],
+    frames_json: &mut [Value],
+    segment_enabled: bool,
+) -> WorkerResult<&'static str> {
+    let detected_total = frames.iter().filter(|frame| frame.detected).count();
+    if detected_total == 0 || !segment_enabled {
+        return Ok("missing");
+    }
+
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
+        fresh_download: false,
+    };
+    let masks_dir = project_path
+        .join("person-tracks")
+        .join(track_id)
+        .join("masks");
+    if tokio::fs::create_dir_all(&masks_dir).await.is_err() {
+        return Ok("degraded");
+    }
+
+    let Some(first) = frames.iter().position(|f| f.detected) else {
+        return Ok("missing");
+    };
+    let last = frames.iter().rposition(|f| f.detected).unwrap_or(first);
+    if frame_paths.len() <= last {
+        return Ok("degraded");
+    }
+    let mut clip_paths = Vec::with_capacity(last - first + 1);
+    let mut anchors = Vec::with_capacity(last - first + 1);
+    for (frame, path) in frames[first..=last].iter().zip(&frame_paths[first..=last]) {
+        clip_paths.push(path.clone());
+        anchors.push(frame.detected.then_some((
+            frame.box_.x,
+            frame.box_.y,
+            frame.box_.width,
+            frame.box_.height,
+        )));
+    }
+
+    check_cancel(
+        api,
+        &job.id,
+        "Person tracking canceled during segmentation.",
+    )
+    .await?;
+
+    let (model, tokenizer) = match crate::person_segment_sam3_candle::ensure_segmenter_weights(
+        settings,
+        &download_context,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
+        Err(_) => return Ok("degraded"),
+    };
+    let masks = match tokio::task::spawn_blocking(move || {
+        crate::person_segment_sam3_candle::segment_track_blocking(
+            model, tokenizer, clip_paths, anchors,
+        )
+    })
+    .await
+    {
+        Ok(Ok(masks)) => masks,
+        _ => return Ok("degraded"),
+    };
+
+    // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`.
+    let pending: Vec<(usize, String, PathBuf, Vec<u8>)> = masks
+        .into_iter()
+        .enumerate()
+        .filter(|(_, pixels)| pixels.iter().any(|&p| p > 127))
+        .map(|(clip_idx, pixels)| {
+            let assembly_idx = first + clip_idx;
+            let rel = format!(
+                "person-tracks/{track_id}/masks/frame_{:06}.png",
+                assembly_idx + 1
+            );
+            let out_path = project_path.join(&rel);
+            (assembly_idx, rel, out_path, pixels)
+        })
+        .collect();
+    let (width, height) = TRACK_FRAME_SIZE;
+    let written =
+        match tokio::task::spawn_blocking(move || write_track_mask_pngs(width, height, pending))
+            .await
+        {
+            Ok(written) => written,
+            Err(_) => return Ok("degraded"),
+        };
+
+    let mut generated = 0usize;
+    for (assembly_idx, rel) in written {
+        if let Some(entry) = frames_json.get_mut(assembly_idx) {
+            entry["mask"] = Value::String(rel);
+        }
+        if frames
+            .get(assembly_idx)
+            .map(|f| f.detected)
+            .unwrap_or(false)
+        {
+            generated += 1;
+        }
+    }
+
+    Ok(crate::person_segment_sam3_candle::rollup_mask_state(
+        generated,
+        detected_total,
+    ))
+}
+
 /// Track the selected person through real source content on the off-Mac candle GPU-worker lane
 /// (sc-5498): sample frames at the 2-FPS cadence, run the `ort`/CUDA YOLO11 detector on each,
 /// associate the boxes into track identities with the pure-Rust SORT/ByteTrack tracker
-/// (sc-3634, `person_track`), and resample the chosen identity onto the sample cadence. Person
-/// *segmentation* (SAM masks) is NOT ported off-Mac yet (epic 3792, sc-5062), so candle tracks
-/// are box-only — `maskState = "missing"` and the replacement loader derives box masks from the
-/// frames. Mirrors the macOS path minus the SAM pass; the Python Ultralytics path is the
-/// fallback on a candle-disabled box.
+/// (sc-3634, `person_track`), and resample the chosen identity onto the sample cadence. The candle
+/// SAM3 text-concept segmenter then fills per-frame masks (sc-6247) — at parity with the macOS SAM3
+/// path — so off-Mac tracks are no longer box-only. Mirrors the macOS `assemble_real_person_track`;
+/// the Python Ultralytics path is the fallback on a candle-disabled box.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track(
@@ -1038,14 +1176,14 @@ async fn assemble_real_person_track(
     settings: &Settings,
     http_client: &reqwest::Client,
     job: &JobSnapshot,
-    _project_path: &std::path::Path,
+    project_path: &std::path::Path,
     source_media_path: &std::path::Path,
     detection: &Value,
-    _track_id: &str,
+    track_id: &str,
     selected_timestamp: f64,
     duration: f64,
     confidence: f64,
-    _segment_enabled: bool,
+    segment_enabled: bool,
 ) -> WorkerResult<RealPersonTrack> {
     use crate::person_track as pt;
 
@@ -1066,7 +1204,10 @@ async fn assemble_real_person_track(
     tokio::fs::create_dir_all(&work_dir).await?;
 
     // The detector reports its real execution device per frame (cuda / cpu, per the `ort` EP).
+    // Keep each rendered frame (don't delete in-loop): the SAM3 segmentation pass re-reads them by
+    // the same sample index (assembly frame `i` ↔ `timestamps[i]` ↔ `frame_paths[i]`).
     let mut device = "cuda";
+    let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
     let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
         Vec::with_capacity(timestamps.len());
     for (index, &timestamp) in timestamps.iter().enumerate() {
@@ -1114,31 +1255,50 @@ async fn assemble_real_person_track(
             })
             .collect::<Vec<_>>();
         per_frame.push((timestamp, boxes));
+        frame_paths.push(frame_path);
     }
-    let _ = tokio::fs::remove_dir_all(&work_dir).await;
 
     let observations = pt::observe(per_frame);
     let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, &timestamps);
     if assembly.target_track_id.is_none() || assembly.detected_frames == 0 {
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
         return Err(WorkerError::InvalidPayload(
             "Selected person was not found in the source video. Re-run detection or adjust the selection."
                 .to_owned(),
         ));
     }
 
+    // Candle SAM3 segmentation pass (sc-6247): write a per-frame mask for each detected target frame
+    // and fold the result into `maskState`. Any segmenter unavailability degrades gracefully to
+    // box-derived masks (handled by the replacement loader), never failing a track that already
+    // located the person.
+    let mut frames_json = pt::frames_to_json(&assembly.frames);
+    let mask_state = segment_assembly_frames(
+        api,
+        settings,
+        http_client,
+        job,
+        project_path,
+        track_id,
+        &assembly.frames,
+        &frame_paths,
+        &mut frames_json,
+        segment_enabled,
+    )
+    .await?;
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+
     Ok(RealPersonTrack {
-        frames: pt::frames_to_json(&assembly.frames),
+        frames: frames_json,
         average_confidence: pt::average_confidence(&assembly.frames),
-        // Segmentation (SAM masks) is not ported off-Mac yet (epic 3792, sc-5062), so the track
-        // is box-only; the replacement loader derives box masks from these frames.
-        mask_state: "missing",
+        mask_state,
         quality: assembly.quality,
         tracker_meta: json!({
             "backend": "candle",
             "device": device,
             "model": "yolo11m",
             "tracker": "sort_bytetrack",
-            "segmenter": "disabled",
+            "segmenter": if segment_enabled { "sam3" } else { "disabled" },
         }),
     })
 }

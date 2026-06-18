@@ -171,8 +171,8 @@ mod person_track;
 #[cfg(target_os = "macos")]
 mod person_segment;
 // SAM3 text-concept (PCS) person segmenter — the box-prompt-free upgrade of `person_segment`
-// (epic 4910, sc-4926). macOS-only like its SAM2 sibling. The Python SAM2 path stays the
-// Windows/Linux backend until a parallel candle backport (cf. epic 3792).
+// (epic 4910, sc-4926). macOS-only (native MLX `mlx-gen-sam3`); the off-Mac Windows/CUDA candle
+// sibling is `person_segment_sam3_candle` below.
 #[cfg(target_os = "macos")]
 mod person_segment_sam3;
 // Smart-select image segmentation (epic 6087, sc-6105): the `image_segment` job runs SAM3
@@ -180,6 +180,11 @@ mod person_segment_sam3;
 // macOS-only like its `person_segment_sam3` (SAM3) dependency; no torch/candle image-segment path.
 #[cfg(target_os = "macos")]
 mod segment_jobs;
+// Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
+// Windows/CUDA sibling of `person_segment_sam3`, driving `candle-gen-sam3`'s `Sam3VideoModel` to
+// replace the SAM2 box-prompt STUB in the off-Mac person-track (`media_jobs` `maskState = "missing"`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod person_segment_sam3_candle;
 // SCAIL-2 color-coded segmentation-mask painting (epic 5439, sc-5448): turns native SAM3
 // per-person masks into the palette-painted RGB masks the SCAIL-2 engine consumes. macOS-only
 // like its SAM3 dependency.
