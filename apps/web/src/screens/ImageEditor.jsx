@@ -253,6 +253,57 @@ export function buildDetailJobBody({ project, requestedGpu, sourceAssetId, model
   };
 }
 
+// The `POST /api/v1/jobs` body for a smart-select image_segment job (sc-3751 / backend
+// sc-6105). Same generic-jobs shape as upscale/detail; the worker (native-MLX SAM3) reads
+// `sourceAssetId` + a `box` prompt `[x1,y1,x2,y2]` in source-image pixel coords and returns a
+// binary mask asset. Pure for testing.
+export function buildSegmentJobBody({ project, requestedGpu, sourceAssetId, box, displayName }) {
+  return {
+    type: "image_segment",
+    projectId: project.id,
+    projectName: project.name ?? null,
+    requestedGpu,
+    payload: {
+      projectId: project.id,
+      sourceAssetId,
+      box,
+      displayName,
+    },
+  };
+}
+
+// Convert an image-pixel rect `{x,y,width,height}` to a SAM3 box prompt `[x1,y1,x2,y2]`, ordered
+// (positive width/height) and rounded to whole pixels. Pure for testing.
+export function rectToSegmentBox(rect) {
+  const x1 = Math.round(Math.min(rect.x, rect.x + rect.width));
+  const y1 = Math.round(Math.min(rect.y, rect.y + rect.height));
+  const x2 = Math.round(Math.max(rect.x, rect.x + rect.width));
+  const y2 = Math.round(Math.max(rect.y, rect.y + rect.height));
+  return [x1, y1, x2, y2];
+}
+
+// The smart-select mask preview tint: translucent pink, matching the brush-stroke color so the
+// auto-mask and any brush refinements read as one selection.
+export const MASK_PREVIEW_RGBA = [255, 40, 120, 128];
+
+// Recolor a decoded white-on-black mask's RGBA buffer in place to pink-on-transparent for the
+// on-canvas preview: foreground (luminance > 127) → translucent pink, background → transparent.
+// Pure (operates on the pixel buffer) so it's unit-testable without a real canvas.
+export function tintMaskRgbaInPlace(data) {
+  const [r, g, b, a] = MASK_PREVIEW_RGBA;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] > 127) {
+      data[i] = r;
+      data[i + 1] = g;
+      data[i + 2] = b;
+      data[i + 3] = a;
+    } else {
+      data[i + 3] = 0;
+    }
+  }
+  return data;
+}
+
 // Filename for a Save / Download export (sc-2434): the source name with an
 // "-edited" suffix before the extension, always .png — the working image is
 // rasterized to PNG, so the original extension would be misleading. Pure.
@@ -685,6 +736,11 @@ export function ImageEditor() {
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
   // null. The second engine (AuraSR) is dropped on Mac (sc-3668) and gated per-engine below.
   const macUpscaleBlock = macFeatureBlock(macCapabilities, "imageUpscale");
+  // Smart-select (sc-3751) runs native-MLX SAM3 — Mac-only, no torch/candle path. Gate it on the
+  // platform-intrinsic `imageSegment` capability (true only on a Mac backend, false off-Mac and
+  // pre-load), like the seedvr2 engine — independent of the Mac gating-rollout switch. When false,
+  // the mask tool shows only the hand brush (graceful degradation).
+  const smartSelectSupported = macCapabilities?.features?.imageSegment?.supported === true;
 
   // The working-image session: the single bitmap every tool operates on, plus its
   // provenance. This state is the contract consumed by crop/upscale/save and the
@@ -751,6 +807,18 @@ export function ImageEditor() {
   const [maskBrush, setMaskBrush] = useState(64);
   const [maskErase, setMaskErase] = useState(false);
   const maskPaintingRef = useRef(false);
+
+  // Smart-select (sc-3751): a box-drag sub-mode of the mask tool that runs the SAM3 `image_segment`
+  // job (sc-6105) and loads the returned binary mask as an editable base UNDER the brush strokes.
+  // `maskBaseImage` is the white-on-black mask bitmap (rasterized into the mask PNG alongside the
+  // strokes); `maskOverlay` is its pink-on-transparent preview (rendered in the mask layer, so the
+  // eraser's destination-out clears it too). `maskSubTool` toggles brush vs. box-select.
+  const [maskBaseImage, setMaskBaseImage] = useState(null); // HTMLImageElement | null
+  const [maskOverlay, setMaskOverlay] = useState(null); // HTMLCanvasElement | null
+  const [maskSubTool, setMaskSubTool] = useState("brush"); // "brush" | "select"
+  const [selectDraft, setSelectDraft] = useState(null); // live selection rect during a drag
+  const selectDrawingRef = useRef(false);
+  const selectStartRef = useRef(null);
 
   // Box layout tool (sc-6090): colored rectangles drawn over the working image in
   // image-pixel coords. They drive the color-keyed edit path (sc-6093) and the
@@ -892,9 +960,14 @@ export function ImageEditor() {
     setTool("move");
     setCropRect(null);
     setColorAdjust(IDENTITY_COLOR_ADJUST);
-    // A new working bitmap invalidates the mask (dims/content changed).
+    // A new working bitmap invalidates the mask (dims/content changed) — strokes + smart-select base.
     setMaskLines([]);
     setMaskMode(false);
+    setMaskBaseImage(null);
+    setMaskOverlay(null);
+    setMaskSubTool("brush");
+    setSelectDraft(null);
+    selectDrawingRef.current = false;
     // Boxes are in image-pixel coords → a new bitmap (open/crop/upscale/AI op) invalidates them.
     setBoxes([]);
     setSelectedBoxId(null);
@@ -1460,14 +1533,17 @@ export function ImageEditor() {
   // drawing (boxes tool); each handler no-ops unless its tool/mode is active.
   function handleStagePointerDown(event) {
     maskPointerDown(event);
+    selectPointerDown(event);
     boxPointerDown(event);
   }
   function handleStagePointerMove(event) {
     maskPointerMove(event);
+    selectPointerMove(event);
     boxPointerMove(event);
   }
   function handleStagePointerUp(event) {
     maskPointerUp(event);
+    selectPointerUp(event);
     boxPointerUp(event);
   }
 
@@ -1493,7 +1569,7 @@ export function ImageEditor() {
   }
 
   function maskPointerDown(event) {
-    if (!maskMode || !working) return;
+    if (!maskMode || maskSubTool !== "brush" || !working) return;
     const pt = stagePointToImage(event);
     if (!pt) return;
     maskPaintingRef.current = true;
@@ -1501,7 +1577,7 @@ export function ImageEditor() {
   }
 
   function maskPointerMove(event) {
-    if (!maskMode || !maskPaintingRef.current) return;
+    if (!maskMode || maskSubTool !== "brush" || !maskPaintingRef.current) return;
     const pt = stagePointToImage(event);
     if (!pt) return;
     setMaskLines((prev) => {
@@ -1517,6 +1593,38 @@ export function ImageEditor() {
 
   function clearMask() {
     setMaskLines([]);
+    setMaskBaseImage(null);
+    setMaskOverlay(null);
+  }
+
+  // ── Smart-select box (sc-3751) ────────────────────────────────────────────
+  // A box-drag sub-mode of the mask tool: drag a selection rect, then on release run the SAM3
+  // `image_segment` job over it. Mirrors the sc-6090 box draw, but transient (one rect → one run).
+  function selectPointerDown(event) {
+    if (!maskMode || maskSubTool !== "select" || !working) return;
+    const pt = stagePointToImage(event);
+    if (!pt) return;
+    selectDrawingRef.current = true;
+    selectStartRef.current = pt;
+    setSelectDraft({ x: pt.x, y: pt.y, width: 0, height: 0 });
+  }
+
+  function selectPointerMove(event) {
+    if (!selectDrawingRef.current) return;
+    const pt = stagePointToImage(event);
+    if (!pt) return;
+    setSelectDraft(rectFromPoints(selectStartRef.current, pt));
+  }
+
+  function selectPointerUp() {
+    if (!selectDrawingRef.current) return;
+    selectDrawingRef.current = false;
+    const draft = selectDraft;
+    setSelectDraft(null);
+    // Discard a click / sub-minimum smudge; otherwise run segmentation over the box.
+    if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
+    const rect = clampRectToCanvas(draft, working.width, working.height);
+    runSmartSelect(rect);
   }
 
   // Rasterize the brush strokes to a mask PNG File aligned to the working bitmap:
@@ -1529,6 +1637,10 @@ export function ImageEditor() {
       scratch.width = working.width;
       scratch.height = working.height;
       const sctx = scratch.getContext("2d");
+      // Smart-select base first (sc-3751): the white-on-black SAM3 mask underlays the brush strokes,
+      // so paint strokes add to it and erase strokes (destination-out) carve it back. Its opaque
+      // black areas are harmless — the final flatten is onto black anyway.
+      if (maskBaseImage) sctx.drawImage(maskBaseImage, 0, 0);
       sctx.lineCap = "round";
       sctx.lineJoin = "round";
       sctx.strokeStyle = "#ffffff";
@@ -1598,7 +1710,15 @@ export function ImageEditor() {
   // track it. The watcher below loads the result back and purges scratch + result —
   // intermediates never persist; only Save (sc-2434) lands a Library asset.
   const runAiOp = useCallback(
-    async ({ buildBody, label, edit, endpoint = "/api/v1/jobs", maskFile = null, sourceFile = null }) => {
+    async ({
+      buildBody,
+      label,
+      edit,
+      endpoint = "/api/v1/jobs",
+      maskFile = null,
+      sourceFile = null,
+      onComplete = null,
+    }) => {
       if (!working || aiOp || !activeProject) return;
       setStatus({ loading: false, error: "" });
       // Stage the source (and, for a masked edit, the mask) as scratch assets. The
@@ -1620,7 +1740,7 @@ export function ImageEditor() {
           body: JSON.stringify(buildBody(scratch, maskScratch)),
         });
         if (!job?.id) throw new Error("The job was not created.");
-        setAiOp({ jobId: job.id, scratch, maskScratch, source: working.source, label, edit });
+        setAiOp({ jobId: job.id, scratch, maskScratch, source: working.source, label, edit, onComplete });
         setTool("move");
       } catch (err) {
         purgeAsset(scratch).catch(() => {});
@@ -1682,9 +1802,10 @@ export function ImageEditor() {
     // the working size, so the existing same-size edit behavior is unchanged.
     const fitMode = effectiveFitMode(editFitMode, canMask);
     const { width: outWidth, height: outHeight } = editOutputDims(working.width, working.height, editAspect, fitMode);
-    // A painted mask is sent only for inpaint-capable models; otherwise it's a
-    // whole-image edit (the mask stays as a local guide but isn't uploaded).
-    const masked = canMask && maskHasContent(maskLines);
+    // A mask is sent only for inpaint-capable models; otherwise it's a whole-image edit (the mask
+    // stays as a local guide but isn't uploaded). The mask is brush strokes (sc-2436) and/or a
+    // smart-select base (sc-3751), composited together by rasterizeMaskToFile.
+    const masked = canMask && (maskHasContent(maskLines) || Boolean(maskBaseImage));
     let maskFile = null;
     if (masked) {
       try {
@@ -1715,30 +1836,89 @@ export function ImageEditor() {
     });
   }
 
+  // Decode a worker mask (white-on-black PNG at working dims) into the editable mask base: a
+  // white-on-black canvas for rasterizeMaskToFile + a pink-on-transparent overlay for the preview.
+  // Drawn scaled to the working dims defensively (the mask is produced at the working size).
+  function loadMaskBase(image) {
+    const base = document.createElement("canvas");
+    base.width = working.width;
+    base.height = working.height;
+    base.getContext("2d").drawImage(image, 0, 0, working.width, working.height);
+    const overlay = document.createElement("canvas");
+    overlay.width = working.width;
+    overlay.height = working.height;
+    const octx = overlay.getContext("2d");
+    octx.drawImage(base, 0, 0);
+    const data = octx.getImageData(0, 0, overlay.width, overlay.height);
+    tintMaskRgbaInPlace(data.data);
+    octx.putImageData(data, 0, 0);
+    setMaskBaseImage(base);
+    setMaskOverlay(overlay);
+  }
+
+  // Run the SAM3 image_segment job over the selection box (sc-3751): stage the working image, post
+  // the job, and on completion load the returned binary mask as an editable base under the strokes.
+  // It does NOT replace the working image (onComplete owns the result), so the session is unchanged
+  // except for the mask layer; the brush/eraser then refines it before Inpaint.
+  function runSmartSelect(rect) {
+    if (!working || aiOp || !canMask) return;
+    const box = rectToSegmentBox(rect);
+    runAiOp({
+      label: "smart select",
+      endpoint: "/api/v1/jobs",
+      buildBody: (scratch) =>
+        buildSegmentJobBody({
+          project: activeProject,
+          requestedGpu,
+          sourceAssetId: scratch.id,
+          box,
+          displayName: working?.source?.name,
+        }),
+      onComplete: async (resultAsset) => {
+        const res = await fetch(assetUrl(resultAsset));
+        if (!res.ok) throw new Error(`Failed to load mask (${res.status})`);
+        const { image, objectUrl } = await blobToImage(await res.blob());
+        loadMaskBase(image);
+        URL.revokeObjectURL(objectUrl); // the pixels are copied into the base/overlay canvases
+        // Return to the mask tool so the auto-mask can be refined with the brush/eraser.
+        setTool("edit");
+        setMaskMode(true);
+        setMaskSubTool("brush");
+      },
+    });
+  }
+
   // When the in-flight op's job terminates, load the result back into the working
   // image (on success) and purge the ephemeral scratch + result assets.
   useEffect(() => {
     if (!aiOp?.jobId) return;
     const job = jobs?.find((item) => item.id === aiOp.jobId);
     if (!job || !terminalStatuses.has(job.status)) return;
-    const { scratch, maskScratch, source, edit } = aiOp;
+    const { scratch, maskScratch, source, edit, onComplete } = aiOp;
     setAiOp(null); // stop tracking immediately so this can't re-enter on the next jobs tick
     const resultAsset = job.status === "completed" ? job.result?.assets?.[0] ?? null : null;
     (async () => {
       try {
-        if (resultAsset) {
-          const res = await fetch(assetUrl(resultAsset));
-          if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
-          const blob = await res.blob();
-          const { image, objectUrl } = await blobToImage(blob);
-          checkpoint();
-          installWorkingImage(image, objectUrl, source);
-          workingBlobRef.current = blob;
-          if (edit) setEdits((prev) => [...prev, edit]);
-          setDirty(true);
-        } else {
+        if (!resultAsset) {
           setStatus({ loading: false, error: job.error ?? job.message ?? "The operation failed." });
+          return;
         }
+        // Smart-select (sc-3751): the caller's `onComplete` consumes the result asset itself (loads
+        // the mask into the mask layer) — it does NOT replace the working image, so skip the install
+        // / history / dirty path entirely.
+        if (onComplete) {
+          await onComplete(resultAsset);
+          return;
+        }
+        const res = await fetch(assetUrl(resultAsset));
+        if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
+        const blob = await res.blob();
+        const { image, objectUrl } = await blobToImage(blob);
+        checkpoint();
+        installWorkingImage(image, objectUrl, source);
+        workingBlobRef.current = blob;
+        if (edit) setEdits((prev) => [...prev, edit]);
+        setDirty(true);
       } catch (err) {
         setStatus({ loading: false, error: err.message || "The operation failed." });
       } finally {
@@ -1997,10 +2177,14 @@ export function ImageEditor() {
                 </>
               ) : null}
             </Layer>
-            {maskLines.length && canMask ? (
+            {canMask && (maskLines.length || maskOverlay) ? (
               // Isolated layer so the eraser's destination-out clears only the mask
-              // overlay, never the image beneath it.
+              // overlay, never the image beneath it. The smart-select base (sc-3751)
+              // renders first, with the brush strokes (and their erases) composited on top.
               <Layer listening={false}>
+                {maskOverlay ? (
+                  <KonvaImage height={working.height} image={maskOverlay} width={working.width} x={0} y={0} />
+                ) : null}
                 {maskLines.map((line, index) => (
                   <Line
                     globalCompositeOperation={line.erase ? "destination-out" : "source-over"}
@@ -2012,6 +2196,21 @@ export function ImageEditor() {
                     strokeWidth={line.size}
                   />
                 ))}
+              </Layer>
+            ) : null}
+            {tool === "edit" && maskMode && maskSubTool === "select" && selectDraft ? (
+              // Live smart-select box preview (sc-3751), image-pixel coords like the crop rect.
+              <Layer listening={false}>
+                <Rect
+                  dash={[8, 6]}
+                  fill="rgba(255,40,120,0.12)"
+                  height={selectDraft.height}
+                  stroke="rgba(255,40,120,0.9)"
+                  strokeWidth={2 / view.scale}
+                  width={selectDraft.width}
+                  x={selectDraft.x}
+                  y={selectDraft.y}
+                />
               </Layer>
             ) : null}
             {tool === "boxes" ? (
@@ -2404,34 +2603,68 @@ export function ImageEditor() {
                     <button
                       className={maskMode ? "active" : ""}
                       onClick={() => setMaskMode((on) => !on)}
-                      title="Paint a mask to confine the edit to a region (inpaint)"
+                      title="Mask a region to confine the edit (inpaint): paint it, or smart-select with a box"
                       type="button"
                     >
-                      {maskHasContent(maskLines) ? "Mask ✓" : "Mask"}
+                      {maskHasContent(maskLines) || maskBaseImage ? "Mask ✓" : "Mask"}
                     </button>
                     {maskMode ? (
                       <>
-                        <label className="image-editor-slider" title="Brush size">
-                          <span className="image-editor-slider-label">Brush</span>
-                          <input
-                            aria-label="Brush size"
-                            max={300}
-                            min={5}
-                            onChange={(event) => setMaskBrush(Number(event.target.value))}
-                            step={1}
-                            type="range"
-                            value={maskBrush}
-                          />
-                        </label>
+                        {smartSelectSupported ? (
+                          <>
+                            <button
+                              className={maskSubTool === "brush" ? "active" : ""}
+                              onClick={() => setMaskSubTool("brush")}
+                              title="Paint the mask by hand"
+                              type="button"
+                            >
+                              Brush
+                            </button>
+                            <button
+                              className={maskSubTool === "select" ? "active" : ""}
+                              disabled={aiOp?.label === "smart select"}
+                              onClick={() => {
+                                setMaskSubTool("select");
+                                setMaskErase(false);
+                              }}
+                              title="Smart-select: drag a box around an object to auto-mask it (SAM3)"
+                              type="button"
+                            >
+                              {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
+                            </button>
+                          </>
+                        ) : null}
+                        {!smartSelectSupported || maskSubTool === "brush" ? (
+                          <>
+                            <label className="image-editor-slider" title="Brush size">
+                              <span className="image-editor-slider-label">Brush</span>
+                              <input
+                                aria-label="Brush size"
+                                max={300}
+                                min={5}
+                                onChange={(event) => setMaskBrush(Number(event.target.value))}
+                                step={1}
+                                type="range"
+                                value={maskBrush}
+                              />
+                            </label>
+                            <button
+                              className={maskErase ? "active" : ""}
+                              onClick={() => setMaskErase((on) => !on)}
+                              title="Eraser"
+                              type="button"
+                            >
+                              Eraser
+                            </button>
+                          </>
+                        ) : (
+                          <span className="image-editor-hint">Drag a box around an object</span>
+                        )}
                         <button
-                          className={maskErase ? "active" : ""}
-                          onClick={() => setMaskErase((on) => !on)}
-                          title="Eraser"
+                          disabled={!maskLines.length && !maskBaseImage}
+                          onClick={clearMask}
                           type="button"
                         >
-                          Eraser
-                        </button>
-                        <button disabled={!maskLines.length} onClick={clearMask} type="button">
                           Clear
                         </button>
                       </>
@@ -2439,7 +2672,7 @@ export function ImageEditor() {
                   </>
                 ) : null}
                 <button className="primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
-                  {canMask && maskHasContent(maskLines) ? "Inpaint" : "Edit"}
+                  {canMask && (maskHasContent(maskLines) || maskBaseImage) ? "Inpaint" : "Edit"}
                 </button>
               </>
             )}

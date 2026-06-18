@@ -66,6 +66,10 @@ import {
   historyRedo,
   canUndo,
   canRedo,
+  buildSegmentJobBody,
+  rectToSegmentBox,
+  tintMaskRgbaInPlace,
+  MASK_PREVIEW_RGBA,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 
@@ -907,5 +911,45 @@ describe("undo/redo history (sc-6106)", () => {
     const after = historyCheckpoint(h, A);
     expect(h).toEqual({ past: [], future: [] });
     expect(after).not.toBe(h);
+  });
+});
+
+// Smart-select (sc-3751): box-prompt segment job body + the pure rect/mask helpers.
+describe("smart-select (sc-3751)", () => {
+  it("builds an image_segment generic-jobs body with the box prompt", () => {
+    const body = buildSegmentJobBody({
+      project: { id: "proj_1", name: "Demo" },
+      requestedGpu: "auto",
+      sourceAssetId: "asset_src",
+      box: [10, 20, 110, 220],
+      displayName: "cat.png",
+    });
+    expect(body.type).toBe("image_segment");
+    expect(body.projectId).toBe("proj_1");
+    expect(body.projectName).toBe("Demo");
+    expect(body.requestedGpu).toBe("auto");
+    expect(body.payload).toEqual({
+      projectId: "proj_1",
+      sourceAssetId: "asset_src",
+      box: [10, 20, 110, 220],
+      displayName: "cat.png",
+    });
+  });
+
+  it("converts a rect to an ordered, rounded [x1,y1,x2,y2] box", () => {
+    expect(rectToSegmentBox({ x: 10.4, y: 20.6, width: 100.2, height: 199.9 })).toEqual([10, 21, 111, 221]);
+    // Negative width/height (dragged up-left) is ordered to a positive box.
+    expect(rectToSegmentBox({ x: 110, y: 220, width: -100, height: -200 })).toEqual([10, 20, 110, 220]);
+  });
+
+  it("tints a white-on-black mask to translucent-pink-on-transparent in place", () => {
+    // 2 px: one white (foreground), one black (background).
+    const data = new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 255]);
+    const out = tintMaskRgbaInPlace(data);
+    expect(out).toBe(data); // mutated in place
+    // foreground → the preview pink
+    expect([data[0], data[1], data[2], data[3]]).toEqual(MASK_PREVIEW_RGBA);
+    // background → fully transparent (rgb untouched, alpha 0)
+    expect(data[7]).toBe(0);
   });
 });

@@ -5959,6 +5959,14 @@ details[open] > summary.lora-scope-group-heading::before,
   white-space: nowrap;
 }
 
+/* Inline hint shown in place of the brush controls when smart-select (box) is active. */
+.image-editor-hint {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  align-self: center;
+}
+
 .image-editor-notice {
   margin: 8px 16px 0;
 }
