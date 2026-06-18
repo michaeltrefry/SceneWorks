@@ -8,6 +8,14 @@ import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { makeObjElement, makeTextElement, normalizeHexColor } from "../ideogramCaption.js";
+import {
+  activeLayerOf,
+  compositeLayersToCanvas,
+  createLayer,
+  sameLayerStack,
+  singleLayerWorking,
+  snapshotLayers,
+} from "../imageLayers.js";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
@@ -739,6 +747,16 @@ export function historyRedo(history, present, limit = HISTORY_LIMIT) {
 export const canUndo = (history) => history.past.length > 0;
 export const canRedo = (history) => history.future.length > 0;
 
+// Revoke the object URLs of a set of live layers (sc-6117). Undo snapshots hold
+// only blobs (no URLs), so the only URLs that ever need revoking are the live
+// ones, when their layer is evicted — on delete, on a session replace, and on
+// unmount. Tolerant of null/missing URLs so callers don't have to guard.
+function revokeLayerUrls(layers) {
+  for (const layer of layers ?? []) {
+    if (layer?.objectUrl) URL.revokeObjectURL(layer.objectUrl);
+  }
+}
+
 export function ImageEditor() {
   const {
     activeProject,
@@ -764,9 +782,12 @@ export function ImageEditor() {
   // the mask tool shows only the hand brush (graceful degradation).
   const smartSelectSupported = macCapabilities?.features?.imageSegment?.supported === true;
 
-  // The working-image session: the single bitmap every tool operates on, plus its
-  // provenance. This state is the contract consumed by crop/upscale/save and the
-  // later AI tools (epic 2427). `objectUrl` is tracked so we can revoke it.
+  // The working document (sc-6117): an ordered raster layer stack composited
+  // bottom→top — `{ width, height, source, layers:[Layer], activeLayerId }` (see
+  // ../imageLayers.js). A single-layer stack is the degenerate case that behaves
+  // exactly like the pre-layers single bitmap, so the existing tools keep operating
+  // on the active layer; the per-layer tool matrix + the panel land in sc-6118/6119.
+  // Each live layer owns its decoded `image` + `objectUrl` (revoked on eviction).
   const [working, setWorking] = useState(null);
   const [status, setStatus] = useState({ loading: false, error: "" });
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -913,8 +934,10 @@ export function ImageEditor() {
   const [aiOp, setAiOp] = useState(null);
 
   const containerRef = useRef(null);
-  const objectUrlRef = useRef(null);
   const needsFitRef = useRef(false);
+  // Monotonic layer-id source: ids survive an undo (the seq is snapshotted, like
+  // boxIdSeq) so a layer added after an undo never collides with a recycled id.
+  const layerIdRef = useRef(0);
   const cropRectRef = useRef(null);
   const transformerRef = useRef(null);
   const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering
@@ -925,9 +948,10 @@ export function ImageEditor() {
   // can-undo/redo flags are mirrored into state so the toolbar buttons re-render.
   const historyRef = useRef(emptyHistory());
   const [historyFlags, setHistoryFlags] = useState({ canUndo: false, canRedo: false });
-  // The Blob of the current working bitmap — a snapshot reuses it (no re-encode) and
-  // restore() compares against it to skip a needless decode/refit for overlay-only steps.
-  const workingBlobRef = useRef(null);
+  // Live mirror of the working document for synchronous reads inside the commit
+  // handlers (a checkpoint captures the pre-operation stack; restore reuses the
+  // live decoded images for unchanged layers and revokes the URLs it drops).
+  const workingRef = useRef(null);
   // Live mirrors of the snapshot-relevant state so a synchronous checkpoint can
   // capture the pre-operation state without stale-closure surprises.
   const editsRef = useRef(edits);
@@ -935,7 +959,6 @@ export function ImageEditor() {
   const savedAssetIdRef = useRef(savedAssetId);
   const boxesRef = useRef(boxes);
   const boxColorRef = useRef(boxColor);
-  const workingSourceRef = useRef(null);
   const aiOpRef = useRef(aiOp);
   useEffect(() => { editsRef.current = edits; }, [edits]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
@@ -943,7 +966,7 @@ export function ImageEditor() {
   useEffect(() => { boxesRef.current = boxes; }, [boxes]);
   useEffect(() => { boxColorRef.current = boxColor; }, [boxColor]);
   useEffect(() => { aiOpRef.current = aiOp; }, [aiOp]);
-  useEffect(() => { if (working) workingSourceRef.current = working.source; }, [working]);
+  useEffect(() => { workingRef.current = working; }, [working]);
 
   const imageAssets = (assets ?? []).filter(assetCanRenderAsImage);
 
@@ -961,10 +984,8 @@ export function ImageEditor() {
     return () => observer.disconnect();
   }, []);
 
-  // Revoke the live object URL when the editor unmounts.
-  useEffect(() => () => {
-    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-  }, []);
+  // Revoke every live layer's object URL when the editor unmounts.
+  useEffect(() => () => revokeLayerUrls(workingRef.current?.layers), []);
 
   const fitToView = useCallback(() => {
     if (!working || !stageSize.width || !stageSize.height) return;
@@ -989,10 +1010,12 @@ export function ImageEditor() {
     }
   }, [working, stageSize.width, stageSize.height, fitToView]);
 
-  const installWorkingImage = useCallback((image, objectUrl, source) => {
-    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-    objectUrlRef.current = objectUrl;
-    needsFitRef.current = true;
+  const nextLayerId = () => `layer_${(layerIdRef.current += 1)}`;
+
+  // Reset the per-bitmap editor overlays/tool state that a new working bitmap
+  // invalidates (tool, crop, color preview, mask, references, boxes). Shared by
+  // installWorkingImage (open/crop/AI result) and a bitmap-changing undo restore.
+  const resetEditorOverlays = useCallback(() => {
     setTool("move");
     setCropRect(null);
     setColorAdjust(IDENTITY_COLOR_ADJUST);
@@ -1013,53 +1036,63 @@ export function ImageEditor() {
     setBoxDraft(null);
     boxNodeRefs.current.clear();
     boxDrawingRef.current = false;
-    setWorking({
-      image,
-      width: image.naturalWidth,
-      height: image.naturalHeight,
-      source,
-    });
   }, []);
 
-  // ── Undo/redo plumbing (sc-6106) ──────────────────────────────────────────
-  // A snapshot is the working bitmap blob plus the overlay/provenance state that
-  // installWorkingImage would otherwise reset (boxes, edit chain, dirty flag).
-  const captureSnapshot = useCallback(
-    () => ({
-      blob: workingBlobRef.current,
-      source: workingSourceRef.current,
+  // Replace the whole working document with a fresh single-layer stack from one
+  // decoded bitmap (open / blank / crop / color / AI result). Revokes the evicted
+  // layers' object URLs first. The single-layer stack is the degenerate case that
+  // reproduces the pre-layers single-bitmap behavior; multi-layer creation is the
+  // layers panel (sc-6118).
+  const installWorkingImage = useCallback(
+    (image, objectUrl, blob, source) => {
+      revokeLayerUrls(workingRef.current?.layers);
+      needsFitRef.current = true;
+      resetEditorOverlays();
+      setWorking(singleLayerWorking({ id: nextLayerId(), image, objectUrl, blob, source }));
+    },
+    [resetEditorOverlays],
+  );
+
+  // ── Undo/redo plumbing (sc-6106, extended to the layer stack sc-6117) ──────
+  // A snapshot is the layer stack (each layer as metadata + its shared blob, no
+  // live image/URL) plus the overlay/provenance state that a re-install would
+  // otherwise reset (boxes, edit chain, dirty flag). Blobs are shared by reference
+  // across snapshots, so retained bitmaps stay bounded like the single-bitmap days.
+  const captureSnapshot = useCallback(() => {
+    const work = workingRef.current;
+    return {
+      layers: snapshotLayers(work?.layers),
+      activeLayerId: work?.activeLayerId ?? null,
+      width: work?.width ?? 0,
+      height: work?.height ?? 0,
+      source: work?.source ?? null,
+      layerIdSeq: layerIdRef.current,
       edits: editsRef.current,
       dirty: dirtyRef.current,
       savedAssetId: savedAssetIdRef.current,
       boxes: boxesRef.current,
       boxColor: boxColorRef.current,
       boxIdSeq: boxIdRef.current,
-    }),
-    [],
-  );
+    };
+  }, []);
 
   const syncHistoryFlags = useCallback(() => {
     setHistoryFlags({ canUndo: canUndo(historyRef.current), canRedo: canRedo(historyRef.current) });
   }, []);
 
   // Record a step: push the pre-operation snapshot onto the undo stack. Call this
-  // BEFORE the working state mutates (crop/color/AI result, or a box change).
+  // BEFORE the working state mutates (crop/color/AI result, layer op, or a box change).
   const checkpoint = useCallback(() => {
-    if (!workingBlobRef.current) return;
+    if (!workingRef.current) return;
     historyRef.current = historyCheckpoint(historyRef.current, captureSnapshot());
     syncHistoryFlags();
   }, [captureSnapshot, syncHistoryFlags]);
 
   // Start a fresh history for a newly opened session (clears both stacks).
-  const resetHistory = useCallback(
-    (blob, source) => {
-      workingBlobRef.current = blob;
-      workingSourceRef.current = source;
-      historyRef.current = emptyHistory();
-      syncHistoryFlags();
-    },
-    [syncHistoryFlags],
-  );
+  const resetHistory = useCallback(() => {
+    historyRef.current = emptyHistory();
+    syncHistoryFlags();
+  }, [syncHistoryFlags]);
 
   // Re-apply a snapshot's overlay/provenance state, keeping the live mirrors in
   // sync immediately so an undo→undo chain reads the right "present" each step.
@@ -1076,30 +1109,77 @@ export function ImageEditor() {
     boxColorRef.current = snap.boxColor;
     setSelectedBoxId(null);
     boxIdRef.current = snap.boxIdSeq;
+    // Restore the layer-id counter so a layer added after this undo can't recycle
+    // an id that a redo would bring back (mirrors boxIdSeq).
+    if (typeof snap.layerIdSeq === "number") layerIdRef.current = snap.layerIdSeq;
   }, []);
 
   const restoreSnapshot = useCallback(
     async (snap) => {
       if (!snap) return;
       try {
-        // Overlay-only steps (box edits) keep the same bitmap → skip the decode and
-        // the view refit; only bitmap ops (crop/color/AI) re-install the image.
-        if (snap.blob && snap.blob !== workingBlobRef.current) {
-          const { image, objectUrl } = await blobToImage(snap.blob);
-          installWorkingImage(image, objectUrl, snap.source);
-          workingBlobRef.current = snap.blob;
-          workingSourceRef.current = snap.source;
+        const live = workingRef.current;
+        // Overlay-only steps (box edits) keep the stack pixel- and metadata-identical
+        // → skip the rebuild, the decode, and the view refit; only a bitmap/structure
+        // change (crop/color/AI/layer op) re-installs the stack.
+        const stackChanged =
+          !live ||
+          !sameLayerStack(live.layers, snap.layers) ||
+          live.activeLayerId !== snap.activeLayerId ||
+          live.width !== snap.width ||
+          live.height !== snap.height;
+        if (stackChanged) {
+          // Rebuild the live stack from the snapshot: reuse a live layer's decoded
+          // image when its blob is unchanged (decode ONLY changed/new layers), and
+          // revoke the object URLs of live layers the restore drops.
+          const liveById = new Map((live?.layers ?? []).map((layer) => [layer.id, layer]));
+          const reused = new Set();
+          const layers = [];
+          for (const sl of snap.layers) {
+            const prev = liveById.get(sl.id);
+            if (prev && prev.blob === sl.blob && prev.image) {
+              reused.add(sl.id);
+              layers.push({
+                ...prev,
+                name: sl.name,
+                visible: sl.visible,
+                opacity: sl.opacity,
+                blendMode: sl.blendMode,
+                transform: { ...sl.transform },
+              });
+            } else {
+              const { image, objectUrl } = await blobToImage(sl.blob);
+              layers.push(createLayer({ ...sl, image, objectUrl }));
+            }
+          }
+          for (const layer of live?.layers ?? []) {
+            if (!reused.has(layer.id) && layer.objectUrl) URL.revokeObjectURL(layer.objectUrl);
+          }
+          // Reset the per-bitmap overlays (the snapshot's overlay state is re-applied
+          // by applyHistoryAux below); refit only when the document size changed (a
+          // pure opacity/visibility/reorder undo keeps the current pan/zoom).
+          resetEditorOverlays();
+          if (!live || live.width !== snap.width || live.height !== snap.height) needsFitRef.current = true;
+          const nextWorking = {
+            width: snap.width,
+            height: snap.height,
+            source: snap.source,
+            layers,
+            activeLayerId: snap.activeLayerId,
+          };
+          workingRef.current = nextWorking;
+          setWorking(nextWorking);
         }
         applyHistoryAux(snap);
       } catch (err) {
         setStatus({ loading: false, error: err.message || "Could not restore that step." });
       }
     },
-    [installWorkingImage, applyHistoryAux],
+    [resetEditorOverlays, applyHistoryAux],
   );
 
   const undo = useCallback(async () => {
-    if (aiOpRef.current || !workingBlobRef.current) return;
+    if (aiOpRef.current || !workingRef.current) return;
     const { history: next, restore } = historyUndo(historyRef.current, captureSnapshot());
     if (!restore) return;
     historyRef.current = next;
@@ -1108,7 +1188,7 @@ export function ImageEditor() {
   }, [captureSnapshot, restoreSnapshot, syncHistoryFlags]);
 
   const redo = useCallback(async () => {
-    if (aiOpRef.current || !workingBlobRef.current) return;
+    if (aiOpRef.current || !workingRef.current) return;
     const { history: next, restore } = historyRedo(historyRef.current, captureSnapshot());
     if (!restore) return;
     historyRef.current = next;
@@ -1143,13 +1223,13 @@ export function ImageEditor() {
       setStatus({ loading: true, error: "" });
       try {
         const { image, objectUrl } = await blobToImage(blob);
-        installWorkingImage(image, objectUrl, source);
+        installWorkingImage(image, objectUrl, blob, source);
         // A freshly opened image is a clean session — clear edit/provenance state
         // and start a fresh undo/redo history rooted at this bitmap (sc-6106).
         setEdits([]);
         setDirty(false);
         setSavedAssetId(null);
-        resetHistory(blob, source);
+        resetHistory();
         setStatus({ loading: false, error: "" });
       } catch (err) {
         setStatus({ loading: false, error: err.message || "Could not open image" });
@@ -1320,7 +1400,8 @@ export function ImageEditor() {
   // bitmap is blob-backed (never tainted), so reading pixels back is safe. The
   // result keeps the same source provenance so lineage survives to Save (sc-2434).
   const applyCrop = useCallback(async () => {
-    if (!working || !cropRect) return;
+    const layer = activeLayerOf(working);
+    if (!working || !cropRect || !layer) return;
     const sx = clamp(Math.round(cropRect.x), 0, working.width - 1);
     const sy = clamp(Math.round(cropRect.y), 0, working.height - 1);
     const sw = clamp(Math.round(cropRect.width), 1, working.width - sx);
@@ -1328,13 +1409,14 @@ export function ImageEditor() {
     const canvas = document.createElement("canvas");
     canvas.width = sw;
     canvas.height = sh;
-    canvas.getContext("2d").drawImage(working.image, sx, sy, sw, sh, 0, 0, sw, sh);
+    // Single-layer document (sc-6117): crop the lone layer and rebuild the stack at
+    // the new size. Document-level crop across a multi-layer stack is sc-6119.
+    canvas.getContext("2d").drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) return;
     const { image, objectUrl } = await blobToImage(blob);
     checkpoint();
-    installWorkingImage(image, objectUrl, working.source);
-    workingBlobRef.current = blob;
+    installWorkingImage(image, objectUrl, blob, working.source);
     setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh }]);
     setDirty(true);
   }, [working, cropRect, installWorkingImage, checkpoint]);
@@ -1380,12 +1462,16 @@ export function ImageEditor() {
   // preview (a 2D-canvas pass, no Konva-cache readback). Keeps the source provenance
   // so lineage survives to Save; records the grade in the edit chain.
   const applyColorGrade = useCallback(async () => {
-    if (!working || isIdentityAdjust(colorAdjust)) return;
+    const layer = activeLayerOf(working);
+    if (!working || !layer || isIdentityAdjust(colorAdjust)) return;
     const canvas = document.createElement("canvas");
     canvas.width = working.width;
     canvas.height = working.height;
     const ctx = canvas.getContext("2d");
-    ctx.drawImage(working.image, 0, 0);
+    // Single-layer document (sc-6117): bake the grade into the lone layer. Grading
+    // the active layer of a multi-layer stack is sc-6119 (the live preview already
+    // caches the active layer's node, below).
+    ctx.drawImage(layer.image, 0, 0);
     const imageData = ctx.getImageData(0, 0, working.width, working.height);
     applyColorAdjustments(imageData.data, colorAdjust);
     ctx.putImageData(imageData, 0, 0);
@@ -1394,8 +1480,7 @@ export function ImageEditor() {
     const baked = { ...colorAdjust };
     const { image, objectUrl } = await blobToImage(blob);
     checkpoint();
-    installWorkingImage(image, objectUrl, working.source);
-    workingBlobRef.current = blob;
+    installWorkingImage(image, objectUrl, blob, working.source);
     setEdits((prev) => [...prev, { op: "color", ...baked }]);
     setDirty(true);
   }, [working, colorAdjust, installWorkingImage, checkpoint]);
@@ -1514,17 +1599,25 @@ export function ImageEditor() {
     setBoxDraft(null);
   }
 
-  // Rasterize the working image + the colored boxes into one PNG File (sc-6093).
+  // Flatten the visible layer stack onto a fresh canvas at the document size
+  // (sc-6117). The layers' images are already decoded, so this is synchronous;
+  // callers toBlob it (Save / Download / AI-op source) or paint overlays on top
+  // first (the box-keyed edit). The shared composite behind every editor export.
+  function compositeToCanvas(work = working) {
+    const canvas = document.createElement("canvas");
+    canvas.width = work.width;
+    canvas.height = work.height;
+    compositeLayersToCanvas(canvas.getContext("2d"), work.layers, { visibleOnly: true });
+    return canvas;
+  }
+
+  // Rasterize the composited document + the colored boxes into one PNG File (sc-6093).
   // This is an ephemeral pass-through reference — staged as scratch, never saved
   // to the Library — that the edit model reads as color-keyed regions.
   function bakeBoxesToFile() {
     return new Promise((resolve, reject) => {
-      const canvas = document.createElement("canvas");
-      canvas.width = working.width;
-      canvas.height = working.height;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(working.image, 0, 0);
-      paintBoxesOnContext(ctx, boxes);
+      const canvas = compositeToCanvas();
+      paintBoxesOnContext(canvas.getContext("2d"), boxes);
       canvas.toBlob((blob) => {
         if (!blob) {
           reject(new Error("Could not bake the boxes."));
@@ -1718,8 +1811,8 @@ export function ImageEditor() {
   }
 
   // ── AI ops on the working image (sc-2432 seam) ────────────────────────────
-  // Rasterize the current working image to a PNG File. `filename` overrides the
-  // name (Save/Download use the "-edited" name; the AI-op scratch upload doesn't care).
+  // Flatten the composited document to a PNG File. `filename` overrides the name
+  // (Save/Download use the "-edited" name; the AI-op scratch upload doesn't care).
   const workingImageToFile = useCallback(
     (filename) => {
       return new Promise((resolve, reject) => {
@@ -1727,10 +1820,7 @@ export function ImageEditor() {
           reject(new Error("No working image."));
           return;
         }
-        const canvas = document.createElement("canvas");
-        canvas.width = working.width;
-        canvas.height = working.height;
-        canvas.getContext("2d").drawImage(working.image, 0, 0);
+        const canvas = compositeToCanvas(working);
         const base = (working.source.name || "image").replace(/\.[^./\\]+$/, "");
         const name = filename || `${base}.png`;
         canvas.toBlob((blob) => {
@@ -1742,6 +1832,7 @@ export function ImageEditor() {
         }, "image/png");
       });
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [working],
   );
 
@@ -1958,8 +2049,7 @@ export function ImageEditor() {
         const blob = await res.blob();
         const { image, objectUrl } = await blobToImage(blob);
         checkpoint();
-        installWorkingImage(image, objectUrl, source);
-        workingBlobRef.current = blob;
+        installWorkingImage(image, objectUrl, blob, source);
         if (edit) setEdits((prev) => [...prev, edit]);
         setDirty(true);
       } catch (err) {
@@ -2164,17 +2254,32 @@ export function ImageEditor() {
                 x={0}
                 y={0}
               />
-              <KonvaImage
-                colorAdjust={colorAdjust}
-                filters={[konvaColorFilter]}
-                height={working.height}
-                image={working.image}
-                name="editor-image"
-                ref={imageNodeRef}
-                width={working.width}
-                x={0}
-                y={0}
-              />
+              {/* Editor layers (sc-6117): one <KonvaImage> per raster layer, bottom→top,
+                  honoring per-layer visibility / opacity / blend / transform. The ACTIVE
+                  layer carries the color-grade filter + the cached node ref (the live
+                  preview) — multi-layer creation + selection arrive with sc-6118/6119. */}
+              {working.layers.map((layer) => {
+                const isActive = layer.id === working.activeLayerId;
+                const t = layer.transform;
+                return (
+                  <KonvaImage
+                    key={layer.id}
+                    globalCompositeOperation={layer.blendMode}
+                    height={layer.image.naturalHeight}
+                    image={layer.image}
+                    name="editor-image"
+                    opacity={layer.opacity}
+                    rotation={t.rotation}
+                    scaleX={t.scaleX}
+                    scaleY={t.scaleY}
+                    visible={layer.visible}
+                    width={layer.image.naturalWidth}
+                    x={t.x}
+                    y={t.y}
+                    {...(isActive ? { colorAdjust, filters: [konvaColorFilter], ref: imageNodeRef } : {})}
+                  />
+                );
+              })}
               {tool === "crop" && cropRect ? (
                 <>
                   {cropOverlayRects(working.width, working.height, cropRect).map((rect, index) => (
