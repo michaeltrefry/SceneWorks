@@ -7,9 +7,9 @@ use sceneworks_core::contracts::{
     WorkerUtilizationSnapshot,
 };
 use sceneworks_core::jobs_store::{
-    mac_capabilities, mac_rust_supported, model_mac_support, CreateJob, DuplicateJob, JobsStore,
-    JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob, WorkerHeartbeat,
-    MAC_NOT_AVAILABLE_LABEL, MAX_JOB_ATTEMPTS,
+    candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
+    DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
+    WorkerHeartbeat, MAC_NOT_AVAILABLE_LABEL, MAX_JOB_ATTEMPTS,
 };
 use serde_json::{json, Map, Value};
 
@@ -1999,6 +1999,230 @@ fn mlx_required_still_lets_mps_claim_a_non_eligible_model() {
         .expect("MPS claims the non-eligible job");
     assert_eq!(claimed.id, job.id);
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+}
+
+// epic 5483 / sc-5502 — the off-Mac candle twin of the MLX sweeps: the `candle_supported` oracle
+// (inverse of the candle eligibility predicates) + `fail_unsupported_candle_jobs` (enforce) +
+// `fail_stranded_candle_jobs` (grace). The candle worker is identified by the `candle` marker
+// capability (`WorkerCapability::Unknown("candle")`), not a `gpu_id` — it runs on a real CUDA index.
+
+fn register_candle_worker(store: &JobsStore, worker_id: &str) {
+    register_gpu_worker(
+        store,
+        worker_id,
+        "0",
+        vec![
+            WorkerCapability::Gpu,
+            WorkerCapability::ImageGenerate,
+            WorkerCapability::Unknown("candle".to_owned()),
+        ],
+    );
+}
+
+#[test]
+fn candle_supported_accepts_eligible_and_in_process_jobs() {
+    let store = store("candle-oracle-ok");
+    // A candle-eligible txt2img → supported (consistent with candle routing by construction).
+    let eligible = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p" }),
+    );
+    assert!(candle_supported(&eligible).is_ok());
+    // In-process job types run off-Mac with zero torch.
+    let download = job_of(&store, JobType::ModelDownload, json!({ "repo": "x/y" }));
+    assert!(candle_supported(&download).is_ok());
+    let refine = job_of(&store, JobType::PromptRefine, json!({ "prompt": "p" }));
+    assert!(candle_supported(&refine).is_ok());
+}
+
+#[test]
+fn candle_supported_rejects_unsupported_strict_pose() {
+    // The sc-5968 case generalized: sdxl + poses has no candle strict-pose lane, so the candle/CUDA
+    // flow can't serve it — it must fail loudly off-Mac, not silently render an unconditioned T2I.
+    let store = store("candle-oracle-pose");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+    );
+    let reason = candle_supported(&job).unwrap_err();
+    assert_eq!(reason.model.as_deref(), Some("sdxl"));
+    assert!(reason.feature.contains("strict-pose"));
+    assert!(reason
+        .candle_error_message()
+        .starts_with("candle_unsupported:"));
+}
+
+#[test]
+fn candle_supported_flags_a_torch_only_image_model() {
+    let store = store("candle-oracle-torch-model");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "bernini_image", "prompt": "p" }),
+    );
+    let reason = candle_supported(&job).unwrap_err();
+    assert_eq!(reason.model.as_deref(), Some("bernini_image"));
+    assert!(reason
+        .candle_error_message()
+        .starts_with("candle_unsupported:"));
+}
+
+#[test]
+fn candle_required_enforce_fails_unsupported_job() {
+    let store = store("candle-enforce");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+    );
+    // Warn mode (enforce = false): no-op, the job stays queued (still runs on torch).
+    let warn = store
+        .fail_unsupported_candle_jobs(true, false)
+        .expect("sweep ok");
+    assert!(warn.is_empty());
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Queued
+    );
+    // Off (candle not required): no-op even with enforce requested.
+    assert!(store
+        .fail_unsupported_candle_jobs(false, true)
+        .expect("sweep ok")
+        .is_empty());
+    // Enforce: the unsupported job fails terminal with candle_unsupported.
+    let failed = store
+        .fail_unsupported_candle_jobs(true, true)
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0.id, job.id);
+    assert_eq!(failed[0].0.status, JobStatus::Failed);
+    assert!(failed[0]
+        .0
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("candle_unsupported"));
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Failed
+    );
+}
+
+#[test]
+fn candle_required_enforce_leaves_eligible_job_queued() {
+    // Partition: a candle-eligible job is Ok in the oracle, so the enforce sweep never touches it.
+    let store = store("candle-enforce-eligible");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p" }),
+    );
+    let failed = store
+        .fail_unsupported_candle_jobs(true, true)
+        .expect("sweep ok");
+    assert!(failed.is_empty());
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn candle_required_fails_stranded_eligible_job_when_no_live_candle_worker() {
+    let store = store("candle-strand");
+    // A non-candle torch GPU worker exists, but no candle worker — the candle-eligible job strands.
+    register_gpu_worker(&store, "worker-torch", "0", image_caps());
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p" }),
+    );
+    backdate_job_created_at(&store, &job.id);
+
+    let failed = store.fail_stranded_candle_jobs(true, 90).expect("sweep ok");
+    assert_eq!(
+        failed.len(),
+        1,
+        "the stranded candle-eligible job is failed"
+    );
+    assert_eq!(failed[0].id, job.id);
+    assert_eq!(failed[0].status, JobStatus::Failed);
+    assert!(
+        failed[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("candle_unavailable"),
+        "error names the candle_unavailable cause: {:?}",
+        failed[0].error
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Failed
+    );
+}
+
+#[test]
+fn candle_required_does_not_fail_when_a_live_candle_worker_is_present() {
+    let store = store("candle-strand-live");
+    // A live candle worker exists (just registered → recent heartbeat); the job waits for it
+    // instead of being failed — covers the "candle worker merely busy" case.
+    register_candle_worker(&store, "worker-candle");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p" }),
+    );
+    backdate_job_created_at(&store, &job.id);
+
+    let failed = store.fail_stranded_candle_jobs(true, 90).expect("sweep ok");
+    assert!(
+        failed.is_empty(),
+        "a live candle worker keeps the job queued"
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn candle_stranded_sweep_partitions_and_is_noop_when_off() {
+    let store = store("candle-strand-partition");
+    // No candle worker. An UNSUPPORTED job (sdxl+poses) is not candle-eligible, so the stranded
+    // sweep leaves it for the enforce sweep — the two partition the queue.
+    let unsupported = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+    );
+    backdate_job_created_at(&store, &unsupported.id);
+    let failed = store.fail_stranded_candle_jobs(true, 90).expect("sweep ok");
+    assert!(
+        failed.is_empty(),
+        "stranded sweep only fails candle-eligible jobs"
+    );
+    assert_eq!(
+        store.get_job(&unsupported.id).expect("loads").status,
+        JobStatus::Queued
+    );
+    // And the whole sweep is a no-op when candle is not required (today's off-Mac default).
+    let eligible = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p" }),
+    );
+    backdate_job_created_at(&store, &eligible.id);
+    assert!(store
+        .fail_stranded_candle_jobs(false, 90)
+        .expect("sweep ok")
+        .is_empty());
+    assert_eq!(
+        store.get_job(&eligible.id).expect("loads").status,
+        JobStatus::Queued
+    );
 }
 
 // epic 3482 / sc-3484 — mac_rust_supported oracle (the inverse of the eligibility predicates)

@@ -230,6 +230,8 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         run_utility_inprocess: false,
         mlx_required: false,
         mlx_enforce_unsupported: false,
+        candle_required: false,
+        candle_enforce_unsupported: false,
     }
 }
 

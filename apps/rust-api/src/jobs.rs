@@ -50,7 +50,9 @@ pub(crate) async fn claim_job(
 ) -> Result<Json<ClaimResponse>, ApiError> {
     let mlx_required = state.settings.mlx_required;
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
-    let (response, decision, stranded, unsupported) =
+    let candle_required = state.settings.candle_required;
+    let candle_enforce = state.settings.candle_enforce_unsupported;
+    let (response, decision, stranded, unsupported, candle_stranded, candle_unsupported) =
         store_call(state.clone(), move |store, timeout| {
             store.mark_stale_workers_interrupted(timeout)?;
             // macOS MLX-required (sc-3483): before claiming, fail any MLX-eligible job left
@@ -60,8 +62,22 @@ pub(crate) async fn claim_job(
             // macOS MLX-required + enforce (sc-3484): fail any queued job the Rust/MLX flow
             // can't run. No-op in warn mode (the default) — the gap is logged at claim instead.
             let unsupported = store.fail_unsupported_mlx_jobs(mlx_required, enforce_unsupported)?;
+            // Off-Mac candle-required (sc-5502, epic 5483): the Windows/Linux twins of the two
+            // sweeps above — fail any candle-eligible job stranded with no live candle worker, and
+            // (enforce) any queued job the candle/CUDA flow can't serve. Both no-op when the flag
+            // is off (the default), so a deployment still keeping the torch worker is unaffected.
+            let candle_stranded = store.fail_stranded_candle_jobs(candle_required, timeout)?;
+            let candle_unsupported =
+                store.fail_unsupported_candle_jobs(candle_required, candle_enforce)?;
             let (job, decision) = store.claim_next_job_routed(&payload.worker_id, mlx_required)?;
-            Ok((job, decision, stranded, unsupported))
+            Ok((
+                job,
+                decision,
+                stranded,
+                unsupported,
+                candle_stranded,
+                candle_unsupported,
+            ))
         })
         .await?;
     for job in &stranded {
@@ -70,6 +86,14 @@ pub(crate) async fn claim_job(
     }
     for (job, reason) in &unsupported {
         emit_mlx_unsupported(job, reason, "enforce");
+        publish(&state, "job.updated", job);
+    }
+    for job in &candle_stranded {
+        emit_candle_unavailable(job);
+        publish(&state, "job.updated", job);
+    }
+    for (job, reason) in &candle_unsupported {
+        emit_candle_unsupported(job, reason, "enforce");
         publish(&state, "job.updated", job);
     }
     if let Some(decision) = &decision {
@@ -84,9 +108,22 @@ pub(crate) async fn claim_job(
                 emit_mlx_unsupported(job, &reason, "warn");
             }
         }
+        // Warn-only (sc-5502): the off-Mac candle twin — log the gap once while the job still
+        // runs on the co-resident torch worker, so the off-Mac port-or-drop inventory
+        // materializes. In enforce mode such a job was already failed above and never reaches here.
+        if candle_required && !candle_enforce {
+            if let Err(reason) = candle_supported(job) {
+                emit_candle_unsupported(job, &reason, "warn");
+            }
+        }
         publish(&state, "job.updated", job);
     }
-    if response.is_some() || !stranded.is_empty() || !unsupported.is_empty() {
+    if response.is_some()
+        || !stranded.is_empty()
+        || !unsupported.is_empty()
+        || !candle_stranded.is_empty()
+        || !candle_unsupported.is_empty()
+    {
         publish_queue(&state).await?;
     }
     Ok(Json(ClaimResponse {
@@ -130,6 +167,46 @@ fn emit_mlx_unavailable(job: &JobSnapshot) {
         tracing::Level::INFO,
         json!({
             "event": "mlx_unavailable",
+            "jobId": job.id,
+            "jobType": job.job_type.as_str(),
+            "model": model,
+            "reason": job.error,
+        }),
+    );
+}
+
+/// Emit the off-Mac `candle_unsupported` gap event (sc-5502, epic 5483) — the candle twin of
+/// [`emit_mlx_unsupported`]. `mode` is `"enforce"` (the job was failed terminal) or `"warn"`
+/// (logged but still run on the co-resident torch worker). The body is the feature-precise
+/// [`UnsupportedReason`] so the Logs surface + the off-Mac gap inventory name the exact
+/// port-or-drop work.
+fn emit_candle_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &str) {
+    let mut value = serde_json::to_value(reason).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "event".to_owned(),
+            Value::String("candle_unsupported".to_owned()),
+        );
+        object.insert("mode".to_owned(), Value::String(mode.to_owned()));
+        object.insert("jobId".to_owned(), Value::String(job.id.clone()));
+        object.insert(
+            "jobType".to_owned(),
+            Value::String(job.job_type.as_str().to_owned()),
+        );
+    }
+    sceneworks_core::observability::emit_event(tracing::Level::INFO, value);
+}
+
+/// Emit the off-Mac `candle_unavailable` terminal-routing event (sc-5502, epic 5483) — the candle
+/// twin of [`emit_mlx_unavailable`]: the System → Logs surface that turns "no candle worker took
+/// the job" into a named, actionable line instead of a job silently stuck. `reason` carries the
+/// full actionable error set on the job.
+fn emit_candle_unavailable(job: &JobSnapshot) {
+    let model = job.payload.get("model").and_then(Value::as_str);
+    sceneworks_core::observability::emit_event(
+        tracing::Level::INFO,
+        json!({
+            "event": "candle_unavailable",
             "jobId": job.id,
             "jobType": job.job_type.as_str(),
             "model": model,

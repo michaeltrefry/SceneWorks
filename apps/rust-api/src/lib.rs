@@ -27,9 +27,9 @@ use sceneworks_core::contracts::{
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
 use sceneworks_core::jobs_store::{
-    mac_capabilities, mac_rust_supported, model_mac_support, CreateJob, DuplicateJob, JobsStore,
-    JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision,
-    UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
+    candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
+    DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
+    RetryJob, RouteDecision, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
@@ -178,6 +178,22 @@ pub struct Settings {
     /// `mlx_unsupported`. Read from `SCENEWORKS_MLX_UNSUPPORTED_MODE` (`enforce` vs anything
     /// else). Irrelevant unless `mlx_required`.
     pub mlx_enforce_unsupported: bool,
+    /// Epic 5483 (sc-5502) — the off-Mac (Windows/Linux/Docker) twin of `mlx_required`. When set,
+    /// the candle (CUDA) worker is the only GPU backend: a candle-eligible job no live candle
+    /// worker takes within the grace window fails terminal with `candle_unavailable` instead of
+    /// waiting forever, and (under `candle_enforce_unsupported`) a job the candle/CUDA flow can't
+    /// serve (`candle_supported` returns `Err`) fails with `candle_unsupported` instead of silently
+    /// falling back to torch. Ships default OFF (the Python torch worker is still the fallback until
+    /// the Phase-7 cutover); flip it on per-deployment as candle reaches parity. Read from
+    /// `SCENEWORKS_CANDLE_REQUIRED`. Absent on macOS (the `mlx_required` path governs there).
+    pub candle_required: bool,
+    /// Epic 5483 (sc-5502) — the candle twin of `mlx_enforce_unsupported`. **false = warn-only**
+    /// (default): log a structured `candle_unsupported` gap event at claim time but still let the
+    /// job run on the existing torch path, so flipping `candle_required` on for observation
+    /// materializes the off-Mac gap list without breaking anything. **true = enforce**: fail the
+    /// job terminal with `candle_unsupported`. Read from `SCENEWORKS_CANDLE_UNSUPPORTED_MODE`
+    /// (`enforce` vs anything else). Irrelevant unless `candle_required`.
+    pub candle_enforce_unsupported: bool,
 }
 
 impl Settings {
@@ -220,6 +236,12 @@ impl Settings {
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
             mlx_enforce_unsupported: std::env::var("SCENEWORKS_MLX_UNSUPPORTED_MODE")
+                .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
+                .unwrap_or(false),
+            candle_required: std::env::var("SCENEWORKS_CANDLE_REQUIRED")
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
+            candle_enforce_unsupported: std::env::var("SCENEWORKS_CANDLE_UNSUPPORTED_MODE")
                 .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
                 .unwrap_or(false),
         }

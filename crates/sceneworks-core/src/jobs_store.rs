@@ -965,6 +965,159 @@ impl JobsStore {
         Ok(failed)
     }
 
+    /// Off-Mac candle grace sweep (sc-5502, epic 5483) — the Windows/Linux twin of
+    /// [`Self::fail_stranded_mlx_jobs`]. When `candle_required`, fails any candle-eligible job left
+    /// queued past the grace window when no live candle worker exists, terminal with
+    /// `candle_unavailable` — so a retired-torch deployment fails loudly instead of queuing forever.
+    ///
+    /// "Live candle worker" = a worker advertising the `candle` marker capability that is not
+    /// offline and has a heartbeat within `grace_seconds` (the marker is a fixed JSON string in
+    /// `capabilities_json`, matched as a substring — the candle worker runs on a real CUDA gpu
+    /// index, not the `mlx` sentinel, so it can't be matched by `gpu_id`; see [`worker_is_candle`]).
+    /// While one exists (even merely busy) this is a no-op and candle-eligible jobs wait, so a
+    /// transient candle crash the supervisor restarts inside the window never fails a job. Off
+    /// (`!candle_required`) it returns immediately, so a deployment still keeping the Python torch
+    /// worker is completely unaffected. Returns the jobs it failed so the caller can surface the
+    /// structured event and publish their updates.
+    pub fn fail_stranded_candle_jobs(
+        &self,
+        candle_required: bool,
+        grace_seconds: u64,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        if !candle_required {
+            return Ok(Vec::new());
+        }
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_unix_seconds();
+        let grace = i64::try_from(grace_seconds.max(1)).unwrap_or(i64::MAX);
+        let cutoff = format_unix_seconds(now.saturating_sub(grace));
+
+        // A live candle worker means candle-eligible jobs should wait for it — it may simply be
+        // busy. Only when none has checked in within the window do we treat candle as unavailable
+        // and fail the stranded jobs.
+        let live_candle_worker = transaction
+            .query_row(
+                "
+                select 1 from workers
+                 where status != 'offline'
+                   and last_seen_at >= ?1
+                   and capabilities_json like '%\"candle\"%'
+                 limit 1
+                ",
+                params![cutoff],
+                |_row| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if live_candle_worker {
+            return Ok(Vec::new());
+        }
+
+        // Candidates: still queued and old enough to have outlived the grace window. A job newer
+        // than the cutoff keeps waiting (bounded), so a job created mid-outage isn't failed
+        // instantly — it gets the full window for a candle worker to appear.
+        let mut statement = transaction.prepare(
+            "
+            select * from jobs
+             where status = 'queued'
+               and created_at < ?1
+             order by created_at asc
+            ",
+        )?;
+        let candidates = collect_jobs(statement.query_map(params![cutoff], row_to_job)?)?;
+        drop(statement);
+
+        let now_text = format_unix_seconds(now);
+        let mut failed_ids = Vec::new();
+        for job in candidates {
+            if !job_is_any_candle_eligible(&job) {
+                continue;
+            }
+            let error = candle_unavailable_error(&job, grace_seconds);
+            transaction.execute(
+                "
+                update jobs
+                   set status = 'failed',
+                       stage = 'failed',
+                       message = 'Candle worker unavailable.',
+                       error = ?2,
+                       completed_at = ?1,
+                       updated_at = ?1,
+                       worker_id = null
+                 where id = ?3 and status = 'queued'
+                ",
+                params![now_text, error, job.id],
+            )?;
+            failed_ids.push(job.id.clone());
+        }
+        let failed = failed_ids
+            .iter()
+            .map(|id| self.get_job_on_connection(&transaction, id))
+            .collect::<JobsStoreResult<Vec<_>>>()?;
+        transaction.commit()?;
+        Ok(failed)
+    }
+
+    /// Off-Mac "candle-unsupported" enforce sweep (sc-5502, epic 5483) — the Windows/Linux twin of
+    /// [`Self::fail_unsupported_mlx_jobs`]. When `candle_required` AND `enforce`, fails every queued
+    /// job the candle/CUDA flow can't run ([`candle_supported`] returns `Err`) terminal with a
+    /// feature-precise `candle_unsupported` error — the forcing function that turns "still on torch"
+    /// into a loud, named failure instead of a silent fallback. Unlike the stranded sweep there is
+    /// no grace window: an unsupported job is permanently unsupported until its surface is ported or
+    /// dropped, so it fails immediately.
+    ///
+    /// Default mode is **warn** (`enforce == false`) → no-op, and the gap is logged at claim time
+    /// instead (the job still runs on torch), so flipping `candle_required` on for observation
+    /// surfaces the gap list without breaking anything. Off (`!candle_required`) → immediate no-op,
+    /// so a deployment still keeping the torch worker is unaffected. Candle-*eligible* jobs are `Ok`
+    /// here and handled by routing / [`Self::fail_stranded_candle_jobs`] — the two sweeps partition
+    /// the queue and never touch the same job. Returns `(job, reason)` pairs so the caller can emit
+    /// the structured event.
+    pub fn fail_unsupported_candle_jobs(
+        &self,
+        candle_required: bool,
+        enforce: bool,
+    ) -> JobsStoreResult<Vec<(JobSnapshot, UnsupportedReason)>> {
+        if !candle_required || !enforce {
+            return Ok(Vec::new());
+        }
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = transaction
+            .prepare("select * from jobs where status = 'queued' order by created_at asc")?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        drop(statement);
+
+        let now_text = format_unix_seconds(now_unix_seconds());
+        let mut failed = Vec::new();
+        for job in candidates {
+            let Err(reason) = candle_supported(&job) else {
+                continue;
+            };
+            transaction.execute(
+                "
+                update jobs
+                   set status = 'failed',
+                       stage = 'failed',
+                       message = 'Not supported by the candle/CUDA flow off-Mac.',
+                       error = ?2,
+                       completed_at = ?1,
+                       updated_at = ?1,
+                       worker_id = null
+                 where id = ?3 and status = 'queued'
+                ",
+                params![now_text, reason.candle_error_message(), job.id],
+            )?;
+            let updated = self.get_job_on_connection(&transaction, &job.id)?;
+            failed.push((updated, reason));
+        }
+        transaction.commit()?;
+        Ok(failed)
+    }
+
     pub fn claim_next_job(&self, worker_id: &str) -> JobsStoreResult<Option<JobSnapshot>> {
         Ok(self.claim_next_job_routed(worker_id, false)?.0)
     }
@@ -1874,6 +2027,22 @@ fn job_is_any_mlx_eligible(job: &JobSnapshot) -> bool {
         || understanding_job_is_mlx_eligible(job)
 }
 
+/// True when *any* candle-routing predicate (image, video, image/video upscale, caption,
+/// understanding) claims this job — the union a candle (Windows/CUDA) worker would want, the
+/// off-Mac twin of [`job_is_any_mlx_eligible`] (sc-5502, epic 5483). Used to identify the jobs
+/// the Phase-7 candle grace sweep must fail when no live candle worker is alive
+/// ([`JobsStore::fail_stranded_candle_jobs`]). Deliberately excludes the unsupported-pose shapes
+/// the candle worker only *owns to reject* ([`image_job_candle_pose_reject`]) — those are gaps,
+/// not served, so they must strand/enforce-fail rather than wait for a candle worker.
+fn job_is_any_candle_eligible(job: &JobSnapshot) -> bool {
+    image_job_is_candle_eligible(job)
+        || video_job_is_candle_eligible(job)
+        || upscale_job_is_candle_eligible(job)
+        || video_upscale_job_is_candle_eligible(job)
+        || caption_job_is_mlx_eligible(job)
+        || understanding_job_is_mlx_eligible(job)
+}
+
 /// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
 /// worker (sc-3483). Names the model + job type so the job card and the System → Logs
 /// surface point at the real gap, never a generic failure. Prefixed `mlx_unavailable:` so
@@ -1889,6 +2058,25 @@ fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
          claimed this job within {grace_seconds}s (model={model}, type={job_type}). The \
          Python/MPS fallback is disabled on Mac — check System → Logs and confirm the MLX \
          worker is running.",
+        job_type = job.job_type.as_str()
+    )
+}
+
+/// Actionable terminal error for a candle-eligible job stranded off-Mac with no live candle
+/// (CUDA) worker (sc-5502, epic 5483) — the Windows/Linux twin of [`mlx_unavailable_error`].
+/// Names the model + job type and is prefixed `candle_unavailable:` so the cause is greppable in
+/// logs and distinguishable from `candle_unsupported`.
+fn candle_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
+    let model = job
+        .payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)");
+    format!(
+        "candle_unavailable: the candle GPU worker is required off-Mac but no live worker \
+         claimed this job within {grace_seconds}s (model={model}, type={job_type}). The Python \
+         torch fallback is disabled on this deployment — check System → Logs and confirm the \
+         candle worker is running.",
         job_type = job.job_type.as_str()
     )
 }
@@ -2031,6 +2219,27 @@ impl UnsupportedReason {
             .unwrap_or_default();
         format!(
             "mlx_unsupported: {feature}{model} is not in the Rust/MLX flow on macOS — {detail}{pointer}",
+            feature = self.feature,
+            detail = self.detail,
+        )
+    }
+
+    /// Terminal job error for an enforced `candle_unsupported` failure (sc-5502, epic 5483) — the
+    /// off-Mac twin of [`Self::error_message`]: same feature/model/detail/pointer, a candle-flavored
+    /// prefix and flow name so the two backends' gap events are independently greppable.
+    pub fn candle_error_message(&self) -> String {
+        let model = self
+            .model
+            .as_deref()
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default();
+        let pointer = self
+            .suggested_epic
+            .as_deref()
+            .map(|epic| format!(" [{epic}]"))
+            .unwrap_or_default();
+        format!(
+            "candle_unsupported: {feature}{model} is not in the candle/CUDA flow off-Mac — {detail}{pointer}",
             feature = self.feature,
             detail = self.detail,
         )
@@ -2187,6 +2396,183 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             Some("sc-3556"),
         )),
     }
+}
+
+/// Off-Mac "can the candle/CUDA flow run this?" oracle (sc-5502, epic 5483) — the Windows/Linux
+/// twin of [`mac_rust_supported`]. `Ok(())` = the candle worker (or an MLX-agnostic in-process
+/// Rust path: downloads, ffmpeg, prompt refine — sc-5525) runs it with zero torch; `Err` names the
+/// exact torch gap. Under `candle_required` **enforce** an `Err` job fails terminal with
+/// `candle_unsupported`, so the set of `Err`s is the off-Mac port-or-drop roadmap. Consistent with
+/// routing by construction — anything [`job_is_any_candle_eligible`] accepts is `Ok`.
+///
+/// **Scope (this slice):** biased toward `Ok` exactly like the MLX oracle ("never over-gate a
+/// valid combination"). It enforce-fails only the **generation** gaps that have crisp candle
+/// eligibility predicates — the shapes that would otherwise silently mis-serve as an unconditioned
+/// torch T2I (the sc-5968 concern, generalized from poses to the whole image/video surface). The
+/// CV-aux / segment / detail / training / convert / infra job types route by capability and their
+/// candle parity is still landing (Phase 5, epic 5482; the training cutover); they stay `Ok` here
+/// so the enforce sweep never kills a job the co-resident torch worker still serves. Each converts
+/// to an `Err` arm as its phase epic closes and torch is retired for that surface (sc-5503).
+pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
+    if job_is_any_candle_eligible(job) {
+        return Ok(());
+    }
+    let model = job.payload.get("model").and_then(Value::as_str);
+    match job.job_type {
+        // Reached only for an ineligible image shape (the eligible candle lanes early-return `Ok`
+        // above): a torch-only family, or a conditioned shape with no candle lane — incl. the
+        // sc-5968 strict-pose-on-an-unwired-family trap.
+        JobType::ImageGenerate | JobType::ImageEdit => Err(classify_candle_image_gap(&job.payload)),
+
+        // SenseNova-U1 VQA / interleave run on candle (sc-5501); eligible jobs early-return `Ok`.
+        // This arm is reached only for an understanding job on a model with no candle path.
+        JobType::ImageVqa | JobType::ImageInterleave => Err(UnsupportedReason::new(
+            model,
+            "image understanding / interleave on this model",
+            "image VQA / interleaved generation runs on candle for the SenseNova-U1 model \
+             (sensenova_u1_8b[_fast]); other models have no candle understanding path and stay on \
+             the Python torch worker.",
+            Some("epic 3180"),
+        )),
+
+        JobType::VideoGenerate => Err(classify_candle_video_gap(&job.payload)),
+
+        // Wan-VACE extend/bridge/replace run on candle (sc-5494); eligible jobs early-return `Ok`.
+        // This arm is the gap: an engine with no candle keyframe/clip path.
+        JobType::VideoExtend | JobType::VideoBridge => Err(UnsupportedReason::new(
+            model,
+            "extend / bridge on this engine",
+            "extend_clip / video_bridge run on candle only on the Wan-VACE path (the \
+             replace-capable Wan models); other engines have no candle keyframe/clip path and stay \
+             on the Python torch worker.",
+            Some("epic 5481"),
+        )),
+
+        JobType::PersonReplace => Err(UnsupportedReason::new(
+            model,
+            "person replacement on this engine",
+            "replace_person runs on candle via native Wan-VACE (the replace-capable Wan models); \
+             this model has no candle video engine and stays on the Python torch worker.",
+            Some("epic 5481"),
+        )),
+
+        // image_upscale eligible engines (Real-ESRGAN + SeedVR2) early-return `Ok`; this arm is the
+        // dropped AuraSR engine (sc-3668 / sc-5499 — a defensive submit-time guard, the UI hides it).
+        JobType::ImageUpscale => Err(UnsupportedReason::new(
+            model,
+            "image_upscale (AuraSR)",
+            "the candle upscaler runs Real-ESRGAN (+ SeedVR2); the AuraSR engine is dropped as an \
+             offered engine (sc-3668 / sc-5499).",
+            Some("sc-5499"),
+        )),
+
+        // video_upscale SeedVR2 early-returns `Ok`; this arm is the defensive non-SeedVR2 guard.
+        JobType::VideoUpscale => Err(UnsupportedReason::new(
+            model,
+            "video_upscale (non-SeedVR2 engine)",
+            "video upscaling runs on the candle SeedVR2 engine (seedvr2); no other engine is \
+             available off-Mac.",
+            Some("epic 5482"),
+        )),
+
+        // JoyCaption early-returns `Ok`; this arm is a non-JoyCaption captioner.
+        JobType::TrainingCaption => Err(UnsupportedReason::new(
+            None,
+            "dataset captioning",
+            "this dataset captioning job is not in the candle JoyCaption flow.",
+            Some("sc-5098"),
+        )),
+
+        // Not enforce-failed by this slice (biased to `Ok`). The MLX-agnostic in-process job types
+        // (downloads, model import/convert, ffmpeg, prompt refine — sc-5525) run with zero torch
+        // off-Mac. The CV-aux / segment / tile-detail / training surfaces route by capability and
+        // are still co-served by the Python torch worker until their phase epics close (Phase 5
+        // epic 5482 for person/pose/kps; the candle SAM3 segment of sc-5062; the training cutover
+        // for lora_train) — leaving them `Ok` keeps the enforce sweep from killing a job torch
+        // still serves. An unrecognized job type is never a known gap (forward-compat).
+        JobType::Placeholder
+        | JobType::ModelDownload
+        | JobType::ModelImport
+        | JobType::ModelConvert
+        | JobType::LoraImport
+        | JobType::LoraDownload
+        | JobType::FrameExtract
+        | JobType::TimelineExport
+        | JobType::PromptRefine
+        | JobType::ImageDetail
+        | JobType::PersonDetect
+        | JobType::PersonTrack
+        | JobType::PoseDetect
+        | JobType::KpsExtract
+        | JobType::ImageSegment
+        | JobType::LoraTrain
+        | JobType::Unknown(_) => Ok(()),
+    }
+}
+
+/// Name the precise gap for a candle-ineligible image job (sc-5502) — the candle-worded,
+/// candle-parity twin of [`classify_image_gap`]. The strict-pose-on-an-unwired-family case (the
+/// canonical sc-5968 silent-T2I trap) is named precisely; the rest report whether the model has no
+/// candle engine at all or is a candle txt2img family asked for a conditioned shape with no lane.
+fn classify_candle_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
+        return UnsupportedReason::new(None, "image generation", "no model specified.", None);
+    };
+    // The sc-5968 case generalized: a candle family with no strict-pose lane asked for poses —
+    // it would otherwise silently render an unconditioned image, so it is a hard gap off-Mac.
+    if image_request_candle_pose_reject(model, payload) {
+        return UnsupportedReason::new(
+            Some(model),
+            "strict-pose ControlNet",
+            "this model has no candle strict-pose lane (candle serves strict pose for qwen_image / \
+             kolors / z_image_turbo, and SDXL via InstantID); the pose request would otherwise \
+             silently render an unconditioned image, so it is rejected off-Mac.",
+            Some("sc-5489"),
+        );
+    }
+    if !CANDLE_ROUTED_MODELS.contains(&model) {
+        return UnsupportedReason::new(
+            Some(model),
+            "torch-only image model / shape",
+            "this model (or its requested conditioning shape) has no candle/CUDA lane; it stays on \
+             the Python torch worker until its port lands.",
+            Some("epic 3692"),
+        );
+    }
+    // A candle txt2img family but a conditioned shape (edit / reference / inpaint / LoRA / quant)
+    // with no candle lane for it (the candle identity/control/edit lanes early-return `Ok`).
+    UnsupportedReason::new(
+        Some(model),
+        "conditioned shape on a txt2img candle family",
+        "this candle family serves text-to-image; the requested edit / reference / inpaint / LoRA / \
+         quant shape has no candle lane for it and stays on the Python torch worker.",
+        Some("epic 5480"),
+    )
+}
+
+/// Name the precise gap for a candle-ineligible `video_generate` job (sc-5502) — the candle-worded
+/// twin of [`classify_video_gap`]: a torch-only video model or an advanced/conditioned mode with no
+/// candle lane.
+fn classify_candle_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
+        return UnsupportedReason::new(None, "video generation", "no model specified.", None);
+    };
+    if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
+        return UnsupportedReason::new(
+            Some(model),
+            "torch-only video model",
+            "this video model has no candle/CUDA engine; it stays on the Python torch worker.",
+            Some("epic 5095"),
+        );
+    }
+    UnsupportedReason::new(
+        Some(model),
+        "advanced / conditioned video mode",
+        "this video_generate mode is not candle-eligible on this model (candle serves base \
+         text-to-video, the 14B I2V + SVD image-to-video, and Wan-VACE extend/bridge/replace); \
+         other conditioned modes + LoRAs stay on the Python torch worker.",
+        Some("epic 5481"),
+    )
 }
 
 /// The user-facing affordance prefix the Mac UI shows in place of a torch-only control
