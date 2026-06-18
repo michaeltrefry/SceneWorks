@@ -3771,10 +3771,10 @@ mod tests {
     use super::{
         apply_project_migrations, build_generated_asset_sidecar, connect_project_db,
         find_timeline_file, guess_mime_from_filename, index_timeline, is_safe_relative_path,
-        normalize_asset_tags, sniff_image_format, AssetListQuery, AssetScope,
-        AssetStatusFilter, AssetStatusPatch, CharacterCreateInput, CharacterLookInput,
-        ProjectStore, ProjectStoreError, UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID,
-        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
+        normalize_asset_tags, sniff_image_format, AssetListQuery, AssetScope, AssetStatusFilter,
+        AssetStatusPatch, CharacterCreateInput, CharacterLookInput, ProjectStore,
+        ProjectStoreError, UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
