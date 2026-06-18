@@ -10,12 +10,20 @@ import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.j
 import { makeObjElement, makeTextElement, normalizeHexColor } from "../ideogramCaption.js";
 import {
   activeLayerOf,
+  addLayer,
   compositeLayersToCanvas,
   createLayer,
+  duplicateLayer,
+  layerById,
+  moveLayer,
+  removeLayer,
   sameLayerStack,
+  setActiveLayer,
+  setLayerProps,
   singleLayerWorking,
   snapshotLayers,
 } from "../imageLayers.js";
+import { LayersPanel } from "../components/LayersPanel.jsx";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
@@ -1485,6 +1493,95 @@ export function ImageEditor() {
     setDirty(true);
   }, [working, colorAdjust, installWorkingImage, checkpoint]);
 
+  // ── Layer stack ops (sc-6118) ─────────────────────────────────────────────
+  // Wire the layers panel to the pure layer-stack ops (../imageLayers.js). Each
+  // mutating op checkpoints first (sc-6106 → undoable) and marks the session dirty.
+  // Structural ops manage object URLs: delete revokes the evicted layer's URL;
+  // add/duplicate decode a fresh blob into the new layer's own image + URL.
+  function selectLayer(id) {
+    setWorking((prev) => (prev ? setActiveLayer(prev, id) : prev));
+  }
+
+  function toggleLayerVisible(id) {
+    if (!workingRef.current) return;
+    checkpoint();
+    setWorking((prev) => {
+      const layer = layerById(prev, id);
+      return layer ? setLayerProps(prev, id, { visible: !layer.visible }) : prev;
+    });
+    setDirty(true);
+  }
+
+  // One undo step per opacity DRAG: the panel flags the first change of a gesture
+  // (`isGestureStart`) → checkpoint once, then the rest of the drag just updates.
+  function changeLayerOpacity(id, opacity, isGestureStart) {
+    if (!workingRef.current) return;
+    if (isGestureStart) checkpoint();
+    setWorking((prev) => setLayerProps(prev, id, { opacity }));
+    setDirty(true);
+  }
+
+  function renameLayer(id, name) {
+    const work = workingRef.current;
+    const layer = work && layerById(work, id);
+    if (!layer || layer.name === name) return;
+    checkpoint();
+    setWorking((prev) => setLayerProps(prev, id, { name }));
+    setDirty(true);
+  }
+
+  function reorderLayer(id, toIndex) {
+    if (!workingRef.current) return;
+    checkpoint();
+    setWorking((prev) => moveLayer(prev, id, toIndex));
+    setDirty(true);
+  }
+
+  function deleteLayer(id) {
+    const work = workingRef.current;
+    if (!work || work.layers.length <= 1) return;
+    checkpoint();
+    const { working: next, removed } = removeLayer(work, id);
+    if (!removed) return;
+    setWorking(next);
+    if (removed.objectUrl) URL.revokeObjectURL(removed.objectUrl);
+    setDirty(true);
+  }
+
+  async function duplicateLayerById(id) {
+    const work = workingRef.current;
+    const src = work && layerById(work, id);
+    if (!src) return;
+    const { image, objectUrl } = await blobToImage(src.blob);
+    checkpoint();
+    setWorking((prev) => duplicateLayer(prev, id, { id: nextLayerId(), image, objectUrl }));
+    setDirty(true);
+  }
+
+  async function addBlankLayer() {
+    const work = workingRef.current;
+    if (!work) return;
+    // A new transparent layer at the document size — a fresh surface above the
+    // active layer. The tools begin targeting it with the sc-6119 per-layer matrix.
+    const canvas = document.createElement("canvas");
+    canvas.width = work.width;
+    canvas.height = work.height;
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) {
+      setStatus({ loading: false, error: "Could not create the layer." });
+      return;
+    }
+    const { image, objectUrl } = await blobToImage(blob);
+    checkpoint();
+    setWorking((prev) =>
+      addLayer(
+        prev,
+        createLayer({ id: nextLayerId(), name: `Layer ${prev.layers.length + 1}`, image, objectUrl, blob }),
+      ),
+    );
+    setDirty(true);
+  }
+
   // ── Box layout tool (sc-6090) ─────────────────────────────────────────────
   function selectBoxTool() {
     if (working) setTool("boxes");
@@ -2432,6 +2529,22 @@ export function ImageEditor() {
             )}
           </div>
         )}
+
+        {working ? (
+          <LayersPanel
+            layers={working.layers}
+            activeLayerId={working.activeLayerId}
+            busy={Boolean(aiOp)}
+            onSelect={selectLayer}
+            onToggleVisible={toggleLayerVisible}
+            onSetOpacity={changeLayerOpacity}
+            onRename={renameLayer}
+            onReorder={reorderLayer}
+            onAdd={addBlankLayer}
+            onDelete={deleteLayer}
+            onDuplicate={duplicateLayerById}
+          />
+        ) : null}
 
         {working ? (
           <aside className="image-editor-toolbar" aria-label="Editor tools">
