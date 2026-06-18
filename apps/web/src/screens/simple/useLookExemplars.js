@@ -44,14 +44,15 @@ export function useLookExemplars(preferredModelId = null) {
     const id = defaultImageModelId(choices);
     return choices.find((entry) => entry.id === id) ?? null;
   }, [imageModels, preferredModelId]);
-  const [exemplars, setExemplars] = useState(() => readLookExemplars(projectId));
+  const modelKey = model?.id ?? null;
+  const [exemplars, setExemplars] = useState(() => readLookExemplars(projectId, modelKey));
   const [pending, setPending] = useState({}); // lookId → jobId in flight
 
-  // Re-seed from storage when the workspace changes; drop any in-flight markers.
+  // Re-seed from storage when the workspace/model changes; drop any in-flight markers.
   useEffect(() => {
-    setExemplars(readLookExemplars(projectId));
+    setExemplars(readLookExemplars(projectId, modelKey));
     setPending({});
-  }, [projectId]);
+  }, [projectId, modelKey]);
 
   // Resolve completed render jobs to their asset and cache them.
   useEffect(() => {
@@ -67,7 +68,7 @@ export function useLookExemplars(preferredModelId = null) {
         const asset = pool.find((entry) => entry.id === assetId) ?? job.result?.assets?.[0] ?? null;
         if (assetId) {
           const entry = { assetId, url: asset?.url ?? null, seed: job.result?.seed ?? null };
-          writeLookExemplar(projectId, lookId, entry);
+          writeLookExemplar(projectId, modelKey, lookId, entry);
           setExemplars((current) => ({ ...current, [lookId]: entry }));
         }
       }
@@ -75,7 +76,7 @@ export function useLookExemplars(preferredModelId = null) {
       changed = true;
     }
     if (changed) setPending(next);
-  }, [jobs, pending, projectId, recentImageAssets, mediaAssets]);
+  }, [jobs, pending, projectId, modelKey, recentImageAssets, mediaAssets]);
 
   const canRender = Boolean(model && projectId && typeof createImageJob === "function");
 

@@ -59,6 +59,11 @@ export function MyCreations() {
 
   const isImage = selected?.type === "image";
   const canRemake = isImage && Boolean(selected?.recipe?.prompt);
+  const imageToVideoModel = useMemo(
+    () => videoModels.find((model) => (model.capabilities ?? []).includes("image_to_video")) ?? null,
+    [videoModels],
+  );
+  const canMakeVideoFromThis = isImage && Boolean(selected?.recipe?.prompt) && Boolean(imageToVideoModel);
 
   async function makeMoreLikeThis() {
     if (!canRemake) return;
@@ -81,8 +86,8 @@ export function MyCreations() {
   }
 
   async function makeVideoFromThis() {
-    if (!isImage) return;
-    const model = videoModels[0] ?? null;
+    if (!canMakeVideoFromThis) return;
+    const model = imageToVideoModel;
     const dims = dimsOf(selected, "1280x720");
     setNotice("");
     const job = await createVideoJob({
@@ -171,7 +176,7 @@ export function MyCreations() {
                   <Icon.Image /> Make more like this
                 </button>
               ) : null}
-              {isImage ? (
+              {canMakeVideoFromThis ? (
                 <button type="button" className="sw-act" onClick={makeVideoFromThis}>
                   <Icon.Video /> Make a video from this
                 </button>

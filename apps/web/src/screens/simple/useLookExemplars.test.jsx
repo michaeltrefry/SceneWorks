@@ -6,8 +6,8 @@ import { useLookExemplars } from "./useLookExemplars.js";
 import { LOOK_EXEMPLARS_STORAGE_KEY } from "./lookExemplars.js";
 import { AppContext } from "../../context/AppContext.js";
 
-function Harness() {
-  const { assetForLook, refresh, refreshing, canRender, hasAny, pending } = useLookExemplars();
+function Harness({ preferredModelId = null }) {
+  const { assetForLook, refresh, refreshing, canRender, hasAny, pending } = useLookExemplars(preferredModelId);
   return (
     <div>
       <span data-testid="can">{String(canRender)}</span>
@@ -43,9 +43,13 @@ async function settle() {
   });
 }
 
-function render(value) {
+function render(value, props = {}) {
   return act(() => {
-    root.render(<AppContext.Provider value={value}>{<Harness />}</AppContext.Provider>);
+    root.render(
+      <AppContext.Provider value={value}>
+        <Harness {...props} />
+      </AppContext.Provider>,
+    );
   });
 }
 
@@ -104,17 +108,51 @@ describe("useLookExemplars", () => {
     expect(text("photo-url")).toBe("/api/v1/projects/proj-1/files/photo.png");
     expect(text("photo-pending")).toBe("false");
     const stored = JSON.parse(localStorage.getItem(LOOK_EXEMPLARS_STORAGE_KEY));
-    expect(stored["proj-1"].photo).toMatchObject({ assetId: "asset-1" });
+    expect(stored["proj-1"].z_image_turbo.photo).toMatchObject({ assetId: "asset-1" });
   });
 
   it("rehydrates cached exemplars from storage on mount", async () => {
     localStorage.setItem(
       LOOK_EXEMPLARS_STORAGE_KEY,
-      JSON.stringify({ "proj-1": { photo: { assetId: "asset-9", url: "/api/v1/projects/proj-1/files/cached.png", seed: 1 } } }),
+      JSON.stringify({
+        "proj-1": {
+          z_image_turbo: {
+            photo: { assetId: "asset-9", url: "/api/v1/projects/proj-1/files/cached.png", seed: 1 },
+          },
+        },
+      }),
     );
     await render(baseContext());
     expect(text("any")).toBe("true");
     expect(text("photo-url")).toBe("/api/v1/projects/proj-1/files/cached.png");
+  });
+
+  it("keeps cached exemplars separate per model", async () => {
+    localStorage.setItem(
+      LOOK_EXEMPLARS_STORAGE_KEY,
+      JSON.stringify({
+        "proj-1": {
+          z_image_turbo: {
+            photo: { assetId: "asset-z", url: "/api/v1/projects/proj-1/files/z.png", seed: 1 },
+          },
+          realvisxl: {
+            photo: { assetId: "asset-r", url: "/api/v1/projects/proj-1/files/r.png", seed: 2 },
+          },
+        },
+      }),
+    );
+    const ctx = baseContext({
+      imageModels: [
+        { id: "z_image_turbo", capabilities: ["text_to_image"] },
+        { id: "realvisxl", capabilities: ["text_to_image"] },
+      ],
+    });
+
+    await render(ctx, { preferredModelId: "realvisxl" });
+    expect(text("photo-url")).toBe("/api/v1/projects/proj-1/files/r.png");
+
+    await render(ctx, { preferredModelId: "z_image_turbo" });
+    expect(text("photo-url")).toBe("/api/v1/projects/proj-1/files/z.png");
   });
 
   it("renders every look when refreshed without an explicit list", async () => {

@@ -63,20 +63,36 @@ export function MakeVideo() {
   const isFieldDefault = (key, value) => savedDefaults[key] === String(value);
 
   const looks = useLookExemplars();
-  const { models: videoChoices, model, modelId, select: selectModel, makeDefault, isDefault } = useSimpleVideoModel();
+  const {
+    models: videoChoices,
+    modelId,
+    select: selectModel,
+    makeDefault,
+    isDefaultId,
+  } = useSimpleVideoModel();
   const motion = useMemo(() => VIDEO_MOTIONS.find((entry) => entry.id === motionId) ?? VIDEO_MOTIONS[0], [motionId]);
   const look = useMemo(() => LOOKS.find((entry) => entry.id === lookId) ?? null, [lookId]);
   const shape = useMemo(() => SHAPES.find((entry) => entry.id === shapeId) ?? SHAPES[0], [shapeId]);
+  const requiredCapability = startMode === "picture" ? "image_to_video" : "text_to_video";
+  const modeVideoChoices = useMemo(
+    () => videoChoices.filter((entry) => (entry.capabilities ?? []).includes(requiredCapability)),
+    [videoChoices, requiredCapability],
+  );
+  const modeModel = useMemo(
+    () => modeVideoChoices.find((entry) => entry.id === modelId) ?? modeVideoChoices[0] ?? null,
+    [modeVideoChoices, modelId],
+  );
+  const modeModelId = modeModel?.id ?? null;
 
   // Length options come from the selected model (lengths vary per model), capped
   // at the model's recommended max for Simple. Clamp the chosen value to those
   // options so switching models can't leave an unsupported/over-long length set.
-  const durations = videoDurations(model);
-  const preferredDuration = durationValue ?? model?.defaults?.duration;
+  const durations = videoDurations(modeModel);
+  const preferredDuration = durationValue ?? modeModel?.defaults?.duration;
   const duration = durations.some((value) => Number(value) === Number(preferredDuration))
     ? preferredDuration
     : durations[durations.length - 1];
-  const fps = model?.defaults?.fps ?? model?.limits?.fps?.[0] ?? 25;
+  const fps = modeModel?.defaults?.fps ?? modeModel?.limits?.fps?.[0] ?? 25;
 
   // Only stills make sense as a first frame.
   const startImages = useMemo(
@@ -86,24 +102,30 @@ export function MakeVideo() {
 
   const rendering = videoLocalJobs.length > 0;
   const needsSource = startMode === "picture" && !sourceAssetId;
-  const canSubmit = Boolean(activeProject) && prompt.trim().length > 0 && !needsSource && !submitting;
+  const modelNotice = !modeModelId
+    ? startMode === "picture"
+      ? "Add a video model that can animate pictures in Settings first."
+      : "Add a text-to-video model in Settings first."
+    : "";
+  const canSubmit = Boolean(activeProject) && Boolean(modeModelId) && prompt.trim().length > 0 && !needsSource && !submitting;
 
   async function handleCreate() {
     if (!canSubmit) {
       if (!activeProject) setNotice("Open or create a workspace first.");
+      else if (!modeModelId) setNotice(modelNotice);
       else if (needsSource) setNotice("Pick a picture to animate, or switch to “A description”.");
       return;
     }
     setSubmitting(true);
     setNotice("");
-    const dims = resolveDims(model, shape);
+    const dims = resolveDims(modeModel, shape);
     const isImage = startMode === "picture";
     try {
       const job = await createVideoJob({
         mode: isImage ? "image_to_video" : "text_to_video",
         prompt: composePrompt(prompt, look),
         negativePrompt: "",
-        model: modelId ?? "",
+        model: modeModelId,
         duration: Number(duration),
         fps: Number(fps),
         width: dims.width,
@@ -131,7 +153,7 @@ export function MakeVideo() {
     setDescribing(true);
     setNotice("");
     try {
-      const refined = await refinePrompt({ prompt: base, modelId, workflow: "video" });
+      const refined = await refinePrompt({ prompt: base, modelId: modeModelId, workflow: "video" });
       if (refined) setPrompt(refined);
     } catch (error) {
       setNotice(error?.message || "Couldn't reach the description helper. Is its model installed?");
@@ -269,17 +291,21 @@ export function MakeVideo() {
             <span className="sw-meta">Makes 1 clip · takes a few minutes</span>
           </div>
 
-          {notice ? <p className="sw-notice">{notice}</p> : null}
+          {notice || modelNotice ? <p className="sw-notice">{notice || modelNotice}</p> : null}
 
           <details className="sw-disclosure">
             <summary>
               <Icon.ChevDown className="sw-caret" /> More options
             </summary>
             <div className="sw-adv">
-              {videoChoices.length > 0 ? (
-                <AdvField label="Model" isDefault={isDefault} onMakeDefault={makeDefault}>
-                  <select value={modelId ?? ""} onChange={(event) => selectModel(event.target.value)}>
-                    {videoChoices.map((entry) => (
+              {modeVideoChoices.length > 0 ? (
+                <AdvField
+                  label="Model"
+                  isDefault={isDefaultId(modeModelId)}
+                  onMakeDefault={() => makeDefault(modeModelId)}
+                >
+                  <select value={modeModelId ?? ""} onChange={(event) => selectModel(event.target.value)}>
+                    {modeVideoChoices.map((entry) => (
                       <option key={entry.id} value={entry.id}>
                         {modelLabel(entry)}
                       </option>

@@ -70,11 +70,13 @@ export function MakePicture() {
   const upscale = useMemo(() => UPSCALE_OPTIONS.find((entry) => entry.id === upscaleId) ?? UPSCALE_OPTIONS[0], [upscaleId]);
 
   const rendering = imageLocalJobs.length > 0;
-  const canSubmit = Boolean(activeProject) && prompt.trim().length > 0 && !submitting;
+  const modelNotice = !modelId ? "Add a picture model in Settings first." : "";
+  const canSubmit = Boolean(activeProject) && Boolean(modelId) && prompt.trim().length > 0 && !submitting;
 
   async function handleCreate() {
     if (!canSubmit) {
       if (!activeProject) setNotice("Open or create a workspace first.");
+      else if (!modelId) setNotice(modelNotice);
       return;
     }
     setSubmitting(true);
@@ -85,7 +87,7 @@ export function MakePicture() {
       mode: "text_to_image",
       prompt: composePrompt(prompt, look),
       negativePrompt: "",
-      model: modelId ?? "z_image_turbo",
+      model: modelId,
       count,
       width: dims.width,
       height: dims.height,
@@ -199,7 +201,7 @@ export function MakePicture() {
             </span>
           </div>
 
-          {notice ? <p className="sw-notice">{notice}</p> : null}
+          {notice || modelNotice ? <p className="sw-notice">{notice || modelNotice}</p> : null}
 
           <details className="sw-disclosure">
             <summary>

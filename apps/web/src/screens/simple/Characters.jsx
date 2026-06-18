@@ -23,6 +23,8 @@ export function Characters() {
     importAsset,
     imageModels = [],
     createImageJob,
+    setUiMode,
+    setActiveView,
   } = useAppContext();
 
   const [selectedId, setSelectedId] = useState(null);
@@ -139,6 +141,11 @@ export function Characters() {
     }
   }
 
+  function openAdvancedCharacters() {
+    setUiMode?.("advanced");
+    setActiveView?.("Characters");
+  }
+
   return (
     <section className="main-surface sw-make">
       <div className="sw-creations-grid">
@@ -242,14 +249,14 @@ export function Characters() {
             </button>
 
             {notice ? <p className="sw-notice">{notice}</p> : null}
-            <a
+            <button
+              type="button"
               className="sw-advlink"
-              href="#"
-              onClick={(event) => event.preventDefault()}
+              onClick={openAdvancedCharacters}
               title="Angle sheets, pose sets and training live in Advanced"
             >
               Want angle sheets or to train a model? Use Advanced →
-            </a>
+            </button>
           </aside>
         ) : (
           <aside className="sw-detail">

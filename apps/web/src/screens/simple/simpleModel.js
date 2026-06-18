@@ -67,14 +67,17 @@ function useModelChoice(models, storageKey, preference) {
 
   const model = useMemo(() => models.find((entry) => entry.id === modelId) ?? null, [models, modelId]);
   const select = useCallback((id) => setChosenId(id), []);
-  const makeDefault = useCallback(() => {
-    if (!modelId) return;
-    writeKey(storageKey, modelId);
-    setSavedDefault(modelId);
+  const makeDefault = useCallback((id = modelId) => {
+    const nextId = typeof id === "string" ? id : modelId;
+    if (!nextId) return;
+    writeKey(storageKey, nextId);
+    setSavedDefault(nextId);
+    setChosenId(nextId);
   }, [modelId, storageKey]);
-  const isDefault = Boolean(modelId) && modelId === savedDefault;
+  const isDefaultId = useCallback((id = modelId) => Boolean(id) && id === savedDefault, [modelId, savedDefault]);
+  const isDefault = isDefaultId(modelId);
 
-  return { models, model, modelId, select, makeDefault, isDefault };
+  return { models, model, modelId, select, makeDefault, isDefault, isDefaultId };
 }
 
 export function useSimpleImageModel() {
