@@ -59,6 +59,13 @@ import {
   colorName,
   composeColorPrompt,
   boxesToIdeogramElements,
+  HISTORY_LIMIT,
+  emptyHistory,
+  historyCheckpoint,
+  historyUndo,
+  historyRedo,
+  canUndo,
+  canRedo,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 
@@ -805,5 +812,100 @@ describe("inpaint mask", () => {
     // Erase-only strokes don't make a mask.
     expect(maskHasContent([{ points: [0, 0, 5, 5], size: 40, erase: true }])).toBe(false);
     expect(maskHasContent([{ points: [0, 0, 5, 5], size: 40, erase: false }])).toBe(true);
+  });
+});
+
+// Undo/redo history reducer (sc-6106). Snapshots are opaque to the reducer, so the
+// tests use plain marker objects in place of real working-image snapshots.
+describe("undo/redo history (sc-6106)", () => {
+  const A = { id: "A" };
+  const B = { id: "B" };
+  const C = { id: "C" };
+
+  it("starts empty with nothing to undo or redo", () => {
+    const h = emptyHistory();
+    expect(h).toEqual({ past: [], future: [] });
+    expect(canUndo(h)).toBe(false);
+    expect(canRedo(h)).toBe(false);
+  });
+
+  it("a checkpoint records the pre-op snapshot and clears any redo branch", () => {
+    let h = emptyHistory();
+    h = historyCheckpoint(h, A);
+    expect(h).toEqual({ past: [A], future: [] });
+    expect(canUndo(h)).toBe(true);
+    // A stale redo branch is dropped the moment a new op is committed.
+    h = { past: [A], future: [C] };
+    expect(historyCheckpoint(h, B)).toEqual({ past: [A, B], future: [] });
+  });
+
+  it("undo/redo on an exhausted stack is a no-op with a null restore target", () => {
+    expect(historyUndo(emptyHistory(), B)).toEqual({ history: { past: [], future: [] }, restore: null });
+    expect(historyRedo(emptyHistory(), B)).toEqual({ history: { past: [], future: [] }, restore: null });
+  });
+
+  it("walks a two-op session back and forth restoring each step", () => {
+    // open (state A) → op1 (A→B) → op2 (B→C): each op checkpoints the pre-op state.
+    let h = emptyHistory();
+    h = historyCheckpoint(h, A); // committing op1, present is now B
+    h = historyCheckpoint(h, B); // committing op2, present is now C
+    expect(h).toEqual({ past: [A, B], future: [] });
+
+    // undo from C → restores B, parks C on the redo branch.
+    let step = historyUndo(h, C);
+    expect(step.restore).toBe(B);
+    expect(step.history).toEqual({ past: [A], future: [C] });
+    h = step.history;
+
+    // undo from B → restores A.
+    step = historyUndo(h, B);
+    expect(step.restore).toBe(A);
+    expect(step.history).toEqual({ past: [], future: [B, C] });
+    h = step.history;
+    expect(canUndo(h)).toBe(false);
+    expect(canRedo(h)).toBe(true);
+
+    // redo from A → restores B, then C.
+    step = historyRedo(h, A);
+    expect(step.restore).toBe(B);
+    expect(step.history).toEqual({ past: [A], future: [C] });
+    step = historyRedo(step.history, B);
+    expect(step.restore).toBe(C);
+    expect(step.history).toEqual({ past: [A, B], future: [] });
+    expect(canRedo(step.history)).toBe(false);
+  });
+
+  it("a new op after undo forks history, dropping the redo branch", () => {
+    // ...A, B committed; undo back to B; then commit a different op D.
+    let h = { past: [A], future: [C] }; // present is B, C is the undone branch
+    const D = { id: "D" };
+    h = historyCheckpoint(h, B);
+    expect(h).toEqual({ past: [A, B], future: [] });
+    // The redo target C is gone — redo now has nothing to restore.
+    expect(historyRedo(h, D).restore).toBe(null);
+  });
+
+  it("bounds the undo depth, evicting the oldest snapshots", () => {
+    let h = emptyHistory();
+    for (let i = 0; i < HISTORY_LIMIT + 5; i += 1) h = historyCheckpoint(h, { id: i });
+    expect(h.past).toHaveLength(HISTORY_LIMIT);
+    // The five oldest (0..4) were evicted; the newest survive.
+    expect(h.past[0]).toEqual({ id: 5 });
+    expect(h.past[h.past.length - 1]).toEqual({ id: HISTORY_LIMIT + 4 });
+  });
+
+  it("honors a custom limit on checkpoint and undo", () => {
+    let h = emptyHistory();
+    h = historyCheckpoint(h, A, 2);
+    h = historyCheckpoint(h, B, 2);
+    h = historyCheckpoint(h, C, 2);
+    expect(h.past).toEqual([B, C]);
+  });
+
+  it("does not mutate the input history", () => {
+    const h = emptyHistory();
+    const after = historyCheckpoint(h, A);
+    expect(h).toEqual({ past: [], future: [] });
+    expect(after).not.toBe(h);
   });
 });
