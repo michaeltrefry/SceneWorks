@@ -10,10 +10,11 @@
 //! so this **replaces the off-Mac SAM2 box-prompt stub** (`maskState = "missing"`) with real masks.
 //!
 //! Off-Mac + `backend-candle` only (`candle-gen-sam3` builds candle/CUDA). It loads the **stock
-//! `facebook/sam3` checkpoint directly** (`model.safetensors` + `tokenizer.json`; no conversion) and
-//! affine-quantizes after load (`Sam3VideoModel::quantize`, sc-6246) — **Q8 by default** (near-
-//! lossless), tunable via `SCENEWORKS_SAM3_QUANT` (`q8`/`q4`/`off`). The pure association/mask helpers
-//! are shared line-for-line with the MLX module; only the tensor/inference seam is candle.
+//! `facebook/sam3` checkpoint directly** (`model.safetensors` + `tokenizer.json`; no conversion).
+//! Affine quant (`Sam3VideoModel::quantize`, sc-6246) is available via `SCENEWORKS_SAM3_QUANT`
+//! (`q8`/`q4`), but the off-Mac default is **dense** — candle's GGUF `QMatMul` returns NaN on Blackwell
+//! sm_120 (sc-6248), and dense is bit-exact (every parity test cosine ≈ 1.0). The pure association/mask
+//! helpers are shared line-for-line with the MLX module; only the tensor/inference seam is candle.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -50,20 +51,23 @@ const CONCEPT_PROMPT: &str = "person";
 /// *associate* a SAM3 object id with the selected track, never as a segmenter prompt.
 pub(crate) type BoxNorm = (f64, f64, f64, f64);
 
-/// Affine-quantization level for the segmenter, from `SCENEWORKS_SAM3_QUANT`: **Q8 by default**
-/// (near-lossless), `q4` for the smaller/lossier Q4, or `off`/`f32` to keep dense F32. `None` = no
-/// quantization.
+/// Affine-quantization level for the segmenter, from `SCENEWORKS_SAM3_QUANT`: **dense by default**
+/// off-Mac (candle's Blackwell quant is broken, sc-6248); `q8`/`q4` opt back in where supported.
+/// `None` = no quantization (dense F32).
 fn quant_level() -> Option<Quant> {
     parse_quant(&std::env::var("SCENEWORKS_SAM3_QUANT").unwrap_or_default())
 }
 
-/// Parse the `SCENEWORKS_SAM3_QUANT` value (split out so the mapping is unit-testable). Unset or
-/// unrecognized → the safe Q8 default.
+/// Parse the `SCENEWORKS_SAM3_QUANT` value (split out so the mapping is unit-testable). The default
+/// off-Mac is **dense** (`None`): candle's GGUF `QMatMul` returns NaN on Blackwell sm_120 (sc-6248),
+/// so Q8/Q4 collapse the SAM3 person masks while the dense path is bit-exact and ~3.4 GB fits the
+/// GPU-worker box. `q8`/`q4` remain opt-in for hardware where candle's quant kernels work; `off`/
+/// `f32`/`none`/unset/unrecognized all stay dense.
 fn parse_quant(value: &str) -> Option<Quant> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "off" | "f32" | "none" | "0" => None,
         "q4" | "4" => Some(Quant::Q4),
-        _ => Some(Quant::Q8),
+        "q8" | "8" => Some(Quant::Q8),
+        _ => None,
     }
 }
 
@@ -345,9 +349,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quant_defaults_to_q8_and_honors_overrides() {
-        assert_eq!(parse_quant(""), Some(Quant::Q8), "unset → Q8 default");
-        assert_eq!(parse_quant("q8"), Some(Quant::Q8));
+    fn quant_defaults_to_dense_and_honors_opt_in() {
+        assert_eq!(
+            parse_quant(""),
+            None,
+            "unset → dense (candle Blackwell quant broken, sc-6248)"
+        );
+        assert_eq!(parse_quant("q8"), Some(Quant::Q8), "explicit opt-in");
         assert_eq!(parse_quant("8"), Some(Quant::Q8));
         assert_eq!(
             parse_quant(" Q4 "),
@@ -358,11 +366,7 @@ mod tests {
         assert_eq!(parse_quant("off"), None);
         assert_eq!(parse_quant("F32"), None);
         assert_eq!(parse_quant("none"), None);
-        assert_eq!(
-            parse_quant("garbage"),
-            Some(Quant::Q8),
-            "unrecognized → safe Q8"
-        );
+        assert_eq!(parse_quant("garbage"), None, "unrecognized → dense");
     }
 
     #[test]
