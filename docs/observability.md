@@ -21,6 +21,41 @@ to a per-process file under the platform log dir (`apps/desktop/src/setup.rs::lo
 
 You rarely need to open these directly — see the in-app Logs screen below.
 
+## Logging backbone
+
+All Rust crates log through [`tracing`]. A single init function —
+`sceneworks_core::observability::init_logging()` (and the API's buffer-aware
+`init_logging_with_buffer()`) — installs the subscriber from each binary's `main`
+(`apps/rust-api`, `apps/rust-worker`, and the desktop shell). It is idempotent, so
+the embedded-worker and standalone-worker paths can both call it safely.
+
+**Format-adaptive output (`SCENEWORKS_LOG_FORMAT = json | pretty | auto`, default
+`auto`).** In `auto` the process emits **pretty**, human-readable colored lines when
+`stdout` is an interactive TTY (a developer running `cargo run`), and **JSON** — one
+object per line — otherwise. "Otherwise" is every deployment that matters here: a
+Tauri sidecar whose stdout the desktop captures, a Docker container, or any pipe.
+So desktop sidecars and headless servers both emit JSON (what the ring buffer and
+log ingestion want), while a terminal stays readable. Force either with
+`SCENEWORKS_LOG_FORMAT=json` / `=pretty`.
+
+**Filtering (`RUST_LOG`).** Honored via `EnvFilter`; the default when unset is
+`info,sceneworks=debug`.
+
+**Levels are declared, not inferred.** Each event's severity is the `tracing` level
+chosen at the call site (`error!` / `warn!` / `info!` / `debug!`), carried as an
+explicit `level` field in the JSON envelope. `session_log` trusts that declared
+level verbatim and only falls back to its text/name heuristic for legacy or plain
+lines that lack one (e.g. the Python worker's `emit_worker_event`). This is what
+makes the Logs-screen `level` filter trustworthy — filtering by `level=error` no
+longer silently drops a real error, and a routine 4xx logged at `debug` is not
+falsely promoted to error by its `_error`-suffixed name.
+
+Secret redaction is unchanged: `session_log::redact_secrets` still scrubs
+tokens / api-keys / bearer / authorization on ingestion before anything is
+persisted or surfaced.
+
+[`tracing`]: https://docs.rs/tracing
+
 ## In-app Logs screen
 
 **System → Logs** (`apps/web/src/screens/LogsScreen.jsx`). Read-only, live-tailing,
@@ -38,9 +73,12 @@ Data source:
 
 ## Event vocabulary
 
-All structured events are one JSON object per line: `{ event, reportedAt, ...payload }`
-(matches the Python worker's `emit_worker_event`). `LogEntry` infers a `level`
-(`info`/`warn`/`error`) and a compact `message` summary from each line.
+All structured events are one JSON object per line:
+`{ event, level, reportedAt, ...payload }` (the Rust crates emit this via the
+`tracing` backbone above; the Python worker's `emit_worker_event` emits the same
+shape minus the declared `level`). `LogEntry` reads the declared `level` when present
+(`error`/`warn`/`info`/`debug`), falling back to a heuristic otherwise, and derives a
+compact `message` summary from each line.
 
 ### Routing — `mlx_route_decision` (API, sc-3449)
 
@@ -96,6 +134,23 @@ expected after the worker has been idle for
 `SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS` seconds (default 300). It should
 correlate with the worker releasing cached Metal/MLX allocations before the
 next generation cold-loads weights again.
+
+### API errors — `api_error` (API)
+
+Emitted from `ApiError`'s `IntoResponse` so no failure leaves the server without a
+trace. Fields: `status` (HTTP code), `detail` (the message returned to the client).
+**5xx responses log at `error`** (an untyped internal failure that an operator must
+see); routine typed **4xx responses log at `debug`** so expected validation/not-found
+churn doesn't drown the error level. Filtering the Logs screen by `level=error` and
+searching `api_error` surfaces exactly the server-side failures.
+
+### Auth rejections — `auth_rejected` (API)
+
+Emitted by `auth::access_control` when a request to a protected route is rejected for
+a missing/invalid access token (warn level). Fields: `path` (the request path, no
+query string), `reason` (`missing_or_invalid_token`), `status` (401). The token /
+secret is deliberately **never** logged. Previously these rejections returned 401
+with no server-side trace.
 
 ## Diagnosing "MLX-eligible job ran on torch/MPS"
 

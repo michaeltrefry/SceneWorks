@@ -12,6 +12,17 @@ pub(crate) async fn access_control(
         return next.run(request).await;
     }
 
+    // Make auth rejections visible to operators (they previously returned 401 with no
+    // server-side trace). Log the path + reason + status only — never the token/secret
+    // (and `uri().path()` excludes any query string).
+    tracing::warn!(
+        event = "auth_rejected",
+        path = %request.uri().path(),
+        reason = "missing_or_invalid_token",
+        status = StatusCode::UNAUTHORIZED.as_u16(),
+        "rejected unauthenticated API request"
+    );
+
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({

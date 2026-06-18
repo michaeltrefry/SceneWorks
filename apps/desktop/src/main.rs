@@ -11,6 +11,11 @@ mod setup;
 use tauri::RunEvent;
 
 fn main() {
+    // Install the tracing backbone for the desktop shell's own logs. The sidecars
+    // are separate processes; their stdout is captured into the multi-source ring
+    // buffer in `setup.rs` (and re-classified there), independent of this subscriber.
+    sceneworks_core::observability::init_logging();
+
     // Kill any sidecars orphaned by a prior crash/force-quit before spawning
     // fresh ones, so API processes don't accumulate and contend on jobs.db.
     setup::reap_stale_sidecars();

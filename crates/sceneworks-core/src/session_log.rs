@@ -21,9 +21,10 @@ use serde_json::Value;
 
 use crate::time::utc_now;
 
-/// One captured log line, tagged with its origin and an inferred severity, plus the
-/// parsed structured event when the line was a JSON object (the worker's
-/// `emit_worker_event` output or the API's `mlx_route_decision`).
+/// One captured log line, tagged with its origin and severity (the **declared**
+/// `level` from the tracing backbone when present, else inferred), plus the parsed
+/// structured event when the line was a JSON object (the worker's `emit_worker_event`
+/// output or the API's `mlx_route_decision`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
@@ -32,7 +33,8 @@ pub struct LogEntry {
     pub seq: u64,
     /// Origin stream: `api` | `worker` | `mlx-worker` (desktop), or `api` (API buffer).
     pub source: String,
-    /// `info` | `warn` | `error`, inferred from the line/event.
+    /// Severity: the declared `level` carried by the tracing envelope
+    /// (`error`/`warn`/`info`/`debug`), or — for legacy/plain lines — inferred.
     pub level: String,
     /// Best-effort timestamp: the event's `reportedAt` when present, else capture time.
     pub timestamp: String,
@@ -231,11 +233,25 @@ fn classify(source: &str, line: &str, seq: u64) -> LogEntry {
     }
 }
 
-/// Severity heuristic. Structured events win: an `event` name ending in `_failed`,
-/// or an `error`/`errorType` field, is an error; `claim_lock_contention` is a warn.
-/// Otherwise sniff the raw text (stderr-style markers), defaulting to info.
+/// Severity for a captured line. A **declared** `level` field (emitted by the
+/// `tracing` backbone, [`crate::observability`]) is authoritative and used verbatim
+/// — this is what makes the Logs-screen `level` filter trustworthy. Only legacy /
+/// plain lines that lack a declared level fall back to the heuristic: a structured
+/// `event` name ending in `_failed`/`_error`, or an `error`/`errorType` field, is an
+/// error; `claim_lock_contention` is a warn; otherwise sniff the raw text.
 fn infer_level(_source: &str, line: &str, event: Option<&Value>) -> String {
     if let Some(event) = event {
+        // Declared level wins, verbatim (the sceneworks tracing envelope always
+        // carries one). This is what makes the filter trustworthy — e.g. a 4xx
+        // `api_error` is emitted at `debug` and must STAY debug, not get re-promoted
+        // to error by the `_error`-suffix heuristic below. Only legacy / plain lines
+        // with no declared level fall through to the heuristic.
+        if let Some(declared) = event.get("level").and_then(Value::as_str) {
+            let declared = declared.trim().to_ascii_lowercase();
+            if !declared.is_empty() {
+                return declared;
+            }
+        }
         let name = event.get("event").and_then(Value::as_str).unwrap_or("");
         if name.ends_with("_failed")
             || name.ends_with("_error")
@@ -267,7 +283,15 @@ fn infer_level(_source: &str, line: &str, event: Option<&Value>) -> String {
 /// Compact one-liner for a structured event: the event name plus a curated set of
 /// high-signal fields when present, so the routing/claim story reads at a glance.
 fn summarize_event(event: &Value) -> Option<String> {
-    let name = event.get("event").and_then(Value::as_str)?;
+    // A structured event without an `event` name (e.g. a plain `tracing` message
+    // routed through the backbone) summarizes to its `message` field, so the Logs
+    // screen shows readable text rather than the raw JSON line.
+    let Some(name) = event.get("event").and_then(Value::as_str) else {
+        return event
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    };
     let mut summary = name.to_owned();
     const FIELDS: &[&str] = &[
         "decision",
@@ -279,6 +303,9 @@ fn summarize_event(event: &Value) -> Option<String> {
         "imageIndex",
         "imageCount",
         "consecutiveFailures",
+        "status",
+        "path",
+        "detail",
         "error",
     ];
     for field in FIELDS {
@@ -326,6 +353,38 @@ mod tests {
         assert!(entry.message.contains("decision=fell_back_to_torch"));
         assert!(entry.message.contains("reason=no_idle_mlx_worker"));
         assert!(entry.event.is_some());
+    }
+
+    #[test]
+    fn declared_level_overrides_heuristic() {
+        let log = SessionLog::with_capacity(16);
+        // A 4xx `api_error` is declared at debug — the name ends in `_error`, which
+        // the heuristic would promote to error, but the declared level must win so the
+        // error filter stays trustworthy.
+        log.push_line(
+            "api",
+            &json!({ "event": "api_error", "level": "debug", "status": 404 }).to_string(),
+        );
+        // A declared error level is honored even when the text has no error markers.
+        log.push_line(
+            "api",
+            &json!({ "event": "mlx_route_decision", "level": "error" }).to_string(),
+        );
+        // No declared level -> fall back to the heuristic (legacy / Python worker line).
+        log.push_line(
+            "worker",
+            &json!({ "event": "image_inference_failed", "error": "boom" }).to_string(),
+        );
+        let entries = log.query(&LogQuery::default());
+        assert_eq!(
+            entries[0].level, "debug",
+            "declared debug wins over _error suffix"
+        );
+        assert_eq!(entries[1].level, "error", "declared error honored verbatim");
+        assert_eq!(
+            entries[2].level, "error",
+            "heuristic still applies with no level"
+        );
     }
 
     #[test]

@@ -121,15 +121,17 @@ where
             // when the child died by signal and `Some(code)` when it exited itself.
             let signal = terminating_signal(&status);
             let exit_code = status.code();
-            emit_json(json!({
-                "event": "worker_exited",
-                "workerId": worker_id,
-                "gpuId": child.spec.gpu_id,
-                "exitCode": exit_code,
-                "signal": signal,
-                "restartInSeconds": delay,
-                "reportedAt": now_rfc3339(),
-            }));
+            emit_event_value(
+                Level::INFO,
+                json!({
+                    "event": "worker_exited",
+                    "workerId": worker_id,
+                    "gpuId": child.spec.gpu_id,
+                    "exitCode": exit_code,
+                    "signal": signal,
+                    "restartInSeconds": delay,
+                }),
+            );
             exited.push((worker_id.clone(), signal, exit_code));
         }
     }
@@ -213,12 +215,14 @@ pub(crate) async fn terminate_child(child: &mut Child) {
 
 pub(crate) fn start_child_worker(_settings: &Settings, spec: &WorkerSpec) -> WorkerResult<Child> {
     let executable = std::env::current_exe()?;
-    emit_json(json!({
-        "event": "starting_worker",
-        "workerId": spec.worker_id,
-        "gpuId": spec.gpu_id,
-        "reportedAt": now_rfc3339(),
-    }));
+    emit_event_value(
+        Level::INFO,
+        json!({
+            "event": "starting_worker",
+            "workerId": spec.worker_id,
+            "gpuId": spec.gpu_id,
+        }),
+    );
     let mut command = Command::new(executable);
     command.envs(child_environment(spec));
     command.spawn().map_err(Into::into)
@@ -258,14 +262,16 @@ async fn report_worker_terminated(
         .post_json(&path, &json!({ "signal": signal, "exitCode": exit_code }))
         .await;
     if let Err(error) = outcome {
-        emit_json(json!({
-            "event": "worker_termination_report_failed",
-            "workerId": worker_id,
-            "signal": signal,
-            "exitCode": exit_code,
-            "error": error.to_string(),
-            "reportedAt": now_rfc3339(),
-        }));
+        emit_event_value(
+            Level::ERROR,
+            json!({
+                "event": "worker_termination_report_failed",
+                "workerId": worker_id,
+                "signal": signal,
+                "exitCode": exit_code,
+                "error": error.to_string(),
+            }),
+        );
     }
 }
 

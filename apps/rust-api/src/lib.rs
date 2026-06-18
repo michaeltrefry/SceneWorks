@@ -298,13 +298,18 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Install the tracing backbone first so every line below (and every request)
+    // flows through the format-adaptive subscriber. The buffer variant also feeds
+    // this process's own ring buffer, served by `GET /api/v1/logs` (sc-3453).
+    sceneworks_core::observability::init_logging_with_buffer(logs::api_session_log());
     // Host mode (no HF cache env set): default HF_HOME to the shared ~/.cache/
     // huggingface so the catalog and downloads agree on the OS cache rather than
     // the private data dir (sc-1904 follow-up). Desktop/Compose already inject it.
     if let Some(home) = sceneworks_core::hf_home::ensure_default_huggingface_home() {
-        println!(
-            "SceneWorks Rust API defaulting HF_HOME to {}",
-            home.display()
+        tracing::info!(
+            event = "hf_home_defaulted",
+            home = %home.display(),
+            "SceneWorks Rust API defaulting HF_HOME"
         );
     }
     let settings = Settings::from_env();
@@ -333,10 +338,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if should_warn_open_bind(&settings.access_token, address.ip()) {
         let override_raw = std::env::var("SCENEWORKS_ALLOW_OPEN_BIND").unwrap_or_default();
         if open_bind_override_enabled(&override_raw) {
-            eprintln!(
-                "WARNING: SceneWorks API is binding to {address} with no SCENEWORKS_ACCESS_TOKEN set — \
-                 every endpoint is reachable without authentication from the network. Proceeding \
-                 because SCENEWORKS_ALLOW_OPEN_BIND is set; ensure this host is on a trusted network."
+            tracing::warn!(
+                event = "open_bind_without_token",
+                address = %address,
+                "SceneWorks API is binding with no SCENEWORKS_ACCESS_TOKEN set — every endpoint is \
+                 reachable without authentication from the network. Proceeding because \
+                 SCENEWORKS_ALLOW_OPEN_BIND is set; ensure this host is on a trusted network."
             );
         } else {
             return Err(format!(
@@ -358,13 +365,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .config_dir
             .join(sceneworks_core::credentials::CREDENTIALS_FILENAME);
         if let Some(mode) = sceneworks_core::credentials::loose_credentials_mode(&creds_path) {
-            eprintln!(
-                "WARNING: credentials file {} is mode {:o} — group/world accessible. It \
-                 holds download tokens that should be owner-only. Run `chmod 600 {}` to \
-                 restrict it.",
-                creds_path.display(),
-                mode,
-                creds_path.display()
+            tracing::warn!(
+                event = "credentials_file_loose_mode",
+                path = %creds_path.display(),
+                mode = format!("{mode:o}"),
+                "credentials file is group/world accessible — it holds download tokens that should \
+                 be owner-only. Run `chmod 600` on it to restrict access."
             );
         }
     }
@@ -375,7 +381,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // in-process worker connects to the real port.
     let bound = listener.local_addr()?;
     let port = bound.port();
-    println!("SceneWorks Rust API listening on http://{bound}");
+    tracing::info!(
+        event = "api_listening",
+        address = %bound,
+        "SceneWorks Rust API listening"
+    );
 
     let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));
 
@@ -402,10 +412,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// shell's graceful teardown — so without this a worker would orphan to launchd
 /// with its multi-GB MLX model resident.
 pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
+    // GPU-worker path of the shared binary (SCENEWORKS_WORKER_ONLY=1): no in-process
+    // log buffer — its stdout is captured by the desktop wrapper / Docker.
+    sceneworks_core::observability::init_logging();
     if let Some(home) = sceneworks_core::hf_home::ensure_default_huggingface_home() {
-        println!(
-            "SceneWorks Rust worker defaulting HF_HOME to {}",
-            home.display()
+        tracing::info!(
+            event = "hf_home_defaulted",
+            home = %home.display(),
+            "SceneWorks Rust worker defaulting HF_HOME"
         );
     }
     #[cfg(unix)]
@@ -413,7 +427,10 @@ pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             result = sceneworks_worker::run() => result?,
             _ = parent_death(parent_pid_to_watch()) => {
-                eprintln!("SceneWorks Rust worker: watched parent process gone, exiting");
+                tracing::info!(
+                    event = "worker_parent_gone",
+                    "SceneWorks Rust worker: watched parent process gone, exiting"
+                );
             }
         }
         Ok(())
@@ -467,11 +484,20 @@ impl InProcessUtilityWorker {
     async fn shutdown(self) {
         match tokio::time::timeout(self.grace, self.handle).await {
             Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => eprintln!("in-process utility worker exited with error: {error}"),
-            Ok(Err(join_error)) => eprintln!("in-process utility worker task failed: {join_error}"),
-            Err(_) => eprintln!(
-                "in-process utility worker did not stop within {}s grace period",
-                self.grace.as_secs()
+            Ok(Ok(Err(error))) => tracing::error!(
+                event = "in_process_worker_exited_error",
+                error = %error,
+                "in-process utility worker exited with error"
+            ),
+            Ok(Err(join_error)) => tracing::error!(
+                event = "in_process_worker_task_failed",
+                error = %join_error,
+                "in-process utility worker task failed"
+            ),
+            Err(_) => tracing::warn!(
+                event = "in_process_worker_shutdown_timeout",
+                graceSeconds = self.grace.as_secs(),
+                "in-process utility worker did not stop within the grace period"
             ),
         }
     }
@@ -555,7 +581,10 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
         _ = parent_gone => {
-            eprintln!("SceneWorks API: parent process exited; shutting down");
+            tracing::info!(
+                event = "api_parent_exited",
+                "SceneWorks API: parent process exited; shutting down"
+            );
         }
     }
 }
@@ -590,12 +619,20 @@ pub(crate) fn create_app_with_state(
     // Reserved global pose library (epic 2282): created up front so its assets
     // endpoint returns [] (not 404) before any pose is saved. Best-effort.
     if let Err(error) = project_store.ensure_global_poses_project() {
-        eprintln!("SceneWorks API: could not ensure global pose library project: {error}");
+        tracing::error!(
+            event = "ensure_global_poses_project_failed",
+            error = %error,
+            "could not ensure global pose library project"
+        );
     }
     // Reserved global Key Point Library (epic 4422): created up front so its assets +
     // collections endpoints return seeded data before any preset is saved. Best-effort.
     if let Err(error) = project_store.ensure_global_keypoints_project() {
-        eprintln!("SceneWorks API: could not ensure global keypoint library project: {error}");
+        tracing::error!(
+            event = "ensure_global_keypoints_project_failed",
+            error = %error,
+            "could not ensure global keypoint library project"
+        );
     }
     let state = AppState {
         settings,
@@ -2320,6 +2357,23 @@ impl From<ProjectStoreError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        // Make every 5xx leave a server-side trace (it previously returned `{detail}`
+        // to the client and logged nothing). Expected/normal typed 4xx domain errors
+        // stay at debug to avoid drowning the error level in routine validation noise.
+        if self.status.is_server_error() {
+            tracing::error!(
+                event = "api_error",
+                status = self.status.as_u16(),
+                detail = %self.detail,
+                "API request failed"
+            );
+        } else if self.status.is_client_error() {
+            tracing::debug!(
+                event = "api_error",
+                status = self.status.as_u16(),
+                detail = %self.detail,
+            );
+        }
         (self.status, Json(json!({ "detail": self.detail }))).into_response()
     }
 }

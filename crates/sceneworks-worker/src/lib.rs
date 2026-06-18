@@ -31,6 +31,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
+use tracing::Level;
 use uuid::Uuid;
 
 // Shared `advanced` knob accessors (sc-4281). The MLX image/video job paths are macOS-gated; the
@@ -473,15 +474,19 @@ async fn shutdown_signal() {
     }
 }
 
-fn emit_json(payload: Value) {
-    println!("{payload}");
+/// Emit a pre-built structured-event object (already carrying its `event` key) at a
+/// **declared** level through the `tracing` backbone. The format-adaptive subscriber
+/// renders the `{ event, level, reportedAt, ... }` line on stdout (captured into the
+/// per-process log file + the in-app Logs buffer); `reportedAt` is stamped at render
+/// time. Replaces the old `println!` of the same JSON so the level is now authoritative
+/// rather than inferred from the line text downstream.
+fn emit_event_value(level: Level, payload: Value) {
+    sceneworks_core::observability::emit_event(level, payload);
 }
 
-/// Emit a structured worker event as a JSON line on stdout, matching the Python
-/// worker's `emit_worker_event` shape (`{event, reportedAt, ...payload}`). Captured
-/// into mlx-worker.log + the in-app Logs buffer, giving the Rust MLX path the same
-/// per-generation visibility the torch path has (sc-3450). `payload` should be a JSON
-/// object; `event` and `reportedAt` are injected.
+/// Emit a structured worker event at **info** level (the per-generation lifecycle
+/// events — pipeline load / inference start+complete — that the Rust MLX path mirrors
+/// from the torch worker, sc-3450). `event` is injected into `payload`.
 // Only the macOS image-generation path emits these today; on other targets the
 // generation code is cfg'd out, so the helper would be dead code.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -489,18 +494,25 @@ fn emit_event(event: &str, payload: Value) {
     let mut value = payload;
     if let Some(object) = value.as_object_mut() {
         object.insert("event".to_owned(), Value::String(event.to_owned()));
-        object.insert("reportedAt".to_owned(), Value::String(now_rfc3339()));
     }
-    emit_json(value);
+    emit_event_value(Level::INFO, value);
 }
 
 pub async fn run() -> WorkerResult<()> {
+    // Install the tracing backbone before anything emits (covers both the
+    // standalone `sceneworks-rust-worker` binary and the API's GPU-worker path,
+    // which both funnel here). Idempotent — a second call is a no-op.
+    sceneworks_core::observability::init_logging();
     // Host mode (no HF cache env set): default HF_HOME to the shared ~/.cache/
     // huggingface so downloads land in the OS cache rather than the private data
     // dir (sc-1904 follow-up). Set before spawning child workers so they inherit
     // it; desktop/Compose already inject HF_HOME, making this a no-op there.
     if let Some(home) = sceneworks_core::hf_home::ensure_default_huggingface_home() {
-        println!("rust_worker defaulting HF_HOME to {}", home.display());
+        tracing::info!(
+            event = "hf_home_defaulted",
+            home = %home.display(),
+            "rust_worker defaulting HF_HOME"
+        );
     }
     let settings = Settings::from_env();
     if !settings.is_child_worker {
@@ -542,20 +554,26 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
                         // lock contention is explained rather than silently retried into torch.
                         lock_failures = lock_failures.saturating_add(1);
                         let delay = retry_delay(settings.poll_seconds, lock_failures);
-                        emit_json(json!({
-                            "event": "claim_lock_contention",
-                            "workerId": settings.worker_id,
-                            "gpuId": settings.gpu_id,
-                            "consecutiveFailures": lock_failures,
-                            "retryInSeconds": delay,
-                            "error": error.to_string(),
-                            "reportedAt": now_rfc3339(),
-                        }));
+                        emit_event_value(
+                            Level::WARN,
+                            json!({
+                                "event": "claim_lock_contention",
+                                "workerId": settings.worker_id,
+                                "gpuId": settings.gpu_id,
+                                "consecutiveFailures": lock_failures,
+                                "retryInSeconds": delay,
+                                "error": error.to_string(),
+                            }),
+                        );
                         tokio::time::sleep(Duration::from_secs(delay)).await;
                     }
                     Err(error) => {
                         lock_failures = 0;
-                        eprintln!("rust_worker_poll_failed: {error}");
+                        tracing::error!(
+                            event = "rust_worker_poll_failed",
+                            error = %error,
+                            "worker claim poll failed"
+                        );
                         tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))).await;
                     }
                 }
@@ -590,8 +608,12 @@ async fn register_worker_with_retry(
             Err(error) => {
                 attempt = attempt.saturating_add(1);
                 let delay = retry_delay(settings.poll_seconds, attempt);
-                eprintln!(
-                    "rust_worker_register_failed: attempt={attempt} retryInSeconds={delay} error={error}"
+                tracing::warn!(
+                    event = "rust_worker_register_failed",
+                    attempt,
+                    retryInSeconds = delay,
+                    error = %error,
+                    "worker registration failed; will retry"
                 );
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
@@ -711,14 +733,16 @@ async fn heartbeat(
     match outcome {
         Ok(_) => Ok(()),
         Err(WorkerError::Http(error)) => {
-            emit_json(json!({
-                "event": "worker_heartbeat_transport_failed",
-                "workerId": settings.worker_id,
-                "jobId": current_job_id,
-                "status": status_label,
-                "error": error.to_string(),
-                "reportedAt": now_rfc3339(),
-            }));
+            emit_event_value(
+                Level::ERROR,
+                json!({
+                    "event": "worker_heartbeat_transport_failed",
+                    "workerId": settings.worker_id,
+                    "jobId": current_job_id,
+                    "status": status_label,
+                    "error": error.to_string(),
+                }),
+            );
             Ok(())
         }
         Err(other) => Err(other),
@@ -916,7 +940,12 @@ async fn run_utility_job(
             WorkerError::Canceled(_) => {}
             error => {
                 let _ = fail_job(api, &job.id, message, Some(error.to_string())).await;
-                eprintln!("{error}");
+                tracing::error!(
+                    event = "utility_job_failed",
+                    jobId = %job.id,
+                    error = %error,
+                    "{message}"
+                );
             }
         }
     }
@@ -1075,7 +1104,12 @@ async fn cancel_requested_peek(api: &ApiClient, job_id: &str) -> bool {
     match outcome {
         Ok(job) => job.cancel_requested,
         Err(error) => {
-            eprintln!("cancel_poll_failed jobId={job_id}: {error}; retrying on the next poll");
+            tracing::warn!(
+                event = "cancel_poll_failed",
+                jobId = %job_id,
+                error = %error,
+                "cancel poll failed; retrying on the next poll"
+            );
             false
         }
     }

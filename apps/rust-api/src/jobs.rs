@@ -108,16 +108,15 @@ fn emit_mlx_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &st
             Value::String("mlx_unsupported".to_owned()),
         );
         object.insert("mode".to_owned(), Value::String(mode.to_owned()));
-        object.insert("reportedAt".to_owned(), Value::String(now_rfc3339()));
         object.insert("jobId".to_owned(), Value::String(job.id.clone()));
         object.insert(
             "jobType".to_owned(),
             Value::String(job.job_type.as_str().to_owned()),
         );
     }
-    let line = value.to_string();
-    println!("{line}");
-    record_api_event(&line);
+    // Through the tracing backbone: the stdout JSON layer feeds the desktop capture
+    // and the API's own ring buffer (GET /api/v1/logs) via the session-log layer.
+    sceneworks_core::observability::emit_event(tracing::Level::INFO, value);
 }
 
 /// Emit the macOS `mlx_unavailable` terminal-routing event as a structured JSON line for
@@ -127,17 +126,16 @@ fn emit_mlx_unsupported(job: &JobSnapshot, reason: &UnsupportedReason, mode: &st
 /// run on MPS (sc-3483). `reason` carries the full actionable error set on the job.
 fn emit_mlx_unavailable(job: &JobSnapshot) {
     let model = job.payload.get("model").and_then(Value::as_str);
-    let line = json!({
-        "event": "mlx_unavailable",
-        "reportedAt": now_rfc3339(),
-        "jobId": job.id,
-        "jobType": job.job_type.as_str(),
-        "model": model,
-        "reason": job.error,
-    })
-    .to_string();
-    println!("{line}");
-    record_api_event(&line);
+    sceneworks_core::observability::emit_event(
+        tracing::Level::INFO,
+        json!({
+            "event": "mlx_unavailable",
+            "jobId": job.id,
+            "jobType": job.job_type.as_str(),
+            "model": model,
+            "reason": job.error,
+        }),
+    );
 }
 
 /// Emit the MLX↔torch routing decision as a structured JSON line on the API's stdout
@@ -152,13 +150,11 @@ fn emit_route_decision(decision: &RouteDecision) {
             "event".to_owned(),
             Value::String("mlx_route_decision".to_owned()),
         );
-        object.insert("reportedAt".to_owned(), Value::String(now_rfc3339()));
     }
-    let line = value.to_string();
-    // Print for the desktop wrapper's stdout-capture buffer (sc-3451) + api.log, and
-    // record into the API's own buffer for the headless `GET /api/v1/logs` (sc-3453).
-    println!("{line}");
-    record_api_event(&line);
+    // Emitted through the tracing backbone: the stdout JSON layer reaches the desktop
+    // wrapper's capture (sc-3451) + api.log, and the session-log layer records it into
+    // the API's own buffer for the headless `GET /api/v1/logs` (sc-3453).
+    sceneworks_core::observability::emit_event(tracing::Level::INFO, value);
 }
 
 pub(crate) async fn get_job(
@@ -398,9 +394,11 @@ pub(crate) async fn register_completed_training_lora(
             Some(status)
         }
         Err(error) => {
-            eprintln!(
-                "Failed to register trained LoRA for job {}: {}",
-                job.id, error.detail
+            tracing::error!(
+                event = "lora_registration_failed",
+                jobId = %job.id,
+                detail = %error.detail,
+                "failed to register trained LoRA"
             );
             let mut status = JsonObject::new();
             status.insert("loraRegistered".to_owned(), Value::Bool(false));

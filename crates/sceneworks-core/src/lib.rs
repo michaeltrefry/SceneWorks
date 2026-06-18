@@ -12,6 +12,7 @@ pub mod jsonc;
 pub mod lora_family;
 pub mod lora_url;
 pub mod media_convert;
+pub mod observability;
 pub mod project_store;
 pub mod session_log;
 pub mod slug;

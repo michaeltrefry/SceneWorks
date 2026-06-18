@@ -99,7 +99,11 @@ where
     let dir = tempfile::tempdir().map_err(ImageError::IoError)?;
     let out = dir.path().join("decoded.png");
     if let Err(error) = transcode(&out) {
-        eprintln!("image_decode_transcode_failed: {error}");
+        tracing::error!(
+            event = "image_decode_transcode_failed",
+            error = %error,
+            "failed to transcode a decoded image"
+        );
         return Err(ImageError::IoError(io::Error::other(error.to_string())));
     }
     image::open(&out)

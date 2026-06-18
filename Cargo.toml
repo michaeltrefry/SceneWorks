@@ -24,6 +24,15 @@ edition = "2021"
 rust-version = "1.80"
 license-file = "LICENSE"
 
+# Shared logging backbone (observability foundations). `tracing` is the single
+# logging facade for every Rust crate; `tracing-subscriber` installs the
+# format-adaptive subscriber from `sceneworks_core::observability::init_logging`.
+# Pinned once here so all crates resolve the same version and the JSON envelope
+# stays consistent across the api / worker / desktop sidecars.
+[workspace.dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

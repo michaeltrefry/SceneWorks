@@ -154,10 +154,12 @@ fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Op
             GeneratorWorkerEvent::IdleTimeout => {
                 if let Some(key) = cache.evict() {
                     release_backend_cache_after_evict();
-                    eprintln!(
-                        "mlx_generator_cache_idle_evicted: engine={} idleSeconds={}",
-                        key.engine_id,
-                        idle_timeout.map_or(0, |timeout| timeout.as_secs())
+                    // Documented event (docs/observability.md): expected idle-timeout
+                    // eviction, so info level with the engine + idle window.
+                    tracing::info!(
+                        event = "mlx_generator_cache_idle_evicted",
+                        engine = %key.engine_id,
+                        idleSeconds = idle_timeout.map_or(0, |timeout| timeout.as_secs()),
                     );
                 }
                 continue;
