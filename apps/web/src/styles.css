@@ -6195,6 +6195,90 @@ details[open] > summary.lora-scope-group-heading::before,
   font-variant-numeric: tabular-nums;
 }
 
+/* Keyboard-shortcut help button + quick-reference panel (sc-6111). */
+.image-editor-help {
+  min-width: 32px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.image-editor-shortcuts {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 5;
+  width: 280px;
+  max-height: calc(100% - 24px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+  font-size: 13px;
+}
+
+.image-editor-shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.image-editor-shortcuts-head button {
+  min-width: 24px;
+  padding: 0 6px;
+}
+
+.image-editor-shortcuts-body {
+  padding: 8px 12px 12px;
+}
+
+.image-editor-shortcuts-group h4 {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.image-editor-shortcuts-group:first-child h4 {
+  margin-top: 0;
+}
+
+.image-editor-shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.image-editor-shortcut-label {
+  color: var(--text-muted);
+}
+
+.image-editor-shortcut-keys {
+  display: inline-flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.image-editor-shortcut-keys kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: center;
+  color: var(--text);
+}
+
 .image-editor-cropbar {
   position: absolute;
   left: 50%;

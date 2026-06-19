@@ -140,16 +140,60 @@ describe("ImageEditor scaffold", () => {
 
   it("offers always-enabled 'Open' + 'New layout' actions before an image loads", async () => {
     await render(baseContext());
-    // Open (dialog picks the source) + New layout (blank canvas, sc-6092). No
-    // separate "Open from project" / "Upload" buttons.
-    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open", "New layout"]);
+    // Open (dialog picks the source) + New layout (blank canvas, sc-6092) + the
+    // keyboard-shortcuts help toggle (sc-6111). No separate "Open from project" /
+    // "Upload" buttons.
+    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open", "New layout", "⌨"]);
     expect(barButton(container, "Open").disabled).toBe(false);
     expect(barButton(container, "New layout").disabled).toBe(false);
 
     // Same with a project active.
     await render(baseContext({ activeProject: { id: "project_1", name: "My Project" } }));
-    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open", "New layout"]);
+    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open", "New layout", "⌨"]);
     expect(barButton(container, "New layout").disabled).toBe(false);
+  });
+
+  // Keyboard-shortcut quick reference (sc-6111). The help panel + the `?` / Escape
+  // bindings work before an image is open, so they're reachable in jsdom (the tool
+  // hotkeys themselves need the Konva <Stage>, verified in the browser).
+  it("toggles the keyboard-shortcut reference from the bar button and lists the set", async () => {
+    await render(baseContext());
+    expect(container.querySelector(".image-editor-shortcuts")).toBeNull();
+
+    await act(async () => barButton(container, "⌨").click());
+    const panel = container.querySelector(".image-editor-shortcuts");
+    expect(panel).not.toBeNull();
+    // Grouped reference covering tools, view, and edit.
+    const text = panel.textContent;
+    for (const cue of ["Tools", "View", "Edit", "Crop", "Color grade", "Zoom in", "Fit to view", "Undo", "Delete selected box"]) {
+      expect(text).toContain(cue);
+    }
+
+    // The ✕ in the panel head closes it.
+    await act(async () => panel.querySelector(".image-editor-shortcuts-head button").click());
+    expect(container.querySelector(".image-editor-shortcuts")).toBeNull();
+  });
+
+  it("opens the reference with '?' and closes it with Escape, but not while typing", async () => {
+    await render(baseContext());
+
+    const press = async (key, target = window) =>
+      act(async () => target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })));
+
+    await press("?");
+    expect(container.querySelector(".image-editor-shortcuts")).not.toBeNull();
+
+    await press("Escape");
+    expect(container.querySelector(".image-editor-shortcuts")).toBeNull();
+
+    // A keystroke originating in a focused text field is left to the browser — the
+    // panel must not toggle while the user is typing (e.g. an edit prompt).
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    input.focus();
+    await press("?", input);
+    expect(container.querySelector(".image-editor-shortcuts")).toBeNull();
+    input.remove();
   });
 });
 

@@ -50,6 +50,48 @@ const MAX_SCALE = 16;
 const ZOOM_STEP = 1.2;
 const MIN_CROP_PX = 8;
 
+// Modifier glyph for the shortcut reference (the handler accepts both ⌘ and Ctrl).
+const IS_MAC =
+  typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
+const MOD_KEY = IS_MAC ? "⌘" : "Ctrl";
+
+// Keyboard shortcut reference (sc-6111). Single source of truth for the in-editor
+// quick reference; the keydown handler implements these exact bindings.
+const EDITOR_SHORTCUTS = [
+  {
+    group: "Tools",
+    items: [
+      { keys: ["M"], label: "Move / pan" },
+      { keys: ["T"], label: "Transform layer" },
+      { keys: ["C"], label: "Crop" },
+      { keys: ["U"], label: "Upscale" },
+      { keys: ["D"], label: "Detail enhance" },
+      { keys: ["G"], label: "Color grade" },
+      { keys: ["E"], label: "AI edit" },
+      { keys: ["B"], label: "Boxes" },
+    ],
+  },
+  {
+    group: "View",
+    items: [
+      { keys: ["+"], label: "Zoom in" },
+      { keys: ["−"], label: "Zoom out" },
+      { keys: ["0"], label: "Fit to view" },
+      { keys: ["1"], label: "Actual size (100%)" },
+    ],
+  },
+  {
+    group: "Edit",
+    items: [
+      { keys: [MOD_KEY, "Z"], label: "Undo" },
+      { keys: ["⇧", MOD_KEY, "Z"], label: "Redo" },
+      { keys: ["Delete"], label: "Delete selected box" },
+      { keys: ["Esc"], label: "Cancel / deselect" },
+      { keys: ["?"], label: "Toggle this help" },
+    ],
+  },
+];
+
 // Future-tool scaffold (epic 2427) — rendered as inert buttons so the frame + the
 // next slices' insertion points stay in place. All current epic-2427 tools are live
 // (Move + Crop + Upscale + Color + AI Edit + Detail), so this is empty for now.
@@ -897,6 +939,9 @@ export function ImageEditor() {
   const [detailStrength, setDetailStrength] = useState(0.55);
   const [detailCnScale, setDetailCnScale] = useState(0.7);
 
+  // Keyboard-shortcut quick reference panel (sc-6111).
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
   // Inpaint mask (sc-2436): freehand brush strokes in image-pixel coords, rasterized
   // to a mask asset on Run for inpaint-capable models. `maskMode` is the paint sub-mode
   // of the AI Edit tool (Stage panning is suspended while it's on).
@@ -1265,27 +1310,102 @@ export function ImageEditor() {
     await restoreSnapshot(restore);
   }, [captureSnapshot, restoreSnapshot, syncHistoryFlags]);
 
-  // Cmd/Ctrl+Z = undo, Shift+Cmd/Ctrl+Z or Ctrl+Y = redo. Ignored while focus is
-  // in a text field so the browser's native text undo (e.g. a box's description)
-  // is not hijacked.
-  useEffect(() => {
-    const onKeyDown = (event) => {
-      if (!(event.metaKey || event.ctrlKey)) return;
-      const tag = event.target?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable) return;
-      const key = event.key?.toLowerCase();
-      if (key === "z") {
+  // ── Keyboard shortcuts (sc-6111) ───────────────────────────────────────────
+  // One editor-scoped window keydown handler. Held behind a ref so the listener is
+  // subscribed once (no add/remove churn during the high-frequency re-renders of a
+  // crop / box / mask drag) while always seeing the latest tool + selection state.
+  // Never fires while a text field is focused, so typing a prompt / box description
+  // / renaming a layer is left to the browser. Undo/redo (sc-6106) are the only
+  // modified combos we own; the rest are single keys that mirror the toolbar and the
+  // zoom bar. `?` toggles the quick reference and works before an image is open.
+  const onEditorKeyDownRef = useRef(null);
+  onEditorKeyDownRef.current = (event) => {
+    const tag = event.target?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable) return;
+
+    if (event.metaKey || event.ctrlKey) {
+      const k = event.key?.toLowerCase();
+      if (k === "z") {
         event.preventDefault();
         if (event.shiftKey) redo();
         else undo();
-      } else if (key === "y") {
+      } else if (k === "y") {
         event.preventDefault();
         redo();
       }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [undo, redo]);
+      return;
+    }
+    // Single-key shortcuts only — never with Alt (avoids hijacking OS combos).
+    if (event.altKey) return;
+
+    if (event.key === "?") {
+      event.preventDefault();
+      setShortcutsOpen((on) => !on);
+      return;
+    }
+    if (event.key === "Escape") {
+      if (shortcutsOpen) setShortcutsOpen(false);
+      else escapeGesture();
+      return;
+    }
+
+    if (!workingRef.current) return;
+
+    // View shortcuts work regardless of the busy/AI state.
+    switch (event.key) {
+      case "+":
+      case "=":
+        event.preventDefault();
+        zoomAtCenter(ZOOM_STEP);
+        return;
+      case "-":
+      case "_":
+        event.preventDefault();
+        zoomAtCenter(1 / ZOOM_STEP);
+        return;
+      case "0":
+        event.preventDefault();
+        fitToView();
+        return;
+      case "1":
+        event.preventDefault();
+        actualSize();
+        return;
+      case "Delete":
+      case "Backspace":
+        if (tool === "boxes" && selectedBoxId) {
+          event.preventDefault();
+          deleteBox(selectedBoxId);
+        }
+        return;
+      default:
+        break;
+    }
+
+    // Tool switches. Move always works (it cancels/pans); the rest mirror their
+    // toolbar buttons' enabled state and are suppressed while an AI op is running.
+    const key = event.key.toLowerCase();
+    if (key === "m") {
+      cancelCrop();
+      return;
+    }
+    if (aiOpRef.current) return;
+    if (key === "t") startTransform();
+    else if (key === "c") startCrop();
+    else if (key === "u") {
+      if (!macUpscaleBlock) setTool("upscale");
+    } else if (key === "d") {
+      if (detailModels.length) setTool("detail");
+    } else if (key === "g") startColorGrade();
+    else if (key === "e") setTool("edit");
+    else if (key === "b") selectBoxTool();
+  };
+
+  useEffect(() => {
+    const handler = (event) => onEditorKeyDownRef.current?.(event);
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const openFromBlob = useCallback(
     async (blob, source) => {
@@ -1421,6 +1541,31 @@ export function ImageEditor() {
     setColorAdjust(IDENTITY_COLOR_ADJUST);
     setLevels(IDENTITY_LEVELS);
     setCurves(IDENTITY_CURVES);
+  }
+
+  // Escape (sc-6111): cancel the most specific in-progress gesture, falling back to
+  // deselecting / returning to the Move tool. Highest priority first.
+  function escapeGesture() {
+    if (boxDrawingRef.current) {
+      boxDrawingRef.current = false;
+      setBoxDraft(null);
+      return;
+    }
+    if (selectDrawingRef.current) {
+      selectDrawingRef.current = false;
+      setSelectDraft(null);
+      return;
+    }
+    if (tool === "crop") {
+      cancelCrop();
+      return;
+    }
+    if (selectedBoxId) {
+      setSelectedBoxId(null);
+      return;
+    }
+    // Any other active tool → back to Move (also discards an unbaked color preview).
+    if (tool !== "move") cancelCrop();
   }
 
   function chooseRatio(key) {
@@ -2612,6 +2757,15 @@ export function ImageEditor() {
           <button onClick={() => setNewLayoutOpen(true)} title="Start a blank canvas for box layout" type="button">
             New layout
           </button>
+          <button
+            aria-pressed={shortcutsOpen}
+            className={shortcutsOpen ? "image-editor-help active" : "image-editor-help"}
+            onClick={() => setShortcutsOpen((on) => !on)}
+            title="Keyboard shortcuts (?)"
+            type="button"
+          >
+            ⌨
+          </button>
           {working && working.source.assetId ? (
             <button
               onClick={() => setPreviewAsset?.(imageAssets.find((item) => item.id === working.source.assetId))}
@@ -2895,6 +3049,34 @@ export function ImageEditor() {
           </div>
         )}
 
+        {shortcutsOpen ? (
+          <div className="image-editor-shortcuts" role="dialog" aria-label="Keyboard shortcuts">
+            <div className="image-editor-shortcuts-head">
+              <span>Keyboard shortcuts</span>
+              <button onClick={() => setShortcutsOpen(false)} title="Close (Esc)" type="button">
+                ✕
+              </button>
+            </div>
+            <div className="image-editor-shortcuts-body">
+              {EDITOR_SHORTCUTS.map((section) => (
+                <div className="image-editor-shortcuts-group" key={section.group}>
+                  <h4>{section.group}</h4>
+                  {section.items.map((item) => (
+                    <div className="image-editor-shortcut-row" key={item.label}>
+                      <span className="image-editor-shortcut-keys">
+                        {item.keys.map((cap) => (
+                          <kbd key={cap}>{cap}</kbd>
+                        ))}
+                      </span>
+                      <span className="image-editor-shortcut-label">{item.label}</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         {working ? (
           <LayersPanel
             layers={working.layers}
@@ -2917,7 +3099,7 @@ export function ImageEditor() {
             <button
               className={tool === "move" ? "image-editor-tool active" : "image-editor-tool"}
               onClick={cancelCrop}
-              title="Move / pan"
+              title="Move / pan (M)"
               type="button"
             >
               Move
@@ -2926,7 +3108,7 @@ export function ImageEditor() {
               className={tool === "transform" ? "image-editor-tool active" : "image-editor-tool"}
               disabled={!!aiOp}
               onClick={startTransform}
-              title="Transform the active layer (move / scale / rotate)"
+              title="Transform the active layer — move / scale / rotate (T)"
               type="button"
             >
               Transform
@@ -2935,7 +3117,7 @@ export function ImageEditor() {
               className={tool === "crop" ? "image-editor-tool active" : "image-editor-tool"}
               disabled={!!aiOp}
               onClick={startCrop}
-              title="Crop"
+              title="Crop (C)"
               type="button"
             >
               Crop
@@ -2944,7 +3126,7 @@ export function ImageEditor() {
               className={tool === "upscale" ? "image-editor-tool active" : "image-editor-tool"}
               disabled={!!aiOp || Boolean(macUpscaleBlock)}
               onClick={() => setTool("upscale")}
-              title={macUpscaleBlock ? macUpscaleBlock.text : "Upscale"}
+              title={macUpscaleBlock ? macUpscaleBlock.text : "Upscale (U)"}
               type="button"
             >
               Upscale
@@ -2953,7 +3135,7 @@ export function ImageEditor() {
               className={tool === "detail" ? "image-editor-tool active" : "image-editor-tool"}
               disabled={!!aiOp || detailModels.length === 0}
               onClick={() => setTool("detail")}
-              title="Detail enhance (tile-ControlNet refine)"
+              title="Detail enhance — tile-ControlNet refine (D)"
               type="button"
             >
               Detail
@@ -2962,7 +3144,7 @@ export function ImageEditor() {
               className={tool === "color" ? "image-editor-tool active" : "image-editor-tool"}
               disabled={!!aiOp}
               onClick={startColorGrade}
-              title="Color grade"
+              title="Color grade (G)"
               type="button"
             >
               Color
@@ -2971,7 +3153,7 @@ export function ImageEditor() {
               className={tool === "edit" ? "image-editor-tool active" : "image-editor-tool"}
               disabled={!!aiOp}
               onClick={() => setTool("edit")}
-              title="AI prompt edit"
+              title="AI prompt edit (E)"
               type="button"
             >
               AI Edit
@@ -2980,7 +3162,7 @@ export function ImageEditor() {
               className={tool === "boxes" ? "image-editor-tool active" : "image-editor-tool"}
               disabled={!!aiOp}
               onClick={selectBoxTool}
-              title="Box layout — draw colored regions (color-keyed edit / Ideogram bbox)"
+              title="Box layout — draw colored regions, color-keyed edit / Ideogram bbox (B)"
               type="button"
             >
               Boxes
@@ -3710,17 +3892,17 @@ export function ImageEditor() {
 
         {working ? (
           <div className="image-editor-viewbar">
-            <button onClick={() => zoomAtCenter(1 / ZOOM_STEP)} title="Zoom out" type="button">
+            <button onClick={() => zoomAtCenter(1 / ZOOM_STEP)} title="Zoom out (−)" type="button">
               −
             </button>
             <span className="image-editor-zoom">{Math.round(view.scale * 100)}%</span>
-            <button onClick={() => zoomAtCenter(ZOOM_STEP)} title="Zoom in" type="button">
+            <button onClick={() => zoomAtCenter(ZOOM_STEP)} title="Zoom in (+)" type="button">
               +
             </button>
-            <button onClick={fitToView} type="button">
+            <button onClick={fitToView} title="Fit to view (0)" type="button">
               Fit
             </button>
-            <button onClick={actualSize} type="button">
+            <button onClick={actualSize} title="Actual size (1)" type="button">
               100%
             </button>
             <span className="image-editor-dims">
