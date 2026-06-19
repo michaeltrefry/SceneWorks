@@ -873,24 +873,12 @@ const IDEOGRAM_EDIT_STRENGTH: f32 = 0.6;
 #[cfg(target_os = "macos")]
 const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
 
-/// Resolve the Ideogram 4 `edit_image` conditioning (sc-6303) into the base MLX path's
-/// `(source, strength, optional-mask)` shape (→ the engine's `Conditioning::Reference` +
-/// `Conditioning::Mask`). Three sub-shapes, mirroring the sdxl edit classification:
-///   * **img2img / Remix** — `sourceAssetId`, no mask: pre-fit the source to the output W×H
-///     (crop/pad, never stretch) → `(source, 0.6, None)`.
-///   * **masked inpaint** — `+ maskAssetId`: the mask fit with the same geometry → `(source, 0.85,
-///     Some(mask))` (white = repaint).
-///   * **outpaint** — `fit_mode == "outpaint"`: contain-pad the source onto the canvas and generate
-///     the border via [`gen_core::imageops::outpaint_border_mask`] (using the ORIGINAL source dims so
-///     it lines up), unioning any user mask (white wins).
-///
-/// `None` when not an edit job or no source asset (the caller falls back to plain txt2img).
-#[cfg(target_os = "macos")]
 /// Resolve the Boogu instruction-edit source: the `sourceAssetId` image, fit to the output W×H (so
 /// it satisfies the engine's multiple-of-16 guard and aligns to the target aspect). Returns
 /// `(source, strength)`; `None` when not an edit / no source. The `strength` is inert for Boogu (the
 /// edit is structural — the engine ignores `Conditioning::Reference.strength`), so a full-strength
 /// 1.0 is returned for the contract. No mask / outpaint path (the descriptor accepts only `Reference`).
+#[cfg(target_os = "macos")]
 fn resolve_boogu_edit(
     request: &ImageRequest,
     settings: &Settings,
@@ -917,6 +905,19 @@ fn resolve_boogu_edit(
     Ok(Some((source, 1.0)))
 }
 
+/// Resolve the Ideogram 4 `edit_image` conditioning (sc-6303) into the base MLX path's
+/// `(source, strength, optional-mask)` shape (→ the engine's `Conditioning::Reference` +
+/// `Conditioning::Mask`). Three sub-shapes, mirroring the sdxl edit classification:
+///   * **img2img / Remix** — `sourceAssetId`, no mask: pre-fit the source to the output W×H
+///     (crop/pad, never stretch) → `(source, 0.6, None)`.
+///   * **masked inpaint** — `+ maskAssetId`: the mask fit with the same geometry → `(source, 0.85,
+///     Some(mask))` (white = repaint).
+///   * **outpaint** — `fit_mode == "outpaint"`: contain-pad the source onto the canvas and generate
+///     the border via [`gen_core::imageops::outpaint_border_mask`] (using the ORIGINAL source dims so
+///     it lines up), unioning any user mask (white wins).
+///
+/// `None` when not an edit job or no source asset (the caller falls back to plain txt2img).
+#[cfg(target_os = "macos")]
 fn resolve_ideogram_edit(
     request: &ImageRequest,
     settings: &Settings,
