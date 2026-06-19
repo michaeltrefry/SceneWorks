@@ -216,6 +216,15 @@ pub(crate) fn resolve_weights_dir(
     if request.model == "ideogram_4" || request.model == "ideogram_4_turbo" {
         return Ok(snapshot.map(|root| ideogram_model_subdir(&root, request)));
     }
+    // Boogu (epic 6387) ships a turnkey with pre-packed Q8 `base/ turbo/ edit/` subfolders (default) +
+    // full-precision `*-bf16/`; point the engine at the variant's subfolder rather than the repo root
+    // (the packed weights auto-detect their quant on load).
+    if matches!(
+        request.model.as_str(),
+        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
+    ) {
+        return Ok(snapshot.map(|root| boogu_model_subdir(&root, request)));
+    }
     Ok(snapshot)
 }
 
@@ -243,6 +252,42 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     }
     present("q4")
         .or_else(|| present("q8"))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// Pick the engine-complete subfolder of a Boogu turnkey `root` for the requested variant. Each
+/// catalog id maps to a variant folder: `boogu_image`→`base`, `boogu_image_turbo`→`turbo`,
+/// `boogu_image_edit`→`edit`. **Q8 is the shipped default** (the pre-packed `<variant>/` folder); an
+/// explicit advanced `mlxQuantize <= 4` selects the full-precision `<variant>-bf16/` build instead —
+/// the source the engine quantizes at load (no packed Q4 is shipped) or runs dense. Falls back to
+/// whichever subfolder is present, then `root`, so a partially-downloaded bundle surfaces as a load
+/// error rather than a silent half-load. (The `*-bf16/` files are an on-demand download — sc tracked;
+/// when absent the bf16 request resolves the Q8 folder.)
+fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    let variant = match request.model.as_str() {
+        "boogu_image_turbo" => "turbo",
+        "boogu_image_edit" => "edit",
+        _ => "base",
+    };
+    let bf16 = format!("{variant}-bf16");
+    let wants_bf16 = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .is_some_and(|bits| bits <= 4);
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        dir.join("transformer/diffusion_pytorch_model.safetensors")
+            .is_file()
+            .then_some(dir)
+    };
+    if wants_bf16 {
+        if let Some(dir) = present(&bf16) {
+            return dir;
+        }
+    }
+    present(variant)
+        .or_else(|| present(&bf16))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -841,6 +886,37 @@ const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
 ///
 /// `None` when not an edit job or no source asset (the caller falls back to plain txt2img).
 #[cfg(target_os = "macos")]
+/// Resolve the Boogu instruction-edit source: the `sourceAssetId` image, fit to the output W×H (so
+/// it satisfies the engine's multiple-of-16 guard and aligns to the target aspect). Returns
+/// `(source, strength)`; `None` when not an edit / no source. The `strength` is inert for Boogu (the
+/// edit is structural — the engine ignores `Conditioning::Reference.strength`), so a full-strength
+/// 1.0 is returned for the contract. No mask / outpaint path (the descriptor accepts only `Reference`).
+fn resolve_boogu_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    if request.mode != "edit_image" {
+        return Ok(None);
+    }
+    let Some(asset_id) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let source = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
+    Ok(Some((source, 1.0)))
+}
+
 fn resolve_ideogram_edit(
     request: &ImageRequest,
     settings: &Settings,
@@ -1228,6 +1304,14 @@ async fn generate_stream(
                 ideogram_edit_mask = mask;
                 (Some((source, strength)), None, None)
             }
+            None => (None, None, None),
+        }
+    } else if request.model == "boogu_image_edit" && request.mode == "edit_image" {
+        // Boogu instruction edit (epic 6387): `sourceAssetId` → the engine's `Reference` (the Qwen3-VL
+        // vision tower reads it + it VAE-encodes into the DiT spatial latent); the prompt is the edit
+        // instruction. No mask / IP-Adapter (the `boogu_image_edit` descriptor accepts only `Reference`).
+        match resolve_boogu_edit(request, settings, project_path)? {
+            Some((source, strength)) => (Some((source, strength)), None, None),
             None => (None, None, None),
         }
     } else {
