@@ -13,6 +13,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
+import os from "node:os";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, ".."); // apps/desktop
@@ -105,7 +106,40 @@ if (candle) {
   console.log(
     `build-sidecar: candle backend ON (CUDA_COMPUTE_CAP=${process.env.CUDA_COMPUTE_CAP ?? "80"})`,
   );
-  run(npmCmd, ["run", "api:build:embedded:candle"], candleEnv);
+  // candle-kernels compiles its CUDA kernels with `cudaforge`, which fans out one
+  // nvcc per .cu over a rayon pool sized to ~half the CPU count. On a high-core
+  // Windows box (e.g. 48 logical CPUs → ~24 parallel nvcc, each spawning
+  // cl/cicc/ptxas) that process-spawn storm — concurrent with the rest of the
+  // cargo build — INTERMITTENTLY gets an nvcc child killed with NO output. It
+  // surfaces as `CompilationFailed { path: "...affine.cu", message: "nvcc error:\n\n" }`
+  // (empty on both streams) — a teardown symptom, NOT a real compile error: every
+  // kernel compiles cleanly for compute_80 AND sm_120a in isolation, and the build
+  // succeeds at low concurrency (CI's 4-core runner, cache hits). Two mitigations:
+  //   1) cap cudaforge's nvcc fan-out (CUDAFORGE_THREADS) so the storm is bounded
+  //      regardless of core count (honored by cudaforge's ParallelConfig).
+  //   2) if it still fails, retry ONCE fully serial (CUDAFORGE_THREADS=1): the
+  //      serial recompile only redoes the kernels the killed run left missing, and
+  //      it both clears the spawn contention AND — were the failure ever a genuine
+  //      per-file nvcc error — surfaces the true (non-empty) message instead of the
+  //      swallowed empty one. NOTE: CUDAFORGE_THREADS is not in candle-kernels'
+  //      rerun-if-env-changed set, so toggling it never forces a needless rebuild.
+  const nvccCap = String(Math.min(8, Math.max(1, os.cpus().length)));
+  try {
+    run(npmCmd, ["run", "api:build:embedded:candle"], {
+      ...candleEnv,
+      CUDAFORGE_THREADS: nvccCap,
+    });
+  } catch (err) {
+    console.warn(
+      `build-sidecar: candle build failed (${err?.message ?? err}); retrying once ` +
+        `with serial CUDA kernel compilation (CUDAFORGE_THREADS=1) to clear nvcc ` +
+        `spawn contention / surface the real nvcc error`,
+    );
+    run(npmCmd, ["run", "api:build:embedded:candle"], {
+      ...candleEnv,
+      CUDAFORGE_THREADS: "1",
+    });
+  }
 } else {
   run(npmCmd, ["run", "api:build:embedded"], { VITE_API_BASE_URL: "" });
 }
