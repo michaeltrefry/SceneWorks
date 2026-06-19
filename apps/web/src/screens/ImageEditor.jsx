@@ -36,6 +36,14 @@ import {
   applyCurves,
   computeHistogram,
 } from "../colorGrade.js";
+import {
+  maskAlphaFromRgba,
+  writeMaskAlphaToRgba,
+  invertAlpha,
+  dilateAlpha,
+  erodeAlpha,
+  blurAlpha,
+} from "../maskRefine.js";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
@@ -897,6 +905,8 @@ export function ImageEditor() {
   const [maskBrush, setMaskBrush] = useState(64);
   const [maskErase, setMaskErase] = useState(false);
   const maskPaintingRef = useRef(false);
+  // Mask refinement (sc-6110): feather / grow / shrink radius in px for the post-process ops.
+  const [maskRefineRadius, setMaskRefineRadius] = useState(6);
 
   // Smart-select (sc-3751): a box-drag sub-mode of the mask tool that runs the SAM3 `image_segment`
   // job (sc-6105) and loads the returned binary mask as an editable base UNDER the brush strokes.
@@ -2118,44 +2128,51 @@ export function ImageEditor() {
   // white = edit region on black. Erase strokes punch holes (destination-out on a
   // transparent scratch), then it's flattened onto black so the worker's convert("L")
   // reads white-on-black. Mirrors the same compositing as the on-canvas preview.
+  // Composite the current mask (smart-select base + brush strokes) onto a fresh
+  // white-on-black canvas at working dims. Shared by the inpaint upload + the mask
+  // refine ops (sc-6110). White = edit region; erased holes flatten to black (=keep).
+  function rasterizeMaskToCanvas() {
+    const scratch = document.createElement("canvas");
+    scratch.width = working.width;
+    scratch.height = working.height;
+    const sctx = scratch.getContext("2d");
+    // Smart-select base first (sc-3751): the white-on-black SAM3 mask underlays the brush strokes,
+    // so paint strokes add to it and erase strokes (destination-out) carve it back. Its opaque
+    // black areas are harmless — the final flatten is onto black anyway.
+    if (maskBaseImage) sctx.drawImage(maskBaseImage, 0, 0);
+    sctx.lineCap = "round";
+    sctx.lineJoin = "round";
+    sctx.strokeStyle = "#ffffff";
+    sctx.fillStyle = "#ffffff";
+    for (const line of maskLines) {
+      sctx.globalCompositeOperation = line.erase ? "destination-out" : "source-over";
+      sctx.lineWidth = line.size;
+      const p = line.points;
+      if (p.length === 2) {
+        sctx.beginPath();
+        sctx.arc(p[0], p[1], line.size / 2, 0, Math.PI * 2);
+        sctx.fill();
+        continue;
+      }
+      sctx.beginPath();
+      sctx.moveTo(p[0], p[1]);
+      for (let i = 2; i < p.length; i += 2) sctx.lineTo(p[i], p[i + 1]);
+      sctx.stroke();
+    }
+    // Flatten onto black so erased/holes read as black (= keep).
+    const out = document.createElement("canvas");
+    out.width = working.width;
+    out.height = working.height;
+    const octx = out.getContext("2d");
+    octx.fillStyle = "#000000";
+    octx.fillRect(0, 0, out.width, out.height);
+    octx.drawImage(scratch, 0, 0);
+    return out;
+  }
+
   function rasterizeMaskToFile() {
     return new Promise((resolve, reject) => {
-      const scratch = document.createElement("canvas");
-      scratch.width = working.width;
-      scratch.height = working.height;
-      const sctx = scratch.getContext("2d");
-      // Smart-select base first (sc-3751): the white-on-black SAM3 mask underlays the brush strokes,
-      // so paint strokes add to it and erase strokes (destination-out) carve it back. Its opaque
-      // black areas are harmless — the final flatten is onto black anyway.
-      if (maskBaseImage) sctx.drawImage(maskBaseImage, 0, 0);
-      sctx.lineCap = "round";
-      sctx.lineJoin = "round";
-      sctx.strokeStyle = "#ffffff";
-      sctx.fillStyle = "#ffffff";
-      for (const line of maskLines) {
-        sctx.globalCompositeOperation = line.erase ? "destination-out" : "source-over";
-        sctx.lineWidth = line.size;
-        const p = line.points;
-        if (p.length === 2) {
-          sctx.beginPath();
-          sctx.arc(p[0], p[1], line.size / 2, 0, Math.PI * 2);
-          sctx.fill();
-          continue;
-        }
-        sctx.beginPath();
-        sctx.moveTo(p[0], p[1]);
-        for (let i = 2; i < p.length; i += 2) sctx.lineTo(p[i], p[i + 1]);
-        sctx.stroke();
-      }
-      // Flatten onto black so erased/holes read as black (= keep).
-      const out = document.createElement("canvas");
-      out.width = working.width;
-      out.height = working.height;
-      const octx = out.getContext("2d");
-      octx.fillStyle = "#000000";
-      octx.fillRect(0, 0, out.width, out.height);
-      octx.drawImage(scratch, 0, 0);
-      out.toBlob((blob) => {
+      rasterizeMaskToCanvas().toBlob((blob) => {
         if (!blob) {
           reject(new Error("Could not encode the mask."));
           return;
@@ -2370,6 +2387,45 @@ export function ImageEditor() {
     octx.putImageData(data, 0, 0);
     setMaskBaseImage(base);
     setMaskOverlay(overlay);
+  }
+
+  // Install a refined white-on-black mask canvas as the new mask base (sc-6110): it
+  // becomes the base + a fresh pink overlay, and the brush strokes are cleared (they
+  // are now baked into the canvas). Mirrors loadMaskBase but from a canvas.
+  function applyRefinedMask(maskCanvas) {
+    const overlay = document.createElement("canvas");
+    overlay.width = working.width;
+    overlay.height = working.height;
+    const octx = overlay.getContext("2d");
+    octx.drawImage(maskCanvas, 0, 0);
+    const data = octx.getImageData(0, 0, overlay.width, overlay.height);
+    tintMaskRgbaInPlace(data.data);
+    octx.putImageData(data, 0, 0);
+    setMaskBaseImage(maskCanvas);
+    setMaskOverlay(overlay);
+    setMaskLines([]);
+  }
+
+  // Mask refinement (sc-6110): flatten the current mask, run a pure pixel op
+  // (feather / grow / shrink / invert), and reinstall it as the base. No-op when no
+  // mask exists, except invert (empty mask → select-all).
+  function refineMask(op) {
+    if (!working) return;
+    if (op !== "invert" && !maskHasContent(maskLines) && !maskBaseImage) return;
+    const canvas = rasterizeMaskToCanvas();
+    const w = canvas.width;
+    const h = canvas.height;
+    const ctx = canvas.getContext("2d");
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const alpha = maskAlphaFromRgba(imageData.data);
+    let refined;
+    if (op === "invert") refined = invertAlpha(alpha);
+    else if (op === "grow") refined = dilateAlpha(alpha, w, h, maskRefineRadius);
+    else if (op === "shrink") refined = erodeAlpha(alpha, w, h, maskRefineRadius);
+    else refined = blurAlpha(alpha, w, h, maskRefineRadius);
+    writeMaskAlphaToRgba(imageData.data, refined);
+    ctx.putImageData(imageData, 0, 0);
+    applyRefinedMask(canvas);
   }
 
   // Run the SAM3 image_segment job over the selection box (sc-3751): stage the working image, post
@@ -3347,6 +3403,47 @@ export function ImageEditor() {
                           type="button"
                         >
                           Clear
+                        </button>
+                        {/* Mask refinement (sc-6110): post-process the current mask. */}
+                        <label className="image-editor-slider" title="Feather / grow / shrink radius (px)">
+                          <span className="image-editor-slider-label">Refine</span>
+                          <input
+                            aria-label="Mask refine radius"
+                            max={40}
+                            min={1}
+                            onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
+                            step={1}
+                            type="range"
+                            value={maskRefineRadius}
+                          />
+                          <span className="image-editor-slider-value">{maskRefineRadius}</span>
+                        </label>
+                        <button
+                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                          onClick={() => refineMask("feather")}
+                          title="Feather (soften) the mask edges"
+                          type="button"
+                        >
+                          Feather
+                        </button>
+                        <button
+                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                          onClick={() => refineMask("grow")}
+                          title="Grow the selection (dilate)"
+                          type="button"
+                        >
+                          Grow
+                        </button>
+                        <button
+                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                          onClick={() => refineMask("shrink")}
+                          title="Shrink the selection (erode)"
+                          type="button"
+                        >
+                          Shrink
+                        </button>
+                        <button onClick={() => refineMask("invert")} title="Invert the selection" type="button">
+                          Invert
                         </button>
                       </>
                     ) : null}
