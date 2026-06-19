@@ -8,8 +8,6 @@ import {
   mkdirSync,
   chmodSync,
   writeFileSync,
-  existsSync,
-  readdirSync,
   readFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -83,15 +81,19 @@ function codesignForNotarization(file) {
 // talk to its own origin (the API serves it), so it works on the dynamic port
 // with no CORS.
 //
-// Opt-in candle (Windows/CUDA) backend (sc-5559): set SCENEWORKS_DESKTOP_CANDLE=1
-// to compile the sidecar with `--features embed-web,backend-candle` so the
-// desktop's Rust worker runs candle for its eligible surface. CUDA-only (product
-// decision: no CPU/AMD); requires the build box to have the CUDA Toolkit 12.9 +
-// VS2022 BuildTools MSVC 14.44 toolset on PATH (run from its vcvars64 — CUDA 12.9
-// rejects VS2026's 14.51). Default OFF keeps the plain build intact for boxes
-// without the CUDA toolkit (windows-latest CI, macOS — candle is Windows-gated).
+// Candle (Windows/CUDA) backend — the DEFAULT for the Windows desktop (sc-5559 /
+// sc-5563): compile the sidecar with `--features embed-web,backend-candle` so the
+// desktop's Rust worker runs candle. Off-Mac is CUDA-only (product decision: no
+// CPU/AMD, and the Python torch worker was retired in Phase 7), so a plain Windows
+// build is a GPU-less shell with no inference backend at all — never what we ship.
+// Building it therefore REQUIRES the CUDA Toolkit 12.9 + VS2022 BuildTools MSVC
+// 14.44 on PATH (run from its vcvars64 — CUDA 12.9 rejects VS2026's 14.51); the
+// candle build aborts with a clear error otherwise. Opt OUT with
+// SCENEWORKS_DESKTOP_CANDLE=0 only for a deliberately GPU-less compile/packaging
+// check on a box without the CUDA toolkit (e.g. a fast windows-latest CI lane).
+// macOS is unaffected — it bakes MLX into the api binary and never builds candle.
 const candle =
-  process.platform === "win32" && process.env.SCENEWORKS_DESKTOP_CANDLE === "1";
+  process.platform === "win32" && process.env.SCENEWORKS_DESKTOP_CANDLE !== "0";
 if (candle) {
   // CUDA_COMPUTE_CAP=80 builds `compute_80` PTX the driver JITs forward to sm_120
   // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). Honor an
@@ -125,6 +127,13 @@ console.log(`build-sidecar: staged ${dest}`);
 // Tauri errors on a resource glob that matches no files. Only macOS stages the
 // real CoreML dylib (pose detection on the Rust worker is macOS-only); other
 // platforms ship a placeholder so the glob matches and the build succeeds.
+//
+// Windows note: the CUDA-enabled onnxruntime-gpu DLLs are NO LONGER bundled here.
+// Together with the CUDA runtime + cuDNN they exceed NSIS's ~2 GB datablock limit
+// (`makensis` "mmapping datablock" error), so the Windows candle build downloads them
+// on first run into %APPDATA%\SceneWorks\gpu-runtime instead (apps/desktop/src/
+// cuda_provision.rs), pointed at by setup.rs. Windows therefore ships only the
+// placeholder below — the glob still matches and the install stays small.
 const ortDir = join(desktopDir, "onnxruntime");
 mkdirSync(ortDir, { recursive: true });
 if (triple.includes("apple-darwin")) {
@@ -145,36 +154,12 @@ if (triple.includes("apple-darwin")) {
     );
   }
   console.log(`build-sidecar: staged onnxruntime MIT license + notice`);
-} else if (candle) {
-  // Windows candle build: stage a CUDA-enabled onnxruntime + its CUDA-12 deps so the
-  // candle worker's `ort` paths (DWPose sc-5496, then YOLO / Real-ESRGAN sc-5498/5499,
-  // epic 5482) run on the GPU instead of the onnxruntime CPU EP. The off-Mac analogue of
-  // the macOS CoreML dylib staging above. onnxruntime's DLLs land in `onnxruntime/`;
-  // cuDNN/cuFFT/nvJitLink/nvRTC land in `cuda/` (cudart/cublas/cublasLt/curand come from
-  // the toolkit copy in the cuda block below). setup.rs points ORT_DYLIB_PATH at the
-  // staged onnxruntime.dll + SCENEWORKS_ORT_CUDA_DIR/CUDNN_DIR at the cuda dir.
-  const py = process.env.PYTHON || "python";
-  run(py, [
-    "apps/desktop/scripts/stage-onnxruntime-cuda.py",
-    ortDir,
-    join(desktopDir, "cuda"),
-  ]);
-  // onnxruntime is MIT — ship its license + notice next to the DLLs (as the mac path does).
-  for (const name of ["LICENSE", "NOTICE.txt"]) {
-    copyFileSync(
-      join(desktopDir, "licenses", "onnxruntime", name),
-      join(ortDir, name),
-    );
-  }
-  console.log(
-    `build-sidecar: staged CUDA-enabled onnxruntime into ${ortDir} + CUDA deps into cuda/`,
-  );
 } else {
   writeFileSync(
     join(ortDir, "README.txt"),
-    "onnxruntime is bundled on macOS (CoreML) and the Windows candle build (CUDA) only; this build uses neither (sc-3487 / sc-5496).\n",
+    "onnxruntime is bundled on macOS (CoreML) only; the Windows candle build downloads the CUDA onnxruntime on first run into %APPDATA%\\SceneWorks\\gpu-runtime (cuda_provision.rs), not into this resource dir (sc-3487 / sc-5496).\n",
   );
-  console.log(`build-sidecar: ${ortDir} placeholder (no DWPose onnxruntime)`);
+  console.log(`build-sidecar: ${ortDir} placeholder (no bundled onnxruntime)`);
 }
 
 // The Rust worker shells out to ffmpeg (frame sampling, frame extract, timeline
@@ -213,67 +198,12 @@ if (triple.includes("apple-darwin")) {
 }
 
 // The candle (Windows/CUDA) worker links cudarc with dynamic-linking, which
-// LoadLibrary's the CUDA runtime redist DLLs by name at runtime. Bundle them as a
-// Tauri resource (tauri.conf.json `resources` -> `cuda/**/*`) so a clean NVIDIA
-// machine (driver >= 576.02, no CUDA toolkit) runs the candle worker; setup.rs
-// prepends this dir to the sidecar's PATH so the loader finds them (sc-5560). Like
-// the onnxruntime/ffmpeg dirs above, `cuda` must exist on EVERY platform (Tauri
-// errors on an empty glob); only the Windows candle build (SCENEWORKS_DESKTOP_CANDLE
-// =1, set above) stages the real DLLs — every other build ships a placeholder.
-const cudaDir = join(desktopDir, "cuda");
-mkdirSync(cudaDir, { recursive: true });
-if (candle) {
-  // Resolve the CUDA Toolkit bin dir the redist DLLs are copied from (same
-  // CUDA_PATH the cargo build linked against); default to the 12.9 install path.
-  const cudaBin = join(
-    process.env.CUDA_PATH ??
-      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9",
-    "bin",
-  );
-  // Match by prefix so a minor CUDA point-release (different version suffix) still
-  // resolves; the regexes exclude variants like `nvrtc64_120_0.alt.dll`.
-  const dllPatterns = [
-    /^cudart64_\d+\.dll$/,
-    /^cublas64_\d+\.dll$/,
-    /^cublasLt64_\d+\.dll$/,
-    /^curand64_\d+\.dll$/,
-    /^nvrtc64_\d+_\d+\.dll$/,
-    /^nvrtc-builtins64_\d+\.dll$/,
-  ];
-  if (!existsSync(cudaBin)) {
-    console.error(
-      `build-sidecar: CUDA bin dir not found: ${cudaBin} (set CUDA_PATH to the CUDA 12.9 install for the candle bundle)`,
-    );
-    process.exit(1);
-  }
-  const binFiles = readdirSync(cudaBin);
-  const staged = [];
-  for (const re of dllPatterns) {
-    const match = binFiles.find((f) => re.test(f));
-    if (!match) {
-      console.error(
-        `build-sidecar: no CUDA redist DLL matching ${re} in ${cudaBin}`,
-      );
-      process.exit(1);
-    }
-    copyFileSync(join(cudaBin, match), join(cudaDir, match));
-    staged.push(match);
-  }
-  // NVIDIA CUDA redistributables ship under the CUDA EULA — stage the tracked
-  // notice (CUDA EULA reference + min-driver/NVIDIA requirement) next to the DLLs,
-  // mirroring the ffmpeg/onnxruntime license staging above. Same source of truth as
-  // the in-app About -> Licenses screen (apps/desktop/licenses/cuda/NOTICE.txt).
-  copyFileSync(
-    join(desktopDir, "licenses", "cuda", "NOTICE.txt"),
-    join(cudaDir, "NOTICE.txt"),
-  );
-  console.log(
-    `build-sidecar: staged ${staged.length} CUDA redist DLLs from ${cudaBin}: ${staged.join(", ")}`,
-  );
-} else {
-  writeFileSync(
-    join(cudaDir, "README.txt"),
-    "CUDA runtime redist DLLs are bundled only on the Windows candle build (SCENEWORKS_DESKTOP_CANDLE=1, sc-5560).\n",
-  );
-  console.log(`build-sidecar: ${cudaDir} placeholder (no candle / non-Windows)`);
-}
+// LoadLibrary's the CUDA runtime redist DLLs by name at runtime, and the worker's
+// `ort` paths dlopen a CUDA-enabled onnxruntime. These DLLs are NO LONGER bundled:
+// the full CUDA runtime + cuDNN + onnxruntime-gpu set is ~2.7 GB, which exceeds NSIS's
+// ~2 GB datablock limit (`makensis` "mmapping datablock" error). The Windows candle
+// build now downloads them on first run from pinned PyPI wheels into
+// %APPDATA%\SceneWorks\gpu-runtime\{cuda,onnxruntime} (apps/desktop/src/
+// cuda_provision.rs); setup.rs resolves the candle worker's PATH + ORT env from there.
+// The `cuda` resource dir is no longer produced at all (it's dropped from
+// tauri.conf.json `bundle.resources`), so there is nothing to stage here.

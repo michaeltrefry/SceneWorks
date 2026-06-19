@@ -5,6 +5,11 @@
 // it replaces the eager spawn-time keychain reads that prompted at every launch.
 #[cfg(target_os = "macos")]
 mod cred_ipc;
+// First-run CUDA/onnxruntime redist downloader (Windows candle build): the heavy GPU
+// runtime DLLs are no longer bundled (NSIS ~2 GB limit) — they're fetched on first
+// run into %APPDATA%\SceneWorks\gpu-runtime and resolved from there.
+#[cfg(target_os = "windows")]
+mod cuda_provision;
 mod settings;
 mod setup;
 

@@ -3,7 +3,7 @@ name: Server Candle (Linux/NVIDIA)
 # Compile-checks + builds the candle (Linux/NVIDIA) server with `--features
 # backend-candle` (epic 4811 / epic 5482, sc-5160). Candle is CPU+CUDA cross-
 # platform, so the Linux server "rides the Windows candle port": the same provider
-# crates desktop-candle-windows.yml builds on Windows/CUDA also build here on
+# crates desktop-windows.yml builds on Windows/CUDA also build here on
 # Linux/NVIDIA — including the SeedVR2 upscaler (image_upscale + video_upscale),
 # the sc-5160 deliverable. This is the standing Linux-compile validation for the
 # candle-gated worker/server code (the default Linux `parity` job and the Docker

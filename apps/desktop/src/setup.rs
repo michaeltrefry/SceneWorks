@@ -101,7 +101,7 @@ struct SetupStatus {
     error: bool,
 }
 
-fn emit(app: &AppHandle, phase: &str, message: impl Into<String>, error: bool) {
+pub(crate) fn emit(app: &AppHandle, phase: &str, message: impl Into<String>, error: bool) {
     let _ = app.emit(
         "setup-status",
         SetupStatus {
@@ -348,40 +348,36 @@ fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
     None
 }
 
-/// Resolve the bundled CUDA-enabled onnxruntime DLL the candle worker's `ort` paths
-/// (DWPose pose_detect sc-5496, + YOLO/Real-ESRGAN next, epic 5482) dlopen at runtime
-/// via `ORT_DYLIB_PATH` (the `load-dynamic` feature). The Windows/CUDA analogue of the
-/// macOS CoreML resolver above: the onnxruntime-gpu DLLs are staged by build-sidecar.mjs
-/// into the `onnxruntime` resource dir on the Windows candle build (with the matching
-/// CUDA-12 runtime + cuDNN-9 in the `cuda` resource dir). Returns None on a plain build —
-/// the placeholder dir ships only a README, so a non-candle desktop leaves `ort` on its
-/// CPU fallback. Windows-only (the candle GPU worker is Windows-gated here).
+/// Resolve the CUDA-enabled onnxruntime DLL the candle worker's `ort` paths (DWPose
+/// pose_detect sc-5496, + YOLO/Real-ESRGAN, epic 5482) dlopen at runtime via
+/// `ORT_DYLIB_PATH` (the `load-dynamic` feature). The Windows/CUDA analogue of the
+/// macOS CoreML resolver above. The onnxruntime-gpu DLLs are no longer bundled (the
+/// ~2.7 GB GPU runtime blew past NSIS's datablock limit); they're downloaded on first
+/// run into `%APPDATA%\SceneWorks\gpu-runtime\onnxruntime` (cuda_provision.rs) and
+/// resolved from there. Returns None until that first-run provisioning completes — the
+/// non-candle / dev path never reaches the candle worker that consumes it. Windows-only
+/// (the candle GPU worker is Windows-gated here).
 #[cfg(target_os = "windows")]
-fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
-    let resources = app.path().resource_dir().ok()?;
-    let bundled = resources.join("onnxruntime").join("onnxruntime.dll");
-    bundled
-        .exists()
-        .then(|| bundled.to_string_lossy().to_string())
+fn resolve_bundled_onnxruntime(_app: &AppHandle) -> Option<String> {
+    crate::cuda_provision::onnxruntime_dll_if_present().map(|dll| dll.to_string_lossy().to_string())
 }
 
-/// Resolve the bundled CUDA runtime redistributable DLL directory (sc-5560). The
-/// candle (Windows/CUDA) worker links cudarc with dynamic-linking, which
-/// `LoadLibrary`s cudart/cublas/cublasLt/curand/nvrtc by name at runtime; bundling
-/// them (staged by build-sidecar.mjs into the `cuda` resource dir on the Windows
-/// candle build) lets a clean NVIDIA machine run without a CUDA Toolkit install.
-/// `spawn_api` prepends this dir to the sidecar's PATH so the loader finds them.
-/// Returns None on a plain build — the placeholder dir ships only a README, no DLL,
-/// so a non-candle desktop leaves PATH untouched. Windows-only (candle is Windows-
-/// gated); the bundled driver-side CUDA (nvcuda.dll) is NOT shipped — it comes with
-/// the user's NVIDIA display driver (>= 576.02).
+/// Resolve the CUDA runtime redistributable DLL directory (sc-5560). The candle
+/// (Windows/CUDA) worker links cudarc with dynamic-linking, which `LoadLibrary`s
+/// cudart/cublas/cublasLt/curand/nvrtc by name at runtime. These DLLs are no longer
+/// bundled (the ~2.7 GB GPU runtime exceeded NSIS's ~2 GB datablock limit); they're
+/// downloaded on first run into `%APPDATA%\SceneWorks\gpu-runtime\cuda`
+/// (cuda_provision.rs) and resolved from there. `spawn_api` /
+/// `supervise_candle_worker` prepend this dir to the sidecar's PATH so the loader
+/// finds them. Returns None until first-run provisioning has written the DLLs (probes
+/// `cudart64_12.dll`); this also gates the candle worker spawn + cuda_preflight, so a
+/// pre-provision / failed-provision state leaves the candle lane dormant rather than
+/// spawning a worker whose CUDA load would fail. Windows-only (candle is Windows-
+/// gated); the driver-side CUDA (nvcuda.dll) is NOT downloaded — it comes with the
+/// user's NVIDIA display driver (>= 576.02).
 #[cfg(target_os = "windows")]
-fn resolve_bundled_cuda_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
-    let resources = app.path().resource_dir().ok()?;
-    let dir = resources.join("cuda");
-    // Probe for a real redist DLL; the placeholder (non-candle) build ships only a
-    // README, so this stays None there and the candle DLLs gate themselves.
-    dir.join("cudart64_12.dll").exists().then_some(dir)
+fn resolve_bundled_cuda_dir(_app: &AppHandle) -> Option<std::path::PathBuf> {
+    crate::cuda_provision::cuda_dir_if_present()
 }
 
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
@@ -1232,21 +1228,37 @@ async fn run_startup(app: AppHandle) {
         return;
     }
     // CUDA-only on Windows (sc-5561): fail fast with a clear requirement message on a
-    // machine with no NVIDIA GPU / too-old driver, before the slow venv provisioning,
+    // machine with no NVIDIA GPU / too-old driver, BEFORE the multi-GB redist download,
     // rather than silently failing or dead-polling a job later. The setup page renders
-    // this `error` event (apps/desktop/ui/index.html). Gated on the candle backend being
-    // bundled (the same signal that turns candle on) so the 576.02 floor only binds the
-    // shipping CUDA desktop, not a hypothetical plain/dev build without the redist DLLs.
+    // this `error` event (apps/desktop/ui/index.html). The off-Mac desktop is candle/
+    // CUDA-only now, so this always runs on Windows (the old "is the redist bundled?"
+    // gate can't be used — the redist isn't downloaded yet at this point, and there's no
+    // candle feature on the desktop crate to gate on; failing fast before a 2.7 GB
+    // download is the whole point).
     #[cfg(target_os = "windows")]
-    if resolve_bundled_cuda_dir(&app).is_some() {
-        if let Err(error) = cuda_preflight() {
-            emit(&app, "error", error, true);
-            return;
-        }
+    if let Err(error) = cuda_preflight() {
+        emit(&app, "error", error, true);
+        return;
+    }
+    // First-run GPU runtime provisioning (Windows candle build): the CUDA runtime +
+    // cuDNN + onnxruntime-gpu DLLs are no longer bundled (they exceeded NSIS's ~2 GB
+    // datablock limit), so download them once into %APPDATA%\SceneWorks\gpu-runtime and
+    // resolve them from there (cuda_provision.rs). Idempotent + cached on later runs via
+    // a version marker; emits per-component progress to the setup screen. On failure,
+    // surface it and abort (same slot the removed Python-venv provisioning used).
+    #[cfg(target_os = "windows")]
+    if let Err(error) = crate::cuda_provision::provision(&app).await {
+        emit(
+            &app,
+            "error",
+            format!("GPU runtime download failed: {error}"),
+            true,
+        );
+        return;
     }
     // No Python venv on ANY platform: macOS went MLX-only (epic 3482, sc-3492/sc-3493)
     // and off-Mac went candle-only (epic 5483 Phase 7, sc-5563), so first run starts
-    // straight on the native engine with no provisioning step.
+    // straight on the native engine with no Python provisioning step.
     // Spawn the API only once across retries.
     if app
         .state::<Managed>()

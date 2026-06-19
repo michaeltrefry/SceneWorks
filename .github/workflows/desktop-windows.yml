@@ -1,10 +1,19 @@
 name: Desktop (Windows)
 
-# Builds the Windows desktop installer (NSIS) on a real windows-latest runner.
+# Builds + packages the Windows desktop installers (NSIS + MSI) on a real runner.
 # This is the Windows build coverage for epic 1330 Phase 3 (sc-1356): the Linux
-# `parity` job (check.yml) excludes the Tauri desktop crate, so this job is the
-# only place the desktop bundle is compiled + packaged in CI. Path-filtered so it
-# only runs when desktop-relevant code changes; heavy (release build + NSIS).
+# `parity` job (check.yml) excludes the Tauri desktop crate, so this job is the only
+# place the desktop bundle is compiled + packaged in CI. Path-filtered so it only
+# runs when desktop-relevant code changes; heavy (candle CUDA release build).
+#
+# The desktop is candle (CUDA) by default off-Mac (sc-5559/sc-5563): the Python
+# torch worker is retired, so a non-candle Windows build has no inference backend
+# at all — a useless shell. So this lane builds the REAL candle installers (the
+# shipped artifacts), which is why it needs the CUDA Toolkit + MSVC toolset below
+# (the candle SIDECAR compile still needs nvcc). The ~2.7 GB CUDA/cuDNN/onnxruntime
+# redist is NOT bundled into the installer anymore — it exceeded NSIS's ~2 GB
+# datablock limit — so the app downloads it on first run (cuda_provision.rs); the
+# installers are small. (Folds in the former desktop-candle-windows.yml lane.)
 
 on:
   pull_request:
@@ -22,7 +31,7 @@ on:
       - "config/manifests/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      # Root build script (api:build:embedded) driven by build-sidecar.mjs.
+      # Root build script (api:build:embedded:candle) driven by build-sidecar.mjs.
       - "package.json"
       - ".github/workflows/desktop-windows.yml"
   push:
@@ -37,35 +46,75 @@ concurrency:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # windows-2022 ships VS2022 with an MSVC 14.4x toolset; CUDA 12.9's nvcc rejects
+    # VS2026's 14.51 (sc-3676), so pin the older image rather than windows-latest.
+    runs-on: windows-2022
+    env:
+      # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
+      # Ampere->Blackwell (sc-3676); build-sidecar.mjs defaults this too.
+      CUDA_COMPUTE_CAP: "80"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Put the VS2022 MSVC toolchain (cl.exe) on PATH so nvcc finds the host
+      # compiler when candle-kernels' build script compiles the CUDA kernels.
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+      # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
+      # the candle `cuda` feature links against. Sets CUDA_PATH for the build +
+      # the redist staging in build-sidecar.mjs.
+      - name: Install CUDA Toolkit 12.9
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: "12.9.1"
+          method: "network"
+      # The candle-gen single-rev invariant the default skew gate is blind to: with
+      # `--features backend-candle` the optional candle-gen providers are pulled, so
+      # a candle-gen pin that resolves a different gen-core rev would split the
+      # inventory registry => runtime "engine not found" (sc-4482). `--target all`
+      # also resolves the macOS-only mlx-gen transitive gen-core.
+      - name: Guard against gen-core version skew (candle)
+        shell: bash
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
+          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
       - name: Install web dependencies
         run: npm ci --prefix apps/web
       - name: Install desktop dependencies
         run: npm ci --prefix apps/desktop
+      # Placeholder sidecar + resource dirs so the Tauri build-script resource
+      # validation passes for the desktop crate test/lint below (the real ones are
+      # staged by build-sidecar.mjs during `tauri build`).
       - name: Stage desktop test sidecar placeholders
         run: node apps/desktop/scripts/stage-test-sidecars.mjs
       - name: Run desktop Rust tests
         run: cargo test -p sceneworks-desktop
       - name: Check desktop Rust lint
         run: npm run desktop:check
-      # `tauri build` runs the beforeBuildCommand (build-sidecar.mjs — builds the
-      # API sidecar + stages the onnxruntime/ffmpeg/cuda resources), then compiles
-      # the Tauri shell and packages the NSIS installer. This plain lane builds
-      # WITHOUT candle (no Python either, sc-5563) — desktop-candle-windows.yml is
-      # the candle/CUDA build. --bundles nsis pins the release pipeline to NSIS (the
-      # .exe installer) and skips WiX/MSI. Output lands in the workspace target dir.
-      - name: Build Windows installer (NSIS)
-        run: npm --prefix apps/desktop run build -- --bundles nsis
-      - name: Upload installer artifact
+      # `tauri build` runs the beforeBuildCommand (build-sidecar.mjs), which on
+      # Windows now builds the candle sidecar by default (cargo build -p
+      # sceneworks-rust-api --release --features embed-web,backend-candle — nvcc
+      # compiles every provider's CUDA kernels) and stages the ffmpeg resource, then
+      # packages the installers. The ~2.7 GB CUDA runtime + cuDNN + onnxruntime-gpu
+      # DLLs are NO LONGER bundled (they exceeded NSIS's ~2 GB datablock limit); the
+      # app downloads them on first run into %APPDATA%\SceneWorks\gpu-runtime
+      # (apps/desktop/src/cuda_provision.rs), so the installer is now small.
+      # --bundles nsis,msi builds BOTH the .exe (NSIS) and .msi (WiX) installers —
+      # the user ships the MSI. Output lands in the workspace target dir.
+      - name: Build Windows candle installers (NSIS + MSI)
+        run: npm --prefix apps/desktop run build -- --bundles nsis,msi
+      - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sceneworks-windows-nsis
-          path: target/release/bundle/nsis/*.exe
+          name: sceneworks-windows-installers
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
           if-no-files-found: error

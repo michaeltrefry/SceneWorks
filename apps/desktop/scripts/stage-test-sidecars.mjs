@@ -34,7 +34,11 @@ for (const name of ["sceneworks-api"]) {
   console.log(`stage-test-sidecars: staged ${path}`);
 }
 
-for (const dir of ["onnxruntime", "ffmpeg", "cuda"]) {
+// Only the bundled resource dirs (tauri.conf.json `bundle.resources`) need a
+// placeholder for the build-script resource validation. The CUDA/onnxruntime GPU
+// runtime is no longer bundled — it's downloaded on first run (cuda_provision.rs) —
+// so there's no `cuda` resource glob to satisfy.
+for (const dir of ["onnxruntime", "ffmpeg"]) {
   const path = join(desktopDir, dir);
   mkdirSync(path, { recursive: true });
   writeFileSync(

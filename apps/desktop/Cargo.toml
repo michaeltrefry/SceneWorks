@@ -27,6 +27,15 @@ tauri-plugin-shell = "2"
 # SIGTERM the Python worker / API sidecar for graceful shutdown before force-kill.
 nix = { version = "0.29", default-features = false, features = ["signal"] }
 
+[target.'cfg(windows)'.dependencies]
+# First-run CUDA/onnxruntime redist downloader (cuda_provision.rs): the heavy GPU
+# runtime DLLs are no longer bundled (NSIS ~2 GB limit) — they're fetched on first run
+# from pinned PyPI wheels (zips), sha256-verified, and unzipped into %APPDATA%. Feature
+# sets match the workspace's existing reqwest/zip/sha2 so no new locked versions appear.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+
 [lints.rust]
 # Tauri's generate_context!/Builder can emit unsafe at the webview FFI boundary,
 # so the workspace-wide forbid(unsafe_code) is relaxed for this GUI shell crate

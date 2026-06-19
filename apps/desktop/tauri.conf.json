@@ -30,8 +30,7 @@
     "externalBin": ["binaries/sceneworks-api"],
     "resources": [
       "onnxruntime/**/*",
-      "ffmpeg/**/*",
-      "cuda/**/*"
+      "ffmpeg/**/*"
     ],
     "icon": [
       "icons/32x32.png",

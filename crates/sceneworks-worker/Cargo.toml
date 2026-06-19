@@ -865,8 +865,8 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "517e
 # `#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]` convention the worker's candle-gated
 # code already uses (sensenova_jobs.rs, sc-5501). The deps stay `optional` behind `backend-candle`, so the
 # plain Linux/Windows torch build (no CUDA toolkit) still resolves WITHOUT candle/cudarc/nvcc, exactly as
-# before. Standing Linux-compile validation is the new manual `desktop-candle-linux` CI lane (the Linux
-# sibling of `desktop-candle-windows.yml`); the gen-core single-rev invariant is unchanged (same pins).
+# before. Standing Linux-compile validation is the manual `server-candle-linux.yml` CI lane (the Linux
+# sibling of `desktop-windows.yml`'s candle build); the gen-core single-rev invariant is unchanged (same pins).
 # candle-gen pin re-pinned in lockstep with the worker's mlx-gen pin so `--features backend-candle`
 # resolves ONE `sceneworks-gen-core` rev (the skew gate). Current: candle-gen `3a4f345` = candle-gen
 # main (incl. sc-6247 SAM3 + the gen-core de-skew, candle-gen #104 `db47ed5`) MERGED with the sc-6220
