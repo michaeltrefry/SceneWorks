@@ -80,6 +80,15 @@ use media_jobs::*;
 mod image_decode;
 mod image_jobs;
 use image_jobs::*;
+// Ideogram 4 mandatory JSON-caption conditioning + placeholder detect-and-recover (epic 4725,
+// sc-6501). Pure prompt-guard + post-render heuristic, compiled cross-platform so its unit tests run
+// on the Linux parity lane; its functions are called from the macOS/candle image base path
+// (`image_jobs/base.rs`), so they read as dead code only on a plain non-macOS, non-candle build.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+mod ideogram_caption;
 // SenseNova-U1 understanding + interleave jobs (epic 3180, sc-3905 — Path B). VQA + Document
 // Studio (interleave) consume the concrete `T2iModel` directly (the `Generator` contract emits
 // Images/Video only). The handlers are compiled cross-platform (with non-macOS error stubs); the

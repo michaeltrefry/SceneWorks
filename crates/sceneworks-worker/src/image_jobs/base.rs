@@ -1238,7 +1238,19 @@ async fn generate_stream(
     // distilled families, which carry CFG (if any) through `guidance` instead.
     let true_cfg = flux_true_cfg.or(model_true_cfg);
 
-    let prompt = request.prompt.clone();
+    // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is
+    // out-of-distribution and stochastically renders the "Image blocked by safety filter"
+    // placeholder (sc-6307, reference-confirmed faithful). The web Image Studio auto-expands plain
+    // prompts into rich captions; this is the worker-side HARD GUARANTEE that raw plain text never
+    // tokenizes — it wraps a non-caption prompt into a minimal valid caption (covers the API path
+    // and any UI bypass). A prompt that is already a caption passes through unchanged. No-op for
+    // every other family.
+    let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
+    let prompt = if is_ideogram {
+        crate::ideogram_caption::ensure_caption_prompt(&request.prompt)
+    } else {
+        request.prompt.clone()
+    };
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
     // sc-6135: caption upsampling (FLUX.2-dev only; every other engine ignores it). Resolved from
@@ -1253,26 +1265,61 @@ async fn generate_stream(
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
-                let (out_w, out_h, pixels) = generate_one(
-                    generator,
-                    &prompt,
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    negative_prompt.clone(),
-                    identity_init.as_ref(),
-                    ideogram_edit_mask.as_ref(),
-                    true_cfg,
-                    sampler.as_deref(),
-                    scheduler.as_deref(),
-                    scheduler_shift,
-                    &enhance,
-                    &cancel,
-                    on_progress,
-                )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
+                let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
+                    generate_one(
+                        generator,
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        negative_prompt.clone(),
+                        identity_init.as_ref(),
+                        ideogram_edit_mask.as_ref(),
+                        true_cfg,
+                        sampler.as_deref(),
+                        scheduler.as_deref(),
+                        scheduler_shift,
+                        &enhance,
+                        &cancel,
+                        on_progress,
+                    )
+                };
+                let (mut out_w, mut out_h, mut pixels) = render(seed, on_progress)?;
+                let mut final_seed = seed;
+                // Detect-and-recover safety net (sc-6501): the caption guard makes the placeholder
+                // rare, but a residual one can still occur even with a caption. Detect it via the
+                // baked-text heuristic (NOT a std/flatness check — the text lifts std to ~10) and
+                // reseed transparently, keeping the first clean render. Gated to Ideogram 4; a no-op
+                // elsewhere (and on turbo, which is CFG-free and cannot produce the placeholder).
+                if is_ideogram
+                    && crate::ideogram_caption::looks_like_placeholder(&pixels, out_w, out_h)
+                {
+                    let retries = crate::ideogram_caption::placeholder_recovery_retries();
+                    for attempt in 0..retries {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        let retry_seed = crate::ideogram_caption::recovery_seed(seed, attempt);
+                        tracing::warn!(
+                            "ideogram 4 placeholder detected (seed {seed}); reseeding {retry_seed} \
+                             (attempt {}/{retries})",
+                            attempt + 1,
+                        );
+                        let (rw, rh, rpixels) = render(retry_seed, on_progress)?;
+                        let recovered =
+                            !crate::ideogram_caption::looks_like_placeholder(&rpixels, rw, rh);
+                        out_w = rw;
+                        out_h = rh;
+                        pixels = rpixels;
+                        final_seed = retry_seed;
+                        if recovered {
+                            break;
+                        }
+                    }
+                }
+                Ok(Some((final_seed, out_w, out_h, pixels)))
             })
         },
     );

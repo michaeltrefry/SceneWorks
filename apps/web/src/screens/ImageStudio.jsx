@@ -332,6 +332,8 @@ export function ImageStudio() {
   const setPromptFromUser = (value) => {
     promptEdited.current = true;
     setPrompt(value);
+    // Editing the idea clears a stale auto-expand error (sc-6501).
+    setSubmitError("");
   };
   const suggestions = mode === "character_image" ? characterSuggestions : sceneSuggestions;
   const [count, setCount] = useState(saved.count ?? 4);
@@ -398,6 +400,12 @@ export function ImageStudio() {
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only used by the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(saved.upscaleSoftness ?? 0);
   const [submitting, setSubmitting] = useState(false);
+  // Auto-expand state (sc-6501): when a structured model is in plain-text mode, Generate first
+  // expands the idea into a JSON caption via magic-prompt. `expanding` drives the button label;
+  // `submitError` surfaces an expansion failure (e.g. the utility model isn't installed) without
+  // ever falling back to sending raw plain text.
+  const [expanding, setExpanding] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [guideOpen, setGuideOpen] = useState(false);
   // "Save as Preset" sidebar control — snapshots the current config into the
   // workspace preset library. Defaults to project scope, falling back to global
@@ -1093,9 +1101,58 @@ export function ImageStudio() {
         mode === "character_image" && referenceAssetId && poseLibrary && selectedPoseIds.length
           ? selectedPoseIds.map((id) => poseById[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
           : [];
-      // Structured models send the canonically-ordered JSON caption as the
-      // prompt; plain-text mode (and every other model) sends the literal prompt.
-      const promptToSend = structuredActive ? serializeCaption(caption) : prompt;
+      // Resolve the prompt + structured-caption payload. Structured models (Ideogram 4) are
+      // JSON-caption-only: raw plain text is out-of-distribution and renders the "Image blocked by
+      // safety filter" placeholder (sc-6307/sc-6501). So a structured model ALWAYS sends a JSON
+      // caption — the builder caption in form/JSON mode, or an auto-expanded caption when the user is
+      // in plain-text mode. Plain text is never submitted raw to a structured engine.
+      let promptToSend = prompt;
+      let sendStructured = false;
+      let submitCaption = caption;
+      let submitBackend = magicPromptBackend;
+      let submitIntent = prompt;
+      if (structuredPromptModel) {
+        if (structuredActive) {
+          sendStructured = true;
+          promptToSend = serializeCaption(caption);
+        } else {
+          // Plain-text mode for a structured model → auto-expand the idea into an editable caption
+          // (silent auto-expand, surfaced in the Builder) before generating.
+          const idea = prompt.trim();
+          if (!idea) {
+            return;
+          }
+          if (typeof magicPrompt !== "function" || magicModelMissing) {
+            setSubmitError(
+              "Plain text can't be sent to this model. Download the prompt-refiner model to auto-expand your idea into a caption, or build one in the Builder.",
+            );
+            return;
+          }
+          let expanded;
+          setExpanding(true);
+          try {
+            expanded = await onMagicExpand(idea);
+          } catch (e) {
+            setSubmitError(e?.message || "Couldn't expand the prompt into a caption. Try the Builder.");
+            return;
+          } finally {
+            setExpanding(false);
+          }
+          // Surface the expanded caption editable in the Builder regardless of validity.
+          setCaption(expanded);
+          setPromptMode("form");
+          if (!validateCaption(expanded).ok) {
+            setSubmitError("The auto-generated caption needs a tweak — review it in the Builder and generate again.");
+            return;
+          }
+          sendStructured = true;
+          submitCaption = expanded;
+          submitBackend = PROMPT_REFINE_MODEL_ID;
+          submitIntent = idea;
+          promptToSend = serializeCaption(expanded);
+        }
+        setSubmitError("");
+      }
       const job = await createImageJob({
         mode,
         prompt: promptToSend,
@@ -1139,13 +1196,13 @@ export function ImageStudio() {
           // can rehydrate the builder rather than replay the serialized JSON as a plain
           // prompt. Rides in `advanced`, which the worker clones verbatim into the asset's
           // rawAdapterSettings — no backend change needed. Only for structured models.
-          ...(structuredActive
+          ...(sendStructured
             ? {
                 structuredPrompt: buildStructuredPromptRecipe({
-                  intent: prompt,
-                  caption,
-                  magicPromptBackend,
-                  edited: !magicPromptBackend,
+                  intent: submitIntent,
+                  caption: submitCaption,
+                  magicPromptBackend: submitBackend,
+                  edited: !submitBackend,
                 }),
               }
             : {}),
@@ -1292,9 +1349,17 @@ export function ImageStudio() {
             )}
             <button className="prompt-cta" disabled={generateDisabled} type="submit">
               <Icon.Sparkle size={14} />
-              {submitting ? "Queueing…" : "Generate"}
+              {submitting ? (expanding ? "Expanding…" : "Queueing…") : "Generate"}
             </button>
           </div>
+          {/* Auto-expand failure (sc-6501): a structured model couldn't turn the plain-text idea
+              into a caption (e.g. the prompt-refiner model isn't installed). We never fall back to
+              sending raw plain text, so surface the reason and the path forward. */}
+          {submitError ? (
+            <p className="structured-error" role="alert">
+              {submitError}
+            </p>
+          ) : null}
 
           {/* Plain-text refine + scene suggestions only make sense for free-text
               prompts; structured models get the builder + (later) magic-prompt. */}

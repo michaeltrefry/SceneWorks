@@ -13,7 +13,12 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { AppContext } from "../context/AppContext.js";
-import { buildStructuredPromptRecipe, serializeCaption } from "../ideogramCaption.js";
+import {
+  buildStructuredPromptRecipe,
+  parseMagicPromptCaption,
+  serializeCaption,
+} from "../ideogramCaption.js";
+import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import { ImageStudio } from "./ImageStudio.jsx";
 
 const Z_IMAGE = {
@@ -695,5 +700,127 @@ describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
 
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.advanced.structuredPrompt).toBeUndefined();
+  });
+});
+
+describe("ImageStudio Ideogram 4 auto-expand on plain-text Generate (sc-6501)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const IDEOGRAM = {
+    ...Z_IMAGE,
+    id: "ideogram_4",
+    name: "Ideogram 4",
+    family: "ideogram",
+    capabilities: ["text_to_image"],
+    structuredPrompt: true,
+  };
+
+  const REFINE_READY = { id: PROMPT_REFINE_MODEL_ID, name: "Prompt Refiner", installState: "ready" };
+
+  // A raw magic-prompt model reply (JSON string), as the worker would return it. `onMagicExpand`
+  // runs it through parseMagicPromptCaption, so the caption the studio sends is EXPANDED.
+  const RAW_CAPTION = JSON.stringify({
+    aspect_ratio: "1:1",
+    high_level_description: "A red fox on a sunny beach",
+    compositional_deconstruction: {
+      background: "a sunlit sandy beach with gentle waves",
+      elements: [{ type: "obj", desc: "a red fox sitting on the sand" }],
+    },
+  });
+  const EXPANDED = parseMagicPromptCaption(RAW_CAPTION).caption;
+
+  const buttonByText = (text) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+  const generateButton = () => buttonByText("Generate");
+
+  function setTextArea(element, value) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    ).set;
+    setter.call(element, value);
+    element.dispatchEvent(new window.Event("input", { bubbles: true }));
+  }
+
+  async function enterPlainText(text) {
+    // Switch the builder to its Plain text tab, then type the idea.
+    await click(buttonByText("Plain text"));
+    await act(async () => {
+      setTextArea(container.querySelector('textarea[aria-label="Plain prompt"]'), text);
+    });
+  }
+
+  it("auto-expands plain text to a JSON caption and never submits raw text", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const magicPrompt = vi.fn(async () => RAW_CAPTION);
+    await render(
+      baseContext({ createImageJob, magicPrompt, imageModels: [IDEOGRAM], models: [REFINE_READY] }),
+    );
+
+    await enterPlainText("a fox on a beach");
+    await click(generateButton());
+    await act(async () => {});
+
+    expect(magicPrompt).toHaveBeenCalledTimes(1);
+    const payload = createImageJob.mock.calls[0][0];
+    // The engine receives the serialized JSON caption — NEVER the raw plain text.
+    expect(payload.prompt).toBe(serializeCaption(EXPANDED));
+    expect(payload.prompt).not.toBe("a fox on a beach");
+    // Recipe records the expanded caption, the original idea, and the magic-prompt backend.
+    expect(payload.advanced.structuredPrompt.caption).toEqual(EXPANDED);
+    expect(payload.advanced.structuredPrompt.intent).toBe("a fox on a beach");
+    expect(payload.advanced.structuredPrompt.magicPromptBackend).toBe(PROMPT_REFINE_MODEL_ID);
+  });
+
+  it("blocks generation (never raw text) when the prompt-refiner model is missing", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const magicPrompt = vi.fn(async () => RAW_CAPTION);
+    await render(
+      baseContext({
+        createImageJob,
+        magicPrompt,
+        createModelDownloadJob: vi.fn(),
+        imageModels: [IDEOGRAM],
+        models: [{ id: PROMPT_REFINE_MODEL_ID, installState: "missing" }],
+      }),
+    );
+
+    await enterPlainText("a fox on a beach");
+    await click(generateButton());
+    await act(async () => {});
+
+    expect(magicPrompt).not.toHaveBeenCalled();
+    expect(createImageJob).not.toHaveBeenCalled();
+    // The block is surfaced (not silently dropped, never sent as raw text).
+    const surfaced = [...container.querySelectorAll('[role="alert"]')].some((n) =>
+      /download the prompt-refiner model/i.test(n.textContent),
+    );
+    expect(surfaced).toBe(true);
   });
 });
