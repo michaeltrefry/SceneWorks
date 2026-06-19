@@ -244,6 +244,23 @@ Notes:
 Performance numbers are indicative of the validated hardware and will vary by GPU,
 model, and settings.
 
+### macOS tier validation
+
+Apple Silicon tiers are validated by unified-memory size; each model declares its
+own floor (see [VRAM by model](#vram-by-model)). On this hardware the demanding MLX
+paths (LTX-2.3 Q4, Wan 2.2 5B, large images) settle at a **~50 GB** working set —
+they fit 64 GB, but with thin headroom, so raise the
+[wired limit](#gpu-memory-tuning-macos) and close other apps for reliable runs.
+
+| Tier | Example chip | Status | Notes |
+| --- | --- | --- | --- |
+| 64 GB | Apple M5 Max | ✅ Validated (minimum) | Happy path end-to-end: Z-Image-Turbo image (1024², ~68 s cold), LTX-2.3 MLX Q4 text-to-video (2 s/768×512, ~41 s), Wan 2.2 5B text-to-video (~2.7 min), 720p timeline export (~2 s). Demanding paths peak ~50 GB unified. **Qwen-Image does not currently work on Mac (a known tokenizer issue) — use Z-Image-Turbo instead.** Wan 2.2 14B (133 GB floor) and person-replace/VACE (96 GB floor) are **not available at this tier.** |
+| 96 GB | — | ⏳ Recommended, not yet validated | Comfortable headroom for video and the largest image models |
+| 128 GB | Apple M-series (≈128 GB+) | ⏳ Partially characterized | MLX benchmarks: LTX-2.3 Q4 ~37.5 s, Wan 2.2 5B ~4.9 min (40-step), Wan 2.2 14B + LoRA ~4.3 min |
+
+Performance numbers are indicative of the validated hardware and will vary by chip,
+model, and settings.
+
 ---
 
 ## Desktop vs. server
