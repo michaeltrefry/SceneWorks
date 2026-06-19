@@ -355,8 +355,8 @@ export function editedFilename(source) {
 // Provenance for a saved edit, stored under the new asset's top-level `extra`
 // (sc-2434): which source it was derived from + the ordered edit chain
 // (crop/upscale/…) applied this session. Pure for unit testing.
-export function buildSaveProvenance({ source, edits, width, height }) {
-  return {
+export function buildSaveProvenance({ source, edits, width, height, layers }) {
+  const provenance = {
     editor: "image_editor",
     source: source?.assetId
       ? { kind: "asset", assetId: source.assetId, name: source.name ?? null }
@@ -365,6 +365,19 @@ export function buildSaveProvenance({ source, edits, width, height }) {
     width: width ?? null,
     height: height ?? null,
   };
+  // Layer summary (sc-6121): record what the flattened asset was composited from —
+  // bottom→top name / opacity / blend / visibility. Omitted for the degenerate
+  // single-layer document (it adds nothing over the flat bitmap, and keeps a plain
+  // non-layered save's provenance byte-for-byte as it was before layers).
+  if (Array.isArray(layers) && layers.length > 1) {
+    provenance.layers = layers.map((layer) => ({
+      name: layer.name,
+      opacity: layer.opacity,
+      blendMode: layer.blendMode,
+      visible: layer.visible,
+    }));
+  }
+  return provenance;
 }
 
 // Predefined crop ratios (width / height). Rotate swaps to the transpose; 1:1 and
@@ -2355,6 +2368,7 @@ export function ImageEditor() {
           edits,
           width: working.width,
           height: working.height,
+          layers: working.layers,
         }),
       });
       setSavedAssetId(saved?.id ?? null);

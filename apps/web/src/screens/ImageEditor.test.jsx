@@ -643,6 +643,21 @@ describe("save / export", () => {
     expect(provenance.source).toEqual({ kind: "upload", name: "drag.png" });
     expect(provenance.edits).toEqual([]);
   });
+
+  it("summarizes a multi-layer stack into provenance, omitting it for single-layer (sc-6121)", () => {
+    const layers = [
+      { name: "Background", opacity: 1, blendMode: "source-over", visible: true, image: {}, blob: {} },
+      { name: "Sky", opacity: 0.5, blendMode: "multiply", visible: false, image: {}, blob: {} },
+    ];
+    const multi = buildSaveProvenance({ source: { kind: "upload", name: "x.png" }, edits: [], width: 4, height: 4, layers });
+    expect(multi.layers).toEqual([
+      { name: "Background", opacity: 1, blendMode: "source-over", visible: true },
+      { name: "Sky", opacity: 0.5, blendMode: "multiply", visible: false },
+    ]);
+    // A single-layer document (or no layers) carries no summary — the flat bitmap is enough.
+    expect(buildSaveProvenance({ source: { kind: "upload" }, edits: [], width: 4, height: 4, layers: [layers[0]] })).not.toHaveProperty("layers");
+    expect(buildSaveProvenance({ source: { kind: "upload" }, edits: [], width: 4, height: 4 })).not.toHaveProperty("layers");
+  });
 });
 
 describe("color grade", () => {
