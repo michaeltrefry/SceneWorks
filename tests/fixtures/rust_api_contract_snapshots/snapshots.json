@@ -2172,7 +2172,7 @@
         },
         "reason": {
           "detail": "this model has no Rust/MLX engine and no port epic yet \u2014 file a porting epic and drop it on Mac (epic 3482 policy).",
-          "feature": "torch-only image model",
+          "feature": "unsupported image model",
           "model": "base-model",
           "suggestedEpic": null
         },

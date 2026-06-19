@@ -72,7 +72,7 @@ export function macModelFeatureBlock(model, caps, feature) {
   if (features && features[feature] === false) {
     return {
       blocked: true,
-      text: `${label(caps)} — this model's ${featureLabel(feature)} runs on the Python torch path.`,
+      text: `${label(caps)} — this model's ${featureLabel(feature)} is not available in the native flow on Mac.`,
     };
   }
   return null;

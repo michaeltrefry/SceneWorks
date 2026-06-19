@@ -701,7 +701,7 @@ pub(crate) async fn run_image_upscale_job(
         "seedvr2" => "seedvr2",
         other => {
             return Err(WorkerError::InvalidPayload(format!(
-                "Rust upscaler supports engine=real-esrgan or engine=seedvr2 (got {other}); aura-sr is dropped (sc-3668 / sc-5499) and runs only on the Python torch worker until Phase 7."
+                "Rust upscaler supports engine=real-esrgan or engine=seedvr2 (got {other}); aura-sr is dropped (sc-3668 / sc-5499)."
             )));
         }
     };

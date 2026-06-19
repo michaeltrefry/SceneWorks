@@ -452,7 +452,7 @@ fn convert_ltx_native(
     _out_dir: &Path,
     _bits: i32,
 ) -> Result<(), String> {
-    Err("LTX-2.3 MLX conversion requires macOS (mlx-gen-ltx); the torch path serves other platforms."
+    Err("LTX-2.3 MLX conversion requires macOS (mlx-gen-ltx); the candle path serves other platforms."
         .to_owned())
 }
 
@@ -663,7 +663,7 @@ pub(crate) async fn run_model_convert_job(
             &job.id,
             "Quantize-only MLX conversion is no longer supported.",
             Some(
-                "In-place re-quantization of a pre-converted MLX model was removed with the Python \
+                "In-place re-quantization of a pre-converted MLX model was removed with the legacy \
                  mlx-video converter (sc-3240). Convert the native checkpoint with quantization \
                  instead."
                     .to_owned(),
@@ -771,7 +771,7 @@ pub(crate) async fn run_model_convert_job(
                 &job.id,
                 "No MLX converter is configured for this model.",
                 Some(format!(
-                    "{model_id} sets mlx.requiresConversion but no mlx.converter; the Python \
+                    "{model_id} sets mlx.requiresConversion but no mlx.converter; the legacy \
                      converter was retired (sc-3240)."
                 )),
             )

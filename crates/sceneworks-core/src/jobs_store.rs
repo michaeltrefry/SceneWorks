@@ -2055,8 +2055,8 @@ fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
         .unwrap_or("(unknown)");
     format!(
         "mlx_unavailable: the MLX GPU worker is required on macOS but no live worker \
-         claimed this job within {grace_seconds}s (model={model}, type={job_type}). The \
-         Python/MPS fallback is disabled on Mac — check System → Logs and confirm the MLX \
+         claimed this job within {grace_seconds}s (model={model}, type={job_type}). There \
+         is no fallback worker on Mac — check System → Logs and confirm the MLX \
          worker is running.",
         job_type = job.job_type.as_str()
     )
@@ -2074,8 +2074,8 @@ fn candle_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
         .unwrap_or("(unknown)");
     format!(
         "candle_unavailable: the candle GPU worker is required off-Mac but no live worker \
-         claimed this job within {grace_seconds}s (model={model}, type={job_type}). The Python \
-         torch fallback is disabled on this deployment — check System → Logs and confirm the \
+         claimed this job within {grace_seconds}s (model={model}, type={job_type}). There is no \
+         fallback worker on this deployment — check System → Logs and confirm the \
          candle worker is running.",
         job_type = job.job_type.as_str()
     )
@@ -2280,7 +2280,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         JobType::ImageDetail => Err(UnsupportedReason::new(
             model,
             "non-SDXL tile-detail refine",
-            "image_detail is ported to MLX only for the SDXL/RealVisXL backbones (sc-3060); other models / third-party LyCORIS stay on the Python torch path.",
+            "image_detail is ported to MLX only for the SDXL/RealVisXL backbones (sc-3060); other models / third-party LyCORIS are not available in the native flow on Mac.",
             Some("epic 3041"),
         )),
 
@@ -2291,7 +2291,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         JobType::ImageVqa | JobType::ImageInterleave => Err(UnsupportedReason::new(
             model,
             "image understanding / interleave on this model",
-            "image VQA / interleaved generation runs on MLX for the SenseNova-U1 model (sensenova_u1_8b[_fast]); other models have no in-process understanding path and stay on the Python torch path.",
+            "image VQA / interleaved generation runs on MLX for the SenseNova-U1 model (sensenova_u1_8b[_fast]); other models have no in-process understanding path and are not available in the native flow on Mac.",
             Some("epic 3180"),
         )),
 
@@ -2306,7 +2306,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             "extend / bridge on this engine",
             "extend_clip / video_bridge run on MLX on the LTX IC-LoRA path (ltx_2_3 / ltx_2_3_eros) \
              and Wan TI2V-5B (wan_2_2, single-frame boundary keyframe conditioning); other engines \
-             (the 14B Wan MoE) have no keyframe path, so they stay on the Python torch path.",
+             (the 14B Wan MoE) have no keyframe path, so they are not available in the native flow on Mac.",
             Some("epic 3040"),
         )),
 
@@ -2317,7 +2317,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         JobType::PersonReplace => Err(UnsupportedReason::new(
             model,
             "replace_person",
-            "person replacement runs on native Wan-VACE (the replace-capable MLX video models) or native SCAIL-2 (scail2_14b); this model has no MLX video engine, so it stays on the Python torch path.",
+            "person replacement runs on native Wan-VACE (the replace-capable MLX video models) or native SCAIL-2 (scail2_14b); this model has no MLX video engine, so it is not available in the native flow on Mac.",
             Some("epic 3040"),
         )),
 
@@ -2430,8 +2430,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             model,
             "image understanding / interleave on this model",
             "image VQA / interleaved generation runs on candle for the SenseNova-U1 model \
-             (sensenova_u1_8b[_fast]); other models have no candle understanding path and stay on \
-             the Python torch worker.",
+             (sensenova_u1_8b[_fast]); other models have no candle understanding path off-Mac.",
             Some("epic 3180"),
         )),
 
@@ -2443,8 +2442,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             model,
             "extend / bridge on this engine",
             "extend_clip / video_bridge run on candle only on the Wan-VACE path (the \
-             replace-capable Wan models); other engines have no candle keyframe/clip path and stay \
-             on the Python torch worker.",
+             replace-capable Wan models); other engines have no candle keyframe/clip path off-Mac.",
             Some("epic 5481"),
         )),
 
@@ -2452,7 +2450,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
             model,
             "person replacement on this engine",
             "replace_person runs on candle via native Wan-VACE (the replace-capable Wan models); \
-             this model has no candle video engine and stays on the Python torch worker.",
+             this model has no candle video engine off-Mac.",
             Some("epic 5481"),
         )),
 
@@ -2533,9 +2531,9 @@ fn classify_candle_image_gap(payload: &Map<String, Value>) -> UnsupportedReason 
     if !CANDLE_ROUTED_MODELS.contains(&model) {
         return UnsupportedReason::new(
             Some(model),
-            "torch-only image model / shape",
-            "this model (or its requested conditioning shape) has no candle/CUDA lane; it stays on \
-             the Python torch worker until its port lands.",
+            "unsupported image model / shape",
+            "this model (or its requested conditioning shape) has no candle/CUDA lane off-Mac \
+             until its port lands.",
             Some("epic 3692"),
         );
     }
@@ -2545,7 +2543,7 @@ fn classify_candle_image_gap(payload: &Map<String, Value>) -> UnsupportedReason 
         Some(model),
         "conditioned shape on a txt2img candle family",
         "this candle family serves text-to-image; the requested edit / reference / inpaint / LoRA / \
-         quant shape has no candle lane for it and stays on the Python torch worker.",
+         quant shape has no candle lane for it off-Mac.",
         Some("epic 5480"),
     )
 }
@@ -2560,8 +2558,8 @@ fn classify_candle_video_gap(payload: &Map<String, Value>) -> UnsupportedReason 
     if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
         return UnsupportedReason::new(
             Some(model),
-            "torch-only video model",
-            "this video model has no candle/CUDA engine; it stays on the Python torch worker.",
+            "unsupported video model",
+            "this video model has no candle/CUDA engine off-Mac.",
             Some("epic 5095"),
         );
     }
@@ -2570,7 +2568,7 @@ fn classify_candle_video_gap(payload: &Map<String, Value>) -> UnsupportedReason 
         "advanced / conditioned video mode",
         "this video_generate mode is not candle-eligible on this model (candle serves base \
          text-to-video, the 14B I2V + SVD image-to-video, and Wan-VACE extend/bridge/replace); \
-         other conditioned modes + LoRAs stay on the Python torch worker.",
+         other conditioned modes + LoRAs have no candle path off-Mac.",
         Some("epic 5481"),
     )
 }
@@ -2863,7 +2861,7 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
             reason: Some(UnsupportedReason::new(
                 None,
                 "image_upscale (AuraSR)",
-                "AuraSR is a torch-only GAN upscaler, dropped as an offered engine on all platforms (sc-3668 / sc-5499); Real-ESRGAN is the cross-platform upscaler (SeedVR2 the high-fidelity option).",
+                "AuraSR is a legacy GAN upscaler, dropped as an offered engine on all platforms (sc-3668 / sc-5499); Real-ESRGAN is the cross-platform upscaler (SeedVR2 the high-fidelity option).",
                 Some("sc-5499"),
             )),
         },
@@ -2933,7 +2931,7 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
                 Some(UnsupportedReason::new(
                     None,
                     "image_segment (SAM3 smart-select)",
-                    "smart-select segmentation runs on the native-MLX SAM3 stack (macOS only); there is no torch/candle SAM3 image path yet.",
+                    "smart-select segmentation runs on the native-MLX SAM3 stack (macOS only); there is no candle SAM3 image path yet.",
                     Some("sc-6105"),
                 ))
             },
@@ -3004,11 +3002,11 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
     if !MLX_ROUTED_MODELS.contains(&model) {
         let epic = torch_only_image_model_epic(model);
         let detail = if epic.is_some() {
-            "this model has no Rust/MLX engine yet; it runs on the Python torch path and is dropped on Mac until its port epic lands."
+            "this model has no Rust/MLX engine yet; it is dropped on Mac until its port epic lands."
         } else {
             "this model has no Rust/MLX engine and no port epic yet — file a porting epic and drop it on Mac (epic 3482 policy)."
         };
-        return UnsupportedReason::new(Some(model), "torch-only image model", detail, epic);
+        return UnsupportedReason::new(Some(model), "unsupported image model", detail, epic);
     }
     // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641,
     // sc-3642/3643/3671), so it is no longer an image gap.
@@ -3016,13 +3014,13 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
         "qwen_image" => UnsupportedReason::new(
             Some(model),
             "reference / edit conditioning",
-            "base Qwen-Image reference / edit_image conditioning stays on the Python torch path unless it is the strict-pose ControlNet tier.",
+            "base Qwen-Image reference / edit_image conditioning is not available in the native flow on Mac unless it is the strict-pose ControlNet tier.",
             Some("epic 3401"),
         ),
         "flux_schnell" | "flux_dev" => UnsupportedReason::new(
             Some(model),
             "reference (XLabs IP-Adapter)",
-            "FLUX.1 reference is the XLabs IP-Adapter (not img2img-init); it stays on the Python torch path until the MLX port lands. (FLUX.1 edit_image has no torch path on any platform — a future Kontext capability, not an eradication gap; see sc-3535.)",
+            "FLUX.1 reference is the XLabs IP-Adapter (not img2img-init); it is not available in the native flow on Mac until the MLX port lands. (FLUX.1 edit_image has no path on any platform — a future Kontext capability, not an eradication gap; see sc-3535.)",
             Some("epic 3621"),
         ),
         "qwen_image_edit"
@@ -3045,7 +3043,7 @@ fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
                 UnsupportedReason::new(
                     Some(model),
                     "strict pose (ControlNet)",
-                    "SenseNova-U1 has no ControlNet/skeleton conditioning — the strict-pose tier is not an MLX path; it stays on the Python torch path (dropped on Mac).",
+                    "SenseNova-U1 has no ControlNet/skeleton conditioning — the strict-pose tier is not an MLX path; it is not available in the native flow on Mac (dropped on Mac).",
                     Some("epic 3180"),
                 )
             } else {
@@ -3098,8 +3096,8 @@ fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
     if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
         return UnsupportedReason::new(
             Some(model),
-            "torch-only video model",
-            "this video model has no Rust/MLX engine; it runs on the Python torch path.",
+            "unsupported video model",
+            "this video model has no Rust/MLX engine; it is not available in the native flow on Mac.",
             Some("epic 3040"),
         );
     }
@@ -3142,7 +3140,7 @@ fn classify_training_gap(payload: &Map<String, Value>) -> UnsupportedReason {
         Some("wan_lora") | Some("wan_moe_lora") => UnsupportedReason::new(
             None,
             "LoKr-on-Wan training",
-            "Wan LoKr training stays on torch (no Kronecker merge in the mlx Wan path).",
+            "Wan LoKr training is not available in the native flow on Mac (no Kronecker merge in the mlx Wan path).",
             Some("epic 3039"),
         ),
         _ => UnsupportedReason::new(
@@ -3167,7 +3165,7 @@ fn classify_convert_gap(payload: &Map<String, Value>) -> Result<(), UnsupportedR
     Err(UnsupportedReason::new(
         payload.get("model").and_then(Value::as_str),
         "Wan/LTX model conversion (mlx_video)",
-        "installing a non-turnkey Wan/LTX checkpoint converts via the Python mlx_video path.",
+        "installing a non-turnkey Wan/LTX checkpoint converts via the native mlx_video path.",
         Some("sc-3491 / sc-3224"),
     ))
 }

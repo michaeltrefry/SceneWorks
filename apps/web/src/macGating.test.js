@@ -64,7 +64,7 @@ describe("macGating helpers", () => {
     expect(macModelFeatureBlock(mlxModel, gating, "pose")).toBeNull();
     const refBlock = macModelFeatureBlock(mlxModel, gating, "reference");
     expect(refBlock?.blocked).toBe(true);
-    expect(refBlock?.text).toContain("torch path");
+    expect(refBlock?.text).toContain("not available in the native flow on Mac");
   });
 
   it("blocks a global feature and surfaces its reason text", () => {

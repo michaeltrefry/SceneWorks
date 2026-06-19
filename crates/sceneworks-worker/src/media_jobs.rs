@@ -614,7 +614,7 @@ async fn run_yolo11_person_detect(
     _confidence: f64,
 ) -> WorkerResult<(Vec<Value>, &'static str)> {
     Err(WorkerError::InvalidPayload(
-        "Real person detection runs on the Python worker on this platform.".to_owned(),
+        "Real person detection requires the candle GPU worker on this platform.".to_owned(),
     ))
 }
 
@@ -1320,7 +1320,7 @@ async fn assemble_real_person_track(
     _segment_enabled: bool,
 ) -> WorkerResult<RealPersonTrack> {
     Err(WorkerError::InvalidPayload(
-        "Real person tracking runs on the Python worker on this platform.".to_owned(),
+        "Real person tracking requires the candle GPU worker on this platform.".to_owned(),
     ))
 }
 

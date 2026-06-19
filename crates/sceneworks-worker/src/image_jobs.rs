@@ -1250,8 +1250,7 @@ pub(crate) async fn run_image_detail_job(
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "image_detail runs on the macOS MLX worker or the Python torch worker, not this Rust worker"
-            .to_owned(),
+        "image_detail runs on the macOS MLX worker, not this worker".to_owned(),
     ))
 }
 
