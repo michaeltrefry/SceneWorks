@@ -243,34 +243,56 @@ function CharacterAssetLinker({ asset, characters = [], onMoveToCharacter }) {
   );
 }
 
-export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId }) {
+// `onToggleSelect` (sc-6112) opts the grid into multi-select: each tile gets a
+// checkbox (a sibling of the tile button, so no interactive element nests inside the
+// button) toggling membership in `selectedIds`. The tile-body click still drives the
+// single-select detail flow unchanged, so the default Library behavior is preserved.
+export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId, selectedIds = null, onToggleSelect = null }) {
   if (!assets.length) {
     return <div className="empty-panel">No assets in this view</div>;
   }
+  const multi = typeof onToggleSelect === "function";
 
   return (
     <div className="asset-grid">
-      {assets.map((asset) => (
-        <button
-          className={selectedAsset?.id === asset.id ? "asset-tile active" : "asset-tile"}
-          key={asset.id}
-          onClick={() => setSelectedAssetId(asset.id)}
-          onDoubleClick={() => onPreview(asset)}
-          type="button"
-        >
-          <AssetMedia asset={asset} />
-          <strong>{asset.displayName}</strong>
-          {Array.isArray(asset.tags) && asset.tags.length ? (
-            <div className="asset-tile-tags">
-              {asset.tags.map((tag) => (
-                <span className="asset-tag compact" key={tag}>
-                  {tag}
-                </span>
-              ))}
-            </div>
-          ) : null}
-        </button>
-      ))}
+      {assets.map((asset) => {
+        const tile = (
+          <button
+            className={selectedAsset?.id === asset.id ? "asset-tile active" : "asset-tile"}
+            onClick={() => setSelectedAssetId(asset.id)}
+            onDoubleClick={() => onPreview(asset)}
+            type="button"
+          >
+            <AssetMedia asset={asset} />
+            <strong>{asset.displayName}</strong>
+            {Array.isArray(asset.tags) && asset.tags.length ? (
+              <div className="asset-tile-tags">
+                {asset.tags.map((tag) => (
+                  <span className="asset-tag compact" key={tag}>
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </button>
+        );
+        if (!multi) {
+          return React.cloneElement(tile, { key: asset.id });
+        }
+        return (
+          <div className={selectedIds?.has(asset.id) ? "asset-tile-wrap selected" : "asset-tile-wrap"} key={asset.id}>
+            <label className="asset-tile-check">
+              <input
+                aria-label={`Select ${asset.displayName}`}
+                checked={Boolean(selectedIds?.has(asset.id))}
+                onChange={() => onToggleSelect(asset.id)}
+                type="checkbox"
+              />
+            </label>
+            {tile}
+          </div>
+        );
+      })}
     </div>
   );
 }

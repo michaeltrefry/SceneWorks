@@ -1,8 +1,14 @@
 import React, { useState } from "react";
+import { apiFetch } from "../api.js";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
+import { batchEligibleAssets, batchItemStatus, buildBatchJob, summarizeBatchProgress } from "../batchOps.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
+import { assetUrl } from "../components/assetMedia.jsx";
+import { BatchOperationsPanel } from "../components/BatchOperationsPanel.jsx";
 import { terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
+import { detailCapableModels, editCapableModels, UPSCALE_ENGINES } from "../imageJobs.js";
+import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "../macGating.js";
 
 export function LibraryScreen() {
   const {
@@ -24,6 +30,9 @@ export function LibraryScreen() {
     setActiveView,
     updateAssetStatus,
     updateAssetTags,
+    token = "",
+    requestedGpu = "auto",
+    macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
   // Bind the fullscreen preview to the currently filtered library view so
   // navigation stays inside the same type/tag/trash scope the user is browsing.
@@ -51,6 +60,11 @@ export function LibraryScreen() {
   const [showRejected, setShowRejected] = useState(false);
   const [assetMode, setAssetMode] = useState("assets");
   const [isImporting, setIsImporting] = useState(false);
+  // Batch operations (sc-6112): a multi-asset selection + a fan-out of one job per asset.
+  const [selectedAssetIds, setSelectedAssetIds] = useState(() => new Set());
+  const [batchOpen, setBatchOpen] = useState(false);
+  // While/after a batch runs: { op, items: [{ asset, jobId }], submitting }.
+  const [batch, setBatch] = useState(null);
   // Asset Library hygiene (sc-2024): show only studio-generated and uploaded
   // media. Character Studio test outputs (origin "character_studio") live under
   // the character, not here. The backend also exposes `?scope=library`; we filter
@@ -116,6 +130,76 @@ export function LibraryScreen() {
   const videoCount = libraryAssets.filter((asset) => asset.type === "video").length;
   const uploadCount = libraryAssets.filter((asset) => asset.type === "upload").length;
   const availableTags = [...new Set(libraryAssets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort();
+
+  // ── Batch operations (sc-6112) ─────────────────────────────────────────────
+  // The current multi-selection, narrowed to the raster images a batch op can run on,
+  // and the upscale engines this platform actually supports.
+  const selectedAssetList = assets.filter((asset) => selectedAssetIds.has(asset.id));
+  const eligibleSelected = batchEligibleAssets(selectedAssetList);
+  const availableUpscaleEngines = UPSCALE_ENGINES.filter((engine) => !macUpscaleEngineBlocked(macCapabilities, engine.key));
+  // Per-item + aggregate progress for an in-flight/just-finished batch, read off the jobs feed.
+  const batchItems = batch
+    ? batch.items.map((item) => ({ asset: item.asset, status: batchItemStatus(item.jobId, jobs) }))
+    : null;
+  const batchProgress = batch ? summarizeBatchProgress(batch.items, jobs) : null;
+
+  const toggleSelect = (id) =>
+    setSelectedAssetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const clearSelection = () => setSelectedAssetIds(new Set());
+
+  // Decode an asset's native pixel size (needed for an edit job — the worker fits the
+  // source to width×height). Resolves null on a load failure so that item fails alone.
+  function loadImageDims(asset) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = () => resolve(null);
+      img.src = assetUrl(asset);
+    });
+  }
+
+  // Fan out one job per selected image (NOT one mega-job): each posts independently so
+  // the worker processes them serially with its between-item cache release (sc-5567).
+  // Library assets are persistent ids → no scratch upload and results persist as new
+  // assets (the auto asset-refresh on job completion surfaces them in the grid).
+  async function runBatch(op, params) {
+    if (!activeProject || !eligibleSelected.length) return;
+    const targets = eligibleSelected;
+    setBatch({ op, submitting: true, items: targets.map((asset) => ({ asset, jobId: null })) });
+    const items = [];
+    for (const asset of targets) {
+      try {
+        let dims = null;
+        if (op === "edit") {
+          dims = await loadImageDims(asset);
+          if (!dims) {
+            items.push({ asset, jobId: null });
+            continue;
+          }
+        }
+        const { endpoint, body } = buildBatchJob({ op, asset, params, project: activeProject, requestedGpu, dims });
+        const job = await apiFetch(endpoint, token, { method: "POST", body: JSON.stringify(body) });
+        items.push({ asset, jobId: job?.id ?? null });
+      } catch {
+        items.push({ asset, jobId: null });
+      }
+    }
+    setBatch({ op, submitting: false, items });
+  }
+
+  function closeBatch() {
+    setBatchOpen(false);
+    // Closing after a run clears the spent selection + progress; cancelling the form keeps it.
+    if (batch) {
+      setBatch(null);
+      clearSelection();
+    }
+  }
 
   return (
     <section className="main-surface library-surface">
@@ -190,12 +274,31 @@ export function LibraryScreen() {
         </div>
       </div>
 
+      {selectedAssetIds.size > 0 ? (
+        <div className="batch-selection-bar">
+          <span>
+            {selectedAssetIds.size} selected
+            {eligibleSelected.length !== selectedAssetIds.size
+              ? ` · ${eligibleSelected.length} image${eligibleSelected.length === 1 ? "" : "s"}`
+              : ""}
+          </span>
+          <button className="primary" disabled={!eligibleSelected.length} onClick={() => setBatchOpen(true)} type="button">
+            Batch…
+          </button>
+          <button onClick={clearSelection} type="button">
+            Clear
+          </button>
+        </div>
+      ) : null}
+
       <div className="library-layout">
         <AssetGrid
           assets={visibleAssets}
           onPreview={onPreview}
           selectedAsset={selectedAsset}
           setSelectedAssetId={setSelectedAssetId}
+          selectedIds={selectedAssetIds}
+          onToggleSelect={toggleSelect}
         />
         <AssetDetail
           asset={selectedAsset}
@@ -216,6 +319,20 @@ export function LibraryScreen() {
           createVqaJob={createVqaJob}
         />
       </div>
+
+      {batchOpen ? (
+        <BatchOperationsPanel
+          assets={eligibleSelected}
+          editModels={editCapableModels(imageModels)}
+          detailModels={detailCapableModels(imageModels)}
+          upscaleEngines={availableUpscaleEngines}
+          busy={Boolean(batch?.submitting)}
+          items={batchItems}
+          progress={batchProgress}
+          onRun={runBatch}
+          onClose={closeBatch}
+        />
+      ) : null}
     </section>
   );
 }

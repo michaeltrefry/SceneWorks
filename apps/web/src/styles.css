@@ -3556,6 +3556,53 @@ label {
   font-weight: 600;
 }
 
+/* Multi-select for batch ops (sc-6112): a checkbox overlaid on each tile + the
+   selected ring. The tile button keeps its own styles; the wrap is the grid cell. */
+.asset-tile-wrap {
+  position: relative;
+  display: grid;
+}
+
+.asset-tile-wrap.selected .asset-tile {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 28%, transparent);
+}
+
+.asset-tile-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  display: flex;
+  padding: 4px;
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--surface) 70%, transparent);
+  cursor: pointer;
+}
+
+.asset-tile-check input {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+/* Batch selection toolbar — shown above the grid while ≥1 asset is selected. */
+.batch-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  margin-bottom: var(--gap-3);
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.batch-selection-bar span {
+  margin-right: auto;
+  font-weight: 600;
+}
+
 .asset-detail {
   position: sticky;
   top: 86px;
@@ -7150,6 +7197,128 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .modal-close {
   justify-self: end;
+}
+
+/* Batch operations modal (sc-6112). */
+.batch-ops-modal {
+  display: grid;
+  gap: 14px;
+  width: min(520px, 96vw);
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.batch-ops-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.batch-ops-head h3 {
+  margin: 0;
+}
+
+.batch-ops-form,
+.batch-ops-progress {
+  display: grid;
+  gap: 14px;
+}
+
+.batch-ops-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.batch-ops-tabs button {
+  flex: 1;
+}
+
+.batch-ops-tabs button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.batch-ops-params {
+  display: grid;
+  gap: 10px;
+}
+
+.batch-ops-params label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.batch-ops-note,
+.batch-ops-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.batch-ops-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.batch-ops-summary {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.batch-ops-items {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.batch-ops-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+}
+
+.batch-ops-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-ops-item-status {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.batch-ops-item-completed .batch-ops-item-status {
+  color: var(--ok, #2e9e5b);
+}
+
+.batch-ops-item-failed .batch-ops-item-status {
+  color: var(--danger, #d4504e);
+}
+
+.batch-ops-item-running .batch-ops-item-status {
+  color: var(--accent);
 }
 
 .prompt-guide-modal {
