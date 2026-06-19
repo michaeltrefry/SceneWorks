@@ -365,6 +365,44 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 4.0,
         adapter_label: "mlx_bernini",
     },
+    // Boogu-Image-0.1 (epic 6387) — native MLX, ungated (Apache-2.0). ~10.3B Lumina-Image-2.0 /
+    // OmniGen2-lineage flow-matching DiT + Qwen3-VL-8B condition encoder + FLUX.1 VAE. Three variants,
+    // one engine crate (`mlx-gen-boogu`); each id maps 1:1 to its gen_core descriptor id. The turnkey
+    // `SceneWorks/boogu-image-mlx` ships pre-packed Q8 `base/ turbo/ edit/` subfolders (default) +
+    // `*-bf16/`; `resolve_boogu_model_dir` (image_jobs/base.rs) points the engine at the variant
+    // subfolder. The packed weights auto-detect their quant on load, so the worker's Q8 quant spec is
+    // a no-op there. Base = true-CFG T2I (50 steps / guidance 4.0).
+    ModelRow {
+        sceneworks_id: "boogu_image",
+        engine_id: "boogu_image",
+        default_repo: "SceneWorks/boogu-image-mlx",
+        default_steps: 50,
+        default_guidance: 4.0,
+        adapter_label: "mlx_boogu",
+    },
+    // Boogu Turbo — the DMD few-step, CFG-free distilled variant (`turbo/` checkpoint). 4 steps;
+    // guidance is INERT (the `boogu_image_turbo` descriptor advertises supports_guidance=false, so
+    // `resolve_guidance` returns None and never forwards a value).
+    ModelRow {
+        sceneworks_id: "boogu_image_turbo",
+        engine_id: "boogu_image_turbo",
+        default_repo: "SceneWorks/boogu-image-mlx",
+        default_steps: 4,
+        default_guidance: 0.0,
+        adapter_label: "mlx_boogu",
+    },
+    // Boogu Edit — instruction image-edit (`edit/` checkpoint). The source image is read by the
+    // Qwen3-VL vision tower + VAE-encoded into the DiT's spatial reference latent; the prompt is the
+    // edit instruction. true-CFG (50 steps / guidance 4.0). The worker's `resolve_boogu_edit` builds
+    // the source `Conditioning::Reference` (no mask path).
+    ModelRow {
+        sceneworks_id: "boogu_image_edit",
+        engine_id: "boogu_image_edit",
+        default_repo: "SceneWorks/boogu-image-mlx",
+        default_steps: 50,
+        default_guidance: 4.0,
+        adapter_label: "mlx_boogu",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids

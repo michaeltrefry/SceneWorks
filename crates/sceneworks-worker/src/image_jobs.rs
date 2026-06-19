@@ -49,6 +49,11 @@ use mlx_gen_flux2 as _;
 // Ideogram 4 (epic 4725) — force-link so `inventory::submit!` registers `ideogram_4`.
 #[cfg(target_os = "macos")]
 use mlx_gen_ideogram as _;
+// Boogu-Image-0.1 (epic 6387) — force-link so `inventory::submit!` registers `boogu_image`,
+// `boogu_image_turbo`, and `boogu_image_edit` (else linker GC drops their `ModelRegistration` and
+// `gen_core::load("boogu_image")` returns "no generator registered").
+#[cfg(target_os = "macos")]
+use mlx_gen_boogu as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
 // Lens / Lens-Turbo (epic 3164 engine / sc-5105) — an inventory-registered `Generator` under the ids

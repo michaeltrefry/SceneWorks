@@ -700,6 +700,12 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // maps to the SAME `bernini` engine the video id uses (`Modality::Both`). Standard guidance
         // family — `supports_guidance=true` (omega_txt) + `supports_negative_prompt=true`.
         ("bernini_image", true, true),
+        // Boogu-Image-0.1 (epic 6387 / sc-6399): Base + Edit are true-CFG (supports_guidance=true)
+        // with no user negative prompt (the CFG-negative is a fixed empty/drop instruction). Turbo is
+        // the DMD few-step, CFG-free distill (supports_guidance=false). None take a negative prompt.
+        ("boogu_image", true, false),
+        ("boogu_image_turbo", false, false),
+        ("boogu_image_edit", true, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());

@@ -3564,6 +3564,14 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     // edit surface as the base (the shared denoise serves both); registered so it reaches the picker
     // and routes to MLX for both T2I and edit (sc-6303). macOS-only (no torch backend).
     "ideogram_4_turbo",
+    // Boogu-Image-0.1 (epic 6387): ~10.3B Lumina-Image-2.0 / OmniGen2-lineage flow DiT + Qwen3-VL-8B
+    // condition encoder + FLUX.1 VAE on the native `mlx-gen-boogu` engine (adapter `mlx_boogu`),
+    // macOS-only (no torch backend, Apache-2.0 ungated). All three route to MLX; mirror
+    // `boogu_mlx_eligible`. Base + Turbo are text-to-image only; Edit adds the instruction
+    // image-edit `Reference` path (`resolve_boogu_edit`).
+    "boogu_image",
+    "boogu_image_turbo",
+    "boogu_image_edit",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -3625,6 +3633,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "lens" | "lens_turbo" => lens_mlx_eligible(payload),
         "bernini_image" => bernini_image_mlx_eligible(payload),
         "ideogram_4" | "ideogram_4_turbo" => ideogram_mlx_eligible(payload),
+        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => boogu_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -4578,6 +4587,20 @@ fn bernini_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// stranding it.) macOS-only (the catalog flags `macOnly`); on Windows/Linux no `mlx` worker is
 /// registered, so nothing defers.
 fn ideogram_mlx_eligible(_payload: &Map<String, Value>) -> bool {
+    true
+}
+
+/// Boogu Image / Turbo / Edit (epic 6387) MLX-eligibility. Text-to-image (and any non-edit mode) is
+/// always eligible. `edit_image` is the **Edit checkpoint's** capability only — Base/Turbo are
+/// text-to-image (their semantic-edit path is incoherent without the Edit fine-tune, E7b-3), so an
+/// edit request is eligible for `boogu_image_edit` alone. This keeps `model_mac_support`'s `features.edit`
+/// false for Base/Turbo (it probes with `mode: edit_image`). macOS-only (the catalog flags `macOnly`);
+/// off-Mac no `mlx` worker registers.
+fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
+    if is_edit {
+        return payload.get("model").and_then(Value::as_str) == Some("boogu_image_edit");
+    }
     true
 }
 
@@ -7205,6 +7228,67 @@ mod mlx_routing_tests {
         let turbo = model_mac_support("ideogram_4_turbo", "image");
         assert!(turbo.supported, "ideogram_4_turbo must be Mac-supported");
         assert!(turbo.features.edit, "ideogram_4_turbo supports edit");
+    }
+
+    #[test]
+    fn boogu_text_to_image_and_edit_route_to_mlx() {
+        // sc-6399 (epic 6387): the three Boogu ids are in MLX_ROUTED_MODELS and route to the native
+        // `mlx-gen-boogu` engine. Base + Turbo are text-to-image; Edit is the instruction image-edit.
+        for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
+            assert!(
+                image_request_mlx_eligible(
+                    model,
+                    &object(json!({ "model": model, "prompt": "p" }))
+                ),
+                "{model} text-to-image must route to MLX"
+            );
+            assert!(
+                image_request_mlx_eligible(model, &Map::new()),
+                "{model} bare payload"
+            );
+        }
+
+        // Edit routes to MLX for the Edit checkpoint only — Base/Turbo are text-to-image (their
+        // semantic-edit path is incoherent without the Edit fine-tune, E7b-3).
+        let edit_payload = |model: &str| {
+            object(json!({ "model": model, "mode": "edit_image", "sourceAssetId": "asset_1" }))
+        };
+        assert!(image_request_mlx_eligible(
+            "boogu_image_edit",
+            &edit_payload("boogu_image_edit")
+        ));
+        assert!(!image_request_mlx_eligible(
+            "boogu_image",
+            &edit_payload("boogu_image")
+        ));
+        assert!(!image_request_mlx_eligible(
+            "boogu_image_turbo",
+            &edit_payload("boogu_image_turbo")
+        ));
+
+        // UI gating oracle: all three are Mac-supported (reach the Text → Image picker); only Edit
+        // advertises `features.edit` (Base/Turbo are T2I — the catalog `edit_image` capability +
+        // this flag both gate the Edit tab to `boogu_image_edit`).
+        for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
+            assert!(
+                model_mac_support(model, "image").supported,
+                "{model} must be Mac-supported"
+            );
+        }
+        assert!(
+            model_mac_support("boogu_image_edit", "image").features.edit,
+            "boogu_image_edit supports edit"
+        );
+        assert!(
+            !model_mac_support("boogu_image", "image").features.edit,
+            "boogu_image (Base) is text-to-image only"
+        );
+        assert!(
+            !model_mac_support("boogu_image_turbo", "image")
+                .features
+                .edit,
+            "boogu_image_turbo is text-to-image only"
+        );
     }
 
     #[test]

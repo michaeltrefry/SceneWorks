@@ -3775,6 +3775,115 @@ fn ideogram_subdir_prefers_q4_and_opts_into_q8() {
     );
 }
 
+/// Boogu (epic 6387) resolves each of its three ids to its own engine + the reference defaults, and
+/// quant resolution returns Q8 — the catalog declares `mlx.quantize: 8` (the pre-packed Q8 turnkey
+/// default). Turbo is CFG-free so `resolve_guidance` returns None. Runs in CI on Mac (no weights).
+#[cfg(target_os = "macos")]
+#[test]
+fn boogu_engine_defaults_and_quant_resolution() {
+    let base = mlx_model("boogu_image").expect("boogu_image in MODEL_TABLE");
+    assert_eq!(base.engine_id(), "boogu_image");
+    assert_eq!(base.adapter_label(), "mlx_boogu");
+    assert_eq!(base.default_steps(), 50);
+    let turbo = mlx_model("boogu_image_turbo").expect("boogu_image_turbo in MODEL_TABLE");
+    assert_eq!(turbo.engine_id(), "boogu_image_turbo");
+    assert_eq!(turbo.default_steps(), 4);
+    let edit = mlx_model("boogu_image_edit").expect("boogu_image_edit in MODEL_TABLE");
+    assert_eq!(edit.engine_id(), "boogu_image_edit");
+
+    let req = |model: &str, advanced: Value| {
+        request(json!({
+            "projectId": "p", "model": model, "prompt": "p", "advanced": advanced,
+            "modelManifestEntry": { "mlx": { "quantize": 8 } },
+        }))
+    };
+    // Base: true-CFG guidance 4.0 from the model row. Turbo: CFG-free → resolve_guidance None.
+    assert_eq!(
+        resolve_guidance(&req("boogu_image", json!({})), &base),
+        Some(4.0)
+    );
+    assert_eq!(
+        resolve_guidance(&req("boogu_image_turbo", json!({})), &turbo),
+        None
+    );
+    // Default → Q8 (the shipped pre-packed turnkey); advanced.mlxQuantize overrides to Q4 / bf16-dense.
+    assert!(matches!(
+        resolve_quant(&req("boogu_image", json!({}))),
+        (Some(Quant::Q8), Some(8))
+    ));
+    assert!(matches!(
+        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 4 }))),
+        (Some(Quant::Q4), Some(4))
+    ));
+    assert!(matches!(
+        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 0 }))),
+        (None, None)
+    ));
+}
+
+/// `boogu_model_subdir` maps each id to its variant folder (`base`/`turbo`/`edit`), picks the
+/// pre-packed Q8 `<variant>/` by default, and the full-precision `<variant>-bf16/` only when
+/// `mlxQuantize <= 4` AND it is present — falling back to the Q8 folder (then root), so a request for
+/// a not-yet-downloaded bf16 build resolves the Q8 default rather than half-loading.
+#[cfg(target_os = "macos")]
+#[test]
+fn boogu_subdir_prefers_q8_and_opts_into_bf16() {
+    let root = tempfile::tempdir().unwrap();
+    let touch = |sub: &str| {
+        let dir = root.path().join(sub).join("transformer");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"stub").unwrap();
+    };
+    let req = |model: &str, advanced: Value| {
+        request(json!({ "projectId": "p", "model": model, "prompt": "p", "advanced": advanced }))
+    };
+    // Variant mapping + Q8 default.
+    touch("base");
+    touch("turbo");
+    touch("edit");
+    assert_eq!(
+        boogu_model_subdir(root.path(), &req("boogu_image", json!({}))),
+        root.path().join("base")
+    );
+    assert_eq!(
+        boogu_model_subdir(root.path(), &req("boogu_image_turbo", json!({}))),
+        root.path().join("turbo")
+    );
+    assert_eq!(
+        boogu_model_subdir(root.path(), &req("boogu_image_edit", json!({}))),
+        root.path().join("edit")
+    );
+    // bf16 opt-in falls back to the Q8 folder when `base-bf16/` is absent (not yet downloaded).
+    assert_eq!(
+        boogu_model_subdir(
+            root.path(),
+            &req("boogu_image", json!({ "mlxQuantize": 0 }))
+        ),
+        root.path().join("base"),
+        "bf16 opt-in falls back to Q8 when base-bf16 absent",
+    );
+    // With the bf16 folder present, `mlxQuantize <= 4` selects it; Q8 stays the default.
+    touch("base-bf16");
+    assert_eq!(
+        boogu_model_subdir(
+            root.path(),
+            &req("boogu_image", json!({ "mlxQuantize": 0 }))
+        ),
+        root.path().join("base-bf16")
+    );
+    assert_eq!(
+        boogu_model_subdir(
+            root.path(),
+            &req("boogu_image", json!({ "mlxQuantize": 4 }))
+        ),
+        root.path().join("base-bf16")
+    );
+    assert_eq!(
+        boogu_model_subdir(root.path(), &req("boogu_image", json!({}))),
+        root.path().join("base")
+    );
+}
+
 /// Raw-settings lineage: the Ideogram recipe records the real-inference flag, repo, resolved
 /// steps/guidance/quant, AND the sc-6147 structured-prompt blob passes through verbatim
 /// (`mlx_raw_settings` clones `advanced`, so the asset recipe can rehydrate the builder).
