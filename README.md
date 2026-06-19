@@ -1,6 +1,6 @@
 # SceneWorks
 
-SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains a Vite/React web shell, Rust API backend, Rust utility worker, Python Diffusers/PyTorch inference worker, shared config/data folders, and Docker Compose wiring.
+SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains a Vite/React web shell, Rust API backend, Rust utility worker, a native candle (CUDA) GPU inference worker, shared config/data folders, and Docker Compose wiring. (The legacy Python/PyTorch worker has been retired off-Mac — Docker GPU inference runs natively on candle; see Phase 7 / sc-5503.)
 
 ## Quick Start
 
@@ -9,8 +9,9 @@ npm run dev
 ```
 
 This starts the local stack with Docker Compose. Compose runs the Rust API and
-Rust utility worker as the backend runtime, plus the Python worker only for
-Diffusers/PyTorch image and video inference adapters:
+Rust utility worker as the backend runtime, plus the candle (CUDA) GPU inference
+worker for image and video generation (an NVIDIA GPU + the container toolkit are
+required):
 
 - Web: http://localhost:5173
 - API: http://localhost:8000/api/v1/health
@@ -30,11 +31,11 @@ container and is exposed on the same host port.
 `SCENEWORKS_WEB_PORT` controls the host port for the Vite web service. The web
 service receives `VITE_API_BASE_URL=http://localhost:${SCENEWORKS_API_PORT}`,
 and workers call `http://api:${SCENEWORKS_API_PORT}` on the compose network.
-Compose builds the Python inference worker with CUDA PyTorch wheels by default
-using `SCENEWORKS_PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu128`.
-Set `SCENEWORKS_PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu` before
-building only when you intentionally want a CPU-only worker; CPU-only PyTorch
-workers do not advertise image or video inference capabilities.
+Compose builds the GPU inference worker from `docker/rust.Dockerfile (target
+rust-worker-candle)` — the native candle/CUDA worker (an NVIDIA GPU + the NVIDIA
+container toolkit are required). The API sets `SCENEWORKS_CANDLE_REQUIRED=1`, so a
+job candle cannot serve fails with a precise, actionable error instead of waiting
+forever; the Python torch worker is retired off-Mac (Phase 7 / sc-5503).
 
 API volume contracts:
 
@@ -90,12 +91,12 @@ npm run hooks:install
 To point host-mode workers at the API, start the Rust API binary on port 8000
 and run each worker with `SCENEWORKS_API_URL=http://localhost:8000`. In Docker
 Compose, workers are wired to the `api` service automatically. The
-Compose `worker` service is the Python inference worker and the `rust-worker`
-service is the Rust utility worker; both use the same HTTP contract.
+Compose `worker` service is the candle (CUDA) GPU inference worker and the
+`rust-worker` service is the Rust utility worker; both use the same HTTP contract.
 The `sceneworks-rust-worker` binary handles CPU utility jobs for model downloads,
-LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. The Rust worker
-defaults to `SCENEWORKS_GPU_ID=cpu` and does not duplicate the Python inference
-GPU workers. Utility jobs are I/O-bound and serialize per worker, so in cpu mode
+LoRA imports, FFmpeg frame extraction, and timeline MP4 exports. The Rust utility
+worker defaults to `SCENEWORKS_GPU_ID=cpu` and does not duplicate the candle GPU
+worker. Utility jobs are I/O-bound and serialize per worker, so in cpu mode
 it supervises a small pool of CPU utility workers (`SCENEWORKS_UTILITY_WORKERS`,
 default 4) — this lets a quick upload run alongside a long download instead of
 queueing behind it. Set it to `1` to restore single-worker behavior. Set

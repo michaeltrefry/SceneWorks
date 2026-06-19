@@ -1,5 +1,10 @@
 .git
 .env
+# Rust build artifacts — every Docker build compiles fresh inside the image, so the
+# host target/ (multi-GB with candle artifacts) must never be sent as build context
+# (sc-5503). Also keeps CI's rust-cache-restored target/ out of the rust-api context.
+target
+.claude
 node_modules
 apps/web/node_modules
 apps/web/dist

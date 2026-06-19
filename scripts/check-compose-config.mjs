@@ -74,13 +74,17 @@ function assertRuntimeDefaults(config, label, options = {}) {
   assertPublishedPort(api, Number(apiPort), apiPublishHost, apiPort, `${label} api`);
   assertMissing(api?.environment, removedRuntimeKey, `${label} api runtime switch`);
   assertWritableMount(api, "/sceneworks/config", `${label} api config mount`);
-  assertMissing(worker?.environment, "SCENEWORKS_UTILITY_JOBS", `${label} python utility jobs`);
-  assertEqual(worker?.environment?.SCENEWORKS_WORKER_ID, "python-inference-worker-0", `${label} python worker id`);
-  assertEqual(worker?.environment?.HF_HOME, "/sceneworks/data/cache/huggingface", `${label} python HF home`);
+  // The Docker GPU worker is the native candle/CUDA worker (epic 5483 Phase 7 /
+  // sc-5503), not the retired Python torch worker. The API requires candle and fails
+  // unsupported jobs loudly (sc-5502) since there is no torch fallback in Docker.
+  assertEqual(api?.environment?.SCENEWORKS_CANDLE_REQUIRED, "1", `${label} api candle required`);
+  assertEqual(worker?.build?.target, "rust-worker-candle", `${label} candle worker build target`);
+  assertEqual(worker?.environment?.SCENEWORKS_WORKER_ID, "candle-inference-worker-0", `${label} candle worker id`);
+  assertEqual(worker?.environment?.HF_HOME, "/sceneworks/data/cache/huggingface", `${label} candle worker HF home`);
   assertEqual(
     worker?.environment?.HUGGINGFACE_HUB_CACHE,
     "/sceneworks/data/cache/huggingface/hub",
-    `${label} python HF hub cache`,
+    `${label} candle worker HF hub cache`,
   );
   assertEqual(rustWorker?.environment?.SCENEWORKS_GPU_ID, "cpu", `${label} rust worker gpu mode`);
   assertEqual(rustWorker?.environment?.SCENEWORKS_CONFIG_DIR, "/sceneworks/config", `${label} rust worker config dir`);

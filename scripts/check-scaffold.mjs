@@ -30,7 +30,6 @@ const requiredPaths = [
   "docker-compose.yml",
   "docker/rust.Dockerfile",
   "docker/web.Dockerfile",
-  "docker/worker.Dockerfile",
 ];
 
 const manifestSchemaPaths = [

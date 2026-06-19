@@ -22,6 +22,12 @@ services:
       SCENEWORKS_ALLOW_OPEN_BIND: ${SCENEWORKS_ALLOW_OPEN_BIND:-}
       SCENEWORKS_CORS_ORIGINS: ${SCENEWORKS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:5176,http://127.0.0.1:5176}
       SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE: ${SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE:-1}
+      # Off-Mac candle cutover (epic 5483 Phase 7 / sc-5502 + sc-5503): the Python torch
+      # worker is retired in Docker, so require the candle GPU worker and fail anything it
+      # can't serve LOUDLY (the claim-time sweeps) instead of waiting for a torch worker
+      # that no longer exists. Set REQUIRED=0 to fall back to a co-resident torch worker.
+      SCENEWORKS_CANDLE_REQUIRED: ${SCENEWORKS_CANDLE_REQUIRED:-1}
+      SCENEWORKS_CANDLE_UNSUPPORTED_MODE: ${SCENEWORKS_CANDLE_UNSUPPORTED_MODE:-enforce}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
       HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
@@ -39,50 +45,45 @@ services:
       start_period: 10s
 
   worker:
+    # Candle GPU inference worker (CUDA; compute_80 PTX → sm_120). The off-Mac torch
+    # replacement (epic 5483 Phase 7 / sc-5503): Docker GPU inference runs natively on
+    # candle, retiring the Python torch worker + its image. Built from rust.Dockerfile's
+    # rust-worker-candle target. The candle build advertises its providers by default
+    # (#804 — backend_candle_enabled defaults on for a candle build), so no runtime
+    # toggle is needed; the API's SCENEWORKS_CANDLE_REQUIRED makes anything candle can't
+    # serve fail loudly rather than wait for a torch worker that no longer exists.
     # Run as the invoking host user, not root (sc-4285 / F-INFRA-10).
     user: "${SCENEWORKS_UID:-1000}:${SCENEWORKS_GID:-1000}"
     build:
       context: .
-      dockerfile: docker/worker.Dockerfile
-      args:
-        PYTORCH_INDEX_URL: ${SCENEWORKS_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-        PYTORCH_SPEC: ${SCENEWORKS_PYTORCH_SPEC:-torch>=2.8,<2.9}
-        PYTORCH_AUDIO_SPEC: ${SCENEWORKS_PYTORCH_AUDIO_SPEC:-torchaudio>=2.8,<2.9}
-        # torchvision (matched to torch) for the vendored sensenova_u1 (SenseNova-U1).
-        PYTORCH_VISION_SPEC: ${SCENEWORKS_PYTORCH_VISION_SPEC:-torchvision>=0.23,<0.24}
-        INCLUDE_LTX_PIPELINES: ${SCENEWORKS_INCLUDE_LTX_PIPELINES:-1}
-        # Lens sidecar venv (/opt/lens-venv): its own cu128 torch 2.11 +
-        # torchvision + transformers 5.8 + diffusers 0.38, isolated from the main
-        # transformers 4.x stack. Reuses PYTORCH_INDEX_URL (cu128) above.
-        INCLUDE_LENS: ${SCENEWORKS_INCLUDE_LENS:-1}
-        LENS_PYTORCH_SPEC: ${SCENEWORKS_LENS_PYTORCH_SPEC:-torch>=2.11,<2.12}
-        LENS_PYTORCH_VISION_SPEC: ${SCENEWORKS_LENS_PYTORCH_VISION_SPEC:-torchvision>=0.26,<0.27}
+      dockerfile: docker/rust.Dockerfile
+      target: rust-worker-candle
+    restart: unless-stopped
     environment:
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
-      SCENEWORKS_WORKER_ID: python-inference-worker-0
-      SCENEWORKS_GPU_ID: auto
+      SCENEWORKS_WORKER_ID: candle-inference-worker-0
+      # Real CUDA device index (not the macOS `mlx` sentinel). `auto` picks the first
+      # visible GPU; override to pin a device (e.g. on a multi-GPU host).
+      SCENEWORKS_GPU_ID: ${SCENEWORKS_CANDLE_GPU_ID:-auto}
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
+      # Download credentials (same contract as rust-worker): `credentials.json` from the
+      # mounted config volume, with HF_TOKEN / SCENEWORKS_CREDENTIALS as host overrides.
+      HF_TOKEN: ${HF_TOKEN:-}
+      SCENEWORKS_CREDENTIALS: ${SCENEWORKS_CREDENTIALS:-}
       HF_HOME: ${SCENEWORKS_HF_HOME:-/sceneworks/data/cache/huggingface}
       HF_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
       HUGGINGFACE_HUB_CACHE: ${SCENEWORKS_HUGGINGFACE_HUB_CACHE:-/sceneworks/data/cache/huggingface/hub}
-      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
-      # "Refine my prompt" (sc-2041) loads a small LLM in-process and downloads on
-      # demand — no setup needed. Optionally override the default model repo.
+      # "Refine my prompt" (sc-2041 / sc-5500) runs in-process on the candle TextLlm
+      # provider and downloads on demand. Optionally override the default model repo.
       PROMPT_REFINE_MODEL: ${PROMPT_REFINE_MODEL:-}
       PROMPT_REFINE_MAX_NEW_TOKENS: ${PROMPT_REFINE_MAX_NEW_TOKENS:-512}
-      # expandable_segments reduces CUDA fragmentation OOM and is recommended by
-      # the LTX stack alongside FP8, BUT it relies on the CUDA virtual-memory
-      # (cuMem*) API, which is unsupported under Docker Desktop's WSL2/WDDM
-      # backend and fails every CUDA op with "CUDA driver error: unknown error".
-      # Leave unset by default; opt in on native-Linux GPU hosts via
-      # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True.
-      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
       - ${SCENEWORKS_HF_CACHE_BIND:-${USERPROFILE:-$HOME}/.cache/huggingface}:/sceneworks/data/cache/huggingface
-      - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config:ro
+      - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
     depends_on:
       api:
         condition: service_healthy
