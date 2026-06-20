@@ -3938,14 +3938,23 @@ def test_qwen_image_adapter_pose_loop_renders_skeleton_and_passes_multi_image(mo
     monkeypatch.setattr(ia, "activate_torch_device", lambda *args, **kwargs: None)
     monkeypatch.setattr(ia, "select_torch_device", lambda *args, **kwargs: "cpu")
     monkeypatch.setattr(ia, "gpu_memory_snapshot", lambda *args, **kwargs: None)
-    # draw_bodypose needs cv2 (not in the requirements-dev CI venv); the actual
-    # render is covered by test_draw_bodypose_renders_colored. Here we only verify
-    # dispatch, so stub it to a tiny array Image.fromarray can consume.
+    # sc-6599: the pose tier now renders the DWPose whole-body skeleton. draw_wholebody
+    # needs cv2 (not in the requirements-dev CI venv); the actual render is covered
+    # elsewhere, so stub it — capturing the hands/face it receives to prove whole-body
+    # poses thread their articulation through (and body-only poses pass None).
     import numpy as _np
-    monkeypatch.setattr(ia, "draw_bodypose", lambda w, h, kps: _np.zeros((h, w, 3), dtype=_np.uint8))
+    wholebody_calls: list[dict] = []
+
+    def fake_draw_wholebody(w, h, kps, hands=None, face=None, stickwidth=4):
+        wholebody_calls.append({"hands": hands, "face": face})
+        return _np.zeros((h, w, 3), dtype=_np.uint8)
+
+    monkeypatch.setattr(ia, "draw_wholebody", fake_draw_wholebody)
 
     # Two library poses; flat 18-point COCO skeletons (values arbitrary but valid).
     kp = [[0.5, 0.1 + 0.04 * i] for i in range(18)]
+    hands = [[[0.4, 0.4]] * 21, [[0.6, 0.4]] * 21]
+    face = [[0.5, 0.3]] * 68
     request = ia.ImageRequest(
         project_id="p",
         mode="character_image",
@@ -3964,7 +3973,10 @@ def test_qwen_image_adapter_pose_loop_renders_skeleton_and_passes_multi_image(mo
         source_asset_id=None,
         reference_asset_id="ref-asset-id",
         # angleSet also set to prove pose takes precedence (no angle loop runs).
-        advanced={"poses": [{"id": "sit_01", "keypoints": kp}, {"id": "stand_01", "keypoints": kp}], "angleSet": True},
+        advanced={"poses": [
+            {"id": "sit_01", "keypoints": kp},  # body-only
+            {"id": "stand_01", "keypoints": kp, "hands": hands, "face": face},  # whole-body
+        ], "angleSet": True},
         model_manifest_entry={},
     )
     QwenImageAdapter().generate(
@@ -3981,6 +3993,12 @@ def test_qwen_image_adapter_pose_loop_renders_skeleton_and_passes_multi_image(mo
     for entry in captured:
         assert entry["pose_skeleton"] is not None
         assert POSE_SKELETON_PROMPT in (entry["prompt_override"] or "")
+    # sc-6599: whole-body hands/face thread through to the edit model (validated by the
+    # whole-body-vs-body-only A/B); body-only poses pass None (rendered identically to
+    # the old draw_bodypose path).
+    assert len(wholebody_calls) == 2
+    assert wholebody_calls[0]["hands"] is None and wholebody_calls[0]["face"] is None
+    assert wholebody_calls[1]["hands"] is not None and len(wholebody_calls[1]["face"]) == 68
 
 def test_load_state_dict_requires_weights_only(tmp_path):
     """sc-4230 / F-WORKER-6: .pth upscaler weights load with weights_only=True

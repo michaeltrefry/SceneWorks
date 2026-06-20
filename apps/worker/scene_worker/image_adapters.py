@@ -39,7 +39,7 @@ from .character_studio_angles import (
     augment_prompt_for_angle,
     augment_prompt_for_pose,
 )
-from .openpose_skeleton import draw_bodypose, draw_wholebody, normalize_face, normalize_hands, normalize_keypoints
+from .openpose_skeleton import draw_wholebody, normalize_face, normalize_hands, normalize_keypoints
 from .sampler_registry import apply_sampler, sampler_selection_from_advanced
 from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 from .lora_adapters import (
@@ -1760,10 +1760,18 @@ class QwenImageAdapter(DiffusersImageAdapterBase):
         # image-capable), so the pose comes from the skeleton while identity comes from
         # the reference. No pose ControlNet exists for the edit model (sc-2250); this is
         # the native multi-image approximation. Pose takes precedence over angleSet.
+        # sc-6599: render the full DWPose whole-body skeleton (body + hands 21x2 + face 68)
+        # so whole-body library poses pass the hand/face articulation through to the edit
+        # model. An A/B (whole-body vs body-only) confirmed the open-hand / gesture detail
+        # transfers and firms hand fidelity with no identity or artifact regression. Zero
+        # risk for today's body-only bundled poses: draw_wholebody with no hands/face is
+        # byte-identical to the old draw_bodypose path.
         raw_poses = request.advanced.get("poses")
         pose_entries = [p for p in raw_poses if isinstance(p, dict)] if isinstance(raw_poses, list) else []
         pose_set = self._use_reference(request) and len(pose_entries) > 0
         pose_keypoints = [normalize_keypoints(p.get("keypoints")) for p in pose_entries] if pose_set else []
+        pose_hands = [normalize_hands(p.get("hands")) for p in pose_entries] if pose_set else []
+        pose_face = [normalize_face(p.get("face")) for p in pose_entries] if pose_set else []
         angle_set = self._use_reference(request) and bool(request.advanced.get("angleSet")) and not pose_set
         angles = list(CHARACTER_ANGLE_SET_ORDER) if angle_set else []
         grouped = angle_set or pose_set
@@ -1780,7 +1788,10 @@ class QwenImageAdapter(DiffusersImageAdapterBase):
             pose_skeleton = None
             if pose_set:
                 pose_skeleton = Image.fromarray(
-                    draw_bodypose(request.width, request.height, pose_keypoints[index])
+                    draw_wholebody(
+                        request.width, request.height, pose_keypoints[index],
+                        hands=pose_hands[index], face=pose_face[index],
+                    )
                 )
                 prompt_override = augment_prompt_for_pose(request.prompt)
             else:
