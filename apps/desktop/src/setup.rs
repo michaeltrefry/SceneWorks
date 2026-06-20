@@ -1116,6 +1116,10 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         .expect("candle worker lock")
         .take();
     let api_child = managed.api.lock().expect("api lock").take();
+    // Take the credential IPC handle so its socket file can be unlinked on a graceful
+    // quit (sc-5891); see the clean-exit block below. macOS-only (the socket is too).
+    #[cfg(target_os = "macos")]
+    let cred_ipc = managed.cred_ipc.lock().expect("cred_ipc lock").take();
     let handle = app.clone();
     std::thread::spawn(move || {
         #[cfg(unix)]
@@ -1162,6 +1166,13 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         // Clean exit: drop the pidfile so the next launch doesn't try to reap
         // PIDs we already terminated.
         let _ = std::fs::remove_file(sidecar_pidfile());
+        // Unlink the credential IPC socket (sc-5891) so a graceful quit doesn't leave a
+        // stale `cred-ipc.sock` in the data dir. A crash/force-quit skips this, but the
+        // next launch's bind reaps it (`cred_ipc::start` removes a stale socket first).
+        #[cfg(target_os = "macos")]
+        if let Some(cred_ipc) = cred_ipc {
+            let _ = std::fs::remove_file(&cred_ipc.socket);
+        }
         handle.exit(0);
     });
     true
