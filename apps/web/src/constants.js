@@ -519,4 +519,25 @@ export const fallbackModels = [
       promptGuide: { title: "Wan2.2 14B Image-to-Video Prompt Guide", path: "/prompt-guides/wan-2-2-i2v-14b.md" },
     },
   },
+  {
+    // Wan2.2 VACE-Fun A14B (epic 3456): native-only dual-expert VACE control model. First
+    // slice exposes replace_person (the validated VACE path); control-video preprocessing
+    // (pose/depth/canny) + extend/bridge are tracked follow-ups (sc-3460).
+    id: "wan_2_2_vace_fun_14b",
+    name: "Wan2.2 VACE-Fun (A14B)",
+    type: "video",
+    capabilities: ["replace_person"],
+    defaults: { duration: 5, fps: 16, resolution: "832x480", quality: "balanced" },
+    limits: {
+      durations: [3, 4, 5],
+      recommendedMaxDuration: 5,
+      fps: [16],
+      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
+    },
+    ui: {
+      description: "Wan2.2 A14B VACE control model (high/low-noise mixture-of-experts) for person replacement and controllable video.",
+      durationHint: "Heavy dual-expert control model — keep clips at 5s or less. Generates at 16fps.",
+      promptGuide: { title: "Wan2.2 VACE-Fun Prompt Guide", path: "/prompt-guides/wan-2-2-t2v-14b.md" },
+    },
+  },
 ];

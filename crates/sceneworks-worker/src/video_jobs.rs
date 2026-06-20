@@ -194,6 +194,23 @@ pub(crate) async fn run_video_generate_job(
         ),
     )
     .await?;
+    // sc-3459 (epic 3456): Wan2.2 VACE-Fun A14B is a NEW dual-expert VACE engine
+    // (`wan2_2_vace_fun_14b`; native MLX sc-6604, native candle sc-6605). Until those engines
+    // merge and the worker's mlx-gen/candle-gen pin is bumped, the runtime cannot serve it — and
+    // replace_person must NEVER fall through to the Wan2.1 `generate_wan_vace` backend below, which
+    // would silently render with the WRONG checkpoint (the exact failure the epic forbids). Fail
+    // honestly instead. When the engine pin lands, this guard is replaced by the real per-platform
+    // `generate_wan_vace_fun` dispatch (resolve the dual-expert snapshot → the `wan2_2_vace_fun_14b`
+    // engine).
+    if request.model == "wan_2_2_vace_fun_14b" {
+        return Err(WorkerError::InvalidPayload(
+            "wan_2_2_vace_fun_14b: the native Wan2.2 VACE-Fun engine is not yet available in this \
+             build (pending the mlx-gen/candle-gen integration, sc-6604/sc-6605). The job will not \
+             be routed to the Wan2.1 VACE backend. Choose another model, or update once the engine \
+             ships."
+                .to_owned(),
+        ));
+    }
     // Generate: real MLX on macOS for Wan (sc-3034) / LTX+audio (sc-3035) models with
     // resolvable weights, else the procedural stub (non-macOS or missing weights = stub).
     // replace_person (sc-3521) always routes to the native Wan-VACE provider regardless of the

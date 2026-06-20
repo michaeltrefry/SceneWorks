@@ -2929,6 +2929,102 @@
         }
       }
     },
+    {
+      // Wan2.2 VACE-Fun A14B (epic 3456): alibaba-pai's VACE-trained dual-expert
+      // (high/low-noise MoE) control model on the Wan2.2-T2V-A14B base — controllable
+      // video (replace_person / pose-depth control / extend-bridge) via a masked control
+      // clip + reference images. NATIVE-ONLY, no Torch path (the epic's native-first
+      // decision; mirrors bernini). macOS = native MLX (mlx-gen-wan engine id
+      // "wan2_2_vace_fun_14b", sc-6604, dual-expert sibling of "wan_vace"); Windows/Linux =
+      // native candle ("wan2_2_vace_fun_14b", sc-6605). The runtime loads BOTH experts
+      // (transformer/ high-noise + transformer_2/ low-noise), switched at boundary 0.875.
+      //
+      // Source: linoyts/Wan2.2-VACE-Fun-14B-diffusers — the community diffusers conversion
+      // of alibaba-pai/Wan2.2-VACE-Fun-A14B (the raw upstream is a VideoX-Fun layout that
+      // does NOT load via diffusers/native engines). ~81 GB; Apache-2.0 (base Wan2.2-T2V-
+      // A14B). sc-6608 (epic 5594) re-hosts this onto SceneWorks/wan2.2-vace-fun-a14b-{mlx,
+      // diffusers} for provenance and flips the downloads below. The macOS engine reads the
+      // diffusers transformer dirs directly + the shared native-converted UMT5/z16-VAE/
+      // tokenizer assembled from a base-Wan-14B snapshot (the worker resolves this — same
+      // convention as the Wan2.1 "wan_vace" replace_person backend).
+      "id": "wan_2_2_vace_fun_14b",
+      "name": "Wan2.2 VACE-Fun (A14B)",
+      "family": "wan-video",
+      "type": "video",
+      "adapter": "wan_video",
+      // VACE control surface, first slice: replace_person (the validated VACE path — the
+      // masked control clip + character references). Pose/Depth/Canny/MLSD control-video
+      // preprocessing and extend/bridge are tracked follow-ups (sc-3460), not exposed until
+      // their preprocessing lands, so the menu never offers a mode the runtime can't serve.
+      "capabilities": ["replace_person"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+          "files": [],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 81200000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/linoyts/Wan2.2-VACE-Fun-14B-diffusers"
+      },
+      "defaults": {
+        "duration": 5,
+        "fps": 16,
+        "resolution": "832x480",
+        "quality": "balanced",
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // Upstream trained at 81 frames / 16 fps / multi-res 512·768·1024. Keep clips short
+        // (dual 14B is heavy); the VACE control clip resolution must match the generation
+        // resolution (the engine errors otherwise).
+        "durations": [3, 4, 5],
+        "recommendedMaxDuration": 5,
+        "hardMaxDuration": 5,
+        "fps": [16],
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
+        // Native engines are default-sampler only (no flow-match swaps wired) — declared on
+        // mlx.limits too; there is no Torch backend for this model.
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["wan-video"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "mlx": {
+        // Native MLX dual-expert VACE-Fun (mlx-gen-wan "wan2_2_vace_fun_14b", sc-6604). The
+        // worker resolves env override (SCENEWORKS_MLX_WAN_VACE_FUN_DIR) → local
+        // <data>/models/mlx/wan_2_2_vace_fun → the assembled snapshot (diffusers transformer/
+        // + transformer_2/ + native-converted UMT5/z16-VAE/tokenizer from a base-Wan-14B
+        // snapshot). Dual 14B bf16 ≈ 56 GB transformers + encoder/VAE → 133 GB floor (Q4/Q8
+        // at load). Runtime support lands with the mlx-gen pin bump (sc-3459).
+        "minMemoryGb": 133,
+        "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
+      "ui": {
+        "label": "Wan2.2 VACE-Fun (A14B)",
+        "description": "Wan2.2 A14B VACE control model (high/low-noise mixture-of-experts) for person replacement and controllable video. Native-only (no Torch); needs ample memory for both experts.",
+        "recommendedFor": ["replace_person"],
+        "durationHint": "Heavy dual-expert control model — keep clips at 5s or less. Generates at 16fps.",
+        "promptGuide": {
+          "title": "Wan2.2 VACE-Fun Prompt Guide",
+          "path": "/prompt-guides/wan-2-2-t2v-14b.md",
+          "sources": [
+            { "label": "Wan2.2 VACE-Fun model card", "url": "https://huggingface.co/alibaba-pai/Wan2.2-VACE-Fun-A14B" },
+            { "label": "VideoX-Fun (VACE-Fun) GitHub", "url": "https://github.com/aigc-apps/VideoX-Fun" },
+            { "label": "Wan2.2 GitHub repo", "url": "https://github.com/Wan-Video/Wan2.2" }
+          ]
+        }
+      }
+    },
     // Bernini (epic 4699): ByteDance's full pipeline — a Qwen2.5-VL-7B semantic
     // planner (Latent Semantic Planning / MAR loop) driving a Wan2.2-T2V-A14B
     // dual-expert renderer. macOS-only native MLX (mlx-gen-bernini, engine id

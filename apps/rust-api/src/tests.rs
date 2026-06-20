@@ -8821,6 +8821,74 @@ fn builtin_manifest_registers_the_prompt_refine_model() {
 }
 
 #[test]
+fn builtin_manifest_registers_the_wan_vace_fun_model() {
+    // sc-3458 (epic 3456): Wan2.2 VACE-Fun A14B is a first-class native video model. Guard the
+    // catalog entry against accidental removal/drift and assert the honest, native-first shape:
+    // the wan-video adapter, ONLY the validated replace_person capability (no generic T2V/I2V on
+    // this control checkpoint), the diffusers-conversion download repo (NOT the raw VideoX-Fun
+    // alibaba-pai repo, which does not load), an MLX block, and NO Torch GGUF quantization.
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
+    let model = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"] == "wan_2_2_vace_fun_14b")
+        .expect("wan_2_2_vace_fun_14b is registered in the catalog");
+    assert_eq!(model["type"], "video");
+    assert_eq!(model["family"], "wan-video");
+    assert_eq!(model["adapter"], "wan_video");
+
+    // Only the validated VACE mode is exposed; generic T2V/I2V are NOT (control checkpoint).
+    let caps: Vec<&str> = model["capabilities"]
+        .as_array()
+        .expect("capabilities array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        caps,
+        vec!["replace_person"],
+        "expose only the validated VACE mode"
+    );
+
+    // Download = the diffusers conversion (loadable), never the raw VideoX-Fun upstream.
+    let download = model["downloads"]
+        .as_array()
+        .and_then(|downloads| downloads.first())
+        .expect("a download entry");
+    assert_eq!(download["provider"], "huggingface");
+    assert_eq!(download["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
+    assert_ne!(
+        download["repo"], "alibaba-pai/Wan2.2-VACE-Fun-A14B",
+        "must not point at the raw VideoX-Fun repo (it does not load via diffusers/native)"
+    );
+    let platforms: Vec<&str> = download["platforms"]
+        .as_array()
+        .expect("platforms array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for os in ["macos", "windows", "linux"] {
+        assert!(platforms.contains(&os), "download should cover {os}");
+    }
+
+    // Native-only: an MLX block, and NO Torch GGUF quantization variants.
+    assert!(model["mlx"].is_object(), "native MLX engine block present");
+    assert!(
+        model["mlx"]["minMemoryGb"].as_u64().unwrap_or(0) >= 64,
+        "dual 14B needs a substantial memory floor"
+    );
+    assert!(
+        model.get("quantization").is_none(),
+        "native-first: no Torch GGUF quantization block"
+    );
+}
+
+#[test]
 fn builtin_manifest_registers_the_joycaption_model() {
     // sc-5620: the native captioner (caption_jobs.rs, the training_caption job) resolves an
     // already-cached HF snapshot via the same resolve_app_managed_model_dir seam and does NOT
