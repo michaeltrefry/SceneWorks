@@ -1002,6 +1002,12 @@
     },
     {
       "id": "boogu_image",
+      // Recommended (sc-6616): render quality validated real-weight in S5 (sc-6402). autoDownload:false
+      // because the Q8 turnkey is ~23 GB/variant — surfaced in the Models Recommended section +
+      // SetupWizard (with its size) so users discover it, but they opt in rather than the wizard
+      // auto-pulling it on first run (mirrors ltx_2_3 / prompt_refine_anubis_8b).
+      "recommended": true,
+      "autoDownload": false,
       "name": "Boogu Image",
       "family": "boogu",
       "type": "image",
@@ -1089,6 +1095,10 @@
     },
     {
       "id": "boogu_image_turbo",
+      // Recommended (sc-6616): the fast few-step variant (S5-validated); same autoDownload:false opt-in
+      // as Base. Edit is intentionally NOT recommended (a specialized mode, only shown in the Edit tab).
+      "recommended": true,
+      "autoDownload": false,
       "name": "Boogu Image Turbo",
       "family": "boogu",
       "type": "image",
