@@ -570,19 +570,18 @@ async fn generate_qwen_edit_stream(
     // seed, each a `[reference, skeleton]` set) / else the plain per-image reference path.
     let grouping = flux2_grouping(request);
     let set_seed = resolve_seed(request, 0);
-    let (seeds, prompts, pose_keypoints): (
+    let (seeds, prompts, pose_inputs): (
         Vec<i64>,
         Vec<String>,
-        Option<Vec<Vec<crate::openpose_skeleton::Keypoint>>>,
+        Option<Vec<PoseInput>>,
     ) = match &grouping {
         Flux2Grouping::Poses(count) => {
             // Shared seed so only the pose changes across the set (Python parity).
-            let keypoints = parse_poses(request)
-                .into_iter()
-                .map(|pose| pose.keypoints)
-                .collect();
+            // Keep the full PoseInput (keypoints + hands + face) so whole-body poses
+            // thread their hand/face articulation into the skeleton below (sc-6599).
+            let poses = parse_poses(request);
             let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
-            (vec![set_seed; *count], prompts, Some(keypoints))
+            (vec![set_seed; *count], prompts, Some(poses))
         }
         Flux2Grouping::Angles => {
             // Shared seed so noise-derived attributes (hair, lighting) stay constant
@@ -652,18 +651,22 @@ async fn generate_qwen_edit_stream(
                 tx,
                 seeds.into_iter().zip(prompts),
                 move |index, (seed, prompt), on_progress| {
-                    // Pose tier: pair the reference with this pose's body-only skeleton (DWPose
-                    // body, no hands/face — Python `draw_bodypose`) as a `[reference, skeleton]`
-                    // multi-image set. Reference FIRST: the engine VL-encodes references[0] for
-                    // the prompt embeds (identity), the skeleton is added dual-latent geometry.
-                    let conditioning = match &pose_keypoints {
-                        Some(keypoints) => {
+                    // Pose tier: pair the reference with this pose's DWPose whole-body skeleton
+                    // (body + hands 21x2 + face 68 when the pose carries them — sc-6599) as a
+                    // `[reference, skeleton]` multi-image set. Reference FIRST: the engine
+                    // VL-encodes references[0] for the prompt embeds (identity), the skeleton is
+                    // added dual-latent geometry. A real-weight A/B confirmed the hand/gesture
+                    // detail transfers; body-only poses render identically to the old path
+                    // (draw_wholebody with no hands/face == draw_bodypose).
+                    let conditioning = match &pose_inputs {
+                        Some(poses) => {
+                            let pose = &poses[index];
                             let skeleton = crate::openpose_skeleton::draw_wholebody(
                                 width,
                                 height,
-                                &keypoints[index],
-                                None,
-                                None,
+                                &pose.keypoints,
+                                pose.hands.as_deref(),
+                                pose.face.as_deref(),
                                 stickwidth,
                             );
                             vec![Conditioning::MultiReference {
