@@ -227,6 +227,13 @@ use candle_gen_kolors::{KolorsControl, KolorsControlPaths, KolorsControlRequest}
 // drives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
+// Z-Image img2img / edit provider (sc-6595, epic 5480) — the candle (Windows/CUDA) sibling of the MLX
+// `z_image_turbo` `Conditioning::Reference` img2img route, living in `candle-gen-z-image` (the Turbo DiT
+// + a strength-derived source-latent init). Candle-only: macOS keeps the registered MLX generator's
+// img2img path. `candle_gen_z_image` is already force-link anchored above; this is the named-type import
+// the bespoke edit route (`image_jobs/zimage_edit_candle.rs`) drives.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_z_image::{ZImageEdit, ZImageEditPaths, ZImageEditRequest};
 // PuLID-FLUX face-identity provider (sc-5492, epic 5480) — the candle (Windows/CUDA) sibling of the
 // macOS `pulid_flux` registry generator, living in `candle-gen-pulid` (the EVA02-CLIP tower + IDFormer
 // + the 20 PerceiverAttentionCA modules injected into the forked FLUX DiT via the post-block
@@ -577,6 +584,23 @@ pub(crate) async fn run_image_generate_job(
         // candle `QwenEdit` stream. Off-Mac this was a torch fallback; candle now serves it. Disjoint
         // from the Qwen strict-pose control lane below (that one is `qwen_image` + `advanced.poses`).
         generate_candle_qwen_edit_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
+    } else if settings.backend_candle_enabled && zimage_edit_candle_available(&request, settings) {
+        // Z-Image img2img / edit (sc-6595) — checked BEFORE `is_candle_engine` because `z_image_turbo` IS
+        // a candle txt2img id (and `z_image_edit` is a distinct id the txt2img branch doesn't know), so
+        // without this an `edit_image` job would be caught by the txt2img branch (which can't honor a
+        // source) or fall through entirely. Grouped with the other edit lanes; disjoint from the Z-Image
+        // strict-pose control lane below (that one is `advanced.poses`, not `edit_image`).
+        generate_candle_zimage_edit_stream(
             api,
             settings,
             job,
@@ -1234,6 +1258,11 @@ include!("image_jobs/kolors_control.rs");
 // MLX `z_image_turbo_control` registry generator; the candle `ZImageControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/zimage_control.rs");
+// Z-Image img2img / edit — the Windows/CUDA candle lane ONLY (sc-6595). macOS keeps the MLX
+// `z_image_turbo` registry generator's `Conditioning::Reference` img2img path; the candle `ZImageEdit`
+// is a bespoke provider.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/zimage_edit_candle.rs");
 // PuLID-FLUX face identity — the Windows/CUDA candle lane ONLY (sc-5492). macOS keeps the
 // inventory-registered `pulid_flux` MLX generator (image_jobs/pulid.rs); the candle `PulidFlux` is a
 // bespoke provider, so this file is candle-gated and distinct from the macOS route.

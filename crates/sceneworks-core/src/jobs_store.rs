@@ -3839,6 +3839,18 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     {
         return true;
     }
+    // Z-Image img2img / edit (sc-6595, epic 5480): a z-image-family `edit_image` job with a source image
+    // is the bespoke candle `ZImageEdit` lane (`generate_candle_zimage_edit_stream`), NOT txt2img — the
+    // gate below rejects the whole `edit_image` family, and the dedicated `z_image_edit` id isn't even a
+    // candle txt2img id (so a `z_image_edit` job would otherwise hit the "model not routed" gap and
+    // misattribute to epic 3692). Branch it out first; disjoint from the Z-Image strict-pose control lane
+    // below (that one is `advanced.poses`, not `edit_image`). Mirrors the worker's
+    // `zimage_edit_candle_available`.
+    if matches!(model, "z_image_turbo" | "z_image_edit")
+        && zimage_edit_candle_eligible(&job.payload)
+    {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
@@ -4208,6 +4220,22 @@ fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// caller. Mirrors the worker's `qwen_edit_candle_available` gate (minus the local weight-resolve check)
 /// so the router and worker agree. Candle-only — macOS keeps the MLX `qwen_image_edit` registry path.
 fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Z-Image img2img / edit candle-routing conditions (sc-6595, epic 5480). The candle `ZImageEdit`
+/// provider serves `edit_image` mode with a `sourceAssetId` on the z-image family — the Turbo weights'
+/// img2img path (no mask / inpaint / outpaint). Same payload predicate as the other edit gates, gated to
+/// the z-image family (`z_image_turbo` + the dedicated `z_image_edit` id) by the caller. Mirrors the
+/// worker's `zimage_edit_candle_available` gate (minus the local weight-resolve check) so the router and
+/// worker agree. Candle-only — macOS keeps the MLX `z_image_turbo` registry generator's `Reference` path.
+fn zimage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
@@ -6788,6 +6816,34 @@ mod candle_routing_tests {
     }
 
     #[test]
+    fn zimage_edit_jobs_route_to_candle() {
+        // Z-Image img2img / edit jobs (sc-6595) route to the bespoke candle `ZImageEdit` lane via the new
+        // branch, NOT the txt2img `image_request_candle_eligible` gate (which rejects `edit_image`). Both
+        // the txt2img id in edit mode (`z_image_turbo`) and the dedicated `z_image_edit` id are served.
+        for model in ["z_image_turbo", "z_image_edit"] {
+            let edit = json!({ "model": model, "mode": "edit_image", "sourceAssetId": "src_1" });
+            assert!(zimage_edit_candle_eligible(&object(edit.clone())));
+            assert!(image_job_is_candle_eligible(&image_generate_job(
+                edit.clone()
+            )));
+            // Reached through the real `image_edit` job type too (the type the Image Editor submits).
+            assert!(image_job_is_candle_eligible(&image_edit_job(edit)));
+        }
+        // `edit_image` WITHOUT a source → not this lane (nothing to edit).
+        assert!(!zimage_edit_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "edit_image"
+        }))));
+        // A plain txt2img z_image_turbo job → not the edit lane (it routes via the txt2img gate instead).
+        assert!(!zimage_edit_candle_eligible(&object(
+            json!({ "model": "z_image_turbo" })
+        )));
+        // A z_image_turbo strict-pose job (advanced.poses, not edit_image) is the control lane, not edit.
+        assert!(!zimage_edit_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "advanced": { "poses": [{}] }
+        }))));
+    }
+
+    #[test]
     fn image_edit_job_type_routes_through_candle_edit_lane() {
         // Regression for the sc-5487 edit lanes being unreachable through the actual `image_edit` job
         // type the Image Editor submits (the prior tests only exercised `image_generate` jobs with
@@ -6812,11 +6868,13 @@ mod candle_routing_tests {
             worker_supports_job(&gpu_worker(CANDLE_CAPS), &image_edit_job(sdxl_edit.clone())),
             "the candle worker (advertising `image_edit`) must claim the SDXL edit job"
         );
-        // The FLUX.2-klein and Qwen-Image-Edit lanes are reached through the same job type.
+        // The FLUX.2-klein, Qwen-Image-Edit, and Z-Image edit lanes are reached through the same job type.
         for model in [
             "flux2_klein_9b",
             "qwen_image_edit",
             "qwen_image_edit_2511_lightning",
+            "z_image_turbo",
+            "z_image_edit",
         ] {
             let job = image_edit_job(json!({
                 "model": model, "mode": "edit_image", "sourceAssetId": "asset_1"
