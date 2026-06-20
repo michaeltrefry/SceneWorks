@@ -1669,7 +1669,8 @@ async fn generate_candle_stream(
     // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
     // non-caption prompt into a minimal valid caption — the same worker-side guarantee the macOS path
     // applies via `ideogram_caption::ensure_caption_prompt`. No-op (a clone) for every other family.
-    let prompt = if crate::ideogram_caption::is_ideogram_model(&request.model) {
+    let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
+    let prompt = if is_ideogram {
         crate::ideogram_caption::ensure_caption_prompt(&request.prompt)
     } else {
         request.prompt.clone()
@@ -1680,7 +1681,7 @@ async fn generate_candle_stream(
     // it is gated to the ideogram family so a stray non-ideogram job reaching this generic lane is
     // untouched. Other candle edit families have their own bespoke streams (checked before this dispatch).
     let (ideogram_reference, ideogram_mask) =
-        if crate::ideogram_caption::is_ideogram_model(&request.model) {
+        if is_ideogram {
             match resolve_ideogram_edit(request, settings, project_path)? {
                 Some((source, strength, mask)) => (Some((source, strength)), mask),
                 None => (None, None),
@@ -1705,29 +1706,66 @@ async fn generate_candle_stream(
         format!("candle {engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
-                let (out_w, out_h, pixels) = generate_one(
-                    generator,
-                    &prompt,
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    negative_prompt.clone(),
-                    ideogram_reference.as_ref(),
-                    ideogram_mask.as_ref(),
-                    true_cfg,
-                    // The candle txt2img families don't advertise sampler/scheduler selection (each uses
-                    // its family default), so no override is forwarded — matching this path's behavior
-                    // before sc-5392 added those params to `generate_one` for the macOS Chroma path.
-                    None,
-                    None,
-                    None,
-                    &enhance,
-                    &cancel,
-                    on_progress,
-                )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
+                let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
+                    generate_one(
+                        generator,
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        negative_prompt.clone(),
+                        ideogram_reference.as_ref(),
+                        ideogram_mask.as_ref(),
+                        true_cfg,
+                        // The candle txt2img families don't advertise sampler/scheduler selection (each
+                        // uses its family default), so no override is forwarded — matching this path's
+                        // behavior before sc-5392 added those params for the macOS Chroma path.
+                        None,
+                        None,
+                        None,
+                        &enhance,
+                        &cancel,
+                        on_progress,
+                    )
+                };
+                let (mut out_w, mut out_h, mut pixels) = render(seed, on_progress)?;
+                let mut final_seed = seed;
+                // Ideogram 4 placeholder detect-and-reseed (sc-6858, parity with the macOS
+                // `generate_stream` net, sc-6501): the caption guard above makes it rare, but a residual
+                // "Image blocked by safety filter" placeholder can still occur even with a caption.
+                // Detect via the baked-text heuristic and reseed transparently, keeping the first clean
+                // render. Gated to Ideogram 4; a no-op for every other candle family, for turbo (CFG-free,
+                // cannot produce it), and for an edit (the output is anchored to a real source latent, so
+                // `looks_like_placeholder` returns false).
+                if is_ideogram
+                    && crate::ideogram_caption::looks_like_placeholder(&pixels, out_w, out_h)
+                {
+                    let retries = crate::ideogram_caption::placeholder_recovery_retries();
+                    for attempt in 0..retries {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        let retry_seed = crate::ideogram_caption::recovery_seed(seed, attempt);
+                        tracing::warn!(
+                            "ideogram 4 placeholder detected (seed {seed}); reseeding {retry_seed} \
+                             (attempt {}/{retries})",
+                            attempt + 1,
+                        );
+                        let (rw, rh, rpixels) = render(retry_seed, on_progress)?;
+                        let recovered =
+                            !crate::ideogram_caption::looks_like_placeholder(&rpixels, rw, rh);
+                        out_w = rw;
+                        out_h = rh;
+                        pixels = rpixels;
+                        final_seed = retry_seed;
+                        if recovered {
+                            break;
+                        }
+                    }
+                }
+                Ok(Some((final_seed, out_w, out_h, pixels)))
             })
         },
     );
