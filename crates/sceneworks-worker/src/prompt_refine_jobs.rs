@@ -342,7 +342,8 @@ pub(crate) async fn run_prompt_refine_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     use gen_core::{
-        CancelFlag, LoadSpec, Progress, TextLlmRequest, TextLlmSampling, WeightsSource,
+        CancelFlag, LoadSpec, Progress, TextLlmConstraint, TextLlmRequest, TextLlmSampling,
+        WeightsSource,
     };
 
     let payload = &job.payload;
@@ -465,6 +466,10 @@ pub(crate) async fn run_prompt_refine_job(
                 max_new_tokens,
                 seed: None,
             },
+            // sc-6585: magic-prompt expansion must emit a structurally-valid JSON caption, so
+            // constrain its decode to the JSON grammar; the free-text "Refine my prompt" rewrite is
+            // unconstrained prose.
+            constraint: is_magic.then_some(TextLlmConstraint::Json),
             cancel: blocking_cancel.clone(),
         };
         let mut on_progress = |progress: Progress| {
@@ -725,7 +730,8 @@ mod tests {
     #[ignore = "real-weight: needs the Llama-3.2-3B prompt-refine model in the HF cache"]
     fn magic_prompt_expands_plain_text_to_caption() {
         use gen_core::{
-            CancelFlag, LoadSpec, Progress, TextLlmRequest, TextLlmSampling, WeightsSource,
+            CancelFlag, LoadSpec, Progress, TextLlmConstraint, TextLlmRequest, TextLlmSampling,
+            WeightsSource,
         };
 
         let home = std::env::var("HOME").expect("HOME");
@@ -758,6 +764,7 @@ mod tests {
                 max_new_tokens: 2048,
                 seed: None,
             },
+            constraint: Some(TextLlmConstraint::Json), // sc-6585: exercise constrained decoding
             cancel: CancelFlag::new(),
         };
         let mut noop = |_progress: Progress| {};
@@ -978,7 +985,8 @@ mod tests {
     #[ignore = "real-weight: set BAKEOFF_MODEL_DIR to a Llama-3.x-Instruct snapshot dir"]
     fn magic_prompt_bakeoff() {
         use gen_core::{
-            CancelFlag, LoadSpec, Progress, TextLlmRequest, TextLlmSampling, WeightsSource,
+            CancelFlag, LoadSpec, Progress, TextLlmConstraint, TextLlmRequest, TextLlmSampling,
+            WeightsSource,
         };
         use std::time::Instant;
 
@@ -1015,6 +1023,11 @@ mod tests {
                         max_new_tokens: 2048,
                         seed: Some(seed),
                     },
+                    // sc-6585: set BAKEOFF_CONSTRAIN=1 to measure caption_valid under grammar-
+                    // constrained decoding (expect ~100%) vs the unconstrained baseline.
+                    constraint: std::env::var("BAKEOFF_CONSTRAIN")
+                        .is_ok()
+                        .then_some(TextLlmConstraint::Json),
                     cancel: CancelFlag::new(),
                 };
                 let mut noop = |_p: Progress| {};

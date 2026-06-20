@@ -4174,36 +4174,40 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
     }
 }
 
-/// sc-6519 real-weight composition: the headless/API path's exact behavior end-to-end on one box —
-/// run the ACTUAL `magic_prompt` 3B expansion on a plain prompt to get a rich JSON caption, then
-/// render THAT caption through the production Ideogram 4 load and assert a real image (not the baked
-/// "Image blocked by safety filter" placeholder). sc-5997 proved plain→caption and sc-6501 proved a
-/// hand-crafted rich caption escapes; this closes the one untested link — that the 3B's OWN
-/// (imperfect) output renders a real image. The refiner is loaded + dropped BEFORE Ideogram loads,
-/// mirroring the API running this as a SEPARATE prompt_refine job (no 3B/Ideogram co-residency).
-/// Defaults to the real placeholder regime (1024²/48) where plain text fails and rich captions escape.
+/// sc-6546 render-confirmation (was sc-6519): the headless/API path's exact behavior end-to-end on
+/// one box — run the ACTUAL `magic_prompt` expansion on a plain prompt through the SHIPPED refiner
+/// (Anubis-Mini-8B, PR #830) to get a rich JSON caption, then render THAT caption through the
+/// production Ideogram 4 load and confirm a real image (not the baked "Image blocked by safety
+/// filter" placeholder). sc-5997 proved plain→caption and sc-6501 proved a hand-crafted rich caption
+/// escapes; this closes sc-6546's open acceptance check — that the coherent Anubis default's OWN
+/// output renders a real image at the real default regime. The refiner is loaded + dropped BEFORE
+/// Ideogram loads, mirroring the API running this as a SEPARATE prompt_refine job (no refiner/Ideogram
+/// co-residency). Defaults to the real placeholder regime (1024²/48) where plain text fails and rich
+/// captions escape.
 /// Run: `cargo test -p sceneworks-worker --lib -- --ignored ideogram_4_headless_auto_caption --nocapture`.
 #[cfg(target_os = "macos")]
-#[ignore = "loads the real Llama-3.2-3B refiner + Ideogram 4 snapshot; run manually on a Mac"]
+#[ignore = "loads the real Anubis-Mini-8B refiner + Ideogram 4 snapshot; run manually on a Mac"]
 #[test]
 fn ideogram_4_headless_auto_caption_renders_real_image() {
     use gen_core::{
-        CancelFlag, LoadSpec, Progress, TextLlmRequest, TextLlmSampling, WeightsSource,
+        CancelFlag, LoadSpec, Progress, TextLlmConstraint, TextLlmRequest, TextLlmSampling,
+        WeightsSource,
     };
 
     let Some(ideogram) = ideogram_dir() else {
         eprintln!("skipping: no SceneWorks/ideogram-4-mlx q4 snapshot found");
         return;
     };
-    // The prompt-refine 3B snapshot the magic_prompt expansion runs on (parity with sc-5997's smoke).
-    let refine_snaps = dirs_home().join(
-        ".cache/huggingface/hub/models--huihui-ai--Llama-3.2-3B-Instruct-abliterated/snapshots",
-    );
+    // The prompt-refine snapshot the magic_prompt expansion runs on — Anubis-Mini-8B, the shipped
+    // magic-prompt default (sc-6546 / PR #830; the Llama-3.2-3B was retired). Loads on the same
+    // config-driven Llama `prompt_refine` seam, stock bf16, no conversion.
+    let refine_snaps =
+        dirs_home().join(".cache/huggingface/hub/models--TheDrummer--Anubis-Mini-8B-v1/snapshots");
     let Some(refine_dir) = std::fs::read_dir(&refine_snaps)
         .ok()
         .and_then(|entries| entries.flatten().map(|e| e.path()).find(|p| p.is_dir()))
     else {
-        eprintln!("skipping: no Llama-3.2-3B-Instruct-abliterated snapshot found");
+        eprintln!("skipping: no TheDrummer/Anubis-Mini-8B-v1 snapshot found");
         return;
     };
 
@@ -4221,7 +4225,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             "prompt_refine",
             &LoadSpec::new(WeightsSource::Dir(refine_dir)),
         )
-        .expect("load prompt_refine 3B");
+        .expect("load prompt_refine (Anubis-8B)");
         let (system, user) =
             crate::prompt_refine_jobs::build_magic_prompt_messages(PLAIN_TEXT, "1:1");
         let mut found = None;
@@ -4235,6 +4239,9 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
                     max_new_tokens: 2048,
                     seed: None,
                 },
+                // sc-6585: constrain to the JSON grammar so the caption is structurally valid in one
+                // shot (the resample loop below should now succeed on attempt 1).
+                constraint: Some(TextLlmConstraint::Json),
                 cancel: CancelFlag::new(),
             };
             let mut noop = |_p: Progress| {};
@@ -4251,9 +4258,11 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
                 found = Some(cleaned);
                 break;
             }
-            eprintln!("attempt {attempt}: 3B produced no valid caption, re-sampling:\n{candidate}");
+            eprintln!(
+                "attempt {attempt}: Anubis produced no valid caption, re-sampling:\n{candidate}"
+            );
         }
-        found.expect("the 3B produced a valid caption within 6 attempts")
+        found.expect("Anubis produced a valid caption within 6 attempts")
     };
     eprintln!("magic-prompt caption:\n{caption}");
 
@@ -4268,10 +4277,11 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
     // 3) Render through the production Ideogram 4 load AND the production reseed recovery (base.rs):
     //    render seed 7, and on a detected placeholder reseed up to the retry budget keeping the first
     //    clean render — exactly what the worker does in `generate_stream`. A coherent caption escapes
-    //    immediately; the reseed net (sc-6501) backstops a sparse one. A *degenerate* 3B caption
-    //    (sc-6519: e.g. the subject emitted as a `text` element, "transparent background") can still
-    //    placeholder through the retries — that is the 3B's caption-QUALITY ceiling, not the engine or
-    //    the orchestration; bump SCENEWORKS_IDEOGRAM_PLACEHOLDER_RETRIES / re-run to resample.
+    //    immediately; the reseed net (sc-6501) backstops a sparse one. Anubis is the coherent default
+    //    (sc-6550 bake-off: ~0% subject-as-text / transparent-bg, residual degeneracy is malformed
+    //    JSON the 6-attempt resample above already filters), so escape is the EXPECTATION here — a
+    //    residual placeholder would be the rare semantic miss; bump SCENEWORKS_IDEOGRAM_PLACEHOLDER_RETRIES
+    //    / re-run to resample.
     //    Defaults to 1024²/48 (the regime where plain text fails); env-overridable for a fast check.
     let env_u32 = |key: &str, default: u32| {
         std::env::var(key)
@@ -4347,17 +4357,17 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
         "auto-caption render: {w}x{h} RGB8, final seed {final_seed}, placeholder={placeholder}"
     );
     // The placeholder ESCAPE is reported, not hard-asserted: whether the rendered image is real is
-    // gated by the 3B caption's COHERENCE, which is stochastic and (for some prompts) systematically
-    // degenerate — the subject emitted as a `text` element, "transparent background" (sc-6546). That
-    // is the 3B caption-QUALITY ceiling, NOT a defect in this story's orchestration/cleanup or the
-    // engine; the web path hits the same 3B and relies on the user editing the caption in the builder.
-    // A coherent caption escapes (sc-6501 proves it with a hand-crafted rich caption); the reseed net
-    // (sc-6501) backstops a sparse one. Re-run to resample, or bump SCENEWORKS_IDEOGRAM_PLACEHOLDER_RETRIES.
+    // gated by the caption's COHERENCE, which is stochastic. With Anubis (the shipped coherent default,
+    // sc-6546/PR #830) escape is the expectation — the bake-off measured ~0% semantic degeneracy and
+    // the malformed-JSON residual is filtered by the resample loop above. A coherent caption escapes
+    // (sc-6501 proves it with a hand-crafted rich caption); the reseed net (sc-6501) backstops a sparse
+    // one. Re-run to resample, or bump SCENEWORKS_IDEOGRAM_PLACEHOLDER_RETRIES.
     if placeholder {
         eprintln!(
-            "NOTE: still the safety placeholder after {retries} reseeds — the 3B returned a \
-             degenerate caption (subject-as-text / transparent background). 3B caption-quality \
-             ceiling (sc-6546), not an orchestration/engine defect."
+            "NOTE: still the safety placeholder after {retries} reseeds — Anubis returned a rare \
+             degenerate caption (subject-as-text / transparent background). Re-run to resample; this \
+             is the residual model ceiling sc-6585 (constrained decoding) further tightens, not an \
+             orchestration/engine defect."
         );
     } else {
         eprintln!("the headless auto-caption rendered a real image (escaped the placeholder).");
