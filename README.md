@@ -2,6 +2,8 @@
 
 SceneWorks is a local Docker-based AI image and video generation studio. This repository currently contains a Vite/React web shell, Rust API backend, Rust utility worker, a native candle (CUDA) GPU inference worker, shared config/data folders, and Docker Compose wiring. (The legacy Python/PyTorch worker has been retired off-Mac — Docker GPU inference runs natively on candle; see Phase 7 / sc-5503.)
 
+![SceneWorks](screenshot.png)
+
 ## Quick Start
 
 ```powershell
