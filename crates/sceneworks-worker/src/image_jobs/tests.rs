@@ -4326,3 +4326,220 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
     // inpaint (Edit): source Reference + Mask (white half repaints, black half keeps).
     run(Some(&(source, 0.85)), Some(&mask), "inpaint");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boogu-Image-0.1 (epic 6387) — unit coverage lives above (`boogu_engine_defaults_*`,
+// `boogu_subdir_*`); here is the S5 (sc-6402) real-weight #[ignore] smoke driving all three ids
+// (Base / Turbo / Edit) through the registry load seam against the published turnkey.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolve the cached Boogu turnkey snapshot ROOT (the dir holding the `base`/`turbo`/`edit` variant
+/// subfolders) for the real-weight smoke: env override `SCENEWORKS_MLX_BOOGU_DIR` → else the cached
+/// `SceneWorks/boogu-image-mlx` snapshot. `None` ⇒ skip (the ~23 GB/variant weights live outside CI).
+/// A root "counts" once any one variant's transformer is present, so a partial download (e.g. only
+/// `base/` pulled so far) still resolves and the smoke validates whatever is on disk.
+#[cfg(target_os = "macos")]
+fn boogu_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let has_any_variant = |root: &Path| {
+        ["base", "turbo", "edit"].iter().any(|v| {
+            root.join(v)
+                .join("transformer/diffusion_pytorch_model.safetensors")
+                .is_file()
+        })
+    };
+    if let Ok(dir) = std::env::var("SCENEWORKS_MLX_BOOGU_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if has_any_variant(&path) {
+            return Some(path);
+        }
+    }
+    let snaps =
+        dirs_home().join(".cache/huggingface/hub/models--SceneWorks--boogu-image-mlx/snapshots");
+    std::fs::read_dir(&snaps)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|root| has_any_variant(root))
+}
+
+/// Real-weights smoke (sc-6402, epic 6387): drive all three Boogu ids — Base (T2I true-CFG), Turbo
+/// (DMD few-step, CFG-free) and Edit (instruction edit over a source Reference) — through the SAME
+/// `boogu_model_subdir` → `load_engine` → `gen_core::load("boogu_*")` seam the worker uses, proving
+/// the `mlx_gen_boogu` force-link survives in the worker binary and the production quant / guidance /
+/// edit-conditioning resolution is consumed end-to-end. Each variant loads with the resolved Q8 spec
+/// over its packed `<variant>/` subdir, generates once, asserts a non-constant RGB8 image of the
+/// requested size with denoise progress, then DROPS the generator before the next loads (one ~23 GB
+/// model resident at a time — peak footprint is per-variant, well within `minMemoryGb: 64`). Variants
+/// not yet downloaded are skipped + reported; at least one must be present. Steps default low (env
+/// `BOOGU_SMOKE_STEPS` / `BOOGU_SMOKE_TURBO_STEPS` / `BOOGU_SMOKE_RES`): this checks mechanics, not
+/// quality (quality is an eyeball pass on the saved render). Run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored boogu_real_weights --nocapture`.
+#[cfg(target_os = "macos")]
+#[ignore = "loads the real Boogu turnkey (~23 GB/variant); run manually on a Mac with SceneWorks/boogu-image-mlx cached"]
+#[test]
+fn boogu_real_weights_generates_base_turbo_edit() {
+    let Some(root) = boogu_dir() else {
+        eprintln!(
+            "skipping boogu_real_weights: no SceneWorks/boogu-image-mlx snapshot found \
+             (set SCENEWORKS_MLX_BOOGU_DIR or download the turnkey)"
+        );
+        return;
+    };
+    let env_u32 = |key: &str, default: u32| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    };
+    let res = env_u32("BOOGU_SMOKE_RES", 512);
+    let base_steps = env_u32("BOOGU_SMOKE_STEPS", 8);
+    let turbo_steps = env_u32("BOOGU_SMOKE_TURBO_STEPS", 4);
+
+    let cancel = gen_core::CancelFlag::new();
+    let enhance = PromptEnhance::default();
+
+    // Edit source, pre-sized to res×res so it satisfies the engine's multiple-of-16 guard (the
+    // worker's `resolve_boogu_edit` fits the real source the same way). With `BOOGU_SMOKE_EDIT_SRC`
+    // set to a PNG it loads + resizes that image — best for the quality eyeball (feed the Base render
+    // → a clearly judgeable instruction edit); otherwise a synthetic diagonal gradient (mechanics).
+    let source = match std::env::var("BOOGU_SMOKE_EDIT_SRC") {
+        Ok(path) if !path.trim().is_empty() => {
+            let decoded = image::open(path.trim())
+                .unwrap_or_else(|e| panic!("open BOOGU_SMOKE_EDIT_SRC {}: {e}", path.trim()))
+                .to_rgb8();
+            let fitted =
+                image::imageops::resize(&decoded, res, res, image::imageops::FilterType::Lanczos3);
+            Image {
+                width: res,
+                height: res,
+                pixels: fitted.into_raw(),
+            }
+        }
+        _ => Image {
+            width: res,
+            height: res,
+            pixels: (0..res * res)
+                .flat_map(|i| {
+                    [
+                        (255 * (i % res) / res) as u8,
+                        (255 * (i / res) / res) as u8,
+                        160u8,
+                    ]
+                })
+                .collect(),
+        },
+    };
+    let edit_ref = (source, 1.0f32);
+
+    // (id, steps, prompt). Base/Turbo are T2I; Edit additionally takes the source Reference (resolved
+    // per-id below — the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT latent).
+    let cases = [
+        (
+            "boogu_image",
+            base_steps,
+            "a red fox sitting in a snowy forest at golden hour",
+        ),
+        (
+            "boogu_image_turbo",
+            turbo_steps,
+            "a red fox sitting in a snowy forest at golden hour",
+        ),
+        (
+            "boogu_image_edit",
+            base_steps,
+            "make it night with a full moon and cool blue light",
+        ),
+    ];
+
+    let mut ran = 0u32;
+    for (id, steps, prompt) in cases {
+        // Only the Edit variant consumes the source Reference; Base/Turbo are pure T2I.
+        let reference = (id == "boogu_image_edit").then_some(&edit_ref);
+        let req = request(json!({
+            "projectId": "p", "model": id, "prompt": "p", "advanced": {},
+            "modelManifestEntry": { "mlx": { "quantize": 8 } },
+        }));
+        let dir = boogu_model_subdir(&root, &req);
+        if !dir
+            .join("transformer/diffusion_pytorch_model.safetensors")
+            .is_file()
+        {
+            eprintln!(
+                "skipping {id}: variant dir {} not downloaded",
+                dir.display()
+            );
+            continue;
+        }
+        let model = mlx_model(id).unwrap();
+        // The exact production spec: Q8 over the packed `<variant>/` weights, with the resolved
+        // guidance (4.0 Base/Edit, None Turbo) + true_cfg (None for all boogu — Base/Edit forward
+        // CFG via the `guidance` scalar; Turbo is CFG-free).
+        let (quant, _bits) = resolve_quant(&req);
+        let guidance = resolve_guidance(&req, &model);
+        let true_cfg = resolve_true_cfg(&req, &model);
+
+        let generator = load_engine(id, dir, quant, Vec::new(), None)
+            .unwrap_or_else(|error| panic!("{id} load failed: {error}"));
+        let mut steps_seen = 0u32;
+        let (w, h, pixels) = generate_one(
+            generator.as_ref(),
+            prompt,
+            res,
+            res,
+            42,
+            steps,
+            guidance,
+            None,
+            reference,
+            None,
+            true_cfg,
+            None,
+            None,
+            None,
+            &enhance,
+            &cancel,
+            &mut |p| {
+                if let gen_core::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap_or_else(|error| panic!("boogu {id} generation failed: {error}"));
+        assert_eq!(
+            pixels.len(),
+            (w * h * 3) as usize,
+            "{id}: RGB8-sized buffer"
+        );
+        assert!(
+            w == res && h == res,
+            "{id}: output matches requested {res}²"
+        );
+        assert!(steps_seen >= 1, "{id}: expected denoise step progress");
+        assert!(
+            pixels.windows(2).any(|x| x[0] != x[1]),
+            "{id}: non-constant image"
+        );
+        eprintln!("boogu {id}: {w}x{h} RGB8, {steps_seen} steps observed");
+        // Opt-in PNG dump for the eyeball/quality pass (`BOOGU_SMOKE_OUT=<dir>`): mechanics are
+        // asserted above; a human reviews the saved render for actual quality.
+        if let Ok(out_dir) = std::env::var("BOOGU_SMOKE_OUT") {
+            let out_dir = out_dir.trim();
+            std::fs::create_dir_all(out_dir).unwrap_or_else(|e| panic!("create {out_dir}: {e}"));
+            let path = std::path::Path::new(out_dir).join(format!("{id}.png"));
+            image::RgbImage::from_raw(w, h, pixels)
+                .expect("RGB8 buffer → RgbImage")
+                .save(&path)
+                .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
+            eprintln!("  wrote {}", path.display());
+        }
+        ran += 1;
+        // generator dropped here → frees the ~23 GB model before the next variant loads.
+    }
+    assert!(
+        ran >= 1,
+        "expected at least one boogu variant present under {}",
+        root.display()
+    );
+    eprintln!("boogu real-weights smoke: {ran}/3 variants validated");
+}
