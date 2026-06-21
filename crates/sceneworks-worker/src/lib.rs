@@ -110,6 +110,10 @@ use caption_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 mod downloads;
+// Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
+// in normal compiles. Drives the shipped worker conditioning + `gen_core::load("scail2_14b")`.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod scail2_gpu_smoke;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +
