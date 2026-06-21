@@ -468,7 +468,8 @@ pub(crate) async fn run_video_generate_job(
                 (
                     decoded,
                     CANDLE_SCAIL2_ADAPTER,
-                    candle_scail2_raw_settings(&request),
+                    // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
+                    candle_scail2_raw_settings(&request, false),
                     Some(status),
                 )
             } else {
@@ -3197,10 +3198,11 @@ fn resolve_candle_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf>
     )))
 }
 
-/// Raw-settings recorded on a candle SCAIL-2 asset (mirrors `candle_video_raw_settings` + the macOS
-/// `scail2_raw_settings`, trimmed to the no-LoRA candle surface — inference LoRA is sc-6838).
+/// Raw-settings recorded on a candle SCAIL-2 asset (mirrors the macOS `scail2_raw_settings`). When a
+/// lightx2v lightning LoRA is applied (`lightning`, sc-6838), records the effective step-distill recipe
+/// the worker dispatched so the chosen steps/CFG/shift is inspectable on the asset, not silent.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_scail2_raw_settings(request: &VideoRequest) -> Value {
+fn candle_scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
@@ -3210,7 +3212,142 @@ fn candle_scail2_raw_settings(request: &VideoRequest) -> Value {
         "scail2Task".to_owned(),
         Value::String(candle_scail2_engine_video_mode(&request.mode).to_owned()),
     );
+    if lightning {
+        let (steps, guidance, shift) = candle_scail2_sampling(request, true);
+        raw.insert("scail2Lightning".to_owned(), Value::Bool(true));
+        if let Some(steps) = steps {
+            raw.insert("effectiveSteps".to_owned(), json!(steps));
+        }
+        if let Some(guidance) = guidance {
+            raw.insert("effectiveGuidanceScale".to_owned(), json!(guidance));
+        }
+        if let Some(shift) = shift {
+            raw.insert("effectiveSchedulerShift".to_owned(), json!(shift));
+        }
+    }
     Value::Object(raw)
+}
+
+/// Max LoRAs per candle SCAIL-2 job (matches the macOS `MAX_JOB_LORAS`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_SCAIL2_MAX_LORAS: usize = 3;
+
+/// The lightx2v lightning step-distill recipe (sc-6838, the candle sibling of the MLX sc-5684/5700
+/// recipe): 8 steps, CFG off, scheduler shift 1.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_SCAIL2_LIGHTNING_STEPS: u32 = 8;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_SCAIL2_LIGHTNING_GUIDANCE: f32 = 1.0;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
+
+/// A LoRA spec's strength (`weight`, default 0.8 — matches the macОS `lora_scale`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_scail2_lora_scale(lora: &Value) -> f32 {
+    lora.get("weight")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .unwrap_or(0.8) as f32
+}
+
+/// Resolve a LoRA spec's file (a directory → its first `.safetensors`), confined to an app-managed root
+/// (sc-5723 / WKA-002) before any on-disk use — the candle sibling of the macOS `resolve_lora_file`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_resolve_lora_file(settings: &Settings, path: PathBuf) -> WorkerResult<PathBuf> {
+    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
+    let file = if path.is_dir() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&path)
+            .map_err(|e| WorkerError::InvalidPayload(format!("LoRA dir {}: {e}", path.display())))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "safetensors"))
+            .collect();
+        entries.sort();
+        entries.into_iter().next().ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LoRA has no .safetensors under {}",
+                path.display()
+            ))
+        })?
+    } else {
+        path
+    };
+    if !file.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "LoRA file is missing: {}",
+            file.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// Build the candle SCAIL-2 adapter specs from `request.loras` — the candle sibling of the macOS
+/// `resolve_scail2_adapters` (sc-5451). SCAIL-2 is a single dense Wan2.1-14B-I2V transformer (no MoE
+/// high/low), so every adapter is shared (`moe_expert: None`); the engine merges LoRA / LoKr / LoHa and
+/// the lightx2v lightning diff-patch into the dense DiT before build ([`candle_gen_scail2::merge_adapters`]).
+/// Carries both a user-selected SCAIL-2 LoRA and the bundled Bias-Aware DPO quality LoRA (both surface
+/// through `request.loras`); selecting a lightning diff-patch LoRA makes the worker apply the
+/// step-distill recipe ([`candle_scail2_sampling`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_resolve_scail2_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > CANDLE_SCAIL2_MAX_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {CANDLE_SCAIL2_MAX_LORAS} LoRAs per job."
+        )));
+    }
+    let mut specs: Vec<AdapterSpec> = Vec::new();
+    for lora in &request.loras {
+        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = candle_resolve_lora_file(settings, path)?;
+        let kind = crate::image_jobs::classify_adapter(&file)?;
+        specs.push(AdapterSpec {
+            path: file,
+            scale: candle_scail2_lora_scale(lora),
+            kind,
+            pass_scales: None,
+            moe_expert: None,
+        });
+    }
+    Ok(specs)
+}
+
+/// `true` if any resolved adapter is a lightx2v diff-patch ("lightning") LoRA — the engine's own
+/// detector (a file carrying full-rank `.diff`/`.diff_b` tensors), so the recipe keys off the actual
+/// format, not a catalog id or filename. A file that can't be read is treated as non-lightning (the
+/// engine surfaces the real load error downstream). The candle sibling of the macOS
+/// `scail2_adapters_have_lightning`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
+    adapters
+        .iter()
+        .any(|a| candle_gen_scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
+}
+
+/// SCAIL-2 sampling recipe `(steps, guidance, scheduler_shift)`. When a lightx2v diff-patch "lightning"
+/// LoRA is selected (`lightning`), apply the step-distill recipe (CFG off → the engine short-circuits to
+/// a single DiT forward per step, scheduler shift 1.0; step count defaults to 8 but honors an explicit
+/// `advanced.steps`). Without it, all-`None` so the engine's quality defaults stand. The candle sibling
+/// of the macOS `scail2_sampling`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_scail2_sampling(
+    request: &VideoRequest,
+    lightning: bool,
+) -> (Option<u32>, Option<f32>, Option<f32>) {
+    if !lightning {
+        return (None, None, None);
+    }
+    (
+        advanced_opt_u32(request, "steps").or(Some(CANDLE_SCAIL2_LIGHTNING_STEPS)),
+        Some(CANDLE_SCAIL2_LIGHTNING_GUIDANCE),
+        Some(CANDLE_SCAIL2_LIGHTNING_SHIFT),
+    )
 }
 
 /// Resolve a candle SCAIL-2 `animate_character` request into the engine conditioning — the candle
@@ -3340,11 +3477,12 @@ async fn resolve_candle_scail2_conditioning(
     ])
 }
 
-/// Real candle SCAIL-2 character animation (sc-6837): build the `VideoGenInput` and run the shared
-/// `generate_video` path. `animate_character` → engine task `animation`; the source media becomes the
-/// SAM3-painted conditioning. No LoRA / quant on the candle path (the provider rejects them — inference
-/// LoRA is sc-6838); steps/guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4
-/// stride (the renderer is Wan2.1); the engine stitches > 81-frame clips into overlapping segments.
+/// Real candle SCAIL-2 character animation (sc-6837 + sc-6838): build the `VideoGenInput` and run the
+/// shared `generate_video` path. `animate_character` → engine task `animation`; the source media becomes
+/// the SAM3-painted conditioning. Inference LoRA / LoKr / LoHa + the Bias-Aware DPO LoRA + the lightx2v
+/// lightning diff-patch resolve from `request.loras` and merge into the dense DiT (sc-6838); a lightning
+/// LoRA also applies the step-distill recipe (8 steps / CFG-off / shift 1). Frame count uses the Wan
+/// 1-mod-4 stride (the renderer is Wan2.1); the engine stitches > 81-frame clips into overlapping segments.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_scail2(
     api: &ApiClient,
@@ -3361,9 +3499,14 @@ async fn generate_candle_scail2(
     };
     let conditioning =
         resolve_candle_scail2_conditioning(api, settings, job, request, project_path).await?;
+    // Inference adapters (DPO / lightning / user LoRA) + the lightning step-distill recipe.
+    let adapters = candle_resolve_scail2_adapters(settings, request)?;
+    let lightning = candle_scail2_adapters_have_lightning(&adapters);
+    let (steps, guidance, scheduler_shift) = candle_scail2_sampling(request, lightning);
     let input = VideoGenInput {
         engine_id,
         model_dir: resolve_candle_scail2_model_dir(settings)?,
+        adapters,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -3371,6 +3514,9 @@ async fn generate_candle_scail2(
         height: request.height,
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
+        steps,
+        guidance,
+        scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some(candle_scail2_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
@@ -3379,7 +3525,7 @@ async fn generate_candle_scail2(
     Ok((
         decoded,
         CANDLE_SCAIL2_ADAPTER,
-        candle_scail2_raw_settings(request),
+        candle_scail2_raw_settings(request, lightning),
     ))
 }
 

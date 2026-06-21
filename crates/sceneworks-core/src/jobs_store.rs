@@ -4180,10 +4180,11 @@ fn video_request_candle_vace_eligible(
 /// engine (NOT Wan-VACE), so it has its own gate rather than membership in [`CANDLE_VIDEO_VACE_MODELS`]:
 /// the `scail2_14b` model + the `animate_character` mode + a reference character image
 /// (`referenceAssetId` / `referenceAssetIds` / `sourceAssetId`) + a driving clip (`sourceClipAssetId`).
-/// LoRA / on-the-fly quant are not on the candle path (the provider rejects them; inference LoRA is the
-/// follow-up sc-6838). Mirrors the MLX `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape,
-/// expressed as a candle-claim gate. Factored out so the routing tests can probe it with synthetic
-/// payloads (parity with [`video_request_candle_eligible`]).
+/// Inference LoRA / LoKr / LoHa + the Bias-Aware DPO LoRA + the lightx2v lightning diff-patch ARE on the
+/// candle path now (sc-6838 — the provider merges them into the dense DiT), so a LoRA-bearing animate job
+/// stays on candle. On-the-fly quantization is still torch (the candle provider is dense). Mirrors the
+/// MLX `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
+/// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
 fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if model != "scail2_14b" {
         return false;
@@ -4212,13 +4213,8 @@ fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> 
     if !has_nonempty_id("sourceClipAssetId") {
         return false;
     }
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
-    {
-        return false;
-    }
+    // Inference LoRA (DPO / lightning / user adapter) merges into the candle DiT (sc-6838), so a
+    // LoRA-bearing animate job is candle-eligible — only on-the-fly quant still falls back to torch.
     if candle_request_wants_quant(payload) {
         return false;
     }
@@ -6410,6 +6406,20 @@ mod candle_routing_tests {
                 "scail2 animate_character must be candle-eligible: {payload:?}"
             );
         }
+        // An animate job carrying an inference LoRA (DPO / lightning / user adapter) stays on candle —
+        // the provider merges it into the dense DiT (sc-6838); only on-the-fly quant defers to torch.
+        assert!(
+            scail2_animate_candle_eligible(
+                "scail2_14b",
+                &object(json!({
+                    "mode": "animate_character",
+                    "referenceAssetIds": ["ref_1"],
+                    "sourceClipAssetId": "clip_1",
+                    "loras": [{ "name": "scail2-dpo" }]
+                }))
+            ),
+            "scail2 animate with a LoRA must stay candle-eligible (sc-6838)"
+        );
         // Cross-identity replacement: scail2_14b PersonReplace with the clip + track + character.
         assert!(scail2_replace_candle_eligible(
             "scail2_14b",
@@ -6462,22 +6472,17 @@ mod candle_routing_tests {
                 "sourceClipAssetId": "c"
             }))
         ));
-        // LoRA / on-the-fly quant defer to torch (the candle SCAIL-2 path has no LoRA yet — sc-6838).
-        for extra in [
-            json!({ "loras": [{ "name": "x" }] }),
-            json!({ "advanced": { "mlxQuantize": 8 } }),
-        ] {
+        // On-the-fly quant still defers to torch (the candle SCAIL-2 provider is dense).
+        {
             let mut payload = object(json!({
                 "mode": "animate_character",
                 "sourceAssetId": "i",
                 "sourceClipAssetId": "c"
             }));
-            for (k, v) in object(extra) {
-                payload.insert(k, v);
-            }
+            payload.insert("advanced".into(), json!({ "mlxQuantize": 8 }));
             assert!(
                 !scail2_animate_candle_eligible("scail2_14b", &payload),
-                "scail2 animate with LoRA/quant must defer to torch: {payload:?}"
+                "scail2 animate with on-the-fly quant must defer to torch: {payload:?}"
             );
         }
         // replace_person needs the clip + track + character; missing any → torch.

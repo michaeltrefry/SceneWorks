@@ -19,8 +19,8 @@
 use std::path::{Path, PathBuf};
 
 use gen_core::{
-    Conditioning, GenerationOutput, GenerationRequest, Image, LoadSpec, ReplacementMode,
-    WeightsSource,
+    AdapterKind, AdapterSpec, Conditioning, GenerationOutput, GenerationRequest, Image, LoadSpec,
+    ReplacementMode, WeightsSource,
 };
 
 fn env_path(key: &str) -> PathBuf {
@@ -195,7 +195,32 @@ fn scail2_candle_gpu_smoke() {
         video_mode: Some(mode.clone()),
         ..Default::default()
     };
-    let spec = LoadSpec::new(WeightsSource::Dir(snapshot));
+    // Optional inference LoRA (sc-6838): SCAIL2_LORA=<.safetensors> merges into the dense DiT before
+    // build. SCAIL2_LORA_SCALE (default 1.0) + SCAIL2_LORA_KIND (lora|lokr, default lora). A lightx2v
+    // lightning diff-patch file carries `.diff`/`.diff_b` deltas + the cross-arch `patch_embedding`
+    // skip; pair it with SCAIL2_STEPS=8 / SCAIL2_GUIDANCE=1.0 for the step-distill recipe. Unset →
+    // the byte-identical no-adapter (regression) path.
+    let spec = match std::env::var("SCAIL2_LORA")
+        .ok()
+        .map(|v| v.trim().to_string())
+    {
+        Some(p) if !p.is_empty() => {
+            let scale: f32 = env_or("SCAIL2_LORA_SCALE", "1.0")
+                .parse()
+                .expect("SCAIL2_LORA_SCALE");
+            let kind = match env_or("SCAIL2_LORA_KIND", "lora").as_str() {
+                "lokr" => AdapterKind::Lokr,
+                _ => AdapterKind::Lora,
+            };
+            println!("[smoke] merging adapter {p} (scale {scale}, {kind:?})");
+            LoadSpec::new(WeightsSource::Dir(snapshot)).with_adapters(vec![AdapterSpec::new(
+                PathBuf::from(p),
+                scale,
+                kind,
+            )])
+        }
+        _ => LoadSpec::new(WeightsSource::Dir(snapshot)),
+    };
     let generator = gen_core::load("scail2_14b", &spec).expect("load scail2_14b candle provider");
 
     let mut last = String::new();
