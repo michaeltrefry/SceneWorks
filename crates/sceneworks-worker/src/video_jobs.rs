@@ -2392,6 +2392,13 @@ struct VideoGenInput {
     /// Flow-matching scheduler shift (`req.scheduler_shift`); `None` ⇒ the engine default. Set by the
     /// SCAIL-2 lightning recipe (shift 1.0, sc-5700); the other models leave it at the engine default.
     scheduler_shift: Option<f32>,
+    /// Per-generation sampler / scheduler (epic 7114 P5, sc-7127). Left `None` by the handlers; the
+    /// shared funnel [`generate_video`] reads them from the job's `advanced` block and N3-guards them
+    /// against the resolved engine descriptor's advertised surface before they reach `req`. A video
+    /// engine that does not advertise the curated sampler/scheduler axis (everything but the Wan
+    /// fold-in + the SVD/LTX sampler-only outliers, until candle adoption) leaves these `None`.
+    sampler: Option<String>,
+    scheduler: Option<String>,
     seed: u64,
     /// Per-request control-clip conditioning scale (Wan-VACE `conditioning_scale`, sc-3441 /
     /// sc-3521); `None` ⇒ the engine default (1.0). Unused by the non-control paths.
@@ -2433,6 +2440,8 @@ impl Default for VideoGenInput {
             steps: None,
             guidance: None,
             scheduler_shift: None,
+            sampler: None,
+            scheduler: None,
             seed: 0,
             control_scale: None,
             video_mode: None,
@@ -2489,6 +2498,11 @@ fn run_loaded_video_generation(
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,
+        // Per-generation sampler / scheduler (sc-7127), already N3-guarded against the engine's
+        // advertised surface in `generate_video`, so an unsupported name was dropped to `None` (the
+        // engine default) before reaching here — `validate_request` only ever sees an advertised name.
+        sampler: input.sampler,
+        scheduler: input.scheduler,
         seed: Some(input.seed),
         conditioning: input.conditioning,
         control_scale: input.control_scale,
@@ -2637,6 +2651,28 @@ pub(crate) async fn begin_video_cancel(
     .await;
 }
 
+/// The `(samplers, schedulers)` a video engine advertises (epic 7114), read from its registered
+/// gen-core descriptor by engine id — the same `Capabilities` surface `validate_request` enforces, so
+/// the N3 guard in [`generate_video`] mirrors the image lane's `model.descriptor.capabilities` read.
+/// Empty (so every name N3-falls back to the engine default) when the id isn't registered on this
+/// backend — e.g. a candle video engine before it adopts the unified framework.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn video_engine_sampling_surface(engine_id: &str) -> (Vec<&'static str>, Vec<&'static str>) {
+    gen_core::registry::generators()
+        .map(|reg| (reg.descriptor)())
+        .find(|descriptor| descriptor.id == engine_id)
+        .map(|descriptor| {
+            (
+                descriptor.capabilities.samplers,
+                descriptor.capabilities.schedulers,
+            )
+        })
+        .unwrap_or_default()
+}
+
 /// Drive a `run_video_generation` on a blocking thread, forwarding its streamed denoise
 /// progress to the async worker (Generating stage ~0.25..0.58) + polling cancel ~every 2s.
 /// The shared blocking + mpsc + cancel plumbing for Wan and LTX. A forward-progress watchdog
@@ -2650,8 +2686,56 @@ async fn generate_video(
     settings: &Settings,
     job: &JobSnapshot,
     backend: &str,
-    input: VideoGenInput,
+    mut input: VideoGenInput,
 ) -> WorkerResult<DecodedVideo> {
+    // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
+    // `input.sampler`/`scheduler` `None`; read them from the job's `advanced` block here — the single
+    // funnel every Wan / LTX / SVD path passes through — and N3-guard each against the resolved engine
+    // descriptor's advertised surface. A name the engine does not advertise (every video engine but the
+    // Wan fold-in + the SVD/LTX sampler-only outliers, until candle adoption) is dropped to the engine
+    // default + a `sampling_knob_unsupported` event, never a `validate_request` hard-fail.
+    {
+        let advanced = VideoRequest::from_payload(&job.payload).advanced;
+        let read = |key: &str| {
+            advanced
+                .get(key)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "default")
+                .map(str::to_owned)
+        };
+        let (samplers, schedulers) = video_engine_sampling_surface(input.engine_id);
+        input.sampler = crate::image_jobs::normalize_sampling_knob(
+            read("sampler"),
+            &samplers,
+            "sampler",
+            input.engine_id,
+            &job.id,
+            backend,
+        );
+        input.scheduler = crate::image_jobs::normalize_sampling_knob(
+            read("scheduler"),
+            &schedulers,
+            "scheduler",
+            input.engine_id,
+            &job.id,
+            backend,
+        );
+        // Schedule shift: only when the handler hasn't already forced it (the SCAIL-2 lightning recipe
+        // sets shift 1.0), so the user knob can't clobber a model's required recipe. Parity with the
+        // image lane's `advanced.schedulerShift` / `timestepShift` read.
+        if input.scheduler_shift.is_none() {
+            input.scheduler_shift = advanced
+                .get("schedulerShift")
+                .or_else(|| advanced.get("timestepShift"))
+                .and_then(|value| {
+                    value
+                        .as_f64()
+                        .or_else(|| value.as_str()?.trim().parse().ok())
+                })
+                .map(|value| value as f32);
+        }
+    }
     let cancel = CancelFlag::new();
     let stall_timeout = video_stall_timeout();
     let log_engine_id = input.engine_id;
@@ -3066,6 +3150,8 @@ async fn generate_candle_video(
     // resolved above.
     if engine_id == "svd_xt" {
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id,
             model_dir,
             conditioning,
@@ -3117,6 +3203,8 @@ async fn generate_candle_video(
         wan_frame_count(request.raw_frame_count())
     };
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir,
         conditioning,
@@ -3504,6 +3592,8 @@ async fn generate_candle_scail2(
     let lightning = candle_scail2_adapters_have_lightning(&adapters);
     let (steps, guidance, scheduler_shift) = candle_scail2_sampling(request, lightning);
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir: resolve_candle_scail2_model_dir(settings)?,
         adapters,
@@ -3663,6 +3753,8 @@ async fn generate_candle_scail2_replace(
         resolve_candle_scail2_replace_conditioning(api, settings, job, request, project_path)
             .await?;
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir: resolve_candle_scail2_model_dir(settings)?,
         conditioning,
@@ -3748,6 +3840,8 @@ async fn generate_candle_wan_vace(
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     };
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id: "wan_vace",
         model_dir,
         conditioning,
@@ -3852,6 +3946,8 @@ async fn generate_candle_wan_vace_extend_bridge(
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     };
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id: "wan_vace",
         model_dir,
         conditioning,
@@ -3898,6 +3994,8 @@ async fn generate_wan(
         _ => resolve_wan_conditioning(settings, request, project_path, engine_id)?,
     };
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir: resolve_wan_model_dir(settings, &request.model, engine_id)?,
         quant: resolve_wan_quant(request),
@@ -4146,6 +4244,8 @@ async fn generate_bernini(
     let conditioning =
         resolve_bernini_conditioning(api, settings, job, request, project_path).await?;
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir: resolve_bernini_model_dir(settings)?,
         quant: resolve_bernini_quant(request),
@@ -4425,6 +4525,8 @@ async fn generate_scail2(
     let (steps, guidance, scheduler_shift) =
         scail2_sampling(request, scail2_adapters_have_lightning(&adapters));
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir: resolve_scail2_model_dir(settings)?,
         quant: resolve_scail2_quant(request),
@@ -4588,6 +4690,8 @@ async fn generate_scail2_replace(
     let (conditioning, status) =
         resolve_scail2_replace_conditioning(api, settings, job, request, project_path).await?;
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir: resolve_scail2_model_dir(settings)?,
         quant: resolve_scail2_quant(request),
@@ -5320,6 +5424,8 @@ async fn generate_ltx(
     // encoder — point the engine at it (sc-5608) before load. No-op for legacy/local conversions.
     ensure_bundled_ltx_gemma_dir(&model_dir);
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir,
         quant: None,
@@ -5598,6 +5704,8 @@ async fn generate_svd(
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir: resolve_svd_model_dir(settings)?,
         quant: None,
@@ -6236,6 +6344,8 @@ async fn generate_wan_vace_engine(
             .map(|value| value as f32)
     });
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id,
         model_dir,
         quant,
@@ -6631,6 +6741,8 @@ async fn generate_wan_vace_extend_bridge(
             .map(|value| value as f32)
     });
     let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
         engine_id: "wan_vace",
         model_dir,
         quant: resolve_wan_quant(request),
@@ -7161,6 +7273,8 @@ mod tests {
             build_vace_conditioning(frames, masks, vec![gray()], 1.0, ReplacementMode::FaceOnly)
                 .expect("conditioning builds");
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "wan_vace",
             model_dir,
             conditioning,
@@ -7260,6 +7374,8 @@ mod tests {
         let w = bernini_smoke_u32("SCENEWORKS_BERNINI_SMOKE_W", 832);
         let h = bernini_smoke_u32("SCENEWORKS_BERNINI_SMOKE_H", 480);
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "bernini",
             model_dir,
             quant: bernini_smoke_quant(),
@@ -7542,6 +7658,8 @@ mod tests {
 
         for (task, conditioning) in cases {
             let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
                 engine_id: "bernini",
                 model_dir: model_dir.clone(),
                 quant: Some(Quant::Q4),
@@ -7876,6 +7994,8 @@ mod tests {
                 },
             ];
             let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
                 engine_id: "scail2_14b",
                 model_dir: model_dir.clone(),
                 quant: Some(Quant::Q4),
@@ -7947,6 +8067,8 @@ mod tests {
         )
         .expect("extend conditioning builds");
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "wan_vace",
             model_dir,
             conditioning,
@@ -8234,6 +8356,8 @@ mod tests {
             return;
         };
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "wan2_2_ti2v_5b",
             model_dir,
             prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
@@ -8329,6 +8453,8 @@ mod tests {
             return;
         };
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "wan2_2_ti2v_5b",
             model_dir,
             conditioning: vec![Conditioning::Reference {
@@ -8424,6 +8550,8 @@ mod tests {
         }
         mlx_rs::memory::reset_peak_memory();
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "wan2_2_ti2v_5b",
             model_dir,
             prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
@@ -8681,6 +8809,8 @@ mod tests {
             }
         }
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "svd_xt",
             model_dir,
             width: 256,
@@ -8748,6 +8878,8 @@ mod tests {
             })
             .collect();
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "seedvr2_3b",
             model_dir: PathBuf::from(dir),
             conditioning: vec![Conditioning::VideoClip {
@@ -9179,6 +9311,8 @@ mod tests {
         // path) so the smoke needs no separate mlx-community/gemma snapshot in the HF cache.
         ensure_bundled_ltx_gemma_dir(&model_dir);
         let input = VideoGenInput {
+            sampler: None,
+            scheduler: None,
             engine_id: "ltx_2_3",
             model_dir,
             prompt: "a calm ocean wave at sunset, gentle surf".to_owned(),

@@ -766,6 +766,95 @@ pub(crate) fn emit_load_event(event: &str, job_id: &str, engine: &str, adapter_c
     );
 }
 
+/// N3 (epic 7114): a per-generation `sampler` / `scheduler` knob that names something the engine does
+/// NOT advertise must never hard-fail the generation. `gen_core::Capabilities::validate_request` (and
+/// each engine's own `validate`) rejects an unadvertised name with an `Err`, so the worker pre-filters
+/// the knob here against the linked descriptor's advertised surface (`Capabilities.samplers` /
+/// `.schedulers`): an advertised name passes through untouched; an unknown one — a stale recipe, a
+/// per-backend capability gap (candle advertises a narrower set than mlx until P4), or manifest drift —
+/// is dropped back to the engine default (`None`) and a `sampling_knob_unsupported` worker event is
+/// emitted for observability. `None` and the `"default"` sentinel are already stripped at the read site,
+/// so this only fires on a real, unsupported name. Shared by the MLX (`generate_stream`) + candle
+/// (`generate_candle_stream`) image lanes and the video lane (`run_loaded_video_generation`).
+pub(crate) fn normalize_sampling_knob(
+    requested: Option<String>,
+    advertised: &[&str],
+    knob: &str,
+    model_id: &str,
+    job_id: &str,
+    engine: &str,
+) -> Option<String> {
+    let name = requested?;
+    if advertised.contains(&name.as_str()) {
+        return Some(name);
+    }
+    tracing::warn!(
+        "{engine}: requested {knob} {name:?} is not advertised (supported: {advertised:?}); \
+         falling back to the engine default"
+    );
+    emit_event(
+        "sampling_knob_unsupported",
+        json!({
+            "jobId": job_id,
+            "engine": engine,
+            "model": model_id,
+            "knob": knob,
+            "requested": name,
+            "supported": advertised,
+        }),
+    );
+    None
+}
+
+#[cfg(test)]
+mod sampling_knob_tests {
+    use super::*;
+
+    #[test]
+    fn advertised_name_passes_through() {
+        let advertised = ["euler", "dpmpp_2m", "uni_pc"];
+        assert_eq!(
+            normalize_sampling_knob(
+                Some("dpmpp_2m".to_owned()),
+                &advertised,
+                "sampler",
+                "qwen_image",
+                "job-1",
+                "mlx",
+            ),
+            Some("dpmpp_2m".to_owned())
+        );
+    }
+
+    #[test]
+    fn unadvertised_name_falls_back_to_default() {
+        // N3: a name the engine doesn't advertise (a legacy `dpmpp`/`unipc` recipe, or a candle
+        // per-backend gap) is dropped to the engine default (`None`) instead of hard-failing the
+        // generation in `validate_request`.
+        let advertised = ["lightning"];
+        assert_eq!(
+            normalize_sampling_knob(
+                Some("dpmpp".to_owned()),
+                &advertised,
+                "sampler",
+                "qwen_image",
+                "job-1",
+                "mlx",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn unset_knob_stays_unset() {
+        let advertised = ["euler"];
+        assert_eq!(
+            normalize_sampling_knob(None, &advertised, "scheduler", "m", "j", "mlx"),
+            None
+        );
+    }
+}
+
 /// Optional prompt-enhancement settings resolved from a job request's `advanced` block and threaded
 /// into a [`GenerationRequest`] (sc-6135). Mirrors the LTX-2.3 video path (`advanced.enhancePrompt` /
 /// `enhanceTemperature` / `enhanceMaxTokens`). Only FLUX.2-dev / FLUX.2-dev-edit act on it — the
@@ -1293,6 +1382,27 @@ async fn generate_stream(
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .map(|value| value as f32);
+    // N3 (epic 7114): drop a sampler/scheduler the linked engine descriptor doesn't advertise back to
+    // the engine default + emit an event, instead of letting `validate_request` hard-fail the whole
+    // generation over a sampling knob (a stale recipe, manifest drift, or a per-backend gap). The forced
+    // `realvisxl_lightning` sampler above is always in that family's advertised set, so it passes through.
+    let caps = &model.descriptor.capabilities;
+    let sampler = normalize_sampling_knob(
+        sampler,
+        &caps.samplers,
+        "sampler",
+        &request.model,
+        &job.id,
+        backend,
+    );
+    let scheduler = normalize_sampling_knob(
+        scheduler,
+        &caps.schedulers,
+        "scheduler",
+        &request.model,
+        &job.id,
+        backend,
+    );
     // True-CFG families (Chroma) carry the CFG scale in `true_cfg`, not `guidance` (which their
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
@@ -1763,16 +1873,56 @@ async fn generate_candle_stream(
             (None, None)
         };
     let (width, height) = (request.width, request.height);
-    // RealVisXL Lightning (sc-7176, the candle sibling of the MLX forcing in `generate_stream`): the
-    // standalone distilled checkpoint must run on candle-gen-sdxl's few-step `lightning` (Euler-trailing,
-    // CFG-off) schedule, not the default 30-step DDIM, regardless of the UI payload. candle-gen-sdxl
-    // advertises `["ddim", "lightning"]`; every other candle txt2img family ignores the sampler (uses its
-    // single family default), so this is the only forced id. steps/guidance come from the manifest row.
-    let sampler: Option<&str> = if request.model == "realvisxl_lightning" {
-        Some("lightning")
+    // Per-payload sampler / scheduler / schedule-shift, mirroring the MLX `generate_stream` lane (the
+    // 1753 front-half advanced carrier — epic 7114 P5, sc-7127). RealVisXL Lightning (sc-7176) forces the
+    // few-step `lightning` id regardless of the payload: candle-gen-sdxl advertises `["ddim", "lightning"]`,
+    // so it survives the N3 guard below. Every value is then run through `normalize_sampling_knob` against
+    // this family's advertised surface — a name candle doesn't honor (candle adopts the unified framework in
+    // P4, so most families advertise only their family default today) is dropped back to the engine default
+    // + a `sampling_knob_unsupported` event, never a hard-fail. The curated knobs light up per-family with
+    // zero worker change as the candle engines are adopted.
+    let sampler = request
+        .advanced
+        .get("sampler")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "default")
+        .map(str::to_owned);
+    let sampler = if request.model == "realvisxl_lightning" {
+        Some("lightning".to_owned())
     } else {
-        None
+        sampler
     };
+    let scheduler = request
+        .advanced
+        .get("scheduler")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "default")
+        .map(str::to_owned);
+    let scheduler_shift = request
+        .advanced
+        .get("schedulerShift")
+        .or_else(|| request.advanced.get("timestepShift"))
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()))
+        .map(|value| value as f32);
+    let caps = &model.descriptor.capabilities;
+    let sampler = normalize_sampling_knob(
+        sampler,
+        &caps.samplers,
+        "sampler",
+        &request.model,
+        &job.id,
+        backend,
+    );
+    let scheduler = normalize_sampling_knob(
+        scheduler,
+        &caps.schedulers,
+        "scheduler",
+        &request.model,
+        &job.id,
+        backend,
+    );
     // sc-6135: caption upsampling is FLUX.2-dev-only and dev runs on the macOS path, so this is a
     // no-op here — resolved for uniformity (and so a future candle enhancer would be wired).
     let enhance = PromptEnhance::from_advanced(&request.advanced);
@@ -1802,13 +1952,13 @@ async fn generate_candle_stream(
                         ideogram_reference.as_ref(),
                         ideogram_mask.as_ref(),
                         true_cfg,
-                        // RealVisXL Lightning forces the few-step `lightning` sampler (sc-7176); every
-                        // other candle txt2img family advertises no sampler/scheduler selection (each uses
-                        // its family default), so `sampler` is `None` for them and scheduler/shift are
-                        // always unset on this lane.
-                        sampler,
-                        None,
-                        None,
+                        // Per-payload sampler / scheduler / schedule-shift (sc-7127), already N3-guarded
+                        // against this family's advertised surface above. RealVisXL Lightning forces
+                        // `lightning`; most candle families advertise only their default until P4, so an
+                        // unsupported request was dropped to `None` (the engine default) before reaching here.
+                        sampler.as_deref(),
+                        scheduler.as_deref(),
+                        scheduler_shift,
                         &enhance,
                         &cancel,
                         on_progress,
