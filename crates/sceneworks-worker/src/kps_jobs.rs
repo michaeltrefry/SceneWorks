@@ -146,8 +146,10 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
         .map_err(|error| WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}")))?;
     let scrfd = Scrfd::from_weights(&weights)
         .map_err(|error| WorkerError::Engine(format!("SCRFD load: {error}")))?;
+    // gen-core d8038beb (sc-7176 pin sync): `detector_blob` is now fallible (returns a `Result`).
     let (blob, det_scale) =
-        detector_blob(&image.pixels, image.height as usize, image.width as usize);
+        detector_blob(&image.pixels, image.height as usize, image.width as usize)
+            .map_err(|error| WorkerError::Engine(format!("SCRFD blob: {error}")))?;
     let dets = scrfd
         .detect(&blob, det_scale, DET_THRESH, NMS_THRESH)
         .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))?;

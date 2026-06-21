@@ -324,8 +324,11 @@ pub(crate) fn segment_track_blocking(
         .encode(CONCEPT_PROMPT)
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
 
+    // gen-core d8038beb (sc-7176 pin sync): `propagate` gained `cancel` + per-frame `progress` params
+    // (the video per-step cancel contract). `None, None` preserves the prior uncancellable,
+    // progress-silent behavior on this MLX path.
     let outputs = model
-        .propagate(&frames, &input_ids, &text_mask)
+        .propagate(&frames, &input_ids, &text_mask, None, None)
         .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
 
     // Associate SAM3's identities to the selected track, then emit that object's per-frame mask.
@@ -639,8 +642,10 @@ pub(crate) fn segment_all_persons_in_memory(
         .encode(CONCEPT_PROMPT)
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
 
+    // gen-core d8038beb (sc-7176 pin sync): `propagate` gained `cancel` + per-frame `progress` params;
+    // `None, None` preserves the prior uncancellable, progress-silent behavior on this MLX path.
     let outputs = model
-        .propagate(&tensors, &input_ids, &text_mask)
+        .propagate(&tensors, &input_ids, &text_mask, None, None)
         .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
 
     // Paint order: each object's centroid-x in the FIRST frame it appears, ascending (tie-break on

@@ -222,8 +222,11 @@ pub(crate) fn propagate_track_blocking(
                 )
                 .map_err(|e| WorkerError::Engine(format!("sam2 add_box: {e}")))?;
         }
+        // gen-core d8038beb (sc-7176 pin sync): `propagate` gained `cancel` + per-frame `progress`
+        // params (the video per-step cancel contract). Pass `None, None` to preserve the prior
+        // uncancellable, progress-silent behavior on this MLX path.
         let masks = predictor
-            .propagate(&mut state)
+            .propagate(&mut state, None, None)
             .map_err(|e| WorkerError::Engine(format!("sam2 propagate: {e}")))?;
         // `propagate` yields the prompt frame onward in order; build a dense per-clip-frame vec.
         let mut out = vec![Vec::new(); clip_frame_paths.len()];
