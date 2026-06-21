@@ -3733,6 +3733,14 @@ fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
 const CANDLE_ROUTED_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
+    // RealVisXL Lightning (sc-7176, the candle half of sc-6128): the standalone few-step distilled
+    // checkpoint shares the candle `sdxl` engine via a weights swap (like `realvisxl`), driven on the
+    // engine's few-step `lightning` (Euler-trailing, CFG-off) sampler the worker forces for this id.
+    // **txt2img only** — its edit / reference / mask / pose shapes are rejected below
+    // (`image_request_candle_eligible`) and fall back to the Python torch worker, exactly as the MLX
+    // `realvisxl_lightning_mlx_eligible` gate restricts the macOS path (the accel sampler is
+    // conditioning-incompatible).
+    "realvisxl_lightning",
     "z_image_turbo",
     "flux_schnell",
     "flux_dev",
@@ -5947,6 +5955,8 @@ mod candle_routing_tests {
         for model in [
             "sdxl",
             "realvisxl",
+            // sc-7176: RealVisXL Lightning routes to candle for plain txt2img (forced lightning sampler).
+            "realvisxl_lightning",
             "z_image_turbo",
             "flux_dev",
             "qwen_image",

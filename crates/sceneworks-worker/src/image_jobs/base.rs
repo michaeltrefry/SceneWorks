@@ -1534,6 +1534,10 @@ fn is_candle_engine(model: &str) -> bool {
         model,
         "sdxl"
             | "realvisxl"
+            // RealVisXL Lightning (sc-7176): shares the candle `sdxl` engine via a weights swap; the
+            // few-step `lightning` sampler is forced in `generate_candle_stream`. txt2img-only (the
+            // router defers its conditioning shapes to torch), so it rides the base candle txt2img lane.
+            | "realvisxl_lightning"
             | "z_image_turbo"
             | "flux_schnell"
             | "flux_dev"
@@ -1710,7 +1714,8 @@ async fn generate_candle_stream(
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     match request.model.as_str() {
-        "sdxl" | "realvisxl" => candle_gen_sdxl::set_flash_attn(flash_attn),
+        // realvisxl_lightning shares the candle `sdxl` engine (sc-7176), so the SDXL flash toggle applies.
+        "sdxl" | "realvisxl" | "realvisxl_lightning" => candle_gen_sdxl::set_flash_attn(flash_attn),
         "z_image_turbo" => candle_gen_z_image::set_accel_attn(flash_attn),
         _ => {}
     }
@@ -1758,6 +1763,16 @@ async fn generate_candle_stream(
             (None, None)
         };
     let (width, height) = (request.width, request.height);
+    // RealVisXL Lightning (sc-7176, the candle sibling of the MLX forcing in `generate_stream`): the
+    // standalone distilled checkpoint must run on candle-gen-sdxl's few-step `lightning` (Euler-trailing,
+    // CFG-off) schedule, not the default 30-step DDIM, regardless of the UI payload. candle-gen-sdxl
+    // advertises `["ddim", "lightning"]`; every other candle txt2img family ignores the sampler (uses its
+    // single family default), so this is the only forced id. steps/guidance come from the manifest row.
+    let sampler: Option<&str> = if request.model == "realvisxl_lightning" {
+        Some("lightning")
+    } else {
+        None
+    };
     // sc-6135: caption upsampling is FLUX.2-dev-only and dev runs on the macOS path, so this is a
     // no-op here — resolved for uniformity (and so a future candle enhancer would be wired).
     let enhance = PromptEnhance::from_advanced(&request.advanced);
@@ -1787,10 +1802,11 @@ async fn generate_candle_stream(
                         ideogram_reference.as_ref(),
                         ideogram_mask.as_ref(),
                         true_cfg,
-                        // The candle txt2img families don't advertise sampler/scheduler selection (each
-                        // uses its family default), so no override is forwarded — matching this path's
-                        // behavior before sc-5392 added those params for the macOS Chroma path.
-                        None,
+                        // RealVisXL Lightning forces the few-step `lightning` sampler (sc-7176); every
+                        // other candle txt2img family advertises no sampler/scheduler selection (each uses
+                        // its family default), so `sampler` is `None` for them and scheduler/shift are
+                        // always unset on this lane.
+                        sampler,
                         None,
                         None,
                         &enhance,
@@ -2111,6 +2127,7 @@ mod candle_label_tests {
         for model in [
             "sdxl",
             "realvisxl",
+            "realvisxl_lightning",
             "z_image_turbo",
             "flux_schnell",
             "flux_dev",

@@ -114,6 +114,10 @@ mod downloads;
 // in normal compiles. Drives the shipped worker conditioning + `gen_core::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod scail2_gpu_smoke;
+// Real-weight GPU smoke for the candle RealVisXL Lightning lane (sc-7176). Test-only + candle-only;
+// drives `gen_core::load("sdxl")` with the forced `lightning` sampler against the distilled checkpoint.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod realvisxl_lightning_gpu_smoke;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +

@@ -523,6 +523,12 @@ fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
             // sc-3963 engine knob: `None` keeps the per-call fresh seed (captions vary across
             // runs, the pre-bump behavior); an explicit `options.seed` reproduces a caption.
             seed: options.get("seed").and_then(Value::as_u64),
+            // gen-core d8038beb (sc-7176 pin sync) exposed the JoyCaption repetition penalty that was
+            // previously an internal engine constant. `..Default::default()` fills the new
+            // `repetition_penalty` (1.05) + `repetition_context` (256) with the shipped values, so
+            // captions stay byte-identical to the pre-bump behavior (and any future additive sampling
+            // fields keep their engine defaults until the worker wires them).
+            ..CaptionSampling::default()
         },
     }
 }

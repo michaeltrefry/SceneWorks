@@ -2076,13 +2076,13 @@
       // mask conditioning, so edit / inpaint / reference / detail stay on the 30-step base
       // `realvisxl`. openrail++ (commercial use OK, ungated), same license as the base.
       "capabilities": ["text_to_image", "style_variations"],
-      // Mac-only for now: the few-step path runs on the Rust mlx-gen `sdxl` engine's
-      // `lightning` (Euler-trailing) sampler. The Windows torch + candle few-step SDXL
-      // schedulers aren't wired yet (epic 2755, sc-2760/sc-2761), so a non-Mac host would
-      // render this distilled checkpoint at the wrong (30-step) schedule. Hide it off-Mac
-      // until that lands rather than ship a degraded result; the base `realvisxl` (30-step)
-      // stays available on every platform.
-      "macOnly": true,
+      // Cross-platform (sc-7176): the few-step `lightning` (Euler-trailing, CFG-off) sampler now runs on
+      // BOTH the macOS mlx-gen `sdxl` engine (sc-6075) AND the Windows/CUDA candle `sdxl` engine
+      // (candle-gen #121 / sc-6128). The worker forces `sampler="lightning"` for this id on both backends
+      // (MLX `generate_stream` + candle `generate_candle_stream`), so the distilled checkpoint renders at
+      // its native ~5-step schedule everywhere — no wrong 30-step result. txt2img only on candle; its
+      // edit / reference / mask / pose shapes fall back to the Python torch worker. Was `macOnly: true`
+      // until the candle lightning lane landed + was GPU-validated (~5-step render) on the RTX PRO 6000.
       "downloads": [
         {
           // Distilled checkpoint, distinct weights from RealVisXL_V5.0. openrail++, ungated,
