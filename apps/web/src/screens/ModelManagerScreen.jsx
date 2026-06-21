@@ -82,6 +82,14 @@ const MODEL_TYPE_OPTIONS = [
   { value: "utility", label: "Utility" },
 ];
 
+// sc-7081 (epic 7080): model upload/import is hidden + disabled on every platform until a
+// real compatibility + conversion pipeline exists behind it. Today an imported checkpoint
+// has no runnable engine (macOS is MLX-only with a compile-time engine table; off-Mac only
+// loads full diffusers repos), so the form is kept in source but not rendered. The API
+// refuses the request too. Flip to true once the pipeline gates imports on a compatibility
+// verdict.
+const MODEL_IMPORT_ENABLED = false;
+
 // Models render in type-grouped sections. Order is fixed; any model whose `type`
 // isn't listed here falls into a trailing "Other" group so nothing is hidden.
 const MODEL_TYPE_GROUPS = [
@@ -793,6 +801,7 @@ export function ModelManagerScreen() {
       {deleteMessage.text ? <p className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}>{deleteMessage.text}</p> : null}
 
       <section className="model-import-panel-section">
+        {MODEL_IMPORT_ENABLED && (
         <form className="lora-import-panel models-import-panel" aria-label="Import model" onSubmit={importModel}>
           <div>
             <strong>Import model</strong>
@@ -895,6 +904,7 @@ export function ModelManagerScreen() {
           </div>
           {modelImportMessage.text ? <p className={modelImportMessage.tone === "success" ? "inline-success" : "inline-warning"}>{modelImportMessage.text}</p> : null}
         </form>
+        )}
         {pendingModelImportJobs.length ? (
           <div className="lora-import-progress">
             <strong>Model imports in progress</strong>

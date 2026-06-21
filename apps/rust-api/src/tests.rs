@@ -5052,192 +5052,72 @@ async fn request_multipart_model_upload(
 }
 
 #[tokio::test]
-async fn model_import_routes_handle_url_upload_and_family_detection() {
+async fn model_import_route_is_disabled_on_every_platform() {
+    // sc-7081 (epic 7080): model upload/import is intentionally disabled until a real
+    // compatibility + conversion pipeline exists. Both the JSON and multipart entrypoints
+    // must short-circuit with an actionable 403 before any staging/queueing. The deeper
+    // validation/family-detection logic still lives behind `create_model_import_job` (and is
+    // covered by lora_family + worker tests); restore the route-level assertions when the
+    // feature is re-enabled.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
-    std::fs::write(
-            config_dir.join("builtin.models.jsonc"),
-            r#"
-            {
-              "schemaVersion": 1,
-              "models": [
-                { "id": "z_image_turbo", "name": "Z-Image Turbo", "family": "z-image", "type": "image", "loraCompatibility": { "families": ["z-image"] } }
-              ]
-            }
-            "#,
-        )
-        .expect("builtin models writes");
-    std::fs::write(
-        config_dir.join("user.models.jsonc"),
-        r#"{ "schemaVersion": 1, "models": [] }"#,
-    )
-    .expect("user models writes");
-    std::fs::write(
-        config_dir.join("builtin.loras.jsonc"),
-        r#"{ "schemaVersion": 1, "loras": [] }"#,
-    )
-    .expect("builtin loras writes");
-    std::fs::write(
-        config_dir.join("user.loras.jsonc"),
-        r#"{ "schemaVersion": 1, "loras": [] }"#,
-    )
-    .expect("user loras writes");
-    std::fs::write(
-        config_dir.join("builtin.recipe-presets.jsonc"),
-        r#"{ "schemaVersion": 1, "presets": [] }"#,
-    )
-    .expect("builtin presets writes");
-    std::fs::write(
-        config_dir.join("user.recipe-presets.jsonc"),
-        r#"{ "schemaVersion": 1, "presets": [] }"#,
-    )
-    .expect("user presets writes");
+    for (name, body) in [
+        (
+            "builtin.models.jsonc",
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        ),
+        (
+            "user.models.jsonc",
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        ),
+        (
+            "builtin.loras.jsonc",
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        ),
+        ("user.loras.jsonc", r#"{ "schemaVersion": 1, "loras": [] }"#),
+        (
+            "builtin.recipe-presets.jsonc",
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        ),
+        (
+            "user.recipe-presets.jsonc",
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        ),
+    ] {
+        std::fs::write(config_dir.join(name), body).expect("manifest writes");
+    }
 
-    // URL import without supplied family is accepted, payload echoes
-    // the request fields, and target dir lives under data/models/imports.
+    // JSON path: refused before any validation or queueing.
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (status, url_job) = request(
+    let (status, error) = request(
         app,
         "POST",
         "/api/v1/models/import",
         json!({
             "sourceUrl": "https://example.com/models/custom.safetensors",
-            "name": "Custom Model",
             "type": "image"
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(url_job["type"], "model_import");
-    assert_eq!(url_job["requestedGpu"], "auto");
-    assert_eq!(url_job["payload"]["modelId"], "custom_model");
-    assert_eq!(url_job["payload"]["modelName"], "Custom Model");
-    assert_eq!(
-        url_job["payload"]["manifestEntry"]["source"]["provider"],
-        "url"
-    );
-    assert_eq!(url_job["payload"]["manifestEntry"]["type"], "image");
-    assert!(url_job["payload"]["targetDir"]
-        .as_str()
-        .is_some_and(|value| value.contains("models/imports/custom_model")
-            || value.contains("models\\imports\\custom_model")));
-    assert!(url_job["payload"]["manifestEntry"].get("family").is_none());
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(error["detail"].as_str().unwrap_or("").contains("disabled"));
 
-    // Repo imports must be owner/name, not arbitrary path-like strings.
+    // Multipart path: refused before the upload is staged.
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (bad_repo_status, bad_repo_error) = request(
+    let (mp_status, mp_error) = request_multipart_model_upload(
         app,
-        "POST",
-        "/api/v1/models/import",
-        json!({
-            "repo": "owner/nested/model",
-            "name": "Bad Repo",
-            "type": "image"
-        }),
-    )
-    .await;
-    assert_eq!(bad_repo_status, StatusCode::BAD_REQUEST);
-    assert!(bad_repo_error["detail"]
-        .as_str()
-        .unwrap_or("")
-        .contains("owner/name"));
-
-    // Duplicate id is rejected with an actionable error.
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (dup_status, dup_error) = request(
-        app,
-        "POST",
-        "/api/v1/models/import",
-        json!({
-            "modelId": "z_image_turbo",
-            "sourceUrl": "https://example.com/models/clone.safetensors",
-            "name": "Clone"
-        }),
-    )
-    .await;
-    assert_eq!(dup_status, StatusCode::BAD_REQUEST);
-    assert!(dup_error["detail"]
-        .as_str()
-        .unwrap_or("")
-        .contains("already exists"));
-
-    // Local upload stages bytes, queues an import job, and family
-    // detection from a diffusers-style header auto-fills the manifest.
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let upload_bytes = test_safetensors_bytes_with_keys(&qwen_image_tensor_keys());
-    let (upload_status, upload_job) = request_multipart_model_upload(
-        app,
-        &[("name", "Auto Family"), ("type", "image")],
-        "auto-family.safetensors",
-        &upload_bytes,
-    )
-    .await;
-    assert_eq!(upload_status, StatusCode::CREATED);
-    assert_eq!(upload_job["type"], "model_import");
-    assert_eq!(upload_job["payload"]["modelId"], "auto_family");
-    assert_eq!(upload_job["payload"]["uploadedSourcePath"], true);
-    assert_eq!(
-        upload_job["payload"]["manifestEntry"]["family"],
-        "qwen-image"
-    );
-    assert_eq!(
-        upload_job["payload"]["manifestEntry"]["adapter"],
-        "qwen_image"
-    );
-    assert_eq!(
-        upload_job["payload"]["manifestEntry"]["capabilities"],
-        json!(["text_to_image", "style_variations"])
-    );
-    assert_eq!(
-        upload_job["payload"]["manifestEntry"]["loraCompatibility"]["families"],
-        json!(["qwen-image"])
-    );
-    let source_path = std::path::PathBuf::from(
-        upload_job["payload"]["sourcePath"]
-            .as_str()
-            .expect("source path"),
-    );
-    assert_eq!(
-        std::fs::read(&source_path).expect("staged upload reads"),
-        upload_bytes
-    );
-
-    // Declared family must match detected family when detection is
-    // confident — mismatch is rejected at the API boundary.
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (mismatch_status, mismatch_error) = request_multipart_model_upload(
-        app,
-        &[
-            ("name", "Mismatch"),
-            ("type", "image"),
-            ("family", "z-image"),
-        ],
-        "mismatch.safetensors",
+        &[("name", "Disabled"), ("type", "image")],
+        "disabled.safetensors",
         &test_safetensors_bytes_with_keys(&qwen_image_tensor_keys()),
     )
     .await;
-    assert_eq!(mismatch_status, StatusCode::BAD_REQUEST);
-    assert!(mismatch_error["detail"]
+    assert_eq!(mp_status, StatusCode::FORBIDDEN);
+    assert!(mp_error["detail"]
         .as_str()
         .unwrap_or("")
-        .contains("qwen-image"));
-
-    // Missing source produces an actionable error.
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (empty_status, empty_error) = request(
-        app,
-        "POST",
-        "/api/v1/models/import",
-        json!({ "name": "Nothing" }),
-    )
-    .await;
-    assert_eq!(empty_status, StatusCode::BAD_REQUEST);
-    assert!(empty_error["detail"]
-        .as_str()
-        .unwrap_or("")
-        .contains("Hugging Face repo"));
+        .contains("disabled"));
 }
 
 #[tokio::test]

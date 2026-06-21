@@ -5449,10 +5449,10 @@ describe("SceneWorks app shell", () => {
     expect(buttonInside(loraPanel(container), "Queue Import").disabled).toBe(false);
   });
 
-  it("queues model URL imports from the Models page", async () => {
-    const onImportModel = vi.fn(async (payload) => ({
-      payload: { ...payload, modelId: "custom_model", manifestEntry: { family: "z-image" } },
-    }));
+  it("hides the model import form while uploads are disabled pending conversion support (sc-7081)", async () => {
+    // The model upload/import form is gated off on every platform (MODEL_IMPORT_ENABLED)
+    // until the compatibility + conversion pipeline (epic 7080) lands — an imported
+    // checkpoint has no runnable engine today, and the API refuses the request too.
     root = createRoot(container);
     await act(async () => {
       root.render(
@@ -5463,61 +5463,17 @@ describe("SceneWorks app shell", () => {
           models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
           onDownloadModel: () => {},
           onImportLora: () => {},
-          onImportModel,
+          onImportModel: () => {},
           onOpenQueue: () => {},
         }),
       );
     });
 
-    const panel = modelImportPanel(container);
-    await changeField(field(panel, "Source URL"), "https://example.com/models/custom.safetensors");
-    await changeField(field(panel, "Name"), "Custom Model");
-    await act(async () => {
-      buttonInside(panel, "Queue Import").click();
-    });
-
-    expect(onImportModel).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceUrl: "https://example.com/models/custom.safetensors",
-        name: "Custom Model",
-        modelType: "image",
-      }),
-    );
-    expect(onImportModel.mock.calls[0][0]).not.toHaveProperty("family");
-    expect(container.textContent).toContain("Model import queued for custom_model.");
-    expect(container.textContent).toContain("Detected family: z-image.");
-  });
-
-  it("sends an explicit family override on model imports when chosen", async () => {
-    const onImportModel = vi.fn(async (payload) => ({
-      payload: { ...payload, modelId: "custom_model", manifestEntry: { family: payload.family } },
-    }));
-    root = createRoot(container);
-    await act(async () => {
-      root.render(
-        withModelManagerContext({
-          activeProject: null,
-          jobs: [],
-          loras: [],
-          models: [{ id: "z_image_turbo", name: "Z-Image Turbo", type: "image", family: "z-image" }],
-          onDownloadModel: () => {},
-          onImportLora: () => {},
-          onImportModel,
-          onOpenQueue: () => {},
-        }),
-      );
-    });
-
-    const panel = modelImportPanel(container);
-    await changeField(field(panel, "Family"), "z-image");
-    await changeField(field(panel, "Source URL"), "https://example.com/models/custom.safetensors");
-    await act(async () => {
-      buttonInside(panel, "Queue Import").click();
-    });
-
-    expect(onImportModel.mock.calls[0][0]).toEqual(
-      expect.objectContaining({ family: "z-image" }),
-    );
+    expect(modelImportPanel(container)).toBeNull();
+    expect(container.textContent).not.toContain("Import model");
+    // LoRA import is unaffected, and the rest of the Models page still renders.
+    expect(loraPanel(container)).not.toBeNull();
+    expect(container.textContent).toContain("Z-Image Turbo");
   });
 
   it("renders unassociated models with a needs-family badge", async () => {

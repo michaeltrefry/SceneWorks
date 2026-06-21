@@ -405,10 +405,32 @@ pub(crate) async fn delete_model(
     })))
 }
 
+/// Kill-switch for the model upload/import endpoint (sc-7081, epic 7080). Disabled on
+/// every platform until a real compatibility-check + conversion pipeline exists behind it:
+/// today an imported checkpoint never reaches a runnable engine. macOS dropped the torch
+/// worker (MLX-only, sc-3492) and resolves engines from a compile-time table a novel
+/// imported id is never in; the off-Mac diffusers path only loads full repos via
+/// `from_pretrained`, not the single files this endpoint accepts. Flip to `true` once the
+/// pipeline gates imports on an architecture-compatibility verdict (kept as a fn, not a
+/// `const`, so the guarded handler body stays reachable — no `unreachable_code`).
+fn model_import_enabled() -> bool {
+    false
+}
+
+const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled while native \
+     model support and conversion are being built. (LoRA import is unaffected.)";
+
 pub(crate) async fn create_model_import_job(
     State(state): State<AppState>,
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), Response> {
+    // sc-7081 (epic 7080): refuse before staging/queueing, covering both the JSON and
+    // multipart entrypoints. The route stays mounted so a direct API client gets an
+    // actionable 403 rather than a 404. See `model_import_enabled` for the rationale.
+    if !model_import_enabled() {
+        return Err(ApiError::forbidden(MODEL_IMPORT_DISABLED_DETAIL).into_response());
+    }
+
     let is_multipart = request
         .headers()
         .get(header::CONTENT_TYPE)

@@ -2313,6 +2313,13 @@ impl ApiError {
         }
     }
 
+    fn forbidden(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            detail: detail.into(),
+        }
+    }
+
     fn payload_too_large(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
