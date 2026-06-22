@@ -972,12 +972,14 @@ def test_qwen_image_manifest_has_mlx_block():
     assert mem_match and int(mem_match.group(1)) > 0, (
         "qwen_image mlx.minMemoryGb must be a positive int (sc-1972)"
     )
-    # MLX sampler/scheduler menu override
-    assert '"samplers": ["default"]' in mlx_block, (
-        "qwen_image mlx must restrict samplers to default (mflux loop is linear-only)"
+    # MLX sampler/scheduler menu (epic 7114 P5, sc-7126): the native MLX engine now
+    # routes through the unified curated sampler/scheduler framework (the old mflux
+    # linear-only loop is gone), so the mlx block advertises the curated menu.
+    assert '"dpmpp_2m"' in mlx_block and '"uni_pc"' in mlx_block, (
+        "qwen_image mlx must advertise the curated sampler menu (epic 7114)"
     )
-    assert '"schedulers": ["default"]' in mlx_block, (
-        "qwen_image mlx must restrict schedulers to default (mflux loop is linear-only)"
+    assert '"sgm_uniform"' in mlx_block, (
+        "qwen_image mlx must advertise the curated scheduler menu (epic 7114)"
     )
 
 def test_create_image_adapter_routes_qwen_image():
@@ -1087,11 +1089,13 @@ def test_z_image_turbo_manifest_has_mlx_block():
     assert mem_match and int(mem_match.group(1)) > 0, (
         "z_image_turbo mlx.minMemoryGb must be a positive int (sc-2145)"
     )
-    assert '"samplers": ["default"]' in mlx_block, (
-        "z_image_turbo mlx must restrict samplers to default (mflux loop is linear-only)"
+    # epic 7114 P5 (sc-7126): the native MLX engine adopted the unified curated
+    # sampler/scheduler framework, so the mflux linear-only restriction is gone.
+    assert '"dpmpp_2m"' in mlx_block and '"uni_pc"' in mlx_block, (
+        "z_image_turbo mlx must advertise the curated sampler menu (epic 7114)"
     )
-    assert '"schedulers": ["default"]' in mlx_block, (
-        "z_image_turbo mlx must restrict schedulers to default (mflux loop is linear-only)"
+    assert '"sgm_uniform"' in mlx_block, (
+        "z_image_turbo mlx must advertise the curated scheduler menu (epic 7114)"
     )
 
 def test_create_image_adapter_routes_z_image_turbo():

@@ -45,8 +45,8 @@
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
         "count": [1, 2, 4, 8],
         // Flow-matching DiT — full diffusers flow menu (epic 1753).
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["z-image"],
@@ -66,8 +66,8 @@
         "minMemoryGb": 40,
         "quantize": 8,
         "limits": {
-          "samplers": ["default"],
-          "schedulers": ["default"]
+          "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+          "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
       },
       "ui": {
@@ -125,8 +125,8 @@
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
         "count": [1, 2, 4, 8],
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["z-image"],
@@ -176,8 +176,8 @@
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
         "count": [1, 2, 4],
         // Flow-matching DiT — full diffusers flow menu (epic 1753).
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["qwen-image"],
@@ -197,8 +197,8 @@
         "minMemoryGb": 50,
         "quantize": 8,
         "limits": {
-          "samplers": ["default"],
-          "schedulers": ["default"]
+          "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+          "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
       },
       "ui": {
@@ -263,8 +263,8 @@
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
         "count": [1, 2, 4],
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["qwen-image"],
@@ -336,8 +336,8 @@
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
         "count": [1, 2, 4],
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["qwen-image"],
@@ -434,8 +434,14 @@
         "count": [1, 2, 4],
         // Vendored flow-matching loop — sampler/scheduler threaded through
         // sc-1764. Full flow menu surfaced once the vendored loop swap lands.
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "candle": {
+        "limits": {
+          "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+          "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+        }
       },
       "loraCompatibility": {
         // Same `lens` family as Lens-Turbo; a LoRA trained here applies to both.
@@ -489,8 +495,14 @@
         "count": [1, 2, 4],
         // Vendored flow-matching loop — sampler/scheduler threaded through
         // sc-1764. Full flow menu surfaced once the vendored loop swap lands.
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "candle": {
+        "limits": {
+          "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+          "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+        }
       },
       "loraCompatibility": {
         // Lens LoRA training (sc-1583) trains on the non-distilled microsoft/Lens
@@ -561,7 +573,7 @@
         "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
         "count": [1, 2, 4],
         "samplers": ["default"],
-        "schedulers": ["shift"]
+        "schedulers": ["default"]
       },
       "loraCompatibility": {
         // SenseNova-U1 is an 8B MoT autoregressive image model with no diffusion-LoRA merge path,
@@ -636,7 +648,7 @@
         "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
         "count": [1, 2, 4],
         "samplers": ["default"],
-        "schedulers": ["shift"]
+        "schedulers": ["default"]
       },
       "loraCompatibility": {
         // No user-LoRA path (MoT autoregressive; the distill LoRA is baked into this variant).
@@ -709,7 +721,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["flux"],
@@ -772,7 +786,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["flux"],
@@ -1075,8 +1091,8 @@
         // sampler / scheduler.
         "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"],
         "count": [1, 2, 4],
-        "samplers": ["default"],
-        "schedulers": ["default"]
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         // No Boogu LoRA wired yet (the engine descriptor reports supports_lora: false). Family
@@ -1228,8 +1244,8 @@
       "limits": {
         "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"],
         "count": [1, 2, 4],
-        "samplers": ["default"],
-        "schedulers": ["default"]
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["boogu"],
@@ -1299,7 +1315,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["flux2"],
@@ -1405,7 +1423,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["flux2"],
@@ -1495,7 +1515,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["flux2"],
@@ -1595,7 +1617,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2]
+        "count": [1, 2],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       // 32B DiT + ~24B Mistral TE. In-app Q4 *load* of the dense bf16 snapshot peaks
       // ~105 GB (> the 128 GB ceiling), so the snapshot is pre-quantized to Q4 ON DISK
@@ -1722,7 +1746,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         // Chroma is FLUX.1-schnell-derived and shares Flux's transformer layout,
@@ -1774,7 +1800,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         // Chroma is FLUX.1-schnell-derived and shares Flux's transformer layout,
@@ -1829,8 +1857,8 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "samplers": ["default", "euler", "heun"],
-        "schedulers": ["default"],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"],
         "count": [1, 2, 4]
       },
       "loraCompatibility": {
@@ -1884,7 +1912,9 @@
       },
       "limits": {
         "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         // Kolors uses an SDXL-style UNet. Advertise only the kolors family so the
@@ -1953,7 +1983,9 @@
       "limits": {
         // Native 1024x1024 plus the canonical SDXL aspect-ratio buckets.
         "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         // Declare the real family so the picker only offers sdxl-family LoRAs
@@ -2037,7 +2069,9 @@
       "limits": {
         // Native 1024x1024 plus the canonical SDXL aspect-ratio buckets.
         "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         // SDXL UNet, so sdxl-family LoRAs apply (per sc-1927 declare the real
@@ -2195,11 +2229,12 @@
         // bucket is safe (no face stretching — the sc-2009 kps-aspect fix).
         "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
         "count": [1, 2, 4],
-        // sc-3857: SDXL/epsilon sampler menu. The worker registry routes this
-        // epsilon pipe to standard solvers; dpmpp_sde + karras == "DPM++ SDE
-        // Karras" (the RealVisXL-recommended, sharper/less-saturated combo).
-        "samplers": ["default", "euler", "euler_a", "dpmpp", "dpmpp_sde", "unipc"],
-        "schedulers": ["default", "karras", "exponential"]
+        // Sampler/scheduler selection is default-only: the dedicated InstantID worker
+        // path (`generate_instantid_stream`) builds its request without reading
+        // `advanced.sampler`, so a curated menu here would be a silent no-op until that
+        // bespoke path is plumbed through the unified framework (tracked follow-up, epic 7114).
+        "samplers": ["default"],
+        "schedulers": ["default"]
       },
       "loraCompatibility": {
         // SDXL UNet, so sdxl-family LoRAs apply (per sc-1927 declare the real
@@ -2696,8 +2731,8 @@
         "resolutions": ["832x480", "1280x720", "720x1280"],
         // Diffusers WanPipeline (torch backend) supports flow-matching swaps
         // via apply_sampler. Per-backend MLX override below pins default-only.
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default"],
+        "schedulers": ["default"]
       },
       "loraCompatibility": {
         "families": ["wan-video"],
@@ -2803,8 +2838,8 @@
         "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
         // Diffusers WanPipeline (torch backend) supports flow-matching swaps
         // via apply_sampler. MLX path is default-only — declared on mlx.limits.
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default"],
+        "schedulers": ["default"]
       },
       "loraCompatibility": {
         "families": ["wan-video"],
@@ -2910,8 +2945,8 @@
         "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
         // Diffusers WanPipeline (torch backend) supports flow-matching swaps
         // via apply_sampler. MLX path is default-only — declared on mlx.limits.
-        "samplers": ["default", "euler", "heun", "dpmpp", "unipc"],
-        "schedulers": ["default", "simple", "shift", "karras", "exponential", "beta"]
+        "samplers": ["default"],
+        "schedulers": ["default"]
       },
       "loraCompatibility": {
         "families": ["wan-video"],

@@ -7,13 +7,32 @@
   "$defs": {
     "samplerKey": {
       "type": "string",
-      "enum": ["default", "euler", "heun", "dpmpp", "unipc"],
-      "description": "Integration method offered by a diffusers flow-matching adapter (epic 1753). \"default\" = whatever the loaded pipeline ships with (no swap)."
+      "enum": [
+        "default",
+        "euler",
+        "euler_ancestral",
+        "heun",
+        "dpmpp_2m",
+        "dpmpp_sde",
+        "uni_pc",
+        "lcm",
+        "ddim"
+      ],
+      "description": "Sampler (integration method) from the unified curated framework (epic 7114, decision 2), honored by the native mlx-gen / candle-gen engines. Names match gen-core's Solver registry exactly. \"default\" = the engine's native sampler (no swap). Supersedes the epic-1753 diffusers vocabulary (dpmpp -> dpmpp_2m, unipc -> uni_pc, + euler_ancestral / dpmpp_sde / lcm / ddim)."
     },
     "schedulerKey": {
       "type": "string",
-      "enum": ["default", "simple", "shift", "karras", "exponential", "beta"],
-      "description": "Sigma / timestep schedule axis (epic 1753). \"shift\" pairs with defaults.schedulerShift / advanced.schedulerShift. \"default\" preserves the trained schedule."
+      "enum": [
+        "default",
+        "normal",
+        "simple",
+        "karras",
+        "exponential",
+        "sgm_uniform",
+        "beta",
+        "ddim_uniform"
+      ],
+      "description": "Sigma schedule from the unified curated framework (epic 7114, decision 2). Names match gen-core's Scheduler registry exactly. \"default\" preserves the engine's native schedule. The epic-1753 \"shift\" pseudo-scheduler is gone — the per-generation time shift is the orthogonal defaults.schedulerShift / advanced.schedulerShift knob, not a scheduler choice."
     },
     "samplerLimits": {
       "type": "object",

@@ -634,6 +634,102 @@ mod tests {
         s
     }
 
+    // ── epic 7114 P5 / sc-7126: manifest ⊆ descriptor drift guard ────────────────────────────────
+    // The builtin manifest's advertised sampler/scheduler menu for a model MUST be a subset of what
+    // the linked engine descriptor actually advertises on the ACTIVE backend, or the worker N3-falls
+    // the name back to the default (sc-7127) — i.e. the UI offers a knob the engine silently ignores.
+    // This test parses the embedded manifest and, for every image model with a linked descriptor,
+    // asserts the per-backend-effective menu (base `limits` overridden by `<backend>.limits`) is
+    // honoured by the descriptor. It checks `mlx` on macOS (where the MLX provider crates are linked)
+    // and `candle` on the `backend-candle` build — whichever registry is active — so each backend's
+    // truthfulness is enforced on its own lane. `"default"` is the engine-default sentinel, always allowed.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn parse_builtin_models() -> serde_json::Value {
+        let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1;
+        let stripped = sceneworks_core::jsonc::strip_jsonc_comments(text);
+        serde_json::from_str(&stripped).expect("parse builtin.models.jsonc")
+    }
+
+    // The effective `limits[key]` list for `backend`: the per-backend `<backend>.limits[key]` override
+    // if present, else the base `limits[key]`. `None` => the model advertises no list for that axis.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn effective_list(model: &serde_json::Value, backend: &str, key: &str) -> Option<Vec<String>> {
+        let pick = |scope: &serde_json::Value| {
+            scope
+                .get("limits")
+                .and_then(|l| l.get(key))
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+        };
+        model.get(backend).and_then(pick).or_else(|| pick(model))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn manifest_menu_is_subset_of_descriptor() {
+        // The active backend's registry: MLX on macOS, candle on the `backend-candle` build.
+        let backend = if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle"
+        };
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        let mut violations: Vec<String> = Vec::new();
+        for model in models {
+            let Some(id) = model["id"].as_str() else {
+                continue;
+            };
+            // Only image models with a linked descriptor (MODEL_TABLE). Video / unlinked models are out
+            // of this guard's scope (their descriptors aren't reached via `mlx_model`).
+            let Some(resolved) = mlx_model(id) else {
+                continue;
+            };
+            let caps = &resolved.descriptor.capabilities;
+            for (axis, advertised) in [
+                ("samplers", &caps.samplers),
+                ("schedulers", &caps.schedulers),
+            ] {
+                if let Some(list) = effective_list(model, backend, axis) {
+                    for name in list {
+                        if name == "default" {
+                            continue;
+                        }
+                        if !advertised.contains(&name.as_str()) {
+                            violations.push(format!(
+                                "{id}: {backend} {axis} {name:?} not advertised by descriptor {:?} (advertised: {advertised:?})",
+                                resolved.descriptor.id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "manifest advertises {} sampler/scheduler name(s) the {backend} engine does not honor:\n  {}",
+            violations.len(),
+            violations.join("\n  ")
+        );
+    }
+
     // An MLX-backed stub generator registered into the same `inventory` registry the real
     // provider crates use, with an id that IS in MODEL_TABLE (`z_image_turbo`). On Linux/Windows
     // no real provider crate is linked, so this is the only generator the derivation sees — which
