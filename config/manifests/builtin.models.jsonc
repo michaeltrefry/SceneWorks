@@ -432,16 +432,10 @@
       "limits": {
         "resolutions": ["1024x1024", "1440x1440", "1152x864", "864x1152", "1376x768", "768x1376"],
         "count": [1, 2, 4],
-        // Vendored flow-matching loop — sampler/scheduler threaded through
-        // sc-1764. Full flow menu surfaced once the vendored loop swap lands.
-        "samplers": ["default"],
-        "schedulers": ["default"]
-      },
-      "candle": {
-        "limits": {
-          "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
-          "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
-        }
+        // sc-7305: mlx + candle Lens both adopt the unified curated sampler framework, so the curated
+        // menu now applies to BOTH backends — the candle-only override is dropped (last asymmetry gone).
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         // Same `lens` family as Lens-Turbo; a LoRA trained here applies to both.
@@ -493,16 +487,10 @@
         // these map to 1:1 (1024 & 1440), 4:3, 3:4, 16:9, and 9:16 base-1024 buckets.
         "resolutions": ["1024x1024", "1440x1440", "1152x864", "864x1152", "1376x768", "768x1376"],
         "count": [1, 2, 4],
-        // Vendored flow-matching loop — sampler/scheduler threaded through
-        // sc-1764. Full flow menu surfaced once the vendored loop swap lands.
-        "samplers": ["default"],
-        "schedulers": ["default"]
-      },
-      "candle": {
-        "limits": {
-          "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
-          "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
-        }
+        // sc-7305: mlx + candle Lens both adopt the unified curated sampler framework, so the curated
+        // menu now applies to BOTH backends — the candle-only override is dropped (last asymmetry gone).
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         // Lens LoRA training (sc-1583) trains on the non-distilled microsoft/Lens
