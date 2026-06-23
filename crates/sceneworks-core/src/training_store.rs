@@ -465,6 +465,92 @@ impl TrainingDatasetStore {
         Ok(dataset)
     }
 
+    /// Re-point dataset items at derived images (sc-6539 one-tap fixes). Each entry names an item and a
+    /// project-relative `source_path` — the derived bytes the worker just wrote as a library child asset
+    /// (e.g. an upscale) — plus that child `asset_id`. The bytes are copied into the dataset's `images/`
+    /// so the dataset stays self-contained, then [`repoint_item`] swaps the item's source while
+    /// preserving its caption/identity. Items edited away since the job ran are skipped (the fix
+    /// self-invalidates). Bumps the dataset version, since the pixels changed.
+    pub fn repoint_dataset_items(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        repoints: &[DatasetItemRepoint],
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let root = dataset_root(&self.project_path, &dataset.id);
+        let project_root = fs::canonicalize(&self.project_path)?;
+        let mut changed = false;
+        for repoint in repoints {
+            if !is_safe_relative_path(&repoint.source_path) {
+                return Err(ProjectStoreError::BadRequest(
+                    "Invalid derived image path".to_owned(),
+                ));
+            }
+            let Some(index) = dataset
+                .items
+                .iter()
+                .position(|item| item.id == repoint.item_id)
+            else {
+                continue;
+            };
+            let source = fs::canonicalize(self.project_path.join(&repoint.source_path)).map_err(
+                |error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        ProjectStoreError::NotFound("Derived image not found".to_owned())
+                    } else {
+                        ProjectStoreError::Io(error)
+                    }
+                },
+            )?;
+            if !source.starts_with(&project_root) || !source.is_file() {
+                return Err(ProjectStoreError::BadRequest(
+                    "Invalid derived image path".to_owned(),
+                ));
+            }
+            let extension = source
+                .extension()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_else(|| "png".to_owned());
+            let relative_path = format!("images/{}.{extension}", repoint.item_id);
+            let target = root.join(&relative_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &target)?;
+            // Drop the item's previous file if its extension (hence path) changed, to avoid orphans.
+            let previous = root.join(&dataset.items[index].path);
+            if previous != target && previous.exists() {
+                let _ = fs::remove_file(&previous);
+            }
+            let (width, height) = match crate::media_convert::image_dimensions(&target) {
+                Some((file_w, file_h)) => (Some(file_w), Some(file_h)),
+                None => (None, None),
+            };
+            let content_hash = crate::media_convert::file_content_hash(&target).ok();
+            dataset.items[index] = repoint_item(
+                &dataset.items[index],
+                RepointSource {
+                    asset_id: repoint.asset_id.clone(),
+                    path: relative_path,
+                    width,
+                    height,
+                    content_hash,
+                },
+            );
+            changed = true;
+        }
+        if changed {
+            dataset.version = dataset.version.saturating_add(1);
+            dataset.updated_at = utc_now();
+            self.save_dataset(&dataset)?;
+        }
+        Ok(dataset)
+    }
+
     pub fn write_caption_sidecars(
         &self,
         project_id: &str,
@@ -938,6 +1024,15 @@ pub struct RepointSource {
     pub height: Option<u32>,
     /// SHA-256 of the derived bytes — the new exact-dup / cache key.
     pub content_hash: Option<String>,
+}
+
+/// One item to re-point at a derived image (sc-6539). `source_path` is project-relative — the derived
+/// child asset the worker wrote; `asset_id` is that child asset (so the item gains library lineage).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatasetItemRepoint {
+    pub item_id: String,
+    pub asset_id: Option<String>,
+    pub source_path: String,
 }
 
 /// Re-point a dataset item at a derived image (sc-6539 one-tap fixes). Preserves the item's
@@ -1566,6 +1661,73 @@ mod tests {
         assert_eq!(repointed.id, "item_3");
         assert_eq!(repointed.asset_id.as_deref(), Some("asset_derived"));
         assert_eq!(repointed.content_hash.as_deref(), Some("h3_up"));
+    }
+
+    #[test]
+    fn repoint_dataset_items_copies_derived_bytes_swaps_source_and_bumps_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+
+        // A "derived" image the worker would have written as a child asset under the project.
+        let derived_rel = "assets/images/derived.png";
+        let derived_abs = dir.path().join(derived_rel);
+        std::fs::create_dir_all(derived_abs.parent().unwrap()).unwrap();
+        std::fs::write(&derived_abs, b"upscaled-bytes").unwrap();
+
+        let updated = store
+            .repoint_dataset_items(
+                "proj",
+                "ds_test",
+                &[
+                    DatasetItemRepoint {
+                        item_id: "item_1".to_owned(),
+                        asset_id: Some("asset_upscaled".to_owned()),
+                        source_path: derived_rel.to_owned(),
+                    },
+                    // An item edited away since the job ran is silently skipped.
+                    DatasetItemRepoint {
+                        item_id: "ghost".to_owned(),
+                        asset_id: None,
+                        source_path: derived_rel.to_owned(),
+                    },
+                ],
+            )
+            .expect("repoint");
+
+        let item_1 = updated.items.iter().find(|i| i.id == "item_1").unwrap();
+        assert_eq!(item_1.asset_id.as_deref(), Some("asset_upscaled"));
+        assert_eq!(item_1.path, "images/item_1.png");
+
+        // The derived bytes were copied into the dataset's images/, and the item now hashes them.
+        let copied = dataset_root(&store.project_path, "ds_test").join("images/item_1.png");
+        assert_eq!(std::fs::read(&copied).unwrap(), b"upscaled-bytes");
+        assert_eq!(
+            item_1.content_hash,
+            crate::media_convert::file_content_hash(&copied).ok()
+        );
+        assert!(item_1.content_hash.is_some());
+
+        // Pixels changed → version bumped once; the untouched item keeps its source.
+        assert_eq!(updated.version, 2);
+        let item_2 = updated.items.iter().find(|i| i.id == "item_2").unwrap();
+        assert_eq!(item_2.content_hash.as_deref(), Some("h2"));
+        assert!(item_2.asset_id.is_none());
+    }
+
+    #[test]
+    fn repoint_dataset_items_rejects_an_out_of_project_source() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+        let result = store.repoint_dataset_items(
+            "proj",
+            "ds_test",
+            &[DatasetItemRepoint {
+                item_id: "item_1".to_owned(),
+                asset_id: None,
+                source_path: "../escape.png".to_owned(),
+            }],
+        );
+        assert!(matches!(result, Err(ProjectStoreError::BadRequest(_))));
     }
 
     #[test]
