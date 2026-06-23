@@ -107,6 +107,8 @@ mod training_jobs;
 use training_jobs::*;
 mod caption_jobs;
 use caption_jobs::*;
+mod dataset_analysis_jobs;
+use dataset_analysis_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 mod downloads;
@@ -647,6 +649,12 @@ async fn run_utility_job(
         JobType::TrainingCaption => run_training_caption_job(api, settings, &job)
             .await
             .map_err(|error| ("Training captioning failed.", error)),
+        // Dataset Doctor CLIP-embedding analysis (sc-6535): the macOS MLX worker embeds every dataset
+        // image (clip_vit_l14) and POSTs the content-hash sidecar; off-Mac the handler returns a
+        // precise unsupported error (no candle CLIP embedder yet).
+        JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Dataset analysis failed.", error)),
         // Native candle prompt refinement (epic 5095, sc-5525): routes `prompt_refine` to the candle
         // `TextLlm` provider (Llama-3.2-3B) via `gen_core::load_textllm`. The candle worker advertises
         // `prompt_refine` only when `backend_candle_enabled` (engines::registry_capabilities from the

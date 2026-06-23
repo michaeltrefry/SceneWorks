@@ -603,6 +603,16 @@ pub(crate) fn registry_capabilities(
     }) {
         push(Cap::TrainingCaption, &mut caps);
     }
+    // Dataset Doctor CLIP image embedder (sc-6535): mlx-gen-clip registers a `gen_core::ImageEmbedder`
+    // under `clip_vit_l14`. Advertise `dataset_analysis` only when that embedder is registered and its
+    // backend is enabled — so before mlx-gen-clip is force-linked (dataset_analysis_jobs.rs) the job
+    // stays queued rather than mis-claimed. Mirrors the captioner derivation above.
+    if gen_core::registry::image_embedders().any(|r| {
+        let d = (r.descriptor)();
+        backends.contains(&d.backend) && d.id == "clip_vit_l14"
+    }) {
+        push(Cap::DatasetAnalysis, &mut caps);
+    }
     // Prompt-refinement TextLlm (sc-5500 contract / sc-5525 candle cutover / sc-5552 mlx twin): a
     // prompt-refine provider registers a `TextLlm` under id `prompt_refine`. Advertise `prompt_refine`
     // when its backend is enabled — the native MLX Llama-3.2-3B path on macOS (sc-5552) and the candle

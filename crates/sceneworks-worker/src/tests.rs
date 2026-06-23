@@ -603,7 +603,7 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
     let expected: BTreeSet<_> = [
         // seed
         WorkerCapability::Gpu,
-        // 6 registry-derived
+        // 7 registry-derived
         WorkerCapability::ImageGenerate,
         WorkerCapability::VideoGenerate,
         WorkerCapability::LoraTrain,
@@ -612,6 +612,9 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-5552: the native MLX `prompt_refine` TextLlm provider (mlx-gen-prompt-refine) is
         // force-linked on macOS, so the registry now derives PromptRefine from its descriptor.
         WorkerCapability::PromptRefine,
+        // sc-6535: mlx-gen-clip registers the CLIP `clip_vit_l14` ImageEmbedder (force-linked in
+        // dataset_analysis_jobs.rs), so the registry derives DatasetAnalysis from its descriptor.
+        WorkerCapability::DatasetAnalysis,
         // carve-outs
         WorkerCapability::ImageEdit,
         WorkerCapability::ImageDetail,
