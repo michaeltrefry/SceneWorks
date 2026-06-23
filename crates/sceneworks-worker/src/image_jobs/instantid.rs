@@ -671,6 +671,31 @@ async fn generate_instantid_stream(
     };
     let total = work.len();
 
+    // Curated unified-sampler selection (epic 7114, sc-7432). InstantID builds its bespoke request
+    // OUTSIDE base.rs's generic plumbing, so read the per-generation knob here and N3-normalize it
+    // against the shared curated menu both engines honor — mlx #538 / candle #130 route a curated
+    // solver/scheduler through the additive `denoise_curated` path; an unknown name drops back to the
+    // engine default + emits an event rather than hard-failing `validate_request`. N1: with neither set
+    // the request carries `None` ⇒ the bespoke ancestral default loop runs byte-for-byte unchanged.
+    let (curated_samplers, curated_schedulers) = curated_image_menu();
+    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let sampler = normalize_sampling_knob(
+        sampler,
+        &curated_samplers,
+        "sampler",
+        &request.model,
+        &job.id,
+        backend,
+    );
+    let scheduler = normalize_sampling_knob(
+        scheduler,
+        &curated_schedulers,
+        "scheduler",
+        &request.model,
+        &job.id,
+        backend,
+    );
+
     let negative_prompt = request.negative_prompt.clone();
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -796,6 +821,8 @@ async fn generate_instantid_stream(
                         controlnet_scale,
                         openpose_scale,
                         seed: seed as u64,
+                        sampler: sampler.clone(),
+                        scheduler: scheduler.clone(),
                         cancel: cancel.clone(),
                     };
                     let result = match &action {
@@ -834,6 +861,8 @@ async fn generate_instantid_stream(
                             controlnet_scale,
                             openpose_scale,
                             seed: seed as u64,
+                            sampler: sampler.clone(),
+                            scheduler: scheduler.clone(),
                             cancel: cancel.clone(),
                         };
                         out = match model.restore_face(

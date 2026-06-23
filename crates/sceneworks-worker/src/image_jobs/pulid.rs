@@ -357,6 +357,28 @@ async fn generate_pulid_flux_stream(
     let id_weight = pulid_id_weight(request);
     let start_cfg = pulid_timestep_to_start_cfg(request);
     let (quant, recipe_bits) = pulid_quant(request);
+    // Curated unified-sampler selection (epic 7114, sc-7432): PuLID-FLUX delegates its denoise to the
+    // FLUX backbone, which honors a curated solver/scheduler on the `GenerationRequest` (#537). Read +
+    // N3-normalize against the shared curated menu (an unknown name drops to the engine default + emits
+    // an event). N1: unset ⇒ `None` ⇒ the native flow-match default loop runs byte-exact.
+    let (curated_samplers, curated_schedulers) = curated_image_menu();
+    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let sampler = normalize_sampling_knob(
+        sampler,
+        &curated_samplers,
+        "sampler",
+        &request.model,
+        &job.id,
+        backend,
+    );
+    let scheduler = normalize_sampling_knob(
+        scheduler,
+        &curated_schedulers,
+        "scheduler",
+        &request.model,
+        &job.id,
+        backend,
+    );
     let repo = request
         .model_manifest_entry
         .get("repo")
@@ -406,6 +428,9 @@ async fn generate_pulid_flux_stream(
                     guidance: Some(guidance),
                     true_cfg: None,
                     timestep_to_start_cfg: Some(start_cfg),
+                    sampler: sampler.clone(),
+                    scheduler: scheduler.clone(),
+                    scheduler_shift,
                     conditioning: vec![Conditioning::Reference {
                         image: reference.clone(),
                         strength: Some(id_weight),

@@ -216,6 +216,9 @@ fn kolors_control_generate_one(
     reference: &Image,
     ip_scale: f32,
     img2img_strength: f32,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -240,6 +243,12 @@ fn kolors_control_generate_one(
         steps: Some(steps),
         guidance,
         strength: Some(img2img_strength),
+        // Curated unified-sampler selection (epic 7114, sc-7432): the combined-pose tier honors a
+        // curated solver/scheduler via the kolors engine's `denoise_curated` path (#539). `None` ⇒ the
+        // native leading-Euler default, byte-exact (N1).
+        sampler: sampler.map(str::to_owned),
+        scheduler: scheduler.map(str::to_owned),
+        scheduler_shift,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -324,6 +333,26 @@ async fn generate_kolors_control_stream(
     let control_scale = kolors_pose_control_scale(request);
     let ip_scale =
         advanced::f32_clamped(&request.advanced, "ipAdapterScale", KOLORS_IP_SCALE, 0.0..=1.0);
+    // Curated unified-sampler selection (epic 7114, sc-7432): the combined-pose tier builds its own
+    // `GenerationRequest`, so read + N3-normalize the knob against the linked kolors descriptor (the
+    // same advertised set base.rs uses for the generic kolors path). N1: unset ⇒ `None` ⇒ native default.
+    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let sampler = normalize_sampling_knob(
+        sampler,
+        &kolors.descriptor.capabilities.samplers,
+        "sampler",
+        &request.model,
+        &job.id,
+        backend,
+    );
+    let scheduler = normalize_sampling_knob(
+        scheduler,
+        &kolors.descriptor.capabilities.schedulers,
+        "scheduler",
+        &request.model,
+        &job.id,
+        backend,
+    );
     let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &kolors);
     let poses = parse_poses(request);
@@ -384,6 +413,9 @@ async fn generate_kolors_control_stream(
                     reference,
                     ip_scale,
                     KOLORS_POSE_IMG2IMG_STRENGTH,
+                    sampler.as_deref(),
+                    scheduler.as_deref(),
+                    scheduler_shift,
                     &cancel,
                     on_progress,
                 )?;

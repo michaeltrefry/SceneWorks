@@ -2217,11 +2217,15 @@
         // bucket is safe (no face stretching — the sc-2009 kps-aspect fix).
         "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"],
         "count": [1, 2, 4],
-        // Sampler/scheduler selection is default-only: the dedicated InstantID worker
-        // path (`generate_instantid_stream`) builds its request without reading
-        // `advanced.sampler`, so a curated menu here would be a silent no-op until that
-        // bespoke path is plumbed through the unified framework (tracked follow-up, epic 7114).
-        "samplers": ["default"],
+        // Curated sampler selection (epic 7114, sc-7432): the bespoke InstantID worker path
+        // (`generate_instantid_stream`) now reads `advanced.sampler` and threads a curated solver
+        // through the engine's additive `denoise_curated` path. Advertise only the real-weight-validated
+        // solvers (mlx #538 / candle #130 identity smokes): euler + heun preserve identity as well as the
+        // bespoke ancestral default (ArcFace cosine ~0.79 mlx / ~0.72 candle); dpmpp_2m renders a
+        // recognizable identity but is the weakest under InstantID's strong conditioning (~0.63 mlx /
+        // ~0.70 candle), so it trails the menu. Scheduler stays default-only (the smokes held it at the
+        // native schedule). "default" = the native ancestral loop (N1 byte-exact when left unset).
+        "samplers": ["default", "euler", "heun", "dpmpp_2m"],
         "schedulers": ["default"]
       },
       "loraCompatibility": {
@@ -2329,7 +2333,13 @@
         // principle (FLUX DiT is bucket-agnostic) but were not run in the spike;
         // limit until follow-up A/B widens it.
         "resolutions": ["1024x1024"],
-        "count": [1, 2, 4]
+        "count": [1, 2, 4],
+        // Curated sampler selection (epic 7114, sc-7432): the bespoke PuLID-FLUX worker path now reads
+        // `advanced.sampler`/`scheduler` and threads it onto the FLUX backbone — mlx delegates to the
+        // FLUX flow loop which honors it (#537); the candle `PulidFlux` was made sampler-pluggable (#130).
+        // The FLUX flow curated menu, mirroring the base flux_dev entry. "default" = native flow-match (N1).
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       // Native MLX path (sc-3344): PuLID-FLUX runs on the Rust `mlx-gen-pulid` engine — the
       // FLUX.1-dev backbone + the f32 EVA/IDFormer/CA conditioning — retiring the torch MPS path

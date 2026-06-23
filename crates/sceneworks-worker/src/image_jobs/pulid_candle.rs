@@ -276,6 +276,28 @@ async fn generate_candle_pulid_stream(
     let steps = pulid_candle_steps(request);
     let guidance = pulid_candle_guidance(request);
     let id_weight = pulid_candle_id_weight(request);
+    // Curated unified-sampler selection (epic 7114, sc-7432): the candle `PulidFlux` provider was made
+    // sampler-pluggable in #130 (the `scheduler` axis re-strides FLUX's native schedule over the dev
+    // time-shift `mu`). Read + N3-normalize against the shared curated menu. N1: unset ⇒ `None` ⇒ the
+    // native euler-over-native-schedule default runs byte-exact.
+    let (curated_samplers, curated_schedulers) = curated_image_menu();
+    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let sampler = normalize_sampling_knob(
+        sampler,
+        &curated_samplers,
+        "sampler",
+        &request.model,
+        &job.id,
+        backend,
+    );
+    let scheduler = normalize_sampling_knob(
+        scheduler,
+        &curated_schedulers,
+        "scheduler",
+        &request.model,
+        &job.id,
+        backend,
+    );
     let repo = request
         .model_manifest_entry
         .get("repo")
@@ -322,6 +344,8 @@ async fn generate_candle_pulid_stream(
                     guidance,
                     id_weight,
                     seed: seed as u64,
+                    sampler: sampler.clone(),
+                    scheduler: scheduler.clone(),
                     cancel: cancel.clone(),
                 };
                 let out = match model.generate(&req, &reference, &mut *on_progress) {

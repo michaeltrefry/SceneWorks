@@ -215,6 +215,28 @@ async fn generate_candle_kolors_control_stream(
         KOLORS_CONTROL_DEFAULT_SCALE,
         0.0..=2.0,
     );
+    // Curated unified-sampler selection (epic 7114, sc-7432): the candle `KolorsControl` provider honors
+    // a curated solver/scheduler via the shared `denoise_curated` primitive (#130). Read + N3-normalize
+    // against the shared curated menu (an unknown name drops to the engine default + emits an event).
+    // N1: unset ⇒ `None` ⇒ the native leading-Euler default loop runs byte-exact.
+    let (curated_samplers, curated_schedulers) = curated_image_menu();
+    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let sampler = normalize_sampling_knob(
+        sampler,
+        &curated_samplers,
+        "sampler",
+        &request.model,
+        &job.id,
+        backend,
+    );
+    let scheduler = normalize_sampling_knob(
+        scheduler,
+        &curated_schedulers,
+        "scheduler",
+        &request.model,
+        &job.id,
+        backend,
+    );
     let repo = request
         .model_manifest_entry
         .get("repo")
@@ -277,6 +299,8 @@ async fn generate_candle_kolors_control_stream(
                     guidance,
                     control_scale,
                     seed: seed as u64,
+                    sampler: sampler.clone(),
+                    scheduler: scheduler.clone(),
                     cancel: cancel.clone(),
                 };
                 let out = match model.generate(&req, &control, &mut *on_progress) {

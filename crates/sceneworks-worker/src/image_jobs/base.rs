@@ -832,6 +832,31 @@ pub(crate) fn read_advanced_sampling_knobs(
     (name("sampler"), name("scheduler"), scheduler_shift)
 }
 
+/// The curated sampler/scheduler menu (epic 7114 decision 2) the **bespoke** conditioned image paths
+/// honor — the shared `gen_core` solver/scheduler vocabulary the unified-sampler engines gate on
+/// (`Solver::from_name` / the additive `denoise_curated` path; mlx #537/#538/#539, candle #130). The
+/// bespoke per-family paths (InstantID, Kolors-conditioned, PuLID — sc-7432) build CUSTOM request
+/// structs OUTSIDE `generate_stream`'s generic plumbing, so they N3-normalize the per-request knob
+/// against THIS menu instead of a `Capabilities` list: every engine's advertised set is a superset of
+/// it (their native default is the only extra, and `"default"`/`None` already strip to the engine
+/// default), so a name that survives [`normalize_sampling_knob`] here also passes the engine's own
+/// `validate_request`. This is also the single source of truth the manifest⊆engine drift guard
+/// (`engines.rs`) checks these out-of-`MODEL_TABLE` models against, so the runtime and the guard never
+/// disagree. Derived from `gen_core` (the engines' own vocab), so it tracks the framework on BOTH
+/// backends rather than hard-coding names. Returns `(samplers, schedulers)`.
+pub(crate) fn curated_image_menu() -> (Vec<&'static str>, Vec<&'static str>) {
+    (
+        gen_core::sampling::Solver::ALL
+            .iter()
+            .map(|solver| solver.name())
+            .collect(),
+        gen_core::sampling::Scheduler::ALL
+            .iter()
+            .map(|scheduler| scheduler.name())
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod sampling_knob_tests {
     use super::*;
