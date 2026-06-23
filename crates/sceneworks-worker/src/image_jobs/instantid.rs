@@ -797,6 +797,10 @@ async fn generate_instantid_stream(
                         openpose_scale,
                         seed: seed as u64,
                         cancel: cancel.clone(),
+                        // sc-7297 added curated sampler/scheduler overrides; preserve the engine
+                        // default (None) — InstantID payload threading is separate worker-side work.
+                        sampler: None,
+                        scheduler: None,
                     };
                     let result = match &action {
                         InstantIdAction::Identity => {
@@ -835,6 +839,8 @@ async fn generate_instantid_stream(
                             openpose_scale,
                             seed: seed as u64,
                             cancel: cancel.clone(),
+                            sampler: None,
+                            scheduler: None,
                         };
                         out = match model.restore_face(
                             &restore_req,
