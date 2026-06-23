@@ -1062,13 +1062,14 @@
         },
         {
           // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524, epic 6831): the candle provider can't
-          // read the MLX-quantized turnkey above, so off-Mac loads bf16 from the sibling repo
-          // `SceneWorks/boogu-image` (the worker's `candle_boogu_repo` / `candle_boogu_subdir`). Same
-          // per-variant `base/ transformer mllm vae/` layout (leaf-dir globs — the subfolder nests). bf16
-          // only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated. Windows/Linux download.
+          // read the MLX-quantized turnkey above, so off-Mac loads bf16 from the ORIGINAL public repo
+          // `Boogu/Boogu-Image-0.1-Base` (Apache-2.0, ungated) — already a complete `mllm/ transformer/
+          // vae/` snapshot at the root (the worker's `candle_boogu_repo` loads from the snapshot root, no
+          // subfolder). Whole repo (empty files list). bf16 only (the candle provider rejects on-the-fly
+          // quant). Windows/Linux download.
           "provider": "huggingface",
-          "repo": "SceneWorks/boogu-image",
-          "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"],
+          "repo": "Boogu/Boogu-Image-0.1-Base",
+          "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 38500000000
         }
@@ -1156,12 +1157,13 @@
           "estimatedSizeBytes": 23380234586
         },
         {
-          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the `turbo/`
-          // subfolder of `SceneWorks/boogu-image` (same weights-arch as Base; the DMD few-step distill).
-          // bf16 only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated.
+          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the ORIGINAL
+          // public repo `Boogu/Boogu-Image-0.1-Turbo` (the DMD few-step distill — its own weights; same
+          // `mllm/ transformer/ vae/` root layout). Whole repo (empty files list). bf16 only (the candle
+          // provider rejects on-the-fly quant). Apache-2.0, ungated.
           "provider": "huggingface",
-          "repo": "SceneWorks/boogu-image",
-          "files": ["turbo/transformer/*", "turbo/mllm/*", "turbo/vae/*"],
+          "repo": "Boogu/Boogu-Image-0.1-Turbo",
+          "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 38500000000
         }
@@ -1244,12 +1246,13 @@
           "estimatedSizeBytes": 23380234314
         },
         {
-          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the `edit/`
-          // subfolder of `SceneWorks/boogu-image` (the instruction-edit checkpoint — carries the Qwen3-VL
-          // vision tower). bf16 only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated.
+          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the ORIGINAL
+          // public repo `Boogu/Boogu-Image-0.1-Edit` (the instruction-edit checkpoint — its `mllm/` carries
+          // the Qwen3-VL vision tower; same `mllm/ transformer/ vae/` root layout). Whole repo (empty files
+          // list). bf16 only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated.
           "provider": "huggingface",
-          "repo": "SceneWorks/boogu-image",
-          "files": ["edit/transformer/*", "edit/mllm/*", "edit/vae/*"],
+          "repo": "Boogu/Boogu-Image-0.1-Edit",
+          "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 38500000000
         }

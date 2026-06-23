@@ -1839,18 +1839,26 @@ fn candle_ideogram_subdir(root: &Path) -> PathBuf {
     }
 }
 
-/// The candle Boogu-Image-0.1 weights repo (bf16). Like Ideogram, Boogu's published turnkey
+/// The default candle Boogu-Image-0.1 weights repo for a variant. The MLX turnkey
 /// (`SceneWorks/boogu-image-mlx`, the `MODEL_TABLE` default + the macOS MLX repo) is MLX-quantized and
-/// not candle-readable, so off-Mac the candle lane loads bf16 from a separate sibling repo (sc-7524) with
-/// per-variant `base/ turbo/ edit/` subfolders (each a complete `transformer/ mllm/ vae/` snapshot the
-/// provider's `pipeline::load_components` reads). The image sibling of the video `CANDLE_WAN_5B_REPO`.
+/// NOT candle-readable, but — unlike Ideogram — Boogu needs no re-hosted bf16 turnkey: the ORIGINAL
+/// public repos `Boogu/Boogu-Image-0.1-{Base,Turbo,Edit}` (Apache-2.0, ungated) are already bf16 and
+/// already laid out as a complete `mllm/ transformer/ vae/` snapshot at the repo root — exactly what the
+/// provider's `pipeline::load_components` reads. So the candle lane points straight at them (one repo per
+/// variant, loaded from the snapshot root — no `base/ turbo/ edit/` subfolder, unlike the MLX turnkey).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_BOOGU_REPO: &str = "SceneWorks/boogu-image";
+fn candle_boogu_default_repo(model: &str) -> &'static str {
+    match model {
+        "boogu_image_turbo" => "Boogu/Boogu-Image-0.1-Turbo",
+        "boogu_image_edit" => "Boogu/Boogu-Image-0.1-Edit",
+        _ => "Boogu/Boogu-Image-0.1-Base",
+    }
+}
 
-/// Resolve the candle Boogu weights repo: the off-Mac (`std::env::consts::OS`) download entry's `repo`
-/// from the manifest (the bf16 repo) — the single source of truth, also driving the downloader — else the
-/// [`CANDLE_BOOGU_REPO`] default. Deliberately NOT the entry-level `repo`, which is the macOS MLX turnkey.
-/// Mirrors `candle_ideogram_repo`.
+/// Resolve the candle Boogu weights repo for `request.model`: the off-Mac (`std::env::consts::OS`)
+/// download entry's `repo` from the manifest (the single source of truth, also driving the downloader) —
+/// else the per-variant [`candle_boogu_default_repo`]. Deliberately NOT the entry-level `repo` /
+/// `model_repo`, which is the macOS MLX turnkey. Mirrors `candle_ideogram_repo`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_boogu_repo(request: &ImageRequest) -> String {
     let os = std::env::consts::OS;
@@ -1875,27 +1883,7 @@ fn candle_boogu_repo(request: &ImageRequest) -> String {
                     .map(str::to_owned)
             })
         })
-        .unwrap_or_else(|| CANDLE_BOOGU_REPO.to_owned())
-}
-
-/// Pick the engine-complete `base/ turbo/ edit/` subfolder of a candle Boogu snapshot `root` for the
-/// requested variant (`boogu_image`→`base`, `boogu_image_turbo`→`turbo`, `boogu_image_edit`→`edit`) —
-/// each a complete `transformer/ mllm/ vae/` snapshot. Candle is bf16-only (the provider rejects
-/// on-the-fly quant), so there is no quant subdir to choose. Falls back to the snapshot root so a flat
-/// (subdir-less) layout still loads. Mirrors the MLX `boogu_model_subdir` variant mapping.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_boogu_subdir(root: &Path, model: &str) -> PathBuf {
-    let variant = match model {
-        "boogu_image_turbo" => "turbo",
-        "boogu_image_edit" => "edit",
-        _ => "base",
-    };
-    let dir = root.join(variant);
-    if dir.join("transformer").is_dir() {
-        dir
-    } else {
-        root.to_path_buf()
-    }
+        .unwrap_or_else(|| candle_boogu_default_repo(&request.model).to_owned())
 }
 
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
@@ -1945,18 +1933,20 @@ async fn generate_candle_stream(
     };
     let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
     // Boogu (sc-7524) is the second candle image family whose upstream turnkey isn't candle-readable: its
-    // `SceneWorks/boogu-image-mlx` turnkey is MLX-quantized, so the candle lane loads bf16 from the sibling
-    // `SceneWorks/boogu-image` (per-variant `base/ turbo/ edit/` subfolders), exactly as Ideogram below.
+    // `SceneWorks/boogu-image-mlx` turnkey is MLX-quantized, so the candle lane loads bf16 from the
+    // ORIGINAL public `Boogu/Boogu-Image-0.1-{Base,Turbo,Edit}` repos (per-variant; each a complete
+    // `mllm/ transformer/ vae/` snapshot at its root — loaded directly, no subfolder).
     let is_boogu = matches!(
         request.model.as_str(),
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
     );
-    // Ideogram + Boogu are the candle image families whose upstream isn't candle-readable: the published
-    // turnkeys (`SceneWorks/ideogram-4-mlx` / `SceneWorks/boogu-image-mlx`, the MODEL_TABLE defaults + the
-    // macOS MLX repos) are MLX-quantized, so the candle lane loads bf16 from a separate repo
-    // (`SceneWorks/ideogram-4`'s `bf16/` subdir / `SceneWorks/boogu-image`'s per-variant subfolder)
-    // instead — the image sibling of the candle video `candle_video_repo` override (sc-6859). macOS keeps
-    // the MLX turnkeys. Every other candle family shares its upstream diffusers repo via `model_repo`.
+    // Ideogram + Boogu are the candle image families whose `MODEL_TABLE` turnkey isn't candle-readable:
+    // the published `SceneWorks/ideogram-4-mlx` / `SceneWorks/boogu-image-mlx` (the macOS MLX repos) are
+    // MLX-quantized, so the candle lane loads bf16 from a different repo. Ideogram re-hosts a bf16 copy
+    // (`SceneWorks/ideogram-4`'s `bf16/` subdir, because the upstream is gated); Boogu points straight at
+    // its ungated public originals (`Boogu/Boogu-Image-0.1-*`, one repo per variant, loaded from the
+    // snapshot root). macOS keeps the MLX turnkeys. Every other candle family shares its upstream diffusers
+    // repo via `model_repo`.
     let repo = if is_ideogram {
         candle_ideogram_repo(request)
     } else if is_boogu {
@@ -1967,10 +1957,10 @@ async fn generate_candle_stream(
     let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
     })?;
+    // Ideogram nests its weights under a `bf16/` subdir; Boogu's originals (and every other family) are a
+    // complete snapshot at the root, so `weights_dir` is the snapshot itself.
     let weights_dir = if is_ideogram {
         candle_ideogram_subdir(&snapshot)
-    } else if is_boogu {
-        candle_boogu_subdir(&snapshot, &request.model)
     } else {
         snapshot
     };
