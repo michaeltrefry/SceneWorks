@@ -1160,8 +1160,14 @@
       "limits": {
         "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"],
         "count": [1, 2, 4],
-        "samplers": ["default"],
-        "schedulers": ["default"]
+        // Curated picker (sc-7491): the Turbo DMD few-step student is a stochastic predict->renoise
+        // consistency sampler, so the curated *stochastic* solvers match its training regime and
+        // render at native quality (real-weight survey) -- lcm most of all (the ComfyUI lcm +
+        // sgm_uniform combo, enabled by the gen-core flow-aware noise_scaling fix). "default" is
+        // the native DMD loop; the deterministic ODE solvers degrade the few-step student and are
+        // not advertised. descriptor_turbo advertises exactly this subset (drift guard holds).
+        "samplers": ["default", "lcm", "euler_ancestral", "dpmpp_sde"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
         "families": ["boogu"],
