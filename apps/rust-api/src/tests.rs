@@ -1788,6 +1788,8 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     assert!(!flags.iter().any(|flag| flag["check"] == "decode"));
     // sc-6535: before the analysis job persists an embedding sidecar there is no Tier-1 sub-score.
     assert!(report["subScores"]["diversity"].is_null());
+    // sc-6537: nor an aesthetic sub-score (style dataset, but no embeddings yet).
+    assert!(report["subScores"]["aesthetic"].is_null());
 
     let (status, detail) = request(
         app.clone(),
@@ -1809,7 +1811,15 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
 
     // sc-6535 read-back: once the analysis worker POSTs an embedding sidecar (keyed by content hash),
     // the readiness report folds the Tier-1 diversity sub-score in. This is the seam that lights up
-    // the Variety meter + embedding findings in the UI.
+    // the Variety meter + embedding findings in the UI. A full 768-d embedding also lights up the
+    // sc-6537 aesthetic sub-score (the LAION head is 768-in); a sparse unit vector suffices for the
+    // "is a number" assertions.
+    let embedding: Vec<f64> = {
+        let mut values = vec![0.0; 768];
+        values[0] = 0.6;
+        values[1] = 0.8;
+        values
+    };
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -1818,7 +1828,7 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
         ),
         json!({
             "space": "clip-vit-l14",
-            "items": [{ "contentHash": upload_hash.clone(), "embedding": [0.6, 0.8, 0.0] }]
+            "items": [{ "contentHash": upload_hash.clone(), "embedding": embedding }]
         }),
     )
     .await;
@@ -1836,6 +1846,12 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     assert!(
         report["subScores"]["diversity"].is_number(),
         "the embedding sidecar lights up the Tier-1 diversity sub-score"
+    );
+    // sc-6537: the same style sidecar lights up the aesthetic sub-score (LAION head over the persisted
+    // 768-d CLIP embedding); a person/object dataset would leave it null.
+    assert!(
+        report["subScores"]["aesthetic"].is_number(),
+        "a style dataset + embedding sidecar lights up the aesthetic sub-score"
     );
 }
 

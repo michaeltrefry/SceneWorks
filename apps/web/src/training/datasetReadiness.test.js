@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  aestheticScore,
   badgeForSeverity,
   datasetDoctorSummary,
   dismissedChecks,
@@ -159,6 +160,19 @@ describe("datasetDoctorSummary", () => {
     expect(text).toContain("more variety");
   });
 
+  it("surfaces the style-only aesthetic advisory as a non-blocking heads-up (sc-6537)", () => {
+    const text = datasetDoctorSummary(
+      report({
+        gate: "needs_attention",
+        itemCount: 12,
+        items: [],
+        datasetFlags: [{ check: "low_aesthetic", severity: "warn" }],
+      }),
+    );
+    expect(text).toContain("heads-up");
+    expect(text).not.toContain("ready to train");
+  });
+
   it("says a ready set is ready", () => {
     const text = datasetDoctorSummary(report({ gate: "ready", itemCount: 20, items: [] }));
     expect(text).toBe("20 photos. This set looks ready to train.");
@@ -217,6 +231,12 @@ describe("gate + sub-scores", () => {
     expect(diversityPercent(report({ subScores: { technical: 0.8, diversity: 0.42 } }))).toBe(42);
     expect(diversityPercent(report({ subScores: { technical: 0.8 } }))).toBeNull();
     expect(diversityPercent(null)).toBeNull();
+  });
+
+  it("renders the aesthetic sub-score (style-only) rounded to one decimal (sc-6537)", () => {
+    expect(aestheticScore(report({ subScores: { technical: 0.8, aesthetic: 5.34 } }))).toBe(5.3);
+    expect(aestheticScore(report({ subScores: { technical: 0.8 } }))).toBeNull();
+    expect(aestheticScore(null)).toBeNull();
   });
 });
 

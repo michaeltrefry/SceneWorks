@@ -44,6 +44,10 @@ string_enum! {
         // pose/angle/lighting/background), so the LoRA won't generalize. Carries the "add some from
         // other angles" recommendation.
         LowDiversity => "low_diversity",
+        // LowAesthetic: dataset-level, STYLE datasets ONLY (sc-6537) — the set scores low on the LAION
+        // CLIP+MLP aesthetic predictor. Advisory, never gates: low-aesthetic candids are often the best
+        // identity shots, so this is never raised on person/object datasets (documented bias).
+        LowAesthetic => "low_aesthetic",
     }
 }
 
@@ -730,6 +734,7 @@ fn default_min_items(kind: &DatasetKind) -> u32 {
 pub fn build_readiness_report(
     evaluation: Tier0Evaluation,
     tier1: Option<&Tier1Evaluation>,
+    aesthetic: Option<&AestheticEvaluation>,
 ) -> DatasetReadinessReport {
     let item_count = evaluation.items.len() as u32;
     let mut counts = SeverityCounts::default();
@@ -777,6 +782,9 @@ pub fn build_readiness_report(
     if let Some(t) = tier1 {
         dataset_flags.extend(t.dataset.iter().cloned());
     }
+    if let Some(a) = aesthetic {
+        dataset_flags.extend(a.dataset.iter().cloned());
+    }
     for flag in dataset_flags.iter().filter(|flag| !flag.acknowledged) {
         bump(&mut counts, &flag.severity);
     }
@@ -801,7 +809,7 @@ pub fn build_readiness_report(
             diversity: tier1.map(|t| t.diversity),
             identity: None,
             alignment: None,
-            aesthetic: None,
+            aesthetic: aesthetic.map(|a| a.score),
         },
         counts,
         item_count,
@@ -1064,6 +1072,231 @@ fn bump(counts: &mut SeverityCounts, severity: &Severity) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Aesthetic scoring (epic 6529 P2, sc-6537) — the LAION-Aesthetics V2 CLIP+MLP predictor, run
+// host-side over the persisted CLIP image embeddings. STYLE datasets only, advisory (never gates):
+// low-aesthetic candids are often the best identity shots, so it is never raised on person/object.
+// Pure `Vec<f32>` math + a tiny dep-free safetensors reader for the bundled MLP head (the asset is
+// `include_bytes!`d by the caller, `sceneworks-image-quality`).
+// ---------------------------------------------------------------------------
+
+/// One `Linear` layer of the aesthetic MLP head.
+#[derive(Debug, Clone)]
+struct AestheticLayer {
+    /// `[out_dim, in_dim]` row-major — the PyTorch / safetensors `Linear.weight` layout.
+    weight: Vec<f32>,
+    bias: Vec<f32>,
+    in_dim: usize,
+    out_dim: usize,
+}
+
+/// The LAION-Aesthetics V2 MLP head (`layers.{0,2,4,6,7}`): a stack of `Linear` layers with **no
+/// activations** (the `linearMSE` predictor is purely linear at inference), applied to the
+/// L2-normalized CLIP ViT-L/14 image embedding to predict an aesthetic score (~`[1, 10]`).
+#[derive(Debug, Clone)]
+pub struct AestheticPredictor {
+    layers: Vec<AestheticLayer>,
+}
+
+/// Failure loading an [`AestheticPredictor`] from safetensors bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AestheticLoadError(pub String);
+
+impl std::fmt::Display for AestheticLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "aesthetic predictor load failed: {}", self.0)
+    }
+}
+impl std::error::Error for AestheticLoadError {}
+
+impl AestheticPredictor {
+    /// Parse the MLP head from a safetensors blob holding `layers.{N}.weight` / `layers.{N}.bias`
+    /// (`F32`). The format is an 8-byte little-endian header length, a JSON header, then the raw
+    /// little-endian tensor bytes — so this needs only `serde_json`, no tensor backend.
+    pub fn from_safetensors_bytes(bytes: &[u8]) -> Result<Self, AestheticLoadError> {
+        let err = |m: &str| AestheticLoadError(m.to_owned());
+        let len_bytes: [u8; 8] = bytes
+            .get(0..8)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| err("truncated header length"))?;
+        let header_len = u64::from_le_bytes(len_bytes) as usize;
+        let header_end = 8usize
+            .checked_add(header_len)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| err("header length past end of file"))?;
+        let header: serde_json::Value = serde_json::from_slice(&bytes[8..header_end])
+            .map_err(|e| AestheticLoadError(format!("header json: {e}")))?;
+        let obj = header
+            .as_object()
+            .ok_or_else(|| err("header is not an object"))?;
+        let data = &bytes[header_end..];
+
+        let read = |name: &str| -> Result<(Vec<f32>, Vec<usize>), AestheticLoadError> {
+            let t = obj
+                .get(name)
+                .ok_or_else(|| AestheticLoadError(format!("missing tensor {name}")))?;
+            if t.get("dtype").and_then(serde_json::Value::as_str) != Some("F32") {
+                return Err(AestheticLoadError(format!("{name}: dtype must be F32")));
+            }
+            let shape: Vec<usize> = t
+                .get("shape")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| AestheticLoadError(format!("{name}: no shape")))?
+                .iter()
+                .filter_map(|v| v.as_u64().map(|x| x as usize))
+                .collect();
+            let offs = t
+                .get("data_offsets")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| AestheticLoadError(format!("{name}: no data_offsets")))?;
+            let a = offs
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            let b = offs.get(1).and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+            let raw = data
+                .get(a..b)
+                .filter(|r| r.len() % 4 == 0)
+                .ok_or_else(|| AestheticLoadError(format!("{name}: bad data range")))?;
+            let vals = raw
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            Ok((vals, shape))
+        };
+
+        let mut indices: Vec<usize> = obj
+            .keys()
+            .filter_map(|k| k.strip_prefix("layers.")?.strip_suffix(".weight"))
+            .filter_map(|n| n.parse::<usize>().ok())
+            .collect();
+        indices.sort_unstable();
+        if indices.is_empty() {
+            return Err(err("no `layers.N.weight` tensors in the safetensors"));
+        }
+
+        let mut layers = Vec::with_capacity(indices.len());
+        for i in indices {
+            let (weight, wshape) = read(&format!("layers.{i}.weight"))?;
+            let (bias, _) = read(&format!("layers.{i}.bias"))?;
+            let [out_dim, in_dim] = wshape[..] else {
+                return Err(AestheticLoadError(format!("layers.{i}.weight is not 2-D")));
+            };
+            if weight.len() != out_dim * in_dim || bias.len() != out_dim {
+                return Err(AestheticLoadError(format!(
+                    "layers.{i}: weight/bias shape mismatch"
+                )));
+            }
+            layers.push(AestheticLayer {
+                weight,
+                bias,
+                in_dim,
+                out_dim,
+            });
+        }
+        if layers.windows(2).any(|w| w[0].out_dim != w[1].in_dim) {
+            return Err(err("layer dimensions do not chain"));
+        }
+        Ok(Self { layers })
+    }
+
+    /// The embedding dimension this predictor expects (768 for ViT-L/14).
+    pub fn input_dim(&self) -> usize {
+        self.layers.first().map_or(0, |l| l.in_dim)
+    }
+
+    /// Predict the LAION aesthetic score (~`[1, 10]`) for one CLIP image embedding. The embedding is
+    /// L2-normalized first (the predictor was trained on normalized CLIP features). Returns `None` for
+    /// a degenerate (zero-magnitude) or wrong-dimension embedding.
+    pub fn predict(&self, embedding: &[f32]) -> Option<f64> {
+        let norm = embedding
+            .iter()
+            .map(|x| f64::from(*x) * f64::from(*x))
+            .sum::<f64>()
+            .sqrt();
+        if norm <= f64::EPSILON {
+            return None;
+        }
+        let mut x: Vec<f64> = embedding.iter().map(|v| f64::from(*v) / norm).collect();
+        for layer in &self.layers {
+            if x.len() != layer.in_dim {
+                return None;
+            }
+            let mut y = Vec::with_capacity(layer.out_dim);
+            for o in 0..layer.out_dim {
+                let row = &layer.weight[o * layer.in_dim..(o + 1) * layer.in_dim];
+                let acc = row
+                    .iter()
+                    .zip(&x)
+                    .map(|(w, xi)| f64::from(*w) * xi)
+                    .sum::<f64>()
+                    + f64::from(layer.bias[o]);
+                y.push(acc);
+            }
+            x = y;
+        }
+        x.first().copied()
+    }
+}
+
+/// Aesthetic-score thresholds (sc-6537). **Placeholder pending a style-dataset sweep** (§8) — the LAION
+/// score is roughly `[1, 10]`; this floor is a guess, not tuned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AestheticThresholds {
+    /// Mean aesthetic below this ⇒ a `LowAesthetic` advisory. Placeholder.
+    pub floor: f64,
+}
+
+impl Default for AestheticThresholds {
+    fn default() -> Self {
+        Self { floor: 5.0 }
+    }
+}
+
+/// Result of aesthetic scoring (sc-6537): the mean LAION score (fills `ReadinessSubScores.aesthetic`)
+/// plus dataset-level advisory flags (`LowAesthetic`). Only ever produced for `DatasetKind::Style`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AestheticEvaluation {
+    pub score: f64,
+    pub dataset: Vec<QualityFlag>,
+}
+
+/// Score a **style** dataset's images with the LAION aesthetic predictor over their CLIP embeddings.
+/// Returns `None` for non-style kinds (aesthetic never applies to person/object) or when nothing
+/// scored. The `LowAesthetic` flag is `Info`, never `Warn`: aesthetic is explicitly non-blocking
+/// (low-aesthetic candids are often the best shots) and the floor is an uncalibrated placeholder, so it
+/// surfaces the sub-score + a heads-up without ever changing the readiness gate.
+pub fn evaluate_aesthetic(
+    items: &[ItemEmbedding],
+    predictor: &AestheticPredictor,
+    kind: &DatasetKind,
+    thresholds: &AestheticThresholds,
+) -> Option<AestheticEvaluation> {
+    if *kind != DatasetKind::Style {
+        return None;
+    }
+    let scores: Vec<f64> = items
+        .iter()
+        .filter_map(|item| predictor.predict(&item.embedding))
+        .collect();
+    if scores.is_empty() {
+        return None;
+    }
+    let score = scores.iter().sum::<f64>() / scores.len() as f64;
+    let mut dataset = Vec::new();
+    if score < thresholds.floor {
+        dataset.push(QualityFlag {
+            check: QualityCheck::LowAesthetic,
+            severity: Severity::Info,
+            value: Some(score),
+            threshold: Some(thresholds.floor),
+            peers: Vec::new(),
+            acknowledged: false,
+        });
+    }
+    Some(AestheticEvaluation { score, dataset })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,7 +1524,7 @@ mod tests {
     #[test]
     fn gate_is_ready_when_every_item_is_clean() {
         let eval = evaluate_tier0(&[sharp("a", 0xAA), sharp("b", 0x55)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None);
+        let report = build_readiness_report(eval, None, None);
         assert_eq!(report.gate, ReadinessGate::Ready);
         assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
         assert!(report.sub_scores.diversity.is_none()); // Tier-1 not computed yet
@@ -1304,7 +1537,7 @@ mod tests {
         let mut soft = item("soft");
         soft.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0x0F; 8]));
         let eval = evaluate_tier0(&[soft, sharp("ok", 0xF0)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None);
+        let report = build_readiness_report(eval, None, None);
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
         assert!(report.counts.warn >= 1);
         assert!((report.sub_scores.technical - 0.5).abs() < 1e-9);
@@ -1317,7 +1550,7 @@ mod tests {
     #[test]
     fn gate_blocks_when_too_few_images() {
         let eval = evaluate_tier0(&[item("a"), item("b")], 512, 12, &thresholds());
-        let report = build_readiness_report(eval, None);
+        let report = build_readiness_report(eval, None, None);
         assert_eq!(report.gate, ReadinessGate::Blocked);
         assert!(report.counts.fatal >= 1);
         assert!(report
@@ -1346,7 +1579,7 @@ mod tests {
                 peers: Vec::new(),
                 acknowledged: false,
             });
-        let report = build_readiness_report(eval, None);
+        let report = build_readiness_report(eval, None, None);
         assert!((report.sub_scores.technical - 0.5).abs() < 1e-9);
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
     }
@@ -1374,7 +1607,7 @@ mod tests {
     #[test]
     fn report_round_trips_as_camelcase_json() {
         let eval = evaluate_tier0(&[sharp("a", 0x11)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None);
+        let report = build_readiness_report(eval, None, None);
         let json = serde_json::to_string(&report).expect("serialize");
         assert!(json.contains("\"subScores\""));
         assert!(json.contains("\"itemCount\""));
@@ -1429,7 +1662,7 @@ mod tests {
             .expect("blur flag on b");
         assert!(!b_blur.acknowledged);
 
-        let report = build_readiness_report(eval, None);
+        let report = build_readiness_report(eval, None, None);
         assert_eq!(report.counts.warn, 1, "only b's warning counts");
         assert!(
             (report.sub_scores.technical - 0.5).abs() < 1e-9,
@@ -1447,6 +1680,7 @@ mod tests {
         soft.acknowledged = vec![QualityCheck::Blur];
         let report = build_readiness_report(
             evaluate_tier0(std::slice::from_ref(&soft), 512, 1, &thresholds()),
+            None,
             None,
         );
         assert_eq!(report.gate, ReadinessGate::Ready);
@@ -1515,6 +1749,97 @@ mod tests {
 
     fn tier1_thresholds() -> Tier1Thresholds {
         Tier1Thresholds::for_kind(&DatasetKind::Person)
+    }
+
+    /// Build a minimal valid safetensors blob from `(name, shape, f32 values)` tuples.
+    fn safetensors_bytes(tensors: &[(&str, Vec<usize>, Vec<f32>)]) -> Vec<u8> {
+        let mut header = serde_json::Map::new();
+        let mut data: Vec<u8> = Vec::new();
+        for (name, shape, vals) in tensors {
+            let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+            header.insert(
+                (*name).to_owned(),
+                serde_json::json!({
+                    "dtype": "F32",
+                    "shape": shape,
+                    "data_offsets": [data.len(), data.len() + bytes.len()],
+                }),
+            );
+            data.extend(bytes);
+        }
+        let hjson = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut out = (hjson.len() as u64).to_le_bytes().to_vec();
+        out.extend(hjson);
+        out.extend(data);
+        out
+    }
+
+    #[test]
+    fn aesthetic_predictor_parses_and_forwards() {
+        // layers.0 = identity (2->2); layers.2 = sum + 0.5 (2->1). Gaps in indices mirror the real
+        // head (dropout layers carry no params); the parser orders by index and chains the dims.
+        let st = safetensors_bytes(&[
+            ("layers.0.weight", vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+            ("layers.0.bias", vec![2], vec![0.0, 0.0]),
+            ("layers.2.weight", vec![1, 2], vec![1.0, 1.0]),
+            ("layers.2.bias", vec![1], vec![0.5]),
+        ]);
+        let predictor = AestheticPredictor::from_safetensors_bytes(&st).expect("parse");
+        assert_eq!(predictor.input_dim(), 2);
+        // [3,4] L2-normalizes to [0.6,0.8] -> identity -> 0.6 + 0.8 + 0.5 = 1.9.
+        let score = predictor.predict(&[3.0, 4.0]).expect("score");
+        assert!((score - 1.9).abs() < 1e-9, "got {score}");
+        assert!(
+            predictor.predict(&[0.0, 0.0]).is_none(),
+            "degenerate -> None"
+        );
+        assert!(
+            predictor.predict(&[1.0, 2.0, 3.0]).is_none(),
+            "wrong dim -> None"
+        );
+    }
+
+    #[test]
+    fn aesthetic_is_style_only_and_advisory() {
+        // Constant predictor: weight zeros, bias 3.0 -> always 3.0 regardless of input.
+        let st = safetensors_bytes(&[
+            ("layers.0.weight", vec![1, 2], vec![0.0, 0.0]),
+            ("layers.0.bias", vec![1], vec![3.0]),
+        ]);
+        let predictor = AestheticPredictor::from_safetensors_bytes(&st).expect("parse");
+        let items = vec![
+            ItemEmbedding {
+                item_id: "a".into(),
+                embedding: vec![1.0, 0.0],
+                acknowledged: vec![],
+            },
+            ItemEmbedding {
+                item_id: "b".into(),
+                embedding: vec![0.0, 1.0],
+                acknowledged: vec![],
+            },
+        ];
+        let thresholds = AestheticThresholds { floor: 5.0 };
+        // Aesthetic never applies to person/object.
+        assert!(
+            evaluate_aesthetic(&items, &predictor, &DatasetKind::Person, &thresholds).is_none()
+        );
+        assert!(
+            evaluate_aesthetic(&items, &predictor, &DatasetKind::Object, &thresholds).is_none()
+        );
+        // Style: mean 3.0 < floor 5.0 -> a LowAesthetic advisory (Info — never gates).
+        let eval = evaluate_aesthetic(&items, &predictor, &DatasetKind::Style, &thresholds)
+            .expect("style");
+        assert!((eval.score - 3.0).abs() < 1e-9);
+        assert!(eval
+            .dataset
+            .iter()
+            .any(|f| f.check == QualityCheck::LowAesthetic && f.severity == Severity::Info));
+        // Above the floor -> score still reported, no flag.
+        let lenient = AestheticThresholds { floor: 2.0 };
+        let eval =
+            evaluate_aesthetic(&items, &predictor, &DatasetKind::Style, &lenient).expect("style");
+        assert!(eval.dataset.is_empty());
     }
 
     #[test]
@@ -1616,7 +1941,7 @@ mod tests {
             &[emb("a", &[1.0, 0.0, 0.0]), emb("b", &[1.0, 0.0, 0.0])],
             &tier1_thresholds(),
         );
-        let report = build_readiness_report(tier0, Some(&tier1));
+        let report = build_readiness_report(tier0, Some(&tier1), None);
 
         // Embedding dup raises the badge + gate, but the images are technically fine → technical 1.0.
         assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
@@ -1636,6 +1961,7 @@ mod tests {
         ok.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![1; 8]));
         let report = build_readiness_report(
             evaluate_tier0(std::slice::from_ref(&ok), 512, 1, &thresholds()),
+            None,
             None,
         );
         assert_eq!(report.sub_scores.diversity, None);

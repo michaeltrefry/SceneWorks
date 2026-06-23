@@ -227,10 +227,17 @@ DreamBooth** benchmark (30 subject sets, 4–6 imgs each), two style sets (**hok
 - **Style floor 0.10 — provisional.** Only two style sets sampled and they disagree (0.144 vs 0.284);
   needs more style sets before it can be trusted.
 
+### Aesthetic (sc-6537 ①) — implemented, floor uncalibrated
+The aesthetic sub-score is **built**: a host-side **LAION-Aesthetics V2** MLP head (vendored, Apache-2.0,
+extracted from `shunk031/aesthetics-predictor-v2-sac-logos-ava1-l14-linearMSE`) scores the persisted
+L2-normalized CLIP embeddings — STYLE datasets only, `Info`/advisory (never gates; the floor is a
+guess). Validated on real style sets (hokusai mean 6.30, monkey-island 5.47), so the `5.0` mean-score
+floor doesn't false-fire — but it's a **placeholder** pending a proper style-set sweep to set the band.
+
 ### Still pending a sweep
 - Background contamination: detection method (patch-region embeddings? a separate signal).
-- Caption alignment floor (CLIPScore is unnormalized; needs a per-kind floor) — sc-6537.
-- Aesthetic: LAION MLP scale, the style-only advisory band — sc-6537.
+- Caption alignment floor (CLIPScore is unnormalized; needs a per-kind floor) — sc-6537 ② (alignment).
+- Aesthetic floor `5.0`: placeholder, see above.
 
 ---
 

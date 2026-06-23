@@ -122,9 +122,10 @@ fn dataset_readiness_report(
     query: &ReadinessQuery,
 ) -> Result<sceneworks_core::dataset_quality::DatasetReadinessReport, ProjectStoreError> {
     use sceneworks_core::dataset_quality::{
-        evaluate_tier1, readiness_context, CachedTier0Scalars, ItemEmbedding, Tier1Thresholds,
+        evaluate_aesthetic, evaluate_tier1, readiness_context, AestheticThresholds,
+        CachedTier0Scalars, DatasetKind, ItemEmbedding, Tier1Thresholds,
     };
-    use sceneworks_image_quality::{compute_readiness, ReadinessItem};
+    use sceneworks_image_quality::{aesthetic_predictor, compute_readiness, ReadinessItem};
 
     let (dataset, root, _project_stem) = store.training_dataset_for_plan(project_id, dataset_id)?;
 
@@ -177,10 +178,10 @@ fn dataset_readiness_report(
     // (embedding near-duplicates + low set diversity) into the report. Each item's dismissed checks
     // (sc-6534) carry through, so an acknowledged near-dup drops from the rollups. No sidecar (the
     // job hasn't run) → `None` → the report stays Tier-0 only, exactly as before.
-    let tier1 = store
+    let embeddings: Vec<ItemEmbedding> = store
         .read_dataset_embeddings(project_id, dataset_id)?
-        .and_then(|sidecar| {
-            let embeddings: Vec<ItemEmbedding> = dataset
+        .map(|sidecar| {
+            dataset
                 .items
                 .iter()
                 .filter_map(|item| {
@@ -197,12 +198,25 @@ fn dataset_readiness_report(
                         acknowledged,
                     })
                 })
-                .collect();
-            // A sidecar with no current item matching it (every image changed since the analysis) is
-            // not Tier-1 data — fall back to Tier-0 only rather than a misleading 1.0 diversity.
-            (!embeddings.is_empty())
-                .then(|| evaluate_tier1(&embeddings, &Tier1Thresholds::for_kind(&context.kind)))
-        });
+                .collect()
+        })
+        .unwrap_or_default();
+    // A sidecar with no current item matching it (every image changed since the analysis) is not
+    // Tier-1 data — fall back to Tier-0 only rather than a misleading 1.0 diversity.
+    let tier1 = (!embeddings.is_empty())
+        .then(|| evaluate_tier1(&embeddings, &Tier1Thresholds::for_kind(&context.kind)));
+    // Aesthetic (sc-6537): STYLE datasets only — score the same embeddings with the bundled LAION
+    // predictor. Person/object never get an aesthetic sub-score or flag (documented bias).
+    let aesthetic = if context.kind == DatasetKind::Style {
+        evaluate_aesthetic(
+            &embeddings,
+            aesthetic_predictor(),
+            &context.kind,
+            &AestheticThresholds::default(),
+        )
+    } else {
+        None
+    };
 
     let (report, extracted) = compute_readiness(
         &items,
@@ -210,6 +224,7 @@ fn dataset_readiness_report(
         context.min_items,
         &context.thresholds,
         tier1.as_ref(),
+        aesthetic.as_ref(),
     );
 
     if !extracted.is_empty() {

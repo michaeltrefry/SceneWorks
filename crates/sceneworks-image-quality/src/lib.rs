@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use image::{imageops::FilterType, DynamicImage, GrayImage, Luma, RgbImage};
 use image_hasher::{HashAlg, Hasher, HasherConfig};
 use sceneworks_core::dataset_quality::{
-    build_readiness_report, evaluate_tier0, DatasetReadinessReport, ItemQualityInput,
-    MetricDistribution, QualityCheck, QualityFlag, ReadinessDistributions, Severity, Tier0Scalars,
-    Tier0Thresholds, Tier1Evaluation,
+    build_readiness_report, evaluate_tier0, AestheticEvaluation, AestheticPredictor,
+    DatasetReadinessReport, ItemQualityInput, MetricDistribution, QualityCheck, QualityFlag,
+    ReadinessDistributions, Severity, Tier0Scalars, Tier0Thresholds, Tier1Evaluation,
 };
 
 /// Luma at or below this counts as crushed-to-black (8-bit).
@@ -35,6 +35,21 @@ fn dataset_hasher() -> Hasher {
         .hash_alg(HashAlg::Gradient) // dHash: cheap, robust to small edits, good for near-dup
         .hash_size(8, 8)
         .to_hasher()
+}
+
+/// The bundled LAION-Aesthetics V2 MLP head (sc-6537), parsed once. Extracted (head only) from
+/// `shunk031/aesthetics-predictor-v2-sac-logos-ava1-l14-linearMSE` (Apache-2.0; see
+/// `assets/README.md`) — it scores the L2-normalized CLIP ViT-L/14 image embedding produced by the
+/// dataset-analysis job. Lives here (the GPU-free host-eval crate) so the readiness path can score
+/// without a model server.
+pub fn aesthetic_predictor() -> &'static AestheticPredictor {
+    static PREDICTOR: std::sync::OnceLock<AestheticPredictor> = std::sync::OnceLock::new();
+    PREDICTOR.get_or_init(|| {
+        const BYTES: &[u8] =
+            include_bytes!("../assets/aesthetic-v2-sac-logos-ava1-l14.safetensors");
+        AestheticPredictor::from_safetensors_bytes(BYTES)
+            .expect("the bundled aesthetic predictor asset parses")
+    })
 }
 
 /// Decode the image at `path` and extract its Tier-0 scalars. `bucket_edge` is the trainer's
@@ -84,6 +99,7 @@ pub fn compute_readiness(
     min_items: u32,
     thresholds: &Tier0Thresholds,
     tier1: Option<&Tier1Evaluation>,
+    aesthetic: Option<&AestheticEvaluation>,
 ) -> (DatasetReadinessReport, Vec<(String, Tier0Scalars)>) {
     let mut inputs = Vec::with_capacity(items.len());
     let mut extracted = Vec::new();
@@ -133,7 +149,7 @@ pub fn compute_readiness(
         }
     }
 
-    let mut report = build_readiness_report(evaluation, tier1);
+    let mut report = build_readiness_report(evaluation, tier1, aesthetic);
     report.distributions = build_distributions(&inputs, thresholds);
     (report, extracted)
 }
@@ -233,6 +249,23 @@ mod tests {
 
     fn solid(width: u32, height: u32, color: [u8; 3]) -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, Rgb(color)))
+    }
+
+    #[test]
+    fn bundled_aesthetic_predictor_loads_and_scores() {
+        // The bundled LAION head parses, expects a 768-d CLIP embedding, and scores one to a finite
+        // value. (A real-image sanity band is validated end-to-end with the MLX CLIP embedder.)
+        let predictor = aesthetic_predictor();
+        assert_eq!(
+            predictor.input_dim(),
+            768,
+            "ViT-L/14 image_embeds are 768-d"
+        );
+        let embedding = vec![0.1_f32; 768];
+        let score = predictor.predict(&embedding).expect("finite score");
+        assert!(score.is_finite());
+        // Same predictor instance is returned (parsed once).
+        assert!(std::ptr::eq(predictor, aesthetic_predictor()));
     }
 
     /// A 1px checkerboard — maximally high-frequency, so its Laplacian variance is large.
@@ -445,7 +478,7 @@ mod tests {
             },
         ];
 
-        let (report, extracted) = compute_readiness(&items, bucket, 1, &thresholds, None);
+        let (report, extracted) = compute_readiness(&items, bucket, 1, &thresholds, None, None);
 
         // Both decoded fresh (returned for the caller to cache); flat reads soft → NeedsAttention.
         assert_eq!(extracted.len(), 2);
@@ -487,7 +520,7 @@ mod tests {
             },
         ];
 
-        let (report, extracted) = compute_readiness(&items, bucket, 1, &thresholds, None);
+        let (report, extracted) = compute_readiness(&items, bucket, 1, &thresholds, None, None);
 
         // The cached item is not re-extracted; the broken path yields nothing to cache.
         assert!(extracted.is_empty());
@@ -523,7 +556,7 @@ mod tests {
             acknowledged: vec![QualityCheck::Blur],
         }];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None);
         // Blur is the only finding and the user dismissed it → Ready, badge clean…
         assert_eq!(report.gate, ReadinessGate::Ready);
         assert_eq!(report.items[0].severity, None);
@@ -554,7 +587,7 @@ mod tests {
             acknowledged: vec![QualityCheck::Decode], // even if asked, a decode failure stands
         }];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None);
         let decode = report.items[0]
             .flags
             .iter()
@@ -599,7 +632,7 @@ mod tests {
             },
         ];
 
-        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None);
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None);
         let dist = report.distributions.expect("distributions present");
         // One value per decodable item, oriented + thresholded for the chart.
         assert_eq!(dist.blur_variance.values.len(), 2);

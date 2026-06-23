@@ -1,6 +1,7 @@
 import React from "react";
 
 import {
+  aestheticScore,
   datasetDoctorSummary,
   diversityPercent,
   flagMetric,
@@ -183,6 +184,8 @@ export function DatasetDoctorReadout({ report, loading = false, compact = false 
   // Tier-1 (sc-6535): absent until the embedding job has run, so the Variety meter only appears
   // once the report carries a diversity sub-score.
   const diversity = diversityPercent(report);
+  // Aesthetic (sc-6537): STYLE datasets only — `null` for person/object, so the meter is style-scoped.
+  const aesthetic = aestheticScore(report);
   const counts = report.counts ?? {};
   return (
     <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
@@ -199,6 +202,17 @@ export function DatasetDoctorReadout({ report, loading = false, compact = false 
             title={`Variety ${diversity}% — how visually varied the set is`}
           >
             <span className="dataset-doctor-meter-fill" style={{ width: `${diversity}%` }} />
+          </span>
+        ) : null}
+        {Number.isFinite(aesthetic) ? (
+          <span
+            className="dataset-doctor-meter dataset-doctor-meter-aesthetic"
+            title={`Aesthetic ${aesthetic} / 10 — visual polish (style sets, advisory)`}
+          >
+            <span
+              className="dataset-doctor-meter-fill"
+              style={{ width: `${Math.round(aesthetic * 10)}%` }}
+            />
           </span>
         ) : null}
       </div>

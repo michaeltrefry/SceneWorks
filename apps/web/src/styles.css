@@ -7850,6 +7850,16 @@ details[open] > summary.lora-scope-group-heading::before,
   background: oklch(0.62 0.16 285);
 }
 
+/* The Aesthetic meter (sc-6537) — STYLE datasets only, a warm hue distinct from the technical and
+   variety meters; it reads as advisory polish, not overall health. */
+.dataset-doctor-meter-aesthetic {
+  background: color-mix(in oklch, oklch(0.72 0.15 70) 20%, var(--surface-2));
+}
+
+.dataset-doctor-meter-aesthetic .dataset-doctor-meter-fill {
+  background: oklch(0.72 0.15 70);
+}
+
 .dataset-doctor-summary {
   margin: 0;
   font-size: 12px;

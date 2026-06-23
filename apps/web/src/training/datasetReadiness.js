@@ -68,6 +68,7 @@ const CHECK_REASON = {
   near_duplicate: "Nearly identical to another photo",
   near_duplicate_embedding: "Looks very similar to other photos",
   low_diversity: "The set isn't varied enough — too many similar-looking shots",
+  low_aesthetic: "Lower aesthetic score for a style set — advisory only",
   count: "Not enough photos to train well yet",
   decode: "This image couldn't be read",
 };
@@ -126,6 +127,7 @@ const METRIC_LABEL = {
   exact_duplicate: "Hamming distance",
   near_duplicate_embedding: "cosine similarity",
   low_diversity: "diversity score",
+  low_aesthetic: "aesthetic score",
   count: "item count",
   decode: "decoded",
 };
@@ -171,8 +173,8 @@ const CHECK_PHRASE = {
   exposure: (n) => `${n} ${n === 1 ? "is" : "are"} over- or under-exposed`,
   decode: (n) => `${n} couldn't be read`,
 };
-// `low_diversity` is omitted: it's a dataset-level finding (not a per-image count), surfaced
-// separately in the summary + the diversity sub-score meter.
+// `low_diversity` and `low_aesthetic` are omitted: they're dataset-level findings (not per-image
+// counts), surfaced separately in the summary + their sub-score meters.
 const PHRASE_ORDER = [
   "blur",
   "near_duplicate",
@@ -234,6 +236,16 @@ export function datasetDoctorSummary(report) {
     parts.push("The photos are quite similar — adding more variety would help.");
   }
 
+  // Aesthetic is a STYLE-only advisory (sc-6537) — surfaced as a gentle heads-up, never a blocker.
+  const lowAesthetic = (report.datasetFlags ?? []).some(
+    (flag) => flag.check === "low_aesthetic" && !flag.acknowledged,
+  );
+  if (lowAesthetic) {
+    parts.push(
+      "These score a little lower on aesthetics for a style set — just a heads-up, not a problem.",
+    );
+  }
+
   if (report.gate === "ready") {
     parts.push("This set looks ready to train.");
   } else if (countFlag) {
@@ -241,7 +253,7 @@ export function datasetDoctorSummary(report) {
     parts.push(`Aim for ${need}+ photos with some variety to make it stronger.`);
   } else if (fragments.length) {
     parts.push("Replacing or removing these would make the LoRA stronger.");
-  } else if (!lowDiversity) {
+  } else if (!lowDiversity && !lowAesthetic) {
     parts.push("This set looks ready to train.");
   }
   return parts.join(" ");
@@ -276,6 +288,17 @@ export function diversityPercent(report) {
     return null;
   }
   return Math.round(value * 100);
+}
+
+// Aesthetic sub-score — the mean LAION-Aesthetics score (~[1, 10]) for STYLE datasets only; `null`
+// for person/object (never computed) or until the embedding job runs. Surfaced as an advisory
+// "Aesthetic" readout (rounded to one decimal), never a gate.
+export function aestheticScore(report) {
+  const value = report?.subScores?.aesthetic;
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return Math.round(value * 10) / 10;
 }
 
 // Train is disabled ONLY when a report exists AND its gate is "blocked". No report
