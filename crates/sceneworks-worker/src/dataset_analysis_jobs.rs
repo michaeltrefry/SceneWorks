@@ -3,31 +3,54 @@
 //! The `dataset_analysis` job embeds every dataset image with the CLIP ViT-L/14 provider through the
 //! backend-neutral `gen_core::load_image_embedder` seam (macOS MLX), then POSTs the embeddings to
 //! rust-api to persist the content-hash-keyed sidecar — the embedding-side analog of the caption
-//! job's `/caption-sidecars` write. macOS-only for now (no candle CLIP embedder yet); off-Mac the
-//! job is a precise unsupported error.
+//! job's `/caption-sidecars` write. Runs on macOS (MLX) and, with `--features backend-candle`,
+//! off-Mac (candle, sc-6537); on a platform with neither, the job is a precise unsupported error.
 
 use super::*;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const CLIP_TEXT_EMBEDDER_ID: &str = "clip_vit_l14_text";
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const CLIP_EMBEDDER_MODEL: &str = "openai/clip-vit-large-patch14";
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const EMBEDDING_SPACE: &str = "clip-vit-l14";
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const CANCEL_MESSAGE: &str = "Dataset analysis canceled by user.";
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use gen_core::{CancelFlag, Image, LoadSpec, WeightsSource};
-// Force-link the MLX CLIP image embedder so its `inventory::submit!` registration (`clip_vit_l14`,
-// `gen_core::ImageEmbedder`, backend `mlx`) survives the linker — the embedder analog of the
-// JoyCaption anchor in `caption_jobs.rs`.
+// Force-link the CLIP image + text embedders so their `inventory::submit!` registrations
+// (`clip_vit_l14` + `clip_vit_l14_text`) survive the linker — the embedder analog of the JoyCaption
+// anchors in `caption_jobs.rs`. MLX on macOS; candle on the `backend-candle` lane (off-Mac, sc-6537).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_clip as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_clip as _;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[derive(Clone, Debug)]
 struct AnalysisItem {
     image_path: PathBuf,
@@ -36,7 +59,10 @@ struct AnalysisItem {
     caption_hash: String,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[derive(Clone, Debug)]
 struct AnalysisEmbeddingRecord {
     content_hash: String,
@@ -45,7 +71,10 @@ struct AnalysisEmbeddingRecord {
     text_embedding: Option<Vec<f32>>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) async fn run_dataset_analysis_job(
     api: &ApiClient,
     settings: &Settings,
@@ -251,7 +280,10 @@ pub(crate) async fn run_dataset_analysis_job(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn analysis_embedding_records_payload(records: &[AnalysisEmbeddingRecord]) -> Vec<Value> {
     records
         .iter()
@@ -266,7 +298,10 @@ fn analysis_embedding_records_payload(records: &[AnalysisEmbeddingRecord]) -> Ve
         .collect()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<AnalysisItem>> {
     let dataset_root = payload
         .get("datasetRoot")
@@ -352,7 +387,10 @@ fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec
         .collect()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn load_analysis_image(path: &Path) -> WorkerResult<Image> {
     let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
@@ -366,7 +404,10 @@ fn load_analysis_image(path: &Path) -> WorkerResult<Image> {
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn analysis_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -391,7 +432,10 @@ fn analysis_progress(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn analysis_result(dataset_id: &str, embedded_count: usize, stored: Value) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("embedder".to_owned(), json!(CLIP_EMBEDDER_ID));
@@ -405,15 +449,15 @@ fn analysis_result(dataset_id: &str, embedded_count: usize, stored: Value) -> Js
     result
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
 pub(crate) async fn run_dataset_analysis_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "Dataset analysis (CLIP embedding) needs the macOS MLX backend; no candle CLIP embedder \
-         exists yet."
+        "Dataset analysis (CLIP embedding) needs the macOS MLX backend or the candle backend \
+         (build with --features backend-candle)."
             .to_owned(),
     ))
 }
