@@ -112,6 +112,12 @@ use candle_gen_ideogram as _;
 // shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing the registrations.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_chroma as _;
+// Candle Boogu-Image-0.1 (sc-7524, epic 6831): `boogu_image` / `boogu_image_turbo` / `boogu_image_edit`
+// self-register into the shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing
+// the `ModelRegistration`s (else `gen_core::load("boogu_image")` returns "no generator registered"). The
+// Windows/CUDA sibling of the `mlx_gen_boogu` anchor above.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_boogu as _;
 // Candle Kolors (sc-5576, epic 3692): the `kolors` T2I id self-registers into the shared gen_core
 // inventory; `as _;` keeps the MSVC release linker from GC-ing the registration.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
