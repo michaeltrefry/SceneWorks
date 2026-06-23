@@ -1059,6 +1059,18 @@
           "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 23380234752
+        },
+        {
+          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524, epic 6831): the candle provider can't
+          // read the MLX-quantized turnkey above, so off-Mac loads bf16 from the sibling repo
+          // `SceneWorks/boogu-image` (the worker's `candle_boogu_repo` / `candle_boogu_subdir`). Same
+          // per-variant `base/ transformer mllm vae/` layout (leaf-dir globs — the subfolder nests). bf16
+          // only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated. Windows/Linux download.
+          "provider": "huggingface",
+          "repo": "SceneWorks/boogu-image",
+          "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
@@ -1142,6 +1154,16 @@
           "files": ["turbo/transformer/*", "turbo/mllm/*", "turbo/vae/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 23380234586
+        },
+        {
+          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the `turbo/`
+          // subfolder of `SceneWorks/boogu-image` (same weights-arch as Base; the DMD few-step distill).
+          // bf16 only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated.
+          "provider": "huggingface",
+          "repo": "SceneWorks/boogu-image",
+          "files": ["turbo/transformer/*", "turbo/mllm/*", "turbo/vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
@@ -1220,6 +1242,16 @@
           "files": ["edit/transformer/*", "edit/mllm/*", "edit/vae/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 23380234314
+        },
+        {
+          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the `edit/`
+          // subfolder of `SceneWorks/boogu-image` (the instruction-edit checkpoint — carries the Qwen3-VL
+          // vision tower). bf16 only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated.
+          "provider": "huggingface",
+          "repo": "SceneWorks/boogu-image",
+          "files": ["edit/transformer/*", "edit/mllm/*", "edit/vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
