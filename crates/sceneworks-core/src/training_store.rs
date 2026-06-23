@@ -1715,6 +1715,46 @@ mod tests {
     }
 
     #[test]
+    fn repoint_dataset_items_replaces_a_jpg_with_png_and_removes_the_orphan() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+        let root = dataset_root(&store.project_path, "ds_test");
+
+        // Make item_1 a .jpg with a real on-disk file (the derived upscale is always .png).
+        let mut dataset = store.get_dataset("proj", "ds_test").expect("read");
+        dataset.items[0].path = "images/item_1.jpg".to_owned();
+        store.save_dataset(&dataset).expect("save");
+        let old_jpg = root.join("images/item_1.jpg");
+        std::fs::create_dir_all(old_jpg.parent().unwrap()).unwrap();
+        std::fs::write(&old_jpg, b"old-jpg-bytes").unwrap();
+
+        let derived_rel = "assets/images/up.png";
+        let derived_abs = dir.path().join(derived_rel);
+        std::fs::create_dir_all(derived_abs.parent().unwrap()).unwrap();
+        std::fs::write(&derived_abs, b"upscaled").unwrap();
+
+        let updated = store
+            .repoint_dataset_items(
+                "proj",
+                "ds_test",
+                &[DatasetItemRepoint {
+                    item_id: "item_1".to_owned(),
+                    asset_id: None,
+                    source_path: derived_rel.to_owned(),
+                }],
+            )
+            .expect("repoint");
+
+        let item = updated.items.iter().find(|i| i.id == "item_1").unwrap();
+        assert_eq!(
+            item.path, "images/item_1.png",
+            "path follows the derived extension"
+        );
+        assert!(root.join("images/item_1.png").exists(), "new png written");
+        assert!(!old_jpg.exists(), "the orphaned .jpg is removed");
+    }
+
+    #[test]
     fn repoint_dataset_items_rejects_an_out_of_project_source() {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = saved_dataset(dir.path());
