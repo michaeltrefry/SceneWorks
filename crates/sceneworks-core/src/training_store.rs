@@ -924,6 +924,45 @@ fn materialize_item(
     })
 }
 
+/// The derived image to re-point a dataset item at (sc-6539 one-tap fixes). Produced by a fix that
+/// transforms an item's image (e.g. Real-ESRGAN upscale) and persists the result as a new child asset
+/// with lineage back to the original; the item is then re-pointed here. The original asset/upload is
+/// left untouched, so the fix is reversible by re-pointing back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepointSource {
+    /// The derived child asset, when the result was written to the library (the upscale path).
+    pub asset_id: Option<String>,
+    /// Path (dataset-root-relative) of the materialized derived image for the item.
+    pub path: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// SHA-256 of the derived bytes — the new exact-dup / cache key.
+    pub content_hash: Option<String>,
+}
+
+/// Re-point a dataset item at a derived image (sc-6539 one-tap fixes). Preserves the item's
+/// user-facing identity — id and position, display name, caption + trigger words, and `added_at` — and
+/// swaps only the underlying source (`asset_id`/`path`/`content_hash`/dimensions). The per-image caches
+/// the new bytes invalidate are cleared: `tier0_scalars` (measured on the old pixels) and `quality_ack`
+/// (dismissals are content-hash keyed, so they must not carry to different bytes). Pure so the data
+/// mutation is unit-tested independently of the transform that produced `source`.
+pub fn repoint_item(item: &TrainingDatasetItem, source: RepointSource) -> TrainingDatasetItem {
+    TrainingDatasetItem {
+        id: item.id.clone(),
+        asset_id: source.asset_id,
+        path: source.path,
+        display_name: item.display_name.clone(),
+        caption: item.caption.clone(),
+        width: source.width,
+        height: source.height,
+        content_hash: source.content_hash,
+        tier0_scalars: None,
+        quality_ack: None,
+        added_at: item.added_at.clone(),
+        extra: item.extra.clone(),
+    }
+}
+
 #[derive(Debug)]
 struct ItemSource {
     path: PathBuf,
@@ -1455,6 +1494,78 @@ mod tests {
                 phash: vec![1, 2, 3, 4, 5, 6, 7, 8],
             },
         }
+    }
+
+    #[test]
+    fn repoint_item_swaps_source_preserves_identity_and_clears_stale_caches() {
+        use crate::dataset_quality::{QualityAck, QualityCheck};
+
+        // A fully-populated item: a real caption + trigger words, a Tier-0 cache, and a dismissed
+        // finding — all keyed to the OLD bytes.
+        let mut original = item("item_7", "old_hash");
+        original.asset_id = Some("asset_original".to_owned());
+        original.display_name = "Mira_07".to_owned();
+        original.caption = Caption {
+            text: "a photo of Mira".to_owned(),
+            source: CaptionSource::Auto,
+            trigger_words: vec!["mira".to_owned()],
+            updated_at: Some("then".to_owned()),
+            extra: Default::default(),
+        };
+        original.tier0_scalars = Some(cache_entry("old_hash", 512));
+        original.quality_ack = Some(QualityAck {
+            content_hash: "old_hash".to_owned(),
+            caption_hash: None,
+            checks: vec![QualityCheck::Blur],
+        });
+
+        let repointed = repoint_item(
+            &original,
+            RepointSource {
+                asset_id: Some("asset_upscaled".to_owned()),
+                path: "images/item_7.png".to_owned(),
+                width: Some(2048),
+                height: Some(2048),
+                content_hash: Some("new_hash".to_owned()),
+            },
+        );
+
+        // Identity + caption survive the swap.
+        assert_eq!(repointed.id, "item_7");
+        assert_eq!(repointed.display_name, "Mira_07");
+        assert_eq!(repointed.caption, original.caption);
+        assert_eq!(repointed.added_at, original.added_at);
+
+        // Source is swapped to the derived image.
+        assert_eq!(repointed.asset_id.as_deref(), Some("asset_upscaled"));
+        assert_eq!(repointed.content_hash.as_deref(), Some("new_hash"));
+        assert_eq!(repointed.width, Some(2048));
+        assert_eq!(repointed.height, Some(2048));
+
+        // Caches measured against the OLD bytes are cleared (they no longer describe the image).
+        assert!(repointed.tier0_scalars.is_none());
+        assert!(repointed.quality_ack.is_none());
+    }
+
+    #[test]
+    fn repoint_item_handles_a_dataset_owned_item_with_no_parent_asset() {
+        // A direct-upload (path-based) item has no library asset; re-pointing to a derived child asset
+        // gives it one without disturbing its id/caption.
+        let original = item("item_3", "h3"); // asset_id: None
+        assert!(original.asset_id.is_none());
+        let repointed = repoint_item(
+            &original,
+            RepointSource {
+                asset_id: Some("asset_derived".to_owned()),
+                path: "images/item_3.png".to_owned(),
+                width: Some(1024),
+                height: Some(1024),
+                content_hash: Some("h3_up".to_owned()),
+            },
+        );
+        assert_eq!(repointed.id, "item_3");
+        assert_eq!(repointed.asset_id.as_deref(), Some("asset_derived"));
+        assert_eq!(repointed.content_hash.as_deref(), Some("h3_up"));
     }
 
     #[test]
