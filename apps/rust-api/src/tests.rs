@@ -1798,6 +1798,8 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     assert!(report["subScores"]["diversity"].is_null());
     // sc-6537: nor an aesthetic sub-score (style dataset, but no embeddings yet).
     assert!(report["subScores"]["aesthetic"].is_null());
+    // sc-6540: the resolved kind is echoed so the client can branch its recommendations.
+    assert_eq!(report["kind"], "style");
 
     let (status, detail) = request(
         app.clone(),

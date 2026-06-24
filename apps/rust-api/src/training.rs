@@ -285,7 +285,7 @@ fn dataset_readiness_report(
         None
     };
 
-    let (report, extracted) = compute_readiness(
+    let (mut report, extracted) = compute_readiness(
         &items,
         context.bucket_edge,
         context.min_items,
@@ -294,6 +294,9 @@ fn dataset_readiness_report(
         alignment.as_ref(),
         aesthetic.as_ref(),
     );
+    // Echo the resolved kind so the client branches its kind-aware recommendations on the same
+    // source of truth that already shaped the gate/flags (sc-6540).
+    report.kind = Some(context.kind.clone());
 
     if !extracted.is_empty() {
         let updates: Vec<(String, CachedTier0Scalars)> = extracted

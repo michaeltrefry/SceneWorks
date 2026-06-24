@@ -753,6 +753,13 @@ pub struct DatasetReadinessReport {
     /// safely removable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_removal: Option<DuplicateRemovalPlan>,
+    /// The resolved training kind (person/style/object) this report was evaluated for (sc-6540). The
+    /// per-kind thresholds already shape the gate + flags; this echoes the kind so the client can
+    /// branch its kind-aware recommendations on the same source of truth (vs. re-deriving it). Set by
+    /// the extraction layer (which holds the [`ReadinessContext`]); the pure core rollup leaves it
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DatasetKind>,
 }
 
 /// One item's input to the one-tap duplicate-removal planner (sc-6539). `duplicate_peers` are the
@@ -1055,6 +1062,7 @@ pub fn build_readiness_report(
         dataset_flags,
         distributions: None,
         duplicate_removal: None,
+        kind: None,
     }
 }
 
@@ -2736,5 +2744,45 @@ mod tests {
         let right = plan_smart_crop(300, 60, 0.25, Some((1.0, 0.5))).expect("crop");
         assert_eq!(right.x, 300 - right.width);
         assert!(right.x + right.width <= 300);
+    }
+
+    // --- sc-6540: the verdict half of acceptance — the same set scores differently per kind ---
+
+    #[test]
+    fn verdict_and_count_flag_vary_by_kind_on_the_same_set() {
+        // 12 clean, distinct images. A person LoRA wants ≥15 (Count warning → NeedsAttention); an
+        // object LoRA only ≥10 (clean → Ready). The verdict changes with the kind on identical input —
+        // the gate/flags already carry the per-kind weighting that the recommendations build on.
+        let items: Vec<_> = (0..12u8)
+            .map(|i| {
+                let mut entry = item(&format!("img{i}"));
+                entry.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![i; 8]));
+                entry
+            })
+            .collect();
+        let person = build_readiness_report(
+            evaluate_tier0(&items, 512, 15, &thresholds()),
+            None,
+            None,
+            None,
+        );
+        let object = build_readiness_report(
+            evaluate_tier0(&items, 512, 10, &thresholds()),
+            None,
+            None,
+            None,
+        );
+        let has_count = |report: &DatasetReadinessReport| {
+            report
+                .dataset_flags
+                .iter()
+                .any(|flag| flag.check == QualityCheck::Count)
+        };
+        assert!(has_count(&person), "person (min 15) flags a 12-image set");
+        assert!(!has_count(&object), "object (min 10) accepts 12 images");
+        assert_ne!(
+            person.gate, object.gate,
+            "the verdict differs by kind on identical input"
+        );
     }
 }
