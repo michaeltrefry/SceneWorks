@@ -3800,9 +3800,10 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     // generator (sc-7457). Off-Mac the candle lane loads the dense `black-forest-labs/FLUX.2-dev`
     // diffusers snapshot and Q4-quantizes it at load (CPU-stage → quantize-onto-GPU; the 32B doesn't
     // fit the GPU dense) — the manifest `mlx.quantize: 4` + the dev descriptor's `supported_quants`
-    // drive that through the shared `resolve_quant` gate, so it needs no per-payload quant request and
-    // stays a pure **txt2img** id here. Edit / multi-reference / strict-pose shapes are rejected below
-    // (`image_request_candle_eligible`) and fall back to the Python torch worker until story 4 lands.
+    // drive that through the shared `resolve_quant` gate, so it needs no per-payload quant request for
+    // txt2img. Its edit / multi-reference shapes (`Flux2Edit::load_dev`) and strict-pose Fun-Controlnet-
+    // Union (`Flux2Control`) are now candle lanes too (sc-7736): both branch out of
+    // `image_job_is_candle_eligible` BEFORE the txt2img gate (the edit + control eligibility predicates).
     "flux2_dev",
     "qwen_image",
     "lens",
@@ -3916,6 +3917,14 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     {
         return true;
     }
+    // FLUX.2-dev edit (sc-7736, epic 6564): the 32B flagship `edit_image` job with a source is the SAME
+    // bespoke candle `Flux2Edit` lane (`generate_candle_flux2_edit_stream` via `load_dev`, Q4 CPU-stage →
+    // quantize-onto-GPU), NOT txt2img — the `image_request_candle_eligible` gate below rejects the whole
+    // `edit_image` family. Branch it out first (the klein-edit reasoning, for the dev family). Same payload
+    // predicate as klein. Mirrors the worker's `flux2_edit_candle_available` gate.
+    if model == "flux2_dev" && flux2_edit_candle_eligible(&job.payload) {
+        return true;
+    }
     // Qwen-Image-Edit reference / dual-latent edit (sc-5487, epic 5480): a non-lightning Qwen-Image-Edit
     // `edit_image` job with a source image is the bespoke candle `QwenEdit` lane
     // (`generate_candle_qwen_edit_stream`), NOT txt2img — and `qwen_image_edit*` are not candle txt2img
@@ -4014,6 +4023,16 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // Qwen/Kolors-control reasoning, for the last strict-pose family). Mirrors the worker's
     // `zimage_control_available`. With this all three control families (qwen / kolors / z_image) are wired.
     if model == "z_image_turbo" && zimage_control_candle_eligible(&job.payload) {
+        return true;
+    }
+    // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564): `flux2_dev` + `advanced.poses` is
+    // the bespoke candle `Flux2Control` lane (`generate_candle_flux2_control_stream`), NOT txt2img — the
+    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the pose-
+    // reject would otherwise claim-to-reject it (it now HAS a candle pose lane). Branch it out first (the
+    // qwen/kolors/z_image-control reasoning, for the 4th wired strict-pose family). A flux2_dev edit job
+    // (with a source) is the edit branch above; a pure-pose job (no source) reaches here. Mirrors the
+    // worker's `flux2_control_candle_available`.
+    if model == "flux2_dev" && flux2_dev_control_candle_eligible(&job.payload) {
         return true;
     }
     // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
@@ -4615,11 +4634,32 @@ fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|poses| !poses.is_empty())
 }
 
-/// Candle-routed image models that HAVE a candle strict-pose lane (sc-5489). A `advanced.poses` job on
-/// any OTHER candle-routed model has no pose path on candle (plain-SDXL pose ships via InstantID,
-/// `instantid_realvisxl`, not `sdxl`).
+/// FLUX.2-dev strict-pose Fun-Controlnet-Union candle-routing conditions (sc-7736, epic 6564). The candle
+/// `Flux2Control` provider serves `flux2_dev` + a non-empty `advanced.poses` (one image per pose, each
+/// conditioned on a DWPose skeleton via the VACE-style `FLUX.2-dev-Fun-Controlnet-Union` branch overlaid
+/// on the Q4 dev DiT), NOT an `edit_image`. Same shape as the qwen/kolors/zimage control gates — the model
+/// gate (`flux2_dev`) is applied at the call site. Mirrors the worker's `flux2_control_candle_available`.
+/// Candle-only — the macOS path is the MLX `flux2_dev_control` registry generator (sc-6055).
+fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+}
+
+/// Candle-routed image models that HAVE a candle strict-pose lane (sc-5489; flux2_dev sc-7736). A
+/// `advanced.poses` job on any OTHER candle-routed model has no pose path on candle (plain-SDXL pose ships
+/// via InstantID, `instantid_realvisxl`, not `sdxl`).
 fn model_has_candle_pose_lane(model: &str) -> bool {
-    matches!(model, "qwen_image" | "kolors" | "z_image_turbo")
+    matches!(
+        model,
+        "qwen_image" | "kolors" | "z_image_turbo" | "flux2_dev"
+    )
 }
 
 /// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —
@@ -6158,7 +6198,8 @@ mod candle_routing_tests {
             "z_image_turbo",
             "flux_dev",
             // sc-7458: FLUX.2-dev (the 32B flagship) routes to candle for plain txt2img off-Mac (loads
-            // the dense snapshot + Q4-quantizes at load). Edit/reference shapes still defer (story 4).
+            // the dense snapshot + Q4-quantizes at load). Edit (sc-7736) + strict pose (sc-7736) are
+            // candle lanes too now — covered by the dedicated assertions below.
             "flux2_dev",
             "qwen_image",
             "chroma1_hd",
@@ -6263,17 +6304,41 @@ mod candle_routing_tests {
             "mode": "edit_image",
             "sourceAssetId": "asset_1"
         }))));
-        // sc-7458: FLUX.2-dev is txt2img-only on candle in this slice. Its edit / multi-reference shapes
-        // (the `flux2_dev_edit` surface) are NOT a candle lane yet (epic 6564 story 4), so the candle
-        // worker does NOT claim them — they stay off the candle lane until that port lands.
-        assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+        // sc-7736 (epic 6564): FLUX.2-dev edit (`edit_image` + a source) is NOW the candle `Flux2Edit`
+        // dev lane (`load_dev`, Q4) — the worker CLAIMS it (was deferred to torch under sc-7458's
+        // txt2img-only slice). Multi-reference (the plural `referenceAssetIds`) rides the same lane.
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
             "model": "flux2_dev",
             "mode": "edit_image",
             "sourceAssetId": "asset_1"
         }))));
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "flux2_dev",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1",
+            "referenceAssetIds": ["asset_1", "asset_2"]
+        }))));
+        // sc-7736: a pure-reference flux2_dev job (a `referenceAssetId`, NO `edit_image` source, NO poses)
+        // is neither the edit lane (needs `edit_image` + a source) nor the control lane (needs poses), so
+        // the txt2img gate rejects the reference shape → it still defers to torch.
         assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
             "model": "flux2_dev",
             "referenceAssetId": "asset_1"
+        }))));
+        // sc-7736: FLUX.2-dev strict pose (`advanced.poses`, not edit) is the candle `Flux2Control`
+        // Fun-Controlnet-Union lane — the worker CLAIMS it (the 4th wired strict-pose family). A pose job
+        // with no poses array is plain txt2img (claimed by the generic candle lane, not the control one).
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "flux2_dev",
+            "advanced": { "poses": [{ "keypoints": [] }] }
+        }))));
+        assert!(flux2_dev_control_candle_eligible(&object(json!({
+            "advanced": { "poses": [{ "keypoints": [] }] }
+        }))));
+        // An `edit_image` flux2_dev job is the edit lane, not the control lane (disjoint gates).
+        assert!(!flux2_dev_control_candle_eligible(&object(json!({
+            "mode": "edit_image",
+            "advanced": { "poses": [{ "keypoints": [] }] }
         }))));
         // sc-5487: a Qwen-Image-Edit edit (`edit_image` + a source) is now the candle `QwenEdit` lane
         // (dual-latent reference editing). Off-Mac this was a torch fallback; the candle worker CLAIMS
@@ -6391,6 +6456,12 @@ mod candle_routing_tests {
         // A wired candle pose family is NOT a reject shape, and edit_image is never a reject shape.
         assert!(!image_request_candle_pose_reject(
             "qwen_image",
+            &object(json!({ "advanced": { "poses": [{ "id": "p" }] } }))
+        ));
+        // sc-7736: flux2_dev now HAS a candle pose lane (Flux2Control), so its pose job is served, not
+        // rejected.
+        assert!(!image_request_candle_pose_reject(
+            "flux2_dev",
             &object(json!({ "advanced": { "poses": [{ "id": "p" }] } }))
         ));
         assert!(!image_request_candle_pose_reject(

@@ -197,9 +197,14 @@ use candle_gen_sdxl::{
 // reference token-concat over the txt2img FLUX.2 stack + the VAE encoder). Candle-only: macOS keeps the
 // MLX `flux2_klein_9b_edit` registry path. `candle_gen_flux2` is already force-link anchored above (the
 // registered txt2img `flux2_klein_9b`); this is the named-type import the bespoke edit route
-// (`image_jobs/flux2_edit_candle.rs`) drives.
+// (`image_jobs/flux2_edit_candle.rs`) drives. The same crate carries the bespoke `Flux2Control`
+// (FLUX.2-dev Fun-Controlnet-Union strict-pose VACE branch, sc-7460) the candle pose route
+// (`image_jobs/flux2_control_candle.rs`, sc-7736) drives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use candle_gen_flux2::{Flux2Edit, Flux2EditPaths, Flux2EditRequest};
+use candle_gen_flux2::{
+    Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Flux2Edit, Flux2EditPaths,
+    Flux2EditRequest,
+};
 // Kolors IP-Adapter-Plus reference provider (sc-5488, epic 5480) — the candle (Windows/CUDA) Kolors
 // sibling of the SDXL IP lane, living in `candle-gen-kolors` (it reuses candle-gen-sdxl's vendored IP
 // UNet + the CLIP ViT-L/14-336 image encoder, with the Kolors ChatGLM3 conditioning + leading-Euler
@@ -739,11 +744,30 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
         true
+    } else if settings.backend_candle_enabled && flux2_control_candle_available(&request, settings) {
+        // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564) — `flux2_dev` + `advanced.poses`
+        // is the bespoke candle `Flux2Control` lane (`generate_candle_flux2_control_stream`), NOT txt2img —
+        // the `is_candle_engine` txt2img branch below would silently drop the poses, and the no-pose-lane
+        // reject branch would reject them. Branch it out first (the qwen/kolors/z_image-control reasoning,
+        // for the FLUX.2-dev family — the 4th wired strict-pose family). Disjoint from the FLUX.2 edit lane
+        // above (that one is `edit_image` + a source; this is `advanced.poses`, not edit mode). Mirrors the
+        // router's `flux2_dev_control_candle_eligible`.
+        generate_candle_flux2_control_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
     } else if settings.backend_candle_enabled
         && is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),
-            "qwen_image" | "kolors" | "z_image_turbo"
+            "qwen_image" | "kolors" | "z_image_turbo" | "flux2_dev"
         )
         && request.mode != "edit_image"
         && !pose_entries(&request).is_empty()
@@ -753,11 +777,12 @@ pub(crate) async fn run_image_generate_job(
         // and not bounced to torch. The candle worker CLAIMS these (jobs_store
         // `image_job_candle_pose_reject`) precisely to fail them loudly here, checked BEFORE the
         // `is_candle_engine` txt2img branch below. SDXL identity-pose ships via InstantID; the wired
-        // candle pose families are qwen_image / kolors / z_image_turbo.
+        // candle pose families are qwen_image / kolors / z_image_turbo / flux2_dev.
         return Err(WorkerError::InvalidPayload(format!(
             "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
              refusing rather than silently generating an unconditioned image (wired candle pose \
-             families: qwen_image, kolors, z_image_turbo; SDXL identity-pose runs via InstantID)",
+             families: qwen_image, kolors, z_image_turbo, flux2_dev; SDXL identity-pose runs via \
+             InstantID)",
             request.model
         )));
     } else if settings.backend_candle_enabled && is_candle_engine(&request.model) {
@@ -1277,6 +1302,11 @@ include!("image_jobs/kolors_control.rs");
 // MLX `z_image_turbo_control` registry generator; the candle `ZImageControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/zimage_control.rs");
+// FLUX.2-dev Fun-Controlnet-Union (strict pose) — the Windows/CUDA candle lane ONLY (sc-7736, epic 6564).
+// macOS keeps the MLX `flux2_dev_control` registry generator (flux2.rs); the candle `Flux2Control` is a
+// bespoke provider (the dev VACE control branch over the Q4 dev DiT).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/flux2_control_candle.rs");
 // Z-Image img2img / edit — the Windows/CUDA candle lane ONLY (sc-6595). macOS keeps the MLX
 // `z_image_turbo` registry generator's `Conditioning::Reference` img2img path; the candle `ZImageEdit`
 // is a bespoke provider.

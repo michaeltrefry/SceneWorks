@@ -1726,8 +1726,10 @@
       // install-time convert + packed loader are MLX-only; off-Mac is download-and-go).
       // Image edit + reference (sc-5919/5922): reference image(s) condition via the
       // DiT token concat through the `flux2_dev_edit` variant — the same surface as
-      // klein (candle edit is epic 6564 story 4). Pose library is best-effort
-      // (skeleton-as-edit-image, like klein); the real FLUX.2-dev pose ControlNet is sc-2292.
+      // klein. Off-Mac the candle lane now serves this too (sc-7736: `Flux2Edit::load_dev`,
+      // Q4) alongside the real FLUX.2-dev strict-pose ControlNet (`Flux2Control`,
+      // Fun-Controlnet-Union; engine sc-2292 / candle sc-7460). On MLX the pose library is
+      // best-effort (skeleton-as-edit-image) below the strict `flux2_dev_control` tier.
       "adapter": "mlx_flux2",
       "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "macOnly": true,
@@ -1817,15 +1819,16 @@
           { "id": "down_right", "label": "Down · right" },
           { "id": "front", "label": "Front" }
         ],
-        // Strict pose tier (sc-2292 engine + sc-6055 wiring): on the macOS MLX backend
-        // the worker renders the selected library pose to an OpenPose skeleton and
-        // conditions the ported FLUX.2-dev Fun-Controlnet-Union branch on it (true pose
-        // lock via the `flux2_dev_control` registry generator, one image per pose), not
-        // the best-effort `MultiReference [skeleton, reference]` edit tier. The control
-        // checkpoint (`alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union`, ~8 GB) is fetched on
-        // the first pose job. A pose job with NO reference is pure pose; a reference is an
-        // opt-in img2img-init (advanced.referenceStrength). Surfaces dev in the Character
-        // Studio pose picker (character_image not required — poseLibrary gates the picker).
+        // Strict pose tier (sc-2292 engine + sc-6055 wiring; candle sc-7460 engine + sc-7736
+        // wiring): the worker renders the selected library pose to an OpenPose skeleton and
+        // conditions the ported FLUX.2-dev Fun-Controlnet-Union branch on it (true pose lock,
+        // one image per pose) — the macOS MLX `flux2_dev_control` registry generator, and
+        // off-Mac the candle `Flux2Control` bespoke lane — not the best-effort `MultiReference
+        // [skeleton, reference]` edit tier. The control checkpoint
+        // (`alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union`, ~8 GB) is fetched on the first pose
+        // job (both backends). A pose job with NO reference is pure pose; a reference is an
+        // opt-in img2img-init (advanced.referenceStrength, MLX only). Surfaces dev in the
+        // Character Studio pose picker (character_image not required — poseLibrary gates it).
         "poseLibrary": true,
         // Strict ControlNet → expose the pose-lock-strength slider (advanced.controlScale;
         // the dev Fun-Controlnet-Union README recommends 0.65–0.80, worker default 0.75).

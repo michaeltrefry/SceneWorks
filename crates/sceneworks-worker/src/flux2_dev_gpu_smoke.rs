@@ -23,6 +23,30 @@ use std::path::{Path, PathBuf};
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
 
+/// A synthetic RGB test image (a smooth diagonal gradient with a centered block) — enough to exercise
+/// the VAE encode + reference/control token path on real weights without shipping a fixture. The dev
+/// edit / control GPU validation behind the *quality* call lives in `candle-gen-flux2`'s `flux2-edit` /
+/// `flux2-control` examples (sc-7460, real refs + a synthetic OpenPose skeleton); these worker smokes
+/// prove the worker links + drives the bespoke `Flux2Edit::load_dev` / `Flux2Control::load` providers.
+fn synthetic_rgb(w: u32, h: u32) -> Image {
+    let (wu, hu) = (w as usize, h as usize);
+    let mut pixels = vec![0u8; wu * hu * 3];
+    for y in 0..hu {
+        for x in 0..wu {
+            let i = (y * wu + x) * 3;
+            pixels[i] = ((x * 255) / wu.max(1)) as u8;
+            pixels[i + 1] = ((y * 255) / hu.max(1)) as u8;
+            let centered = x > wu / 3 && x < 2 * wu / 3 && y > hu / 3 && y < 2 * hu / 3;
+            pixels[i + 2] = if centered { 220 } else { 40 };
+        }
+    }
+    Image {
+        width: w,
+        height: h,
+        pixels,
+    }
+}
+
 fn env_path(key: &str) -> PathBuf {
     // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
     PathBuf::from(
@@ -151,4 +175,149 @@ fn flux2_dev_candle_gpu_smoke() {
          (check CUDA_COMPUTE_CAP=120: cap=80 JIT-no-ops the quantized matmul on sm_120, sc-7457)"
     );
     println!("[smoke] DONE: flux2_dev {quant:?} render coherent at {steps} steps");
+}
+
+/// Real-weight GPU smoke for the candle FLUX.2-dev **edit** worker lane (sc-7736) — drives the bespoke
+/// `candle_gen_flux2::Flux2Edit::load_dev` provider (Q4 CPU-stage → quantize-onto-GPU) the worker's
+/// `generate_candle_flux2_edit_stream` loads, with a reference (env `FLUX2_DEV_REF`, else a synthetic
+/// image). Embedded distilled guidance, single forward (no negative pass). Proves the worker links + runs
+/// the dev edit provider end-to-end; the quality A/B is the engine's `flux2-edit --variant dev` example.
+///
+/// ```text
+/// $env:FLUX2_DEV_DIR="D:\models\FLUX.2-dev"; $env:FLUX2_DEV_REF="D:\models\FLUX.2-dev\teaser_generation.png"
+/// cargo test -p sceneworks-worker --features backend-candle --release flux2_dev_edit_candle_gpu_smoke -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "real-weight GPU smoke; needs the dense FLUX.2-dev diffusers snapshot + a CUDA device (cap=120)"]
+fn flux2_dev_edit_candle_gpu_smoke() {
+    use candle_gen_flux2::{Flux2Edit, Flux2EditPaths, Flux2EditRequest};
+
+    let weights_dir = env_path("FLUX2_DEV_DIR");
+    assert!(
+        weights_dir.join("model_index.json").is_file(),
+        "FLUX2_DEV_DIR must point at the dense FLUX.2-dev diffusers snapshot: {}",
+        weights_dir.display()
+    );
+    let out_dir = PathBuf::from(env_or("FLUX2_DEV_OUT_DIR", "flux2-dev-out"));
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    let (w, h) = (
+        env_or("FLUX2_DEV_W", "512").parse().expect("FLUX2_DEV_W"),
+        env_or("FLUX2_DEV_H", "512").parse().expect("FLUX2_DEV_H"),
+    );
+    let steps: usize = env_or("FLUX2_DEV_STEPS", "8")
+        .parse()
+        .expect("FLUX2_DEV_STEPS");
+
+    let reference = match std::env::var("FLUX2_DEV_REF") {
+        Ok(p) if !p.trim().is_empty() => {
+            let img = image::open(p.trim()).expect("open FLUX2_DEV_REF").to_rgb8();
+            Image {
+                width: img.width(),
+                height: img.height(),
+                pixels: img.into_raw(),
+            }
+        }
+        _ => synthetic_rgb(w, h),
+    };
+
+    println!("[smoke] loading flux2_dev EDIT (Q4) from {} ...", weights_dir.display());
+    let model = Flux2Edit::load_dev(
+        &Flux2EditPaths {
+            root: weights_dir.clone(),
+        },
+        Some(Quant::Q4),
+    )
+    .expect("load candle Flux2Edit dev");
+
+    let req = Flux2EditRequest {
+        prompt: env_or("FLUX2_DEV_PROMPT", "make the person wear a bright red wizard hat"),
+        negative: String::new(),
+        width: w,
+        height: h,
+        steps,
+        guidance: 4.0,
+        seed: 42,
+        cancel: gen_core::runtime::CancelFlag::new(),
+    };
+    println!("[smoke] dev edit {w}x{h} @ {steps} steps (single ref) ...");
+    let image = model
+        .generate(&req, std::slice::from_ref(&reference), &mut |_| {})
+        .expect("flux2_dev edit generate");
+    let std = image_std(&image);
+    let png = out_dir.join("flux2_dev_edit_candle.png");
+    save_png(&image, &png);
+    println!("[smoke] dev edit {}x{} std {:.2} -> {}", image.width, image.height, std, png.display());
+    assert_eq!((image.width, image.height), (w, h));
+    assert!(std > 5.0, "dev edit render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120");
+    println!("[smoke] DONE: flux2_dev edit (candle) coherent");
+}
+
+/// Real-weight GPU smoke for the candle FLUX.2-dev **strict-pose control** worker lane (sc-7736) — drives
+/// the bespoke `candle_gen_flux2::Flux2Control::load` provider the worker's
+/// `generate_candle_flux2_control_stream` loads, with a synthetic control image and the Fun-Controlnet-
+/// Union checkpoint (env `FLUX2_CONTROL`). Proves the worker links + runs the dev control provider; the
+/// pose-conditioning A/B (scale 0 vs 0.75) is the engine's `flux2-control` example (sc-7460).
+///
+/// ```text
+/// $env:FLUX2_DEV_DIR="D:\models\FLUX.2-dev"
+/// $env:FLUX2_CONTROL="D:\models\FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors"
+/// cargo test -p sceneworks-worker --features backend-candle --release flux2_dev_control_candle_gpu_smoke -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "real-weight GPU smoke; needs the dense FLUX.2-dev snapshot + the Fun-Controlnet-Union ckpt + a CUDA device (cap=120)"]
+fn flux2_dev_control_candle_gpu_smoke() {
+    use candle_gen_flux2::{Flux2Control, Flux2ControlPaths, Flux2ControlRequest};
+
+    let weights_dir = env_path("FLUX2_DEV_DIR");
+    let control = env_path("FLUX2_CONTROL");
+    assert!(
+        weights_dir.join("model_index.json").is_file(),
+        "FLUX2_DEV_DIR must point at the dense FLUX.2-dev diffusers snapshot: {}",
+        weights_dir.display()
+    );
+    let out_dir = PathBuf::from(env_or("FLUX2_DEV_OUT_DIR", "flux2-dev-out"));
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    let (w, h) = (
+        env_or("FLUX2_DEV_W", "768").parse().expect("FLUX2_DEV_W"),
+        env_or("FLUX2_DEV_H", "768").parse().expect("FLUX2_DEV_H"),
+    );
+    let steps: usize = env_or("FLUX2_DEV_STEPS", "28")
+        .parse()
+        .expect("FLUX2_DEV_STEPS");
+    let pose = synthetic_rgb(w, h);
+
+    println!("[smoke] loading flux2_dev CONTROL (Q4) from {} + {} ...", weights_dir.display(), control.display());
+    let model = Flux2Control::load(
+        &Flux2ControlPaths {
+            root: weights_dir.clone(),
+            control: control.clone(),
+        },
+        Some(Quant::Q4),
+    )
+    .expect("load candle Flux2Control dev");
+
+    let req = Flux2ControlRequest {
+        prompt: env_or(
+            "FLUX2_DEV_PROMPT",
+            "a knight in ornate steel armor, dramatic cinematic lighting",
+        ),
+        width: w,
+        height: h,
+        steps,
+        guidance: 4.0,
+        control_scale: 0.75,
+        seed: 42,
+        cancel: gen_core::runtime::CancelFlag::new(),
+    };
+    println!("[smoke] dev control {w}x{h} @ {steps} steps (scale 0.75) ...");
+    let image = model
+        .generate(&req, &pose, &mut |_| {})
+        .expect("flux2_dev control generate");
+    let std = image_std(&image);
+    let png = out_dir.join("flux2_dev_control_candle.png");
+    save_png(&image, &png);
+    println!("[smoke] dev control {}x{} std {:.2} -> {}", image.width, image.height, std, png.display());
+    assert_eq!((image.width, image.height), (w, h));
+    assert!(std > 5.0, "dev control render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120");
+    println!("[smoke] DONE: flux2_dev control (candle) coherent");
 }
