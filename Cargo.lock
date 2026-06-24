@@ -5471,6 +5471,7 @@ dependencies = [
  "reqwest 0.12.28",
  "sceneworks-core",
  "sceneworks-gen-core",
+ "sceneworks-image-quality",
  "serde",
  "serde_json",
  "sha2",

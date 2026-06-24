@@ -280,6 +280,11 @@ uuid = { version = "1.11", features = ["v4"] }
 [dev-dependencies]
 axum = "0.7"
 tower = { version = "0.5", features = ["util"] }
+# sc-6541 closed-loop study: the LoRA eval harness (test-only, src/lora_eval_harness.rs) reuses
+# the canonical Dataset Doctor blur measurement (`scalars_from_image(..).blur_variance`) for the
+# output-sharpness Y axis. GPU-free path crate (image/imageproc/core), builds anywhere; dev-only
+# so it never enters the worker binary.
+sceneworks-image-quality = { path = "../sceneworks-image-quality" }
 # Only the all-targets registry-derivation test stub (engines.rs) calls `inventory::submit!`;
 # the production code reaches the registry through `gen_core::registry::*`. Must be the SAME
 # inventory version gen_core's `collect!` uses (0.3.x) so the stub registers into the registry

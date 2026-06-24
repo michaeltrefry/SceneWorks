@@ -114,6 +114,14 @@ use face_analysis_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 mod downloads;
+// sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
+// see the module doc + docs/sc-6541/closed-loop-protocol.md.
+#[cfg(all(test, target_os = "macos"))]
+mod lora_eval_harness;
+// sc-6541 closed-loop study: native-Rust LoRA train→generate driver (research instrument) —
+// see the module doc + docs/sc-6541/closed-loop-protocol.md.
+#[cfg(all(test, target_os = "macos"))]
+mod lora_train_driver;
 // Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
 // in normal compiles. Drives the shipped worker conditioning + `gen_core::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]

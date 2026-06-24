@@ -96,6 +96,15 @@ the kind changes what "good" means.
 All thresholds live in **one config surface** (a Rust constants module + per-kind overrides),
 never scattered at call sites — calibration in §8 should be a data edit, not a refactor.
 
+> **Pilot evidence (sc-6541, see §8.1) — borderline-significant, not yet validated.** The blur
+> **dual floor** (the absolute arm is load-bearing — a uniformly-soft set only trips the absolute
+> one, a design fact), the non-style **diversity 0.12** floor, and the **near-dup CLIP 0.95**
+> threshold all separated clean-vs-degraded *decisively on the signal (X) side*. The **leap to
+> trained-LoRA output quality is marginal** at N = 16 (blur→identity 11/14, p ≈ 0.057;
+> low-div→adherence 12/16, p ≈ 0.077, + a within-prompt variety collapse 0.172 → 0.130) — borderline,
+> not p < 0.05, so *consistent with* the loop, not yet validated by it. The absolute blur value
+> also needs multi-subject calibration before freezing.
+
 ---
 
 ## 4. Readiness model — sub-scores + a discrete gate, **not** a magic number
@@ -232,3 +241,48 @@ the raw scalars:
 This step needs the raw numbers from real images, so it lands alongside 6532 rather than
 ahead of it — but the catalog, readiness model, and architecture above are the parts that
 had to be settled first, and they are.
+
+### 8.1 Closed-loop validation (sc-6541) — signals → trained-LoRA quality
+
+The deepest validation of §8 isn't "does the bad set trip the check" but "does tripping the check
+predict a worse **trained LoRA**." sc-6541 ran that closed loop on-device (native MLX:
+Z-Image-Turbo LoRA train → generate → ArcFace/CLIP score). Full write-up:
+[`docs/sc-6541/results.md`](../sc-6541/results.md). Pilot scope (N = 16 paired = 8 prompts × 2
+seeds, reduced-step LoRAs, one render subject) — **marginal-significance directional evidence,
+not regression-learned thresholds.**
+
+What it established (each degradation derived from one clean 21-image set, count held fixed).
+**Two tiers of confidence — keep them apart:**
+
+**Solid (decisive on its own terms):**
+- **X-side isolation.** Each degradation moved *only* its own signal: blur collapsed
+  `blur_variance` ~75× (median 203 → 2.7) with diversity/near-dup untouched; low-diversity dropped
+  `clip_diversity` 44% (0.172 → 0.097) and raised near-dup pairs 2 → 45 with `blur_variance`
+  untouched. The check catalog cleanly separates known-bad from clean.
+- **Checks 2/13 (crop-loss / subject-prominence) — confirmed harmful (the strongest finding).**
+  The trainer's blind `center_crop_square` dropped faces on tall full-body inputs; face-centering
+  the crops **doubled** learned identity (0.156 → 0.285). A clean, mechanism-level confirmation
+  that these flags track real training harm, and an argument for face-aware cropping /
+  aspect-bucketing in the trainer.
+- **The absolute blur floor is load-bearing (confirms §2), independent of N.** The blurred set is
+  *uniformly* soft (every image ≈ 2.7 vs clean median 203), so a relative-to-median rule passes it
+  (nothing deviates) — only the **absolute** floor flags it. This is a design fact, not a
+  statistical claim. The absolute *value* is resolution/content/subject-dependent → still needs
+  multi-subject calibration before freezing a constant.
+
+**Marginal (N = 16 = 8 prompts × 2 seeds — borderline significant, p ≈ 0.06–0.08, not p < 0.05):**
+- **Blur → output identity (fidelity).** Blurred LoRA 0.178 vs clean 0.284 (paired clean-wins
+  **11/14, sign-test p ≈ 0.057**, meanΔ +0.106). The 2nd seed moved this from p ≈ 0.23 (single
+  seed) to borderline. Consistent with the blur signal tracking fidelity loss.
+- **Low-diversity → output variety + adherence, NOT identity.** Identity unchanged (8/14, p ≈ 0.79
+  — correct, same subject). Prompt-adherence down (**12/16, p ≈ 0.077**), and a within-prompt
+  variety metric (`same_prompt_spread`, spread of the *same* prompt across seeds) collapsed
+  **0.172 → 0.130** — the actual mode-collapse signal the single-prompt `output_spread` couldn't
+  see. So the diversity check predicts a variety/adherence outcome (directional, 8 prompt-pairs).
+
+Net: the X separation and the crop-confound finding are solid; the **signal → trained-LoRA-quality
+leap is borderline-significant** at N = 16 (p ≈ 0.06–0.08), not p < 0.05. The thresholds in §3 are
+*consistent with* this loop and now have a directional output link, but are not yet *validated* by
+it. Remaining strengthening, in order: the deferred wrong-person + pose-collapse variants, more
+seeds/subjects to cross p < 0.05, and a real-person (non-render) subject to remove the ArcFace
+domain gap.
