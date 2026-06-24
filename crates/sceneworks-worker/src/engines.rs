@@ -437,14 +437,20 @@ pub(crate) const VIDEO_ENGINE_IDS: &[&str] = &[
     "svd_xt",
 ];
 
-/// The mlx-gen trainer registry ids this worker can train (the ids `engine_trainer_id`
-/// maps TO). Trainer descriptors carry no `backend` field at this gen_core rev (a Phase-0
-/// limitation), so the derivation gates the training capabilities on "any backend enabled"
-/// + a registered trainer whose id is one of these, rather than on a per-trainer backend.
+/// The trainer registry ids this worker serves (the ids `engine_trainer_id` maps TO). Used by
+/// [`registry_capabilities`] as the "is this a trainer the worker actually serves" filter: the
+/// training capabilities light up when an enabled backend has a registered trainer whose id is one
+/// of these. Trainer descriptors DO carry `backend` (sc-4906), so the derivation gates per-backend
+/// — a candle trainer lights training up only under `backend_candle_enabled`, an mlx one only under
+/// `backend_mlx_enabled` (see the gate in `registry_capabilities`). `lens` is the mlx (sc-5148) +
+/// candle (sc-7817) Lens trainer. The mlx backend registers all of these; the candle backend only
+/// the subset {`sdxl`, `z_image_turbo`, `lens`, `wan2_2_t2v_14b`} (the Wan 5B / I2V A14B + Kolors /
+/// LTX have no candle trainer — `jobs_store::training_job_is_candle_eligible` keeps them off candle).
 pub(crate) const TRAINER_IDS: &[&str] = &[
     "z_image_turbo",
     "sdxl",
     "kolors",
+    "lens",
     "ltx_2_3",
     "wan2_2_ti2v_5b",
     "wan2_2_t2v_14b",
@@ -995,6 +1001,40 @@ mod tests {
         }
     }
 
+    // A candle-backed stub `Trainer` (backend "candle") registered under an id that IS in TRAINER_IDS
+    // (`sdxl`): proves a Windows/candle backend lights up `lora_train` + `lora_train_execute` from a
+    // registered `backend = "candle"` trainer descriptor alone (sc-7817), so the default (Linux) CI
+    // lane exercises the per-backend training gate without linking a real provider crate. The real
+    // lanes register the candle-gen-{sdxl,z-image,lens,wan} trainers into this SAME registry.
+    //
+    // Compiled out of the `backend-candle` build: there the REAL `candle-gen-sdxl` trainer registers
+    // `sdxl` already (so the capability test still lights up off it), and a stub `sdxl` would be a
+    // DUPLICATE — `load_trainer("sdxl")` is first-wins, so in --release (where the candle GPU smokes
+    // run, debug_assert off) the smoke could resolve THIS `unimplemented!()` stub instead of the real
+    // trainer. On macOS the real trainers are `backend = "mlx"`, so the candle stub is still needed
+    // there to exercise the candle branch, and no macOS smoke loads `sdxl`, so no collision.
+    #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
+    fn stub_candle_trainer_descriptor() -> gen_core::TrainerDescriptor {
+        gen_core::TrainerDescriptor {
+            id: "sdxl",
+            family: "test",
+            backend: "candle",
+            modality: gen_core::Modality::Image,
+            supports_lora: true,
+            supports_lokr: true,
+        }
+    }
+    #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
+    fn stub_candle_trainer_load(
+        _spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<Box<dyn gen_core::Trainer>> {
+        unimplemented!("registry-derivation test stub never loads")
+    }
+    #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
+    inventory::submit! {
+        gen_core::registry::TrainerRegistration { descriptor: stub_candle_trainer_descriptor, load: stub_candle_trainer_load }
+    }
+
     #[test]
     fn mlx_enabled_advertises_image_generate_from_registry() {
         let caps = registry_capabilities(&settings_with_backends(true, false));
@@ -1038,6 +1078,43 @@ mod tests {
         // both off ⇒ nothing (neither the candle stub nor — on macOS — the real mlx twin is enabled).
         let off = registry_capabilities(&settings_with_backends(false, false));
         assert!(!off.contains(&Cap::PromptRefine));
+    }
+
+    #[test]
+    fn candle_backend_lights_up_lora_train_execute() {
+        // candle enabled ⇒ the candle `sdxl` trainer stub (backend "candle", id in TRAINER_IDS)
+        // derives BOTH the dry-run `lora_train` and the real-run `lora_train_execute` caps — the
+        // off-Mac training cutover (sc-7817). They light up together (same in-process trainer registry).
+        let on = registry_capabilities(&settings_with_backends(false, true));
+        assert!(
+            on.contains(&Cap::LoraTrain),
+            "an enabled candle backend with a registered trainer should derive lora_train"
+        );
+        assert!(
+            on.contains(&Cap::LoraTrainExecute),
+            "an enabled candle backend with a registered trainer should derive lora_train_execute"
+        );
+        // both off ⇒ no training caps from the candle trainer (and on macOS the real mlx trainers are
+        // filtered out too, since neither backend is enabled).
+        let off = registry_capabilities(&settings_with_backends(false, false));
+        assert!(!off.contains(&Cap::LoraTrain));
+        assert!(!off.contains(&Cap::LoraTrainExecute));
+    }
+
+    // Off-macOS the ONLY trainer linked is the candle stub above (backend "candle"); no real mlx
+    // trainer crate is linked. So an mlx-only worker must NOT advertise training off a candle trainer
+    // — proving the per-backend gate (sc-4906) actually keys on `descriptor.backend`. On macOS the
+    // real mlx trainers ARE linked, so an mlx-only worker legitimately advertises training and this
+    // isolation no longer holds (hence the cfg gate).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn mlx_only_does_not_advertise_training_from_a_candle_trainer() {
+        let mlx_only = registry_capabilities(&settings_with_backends(true, false));
+        assert!(
+            !mlx_only.contains(&Cap::LoraTrainExecute),
+            "off-macOS the only trainer is candle-backed, so an mlx-only worker must not advertise \
+             lora_train_execute"
+        );
     }
 
     // Off-macOS no real mlx prompt_refine provider is linked (only the candle stub above), so an

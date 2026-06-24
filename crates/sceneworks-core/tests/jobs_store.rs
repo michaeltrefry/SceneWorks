@@ -3676,6 +3676,113 @@ fn mlx_eligible_training_falls_back_to_torch_when_no_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("cuda:0"));
 }
 
+// ── sc-7817: off-Mac candle training routing (epic 5164) ───────────────────────────────────────
+// A candle (Windows/CUDA) worker — a real CUDA gpu_id + the `candle` marker + training caps.
+fn candle_training_caps() -> Vec<WorkerCapability> {
+    vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::LoraTrain,
+        WorkerCapability::LoraTrainExecute,
+        WorkerCapability::Unknown("candle".to_owned()),
+    ]
+}
+
+#[test]
+fn candle_worker_claims_candle_native_training_kernels() {
+    // The four families with a candle trainer (sdxl / z_image / lens / Wan A14B T2V) route to the
+    // candle worker off-Mac. Each in its own store so the claim is unambiguous.
+    let cases: &[(&str, &str, &str)] = &[
+        ("sdxl_lora", "sdxl", "lora"),
+        ("z_image_lora", "z_image_turbo", "lokr"),
+        ("lens_lora", "lens", "lora"),
+        ("wan_moe_lora", "wan_2_2_t2v_14b", "lora"),
+    ];
+    for (kernel, base_model, network_type) in cases {
+        let store = store(&format!("candle-training-{kernel}-{base_model}"));
+        register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+        let job = store
+            .create_job(mlx_training_job(
+                kernel,
+                base_model,
+                network_type,
+                false,
+                "auto",
+            ))
+            .expect("job creates");
+        let claimed = store
+            .claim_next_job("worker-candle")
+            .unwrap_or_else(|error| panic!("candle claim ok ({kernel}): {error:?}"))
+            .unwrap_or_else(|| panic!("candle should claim {kernel}/{base_model}"));
+        assert_eq!(claimed.id, job.id, "kernel={kernel} base={base_model}");
+    }
+}
+
+#[test]
+fn candle_worker_refuses_torch_served_training_kernels() {
+    // Kernels with no candle trainer but a torch fallback: the candle worker must REFUSE them (the
+    // `lora_train_execute` advertisement is coarse), leaving them for the co-resident torch worker —
+    // otherwise the candle worker would claim and fail terminally. Covers Kolors, the dense Wan 5B,
+    // and the I2V A14B (candle has only the T2V A14B trainer).
+    let cases: &[(&str, &str)] = &[
+        ("kolors_lora", "kolors"),
+        ("wan_lora", "wan_2_2"),
+        ("wan_moe_lora", "wan_2_2_i2v_14b"),
+    ];
+    for (kernel, base_model) in cases {
+        let store = store(&format!("candle-refuse-{kernel}-{base_model}"));
+        register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+        let job = store
+            .create_job(mlx_training_job(kernel, base_model, "lora", false, "auto"))
+            .expect("job creates");
+        assert!(
+            store
+                .claim_next_job("worker-candle")
+                .unwrap_or_else(|error| panic!("candle claim ok ({kernel}): {error:?}"))
+                .is_none(),
+            "candle must refuse {kernel}/{base_model} (no candle trainer)"
+        );
+        // The co-resident torch worker serves it.
+        register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+        let claimed = store
+            .claim_next_job("worker-torch")
+            .expect("torch claim ok")
+            .unwrap_or_else(|| panic!("torch should claim {kernel}/{base_model}"));
+        assert_eq!(claimed.id, job.id, "kernel={kernel} base={base_model}");
+    }
+}
+
+#[test]
+fn candle_worker_refuses_ltx_mlx_only_training() {
+    // ltx_mlx_lora has no torch fallback (MLX_ONLY_TRAINING_KERNELS) AND no candle trainer, so off-Mac
+    // neither the candle worker nor a torch worker may claim it — it stays queued for an mlx worker.
+    let store = store("candle-refuse-ltx");
+    register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+    store
+        .create_job(mlx_training_job(
+            "ltx_mlx_lora",
+            "ltx_2_3",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(
+        store
+            .claim_next_job("worker-candle")
+            .expect("candle claim ok")
+            .is_none(),
+        "candle must refuse ltx_mlx_lora (no candle trainer)"
+    );
+    assert!(
+        store
+            .claim_next_job("worker-torch")
+            .expect("torch claim ok")
+            .is_none(),
+        "torch must refuse ltx_mlx_lora (mlx-only, no torch trainer)"
+    );
+}
+
 #[test]
 fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
     let store = store("mlx-training-ltx-only");

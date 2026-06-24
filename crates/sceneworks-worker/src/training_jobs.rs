@@ -9,30 +9,37 @@
 //! it from the staged `manifestEntry` + the files on disk (apps/rust-api jobs.rs
 //! `register_trained_lora`), so the streamed `result` here is informational/UI only.
 //!
-//! Routing (sc-3049): the API only sends MLX-native families
-//! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`wan_lora`/`wan_moe_lora`/`ltx_mlx_lora`)
-//! here (`jobs_store::training_job_is_mlx_eligible`). `kolors_lora` joined the native
-//! trainers in sc-4732 (engine trainer sc-4568). `lens` and LoKr-on-Wan stay on the
-//! Python torch worker, which also remains the Windows/Linux path + the Mac fallback
-//! (the torch Kolors trainer is kept for those paths too). The dry-run validator is
-//! cross-platform; the real run is macOS-only
-//! (mlx-gen builds Apple MLX) and unreachable elsewhere (the capability is never
-//! advertised off macOS).
+//! Routing (sc-3049, sc-7817): the API sends native-trainable families
+//! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`lens_lora`/`wan_lora`/`wan_moe_lora`/`ltx_mlx_lora`)
+//! here (`jobs_store::training_job_is_mlx_eligible` on Mac, `…_is_candle_eligible` off-Mac).
+//! `kolors_lora` joined the native trainers in sc-4732 (engine trainer sc-4568); `lens_lora` in
+//! sc-5180. The dry-run validator is cross-platform. The real run executes in-process on the macOS
+//! MLX engine OR — the off-Mac cutover (sc-7817, epic 5164) — on the candle Windows/CUDA + Linux
+//! engine, for the four families with a candle trainer (`sdxl`/`z_image_turbo`/`lens`/the Wan A14B
+//! **T2V** `wan2_2_t2v_14b`). The Python torch trainer stays the fallback for everything off-Mac
+//! with no candle trainer (Kolors, LTX, the dense Wan 5B, the Wan I2V A14B) and the cross-platform
+//! default until candle is the default off-Mac worker.
 
 use super::*;
 use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
 
-// epic 3720 (sc-3724): the backend-neutral training contract types come from `gen_core`.
-// Force each trainer-provider crate to link so its `inventory::submit!` trainer
-// registration survives linker GC and `load_trainer` can find it. The same crates
-// are referenced by image_jobs/video_jobs for generation; re-stating the training
-// dependency here keeps it explicit and independent of those modules. `cfg(target_os)`
-// decides which backend crates register, not which contract types this module names.
-#[cfg(target_os = "macos")]
+// epic 3720 (sc-3724): the backend-neutral training contract types come from `gen_core`, which is
+// tensor-free and links on every target. The import is gated to the backends that actually run a
+// trainer — macOS (mlx-gen) OR the candle Windows/CUDA + Linux/NVIDIA lane (sc-7817) — only so the
+// non-training default build doesn't carry an unused-import warning.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use gen_core::{
     CancelFlag, LoadSpec, LrSchedule, NetworkType, Precision, TrainingConfig, TrainingItem,
     TrainingOutput, TrainingProgress, TrainingRequest, WeightsSource,
 };
+// Force each trainer-provider crate to link so its `inventory::submit!` trainer registration
+// survives linker GC and `load_trainer` can find it. The same crates are referenced by
+// image_jobs/video_jobs for generation; re-stating the training dependency here keeps it explicit
+// and independent of those modules. `cfg(target_os)` / `feature` decides which backend's crates
+// register, not which contract types this module names — macOS links the mlx-gen trainers.
 #[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
 #[cfg(target_os = "macos")]
@@ -45,6 +52,24 @@ use mlx_gen_sdxl as _;
 use mlx_gen_wan as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_z_image as _;
+// The candle (Windows/CUDA + Linux/NVIDIA) trainer-provider crates, force-linked for the off-Mac
+// training cutover (sc-7817, epic 5164). Each self-registers a `backend = "candle"` `Trainer` into
+// the SAME gen_core registry the mlx crates use, so `gen_core::load_trainer(id, …)` resolves the
+// candle trainer by id with no candle-specific dispatch (exactly like the inference path). These
+// four crates are already linked for inference under `backend-candle`; the trainer `inventory::
+// submit!` is NOT behind a separate feature, so re-stating the dependency here is purely explicit.
+// Only the four families with a candle trainer are anchored: `sdxl`, `z_image_turbo`, `lens`, and
+// the Wan **A14B T2V** MoE (`wan2_2_t2v_14b`). The dense Wan 5B + the I2V A14B have no candle
+// trainer yet (sc-5167 follow-ups) and Kolors/LTX none at all — those kernels stay on the Python
+// torch worker off-Mac (`jobs_store::training_job_is_candle_eligible` keeps them from routing here).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_lens as _;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_sdxl as _;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_wan as _;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_z_image as _;
 
 /// Run a `lora_train` job: parse the resolved plan, then either validate it
 /// (dry run, the default) or execute real training. Mirrors the Python
@@ -252,16 +277,27 @@ fn training_progress(
 }
 
 // --------------------------------------------------------------------------- #
-// Real training — macOS / Apple-Silicon only (mlx-gen builds Apple MLX). The
-// capability is never advertised off macOS, so the non-macOS arm is unreachable.
+// Real training — the in-process native engine: macOS / Apple-Silicon (mlx-gen) OR the candle
+// Windows/CUDA + Linux/NVIDIA lane (sc-7817). The whole section is backend-neutral (it drives the
+// `gen_core::Trainer` contract via `load_trainer`), so it compiles on whichever backend is linked;
+// the registry resolves the trainer by id. The capability is advertised only when a backend with a
+// registered trainer is enabled, so on a build with neither this section is cfg'd out and the stub
+// at the bottom fails loudly.
 // --------------------------------------------------------------------------- #
 
-/// Map a resolved plan's `(kernel, baseModel)` onto the mlx-gen trainer registry id
-/// (the trainer id matches the generator id of the same base model). Wan splits by
-/// the base model variant: the dense TI2V-5B (`wan_lora`) vs the two A14B MoE
-/// variants (`wan_moe_lora` + the T2V/I2V base model). `None` for a family with no
-/// mlx-gen trainer — those never route here, but the mapping fails loudly if one does.
-#[cfg(target_os = "macos")]
+/// Map a resolved plan's `(kernel, baseModel)` onto the trainer registry id (the trainer id matches
+/// the generator id of the same base model). Backend-neutral: the registry resolves it to the mlx
+/// trainer on macOS or the candle trainer off-Mac. Wan splits by the base model variant: the dense
+/// TI2V-5B (`wan_lora`) vs the two A14B MoE variants (`wan_moe_lora` + the T2V/I2V base model).
+/// `None` for a family with no native trainer at all — those never route here, but the mapping fails
+/// loudly if one does. NB the candle registry only holds a subset of these ids (`sdxl`,
+/// `z_image_turbo`, `lens`, `wan2_2_t2v_14b`); the API's `training_job_is_candle_eligible` gate keeps
+/// the candle-untrained ids (Kolors/LTX/Wan-5B/Wan-I2V) off the candle worker, and `load_trainer`
+/// fails loudly as the backstop if one ever slips through.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
     match plan.target.kernel.as_str() {
         "z_image_lora" => Some("z_image_turbo"),
@@ -286,7 +322,10 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
 }
 
 /// Read an `advanced` field as a string, trimmed and non-empty, else `default`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn advanced_str(advanced: &JsonObject, key: &str, default: &str) -> String {
     advanced
         .get(key)
@@ -298,7 +337,10 @@ fn advanced_str(advanced: &JsonObject, key: &str, default: &str) -> String {
 }
 
 /// Read an `advanced` field as an f32, else `default`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn advanced_f32(advanced: &JsonObject, key: &str, default: f32) -> f32 {
     advanced
         .get(key)
@@ -312,7 +354,10 @@ fn advanced_f32(advanced: &JsonObject, key: &str, default: f32) -> f32 {
 }
 
 /// Read an `advanced` field as a u32, else `default`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn advanced_u32(advanced: &JsonObject, key: &str, default: u32) -> u32 {
     advanced
         .get(key)
@@ -327,7 +372,10 @@ fn advanced_u32(advanced: &JsonObject, key: &str, default: u32) -> u32 {
 
 /// Read an `advanced` field as a bool (accepting a JSON bool or a `"true"`/`"false"`
 /// string), else `default`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
     advanced
         .get(key)
@@ -345,7 +393,10 @@ fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
 /// anything unrecognized — falls back to full-precision `"f32"`, matching the
 /// engine's own "unrecognized ⇒ f32" rule. The *absent*-key default is applied by
 /// the caller (`"bf16"`), so a plan that omits the key keeps the OOM fix on.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn normalize_train_dtype(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "bf16" => "bf16".to_owned(),
@@ -358,7 +409,10 @@ fn normalize_train_dtype(value: &str) -> String {
 /// passed verbatim — the engine normalizes aliases (`adamw8bit`→`adamw`,
 /// `prodigyopt`→`prodigy`). An empty `loraTargetModules` lets the family trainer use
 /// its default target set.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> TrainingConfig {
     let advanced = &config.advanced;
     let lora_target_modules = advanced
@@ -431,19 +485,26 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
 }
 
 /// One progress event streamed from the blocking training thread to the async side.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 enum TrainEvent {
     Progress(TrainingProgress),
     Done(TrainingOutput),
 }
 
-/// Execute a real training run on the in-process mlx-gen engine. Loads the (frozen)
-/// base model via a [`LoadSpec`] (exactly as inference's `load_engine`), runs the
-/// family trainer on a blocking thread, streams staged progress, honors cancellation
-/// via the engine's [`CancelFlag`], and reports the produced adapter. The adapter is
-/// written by the engine into the plan's `output.outputDir`; the API registers it
-/// from the staged manifest entry.
-#[cfg(target_os = "macos")]
+/// Execute a real training run on the in-process native engine (mlx-gen on macOS, candle-gen
+/// off-Mac via `backend-candle`, sc-7817). Loads the (frozen) base model via a [`LoadSpec`] (exactly
+/// as inference's `load_engine`), runs the family trainer on a blocking thread, streams staged
+/// progress, honors cancellation via the engine's [`CancelFlag`], and reports the produced adapter.
+/// The adapter is written by the engine into the plan's `output.outputDir`; the API registers it
+/// from the staged manifest entry. Backend-neutral: `load_trainer(engine_id, …)` resolves whichever
+/// backend's trainer is registered under `engine_id`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 async fn run_training_execution(
     api: &ApiClient,
     settings: &Settings,
@@ -515,10 +576,12 @@ async fn run_training_execution(
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
             // Load precision tracks the requested `train_dtype` (advanced `mixedPrecision`, default
-            // bf16). The Lens trainer loads its DiT at this precision and enforces `train_dtype`
-            // against it (sc-5148), so f32 training must load at Fp32; the cast-based trainers
+            // bf16). The MLX Lens trainer loads its DiT at this precision and enforces `train_dtype`
+            // against it (sc-5148), so f32 training must load at Fp32; the cast-based MLX trainers
             // (z-image/kolors/sdxl/wan/ltx) load dense and ignore `precision`, so this is inert for
-            // them — the default bf16 path is byte-identical to before.
+            // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
+            // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
+            // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
             let load_precision = if config.train_dtype.trim().eq_ignore_ascii_case("f32") {
                 Precision::Fp32
             } else {
@@ -580,7 +643,10 @@ async fn run_training_execution(
 /// until the GPU is genuinely idle, and the UI honestly shows "Cancelling…" until completion.
 /// Best-effort: a failed status update here is non-fatal because the post-run terminal write is
 /// what ultimately frees the worker. Mirrors the image path's `begin_image_cancel` (sc-5515).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) async fn begin_training_cancel(
     api: &ApiClient,
     job_id: &str,
@@ -607,7 +673,10 @@ pub(crate) async fn begin_training_cancel(
 /// cancel ~every 2s (draining after a cancel so the blocking sender never blocks),
 /// and on the final `Done` event report completion with the result the UI shows.
 /// Mirrors `image_jobs::consume_gen_events`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
 async fn consume_training_events(
     api: &ApiClient,
@@ -800,7 +869,10 @@ async fn consume_training_events(
 /// message)`. The fractions follow the kernel's bands (prepare 0–.08, load .08–.18,
 /// cache .18–.32, train/checkpoint .32–.92, save .92–1.0) so the UI's existing
 /// `caching_latents`/`training`/`checkpointing`/`saving` stages light up unchanged.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn map_training_progress(
     progress: TrainingProgress,
     total_steps: u32,
@@ -859,7 +931,10 @@ fn map_training_progress(
 }
 
 /// Scale a training micro-step into the 0.32–0.92 training band.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn train_fraction(step: u32, total: u32) -> f64 {
     if total == 0 {
         return 0.32;
@@ -876,7 +951,10 @@ fn train_fraction(step: u32, total: u32) -> f64 {
 /// Studio reads: `trainingSamples` (cumulative), `latestTrainingSamples` (this cadence),
 /// `samplePrompts` (for labels), and `sampleSettings` (steps + guidance + source). Mirrors the
 /// Python trainer's `_result` sample keys.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn training_samples_result(
     all_samples: &[Value],
     latest_samples: &[Value],
@@ -905,7 +983,10 @@ fn training_samples_result(
 /// relative (the UI resolves it as `/api/v1/projects/<id>/files/<relativePath>`); it is omitted when
 /// the project root is unknown (the absolute `path` is still recorded for debugging). PNG encoding +
 /// the atomic temp-then-rename mirror `image_jobs::write_image_asset`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
 fn write_training_sample(
     output_dir: Option<&Path>,
@@ -953,7 +1034,10 @@ fn write_training_sample(
     Ok(record)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
 fn training_result(
     plan: &TrainingPlan,
@@ -1011,9 +1095,11 @@ fn training_result(
     result
 }
 
-/// Off macOS the mlx-gen engine is not linked; the `lora_train_execute` capability is
-/// never advertised, so a real run can never be claimed here. Fail loudly if one is.
-#[cfg(not(target_os = "macos"))]
+/// With no native trainer backend linked (not macOS/mlx-gen, and `backend-candle` off) the
+/// `lora_train_execute` capability is never advertised, so a real run can never be claimed here.
+/// Fail loudly if one is. Off-Mac with `backend-candle` the real `run_training_execution` above is
+/// compiled instead (sc-7817).
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 async fn run_training_execution(
     _api: &ApiClient,
     _settings: &Settings,
@@ -1021,7 +1107,8 @@ async fn run_training_execution(
     _plan: &TrainingPlan,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "Native MLX LoRA training requires macOS (mlx-gen); this worker cannot execute it."
+        "Native LoRA training requires the macOS MLX engine or a `backend-candle` build; this \
+         worker has neither linked and cannot execute it."
             .to_owned(),
     ))
 }
@@ -1145,7 +1232,10 @@ mod tests {
 
     /// sc-4887: only an explicit bf16 selects bf16; every other value (incl. the
     /// engine-unsupported fp16, "no", empty) falls back to full-precision f32.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn normalize_train_dtype_only_bf16_selects_bf16() {
         assert_eq!(normalize_train_dtype("bf16"), "bf16");
@@ -1159,7 +1249,10 @@ mod tests {
     /// sc-4881 / sc-4887: the two OOM-fix levers must reach the engine config. The
     /// mapping builds it field-by-field (no `..Default::default()`), so a dropped
     /// field silently reverts to the wrong value — exactly the bug this story fixes.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn map_training_config_wires_train_dtype_and_gradient_checkpointing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1468,7 +1561,10 @@ mod tests {
         assert_eq!(summary.get("baseModelInstalled").unwrap(), false);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn engine_trainer_id_maps_mlx_native_families_and_rejects_the_rest() {
         let cases: &[(&str, &str, Option<&str>)] = &[
@@ -1505,7 +1601,10 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn map_training_config_reads_advanced_and_passes_optimizer_verbatim() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1539,7 +1638,10 @@ mod tests {
         assert_eq!(cfg.trigger_word, None);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn map_training_config_defaults_when_advanced_is_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1571,7 +1673,10 @@ mod tests {
     /// field-by-field (no `..Default`), so a dropped sample field silently disables previews — exactly
     /// the gap this story fixes. Asserts `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`/`samplePrompts`
     /// flow through from the plan's `advanced` bag.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn map_training_config_wires_sample_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1607,7 +1712,10 @@ mod tests {
     /// `guidanceScale`/`sampleSource`), with `relativePath` resolved against the project root. Validates
     /// the worker persistence deterministically (no model weights), so the chain engine→worker→UI shape
     /// is covered without a real-weight run.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn write_training_sample_writes_png_and_project_relative_record() {
         let project_root = tempfile::tempdir().expect("project root tempdir");
@@ -1976,6 +2084,172 @@ mod tests {
         assert!(
             output_dir.join("z_image_1024_smoke.safetensors").exists(),
             "trained adapter was written"
+        );
+    }
+
+    // ── sc-7817: candle (Windows/CUDA + Linux/NVIDIA) real-weight training smokes ──────────────────
+    // The off-Mac twins of the macOS real-weight smokes above. They prove the worker links each
+    // candle trainer's `backend = "candle"` `inventory::submit!` registration (the dead-strip trap),
+    // resolves it via `gen_core::load_trainer(id, …)`, and runs a real step on the CUDA GPU through
+    // the full worker path. Release build only (the GPU smokes hit the debug_assert dup-id panic in
+    // debug, per the candle CI-gap note).
+
+    /// Resolve a snapshot directory for an HF repo from the local Hugging Face hub cache, the way
+    /// `resolve_base_model_path` hands the worker a base model dir. Honors `HF_HUB_CACHE`, then
+    /// `HF_HOME/hub`, then `%USERPROFILE%\.cache\huggingface\hub` (the Windows default). `repo_dir`
+    /// is the hub's `models--<org>--<name>` directory; `require` (when non-empty) filters snapshots
+    /// to one containing that child, so a partial download is skipped.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn candle_hf_snapshot(repo_dir: &str, require: &str) -> std::path::PathBuf {
+        let hub = std::env::var_os("HF_HUB_CACHE")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HF_HOME").map(|h| std::path::PathBuf::from(h).join("hub"))
+            })
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|p| {
+                    std::path::PathBuf::from(p)
+                        .join(".cache")
+                        .join("huggingface")
+                        .join("hub")
+                })
+            })
+            .expect("an HF hub cache (HF_HUB_CACHE / HF_HOME / %USERPROFILE%) must be resolvable");
+        let snapshots = hub.join(repo_dir).join("snapshots");
+        std::fs::read_dir(&snapshots)
+            .unwrap_or_else(|error| panic!("read {}: {error}", snapshots.display()))
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir() && (require.is_empty() || path.join(require).exists()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no snapshot under {} containing {require:?}",
+                    snapshots.display()
+                )
+            })
+    }
+
+    /// Shared body for the candle real-weight training smokes: two LoRA micro-steps on a one-image
+    /// swatch dataset, asserting a finite loss and a written adapter — the candle twin of the macOS
+    /// `z_image_1024_bf16_trains_past_the_first_step` / `kolors_real_weights_*` smokes.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn candle_real_weights_smoke(
+        engine_id: &str,
+        snapshot: &std::path::Path,
+        resolution: u32,
+        file_name: &str,
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let image_path = tmp.path().join("swatch.png");
+        image::RgbImage::from_fn(resolution, resolution, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        })
+        .save(&image_path)
+        .expect("write test image");
+        let output_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = TrainingConfig {
+            rank: 4,
+            alpha: 4.0,
+            learning_rate: 1e-4,
+            steps: 2,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            gradient_checkpointing: false,
+            train_dtype: "bf16".to_owned(),
+            resolution,
+            save_every: 0,
+            seed: 42,
+            optimizer: "adamw".to_owned(),
+            weight_decay: 0.0,
+            lr_scheduler: LrSchedule::parse("constant"),
+            lr_warmup_steps: 0,
+            network_type: NetworkType::parse("lora"),
+            decompose_factor: -1,
+            lora_target_modules: Vec::new(),
+            timestep_type: "sigmoid".to_owned(),
+            timestep_bias: "balanced".to_owned(),
+            loss_type: "mse".to_owned(),
+            trigger_word: None,
+            sample_every: 0,
+            sample_prompts: Vec::new(),
+            sample_steps: 20,
+            sample_guidance_scale: 1.0,
+        };
+        let request = TrainingRequest {
+            items: vec![TrainingItem {
+                image_path,
+                caption: "a colorful test swatch".to_owned(),
+            }],
+            config,
+            output_dir: output_dir.clone(),
+            file_name: file_name.to_owned(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        };
+
+        let mut trainer = gen_core::load_trainer(
+            engine_id,
+            &LoadSpec::new(WeightsSource::Dir(snapshot.to_path_buf())),
+        )
+        .unwrap_or_else(|error| {
+            panic!("candle {engine_id} trainer loads + is registered (force-link survived GC): {error}")
+        });
+        trainer
+            .validate(&request)
+            .expect("trainer accepts the plan");
+        let mut last_loss = f32::NAN;
+        let output = trainer
+            .train(&request, &mut |progress| {
+                if let TrainingProgress::Training { loss, .. } = progress {
+                    last_loss = loss;
+                }
+            })
+            .expect("training runs a step");
+
+        eprintln!(
+            "[candle-train-smoke {engine_id}] steps={} final_loss={} last_step_loss={} adapter={}",
+            output.steps,
+            output.final_loss,
+            last_loss,
+            output.adapter_path.display()
+        );
+        assert!(output.steps >= 1, "expected at least one micro-step");
+        assert!(output.final_loss.is_finite(), "final loss must be finite");
+        assert!(last_loss.is_finite(), "a training-step loss was observed");
+        assert!(
+            output_dir.join(file_name).exists(),
+            "trained adapter was written"
+        );
+    }
+
+    /// sc-7817 — the candle SDXL training smoke. Loads `load_trainer("sdxl", …)` from the installed
+    /// `stabilityai/stable-diffusion-xl-base-1.0` diffusers snapshot (`text_encoder/ text_encoder_2/
+    /// unet/`) and trains two LoRA micro-steps. Run on demand on the RTX box:
+    /// `cargo test -p sceneworks-worker --lib --release --features backend-candle -- --ignored candle_sdxl_real_weights --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs real SDXL weights + a CUDA device; release build (debug_assert dup-id panic)"]
+    fn candle_sdxl_real_weights_trains_a_lora_step() {
+        let snapshot =
+            candle_hf_snapshot("models--stabilityai--stable-diffusion-xl-base-1.0", "unet");
+        candle_real_weights_smoke("sdxl", &snapshot, 512, "candle_sdxl_smoke.safetensors");
+    }
+
+    /// sc-7817 — the candle Z-Image training smoke. Loads `load_trainer("z_image_turbo", …)` from the
+    /// installed `Tongyi-MAI/Z-Image-Turbo` snapshot and trains two LoRA micro-steps. Run on demand:
+    /// `cargo test -p sceneworks-worker --lib --release --features backend-candle -- --ignored candle_z_image_real_weights --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs real Z-Image-Turbo weights + a CUDA device; release build (debug_assert dup-id panic)"]
+    fn candle_z_image_real_weights_trains_a_lora_step() {
+        let snapshot = candle_hf_snapshot("models--Tongyi-MAI--Z-Image-Turbo", "");
+        candle_real_weights_smoke(
+            "z_image_turbo",
+            &snapshot,
+            512,
+            "candle_z_image_smoke.safetensors",
         );
     }
 }

@@ -2965,8 +2965,12 @@ async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {
 
 /// sc-5516 — the training sibling of the above: `begin_training_cancel` trips the
 /// flag and acknowledges with a NON-terminal `running` update; the terminal
-/// `Canceled` is posted by `consume_training_events` after training stops.
-#[cfg(target_os = "macos")]
+/// `Canceled` is posted by `consume_training_events` after training stops. Compiled on the macOS MLX
+/// path AND the off-Mac candle training lane (sc-7817), where `begin_training_cancel` is also linked.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[tokio::test]
 async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
     let (base_url, posts) = spawn_progress_capture_stub().await;

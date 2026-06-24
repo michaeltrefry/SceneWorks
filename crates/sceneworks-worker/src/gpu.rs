@@ -34,11 +34,13 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
 
 /// Light up the Windows/CUDA candle SDXL lane on the discovered nvidia GPU (epic 3672, sc-3678).
 /// When the candle backend is enabled, extend the GPU's advertised capabilities with the
-/// registry-DERIVED core (`engines::registry_capabilities` → `image_generate`, from the linked
-/// candle SDXL descriptor) plus a `candle` marker capability. The marker lets the API routing gate
-/// (`jobs_store::worker_supports_job`) recognize this worker and confine it to the SDXL/RealVisXL
-/// txt2img lane — every other shape falls back to the Python torch worker. Mirrors the macOS
-/// `mlx_gpu` derivation, but bolted onto the real nvidia GPU descriptor rather than a sentinel id.
+/// registry-DERIVED core (`engines::registry_capabilities` → `image_generate` / `video_generate`
+/// from the linked candle generator descriptors, plus `lora_train` + `lora_train_execute` from the
+/// linked candle trainers — sc-7817) plus a `candle` marker capability. The marker lets the API
+/// routing gate (`jobs_store::worker_supports_job`) recognize this worker and confine each lane to
+/// the candle-served shapes (txt2img/txt2video, the candle-trainable kernels, …) — every other shape
+/// falls back to the Python torch worker. Mirrors the macOS `mlx_gpu` derivation, but bolted onto
+/// the real nvidia GPU descriptor rather than a sentinel id.
 ///
 /// All-targets signature so `discover_gpu` is uniform; a no-op everywhere except the Windows candle
 /// build with `backend_candle_enabled`, so production routing is unchanged until the lane is on.

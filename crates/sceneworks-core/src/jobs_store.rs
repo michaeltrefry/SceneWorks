@@ -2049,12 +2049,13 @@ fn job_is_any_mlx_eligible(job: &JobSnapshot) -> bool {
 }
 
 /// True when *any* candle-routing predicate (image, video, image/video upscale, caption,
-/// understanding) claims this job — the union a candle (Windows/CUDA) worker would want, the
-/// off-Mac twin of [`job_is_any_mlx_eligible`] (sc-5502, epic 5483). Used to identify the jobs
+/// understanding, training) claims this job — the union a candle (Windows/CUDA) worker would want,
+/// the off-Mac twin of [`job_is_any_mlx_eligible`] (sc-5502, epic 5483). Used to identify the jobs
 /// the Phase-7 candle grace sweep must fail when no live candle worker is alive
 /// ([`JobsStore::fail_stranded_candle_jobs`]). Deliberately excludes the unsupported-pose shapes
 /// the candle worker only *owns to reject* ([`image_job_candle_pose_reject`]) — those are gaps,
-/// not served, so they must strand/enforce-fail rather than wait for a candle worker.
+/// not served, so they must strand/enforce-fail rather than wait for a candle worker. Training
+/// (sc-7817) is included only for the candle-trainable kernels; the rest stay on the torch worker.
 fn job_is_any_candle_eligible(job: &JobSnapshot) -> bool {
     image_job_is_candle_eligible(job)
         || video_job_is_candle_eligible(job)
@@ -2062,6 +2063,7 @@ fn job_is_any_candle_eligible(job: &JobSnapshot) -> bool {
         || video_upscale_job_is_candle_eligible(job)
         || caption_job_is_mlx_eligible(job)
         || understanding_job_is_mlx_eligible(job)
+        || training_job_is_candle_eligible(job)
 }
 
 /// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
@@ -5134,6 +5136,52 @@ fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     true
 }
 
+/// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
+/// (sc-7817, epic 5164) — the off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`]. The candle registry
+/// holds trainers for `sdxl`, `z_image_turbo`, `lens`, and the Wan **A14B T2V** MoE
+/// (`wan2_2_t2v_14b`); the first three map straight from kernel, while `wan_moe_lora` is base-model
+/// gated (handled in [`training_job_is_candle_eligible`]). The dense Wan 5B + the I2V A14B have no
+/// candle trainer yet (sc-5167 follow-ups) and Kolors/LTX none at all — those kernels stay on the
+/// Python torch worker off-Mac.
+const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &["z_image_lora", "sdxl_lora", "lens_lora"];
+
+/// Epic 5164 / sc-7817 routing — does this `lora_train` job belong on the candle (Windows/CUDA +
+/// Linux/NVIDIA) worker (vs the Python torch worker)? The training sibling of
+/// [`image_job_is_candle_eligible`]/[`video_job_is_candle_eligible`]: the candle engine has a native
+/// trainer for the family. Both dry-run and real runs are eligible (the dry-run validates the same
+/// resolved plan). `wan_moe_lora` is candle-eligible ONLY for the **T2V** A14B base model
+/// (`wan_2_2_t2v_14b`) — the candle Wan trainer is registered under `wan2_2_t2v_14b` only; the I2V
+/// A14B and the dense `wan_lora` 5B have no candle trainer, so they stay on torch. UNLIKE the mlx Wan
+/// path, the candle Wan trainer DOES support LoKr (its `build_lokr_targets` merge), so there is no
+/// LoKr-on-Wan exclusion here. The resolved plan is stamped into the payload at submit (apps/rust-api
+/// training.rs), so the kernel + base model are readable without touching the dataset or weights.
+fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    if !matches!(job.job_type, JobType::LoraTrain) {
+        return false;
+    }
+    let Some(plan) = job.payload.get("plan").and_then(Value::as_object) else {
+        return false;
+    };
+    let target = plan.get("target").and_then(Value::as_object);
+    let kernel = target
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+        return true;
+    }
+    // The A14B MoE: candle registers only the T2V trainer (`wan2_2_t2v_14b`). The I2V A14B base
+    // model has no candle trainer, so it stays on torch.
+    if kernel == "wan_moe_lora" {
+        let base_model = target
+            .and_then(|target| target.get("baseModel"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return base_model == "wan_2_2_t2v_14b";
+    }
+    false
+}
+
 /// sc-3556 routing: SceneWorks training caption jobs keep their public
 /// `captioner=joy_caption` contract while the macOS mlx worker serves them through
 /// mlx-gen's JoyCaption provider. Other/unknown captioners stay off the mlx worker.
@@ -5385,6 +5433,16 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
                 | JobType::PersonReplace
         ) && !video_job_is_candle_eligible(job)
         {
+            return false;
+        }
+        // Training (sc-7817, epic 5164): the candle worker trains only the candle-native families
+        // (sdxl / z_image / lens / the Wan A14B T2V MoE) via `gen_core::load_trainer`. Everything
+        // else — Kolors, LTX, the dense Wan 5B, the Wan I2V A14B — has no candle trainer and stays on
+        // the co-resident Python torch worker. WITHOUT this gate the candle worker would claim a real
+        // training job it can't execute (the `lora_train_execute` advertisement is coarse — it lights
+        // up whenever ANY candle trainer is registered) and fail it terminally instead of leaving it
+        // for torch. Applies to both dry-run and real runs; mirrors the mlx training gate above.
+        if matches!(job.job_type, JobType::LoraTrain) && !training_job_is_candle_eligible(job) {
             return false;
         }
         // Dataset captioning (sc-5098): the candle worker serves only JoyCaption (the candle
