@@ -30,8 +30,19 @@ export function DatasetCaptionDialog({
   modelName = "JoyCaption",
 }) {
   const single = scope?.type === "item";
-  const title = single ? `Re-caption ${scope.name ?? "image"}` : "Caption images";
-  const runLabel = single ? "Re-caption image" : settings.recaption ? "Re-caption all" : "Caption missing";
+  const flagged = scope?.type === "flagged";
+  const title = single
+    ? `Re-caption ${scope.name ?? "image"}`
+    : flagged
+      ? `Re-caption ${scope.count ?? 0} flagged ${scope.count === 1 ? "image" : "images"}`
+      : "Caption images";
+  const runLabel = single
+    ? "Re-caption image"
+    : flagged
+      ? "Re-caption flagged"
+      : settings.recaption
+        ? "Re-caption all"
+        : "Caption missing";
   const joy = settings.captioner === "joy_caption";
   const [downloadRequested, setDownloadRequested] = useState(false);
 

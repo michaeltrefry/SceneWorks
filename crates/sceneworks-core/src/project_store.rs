@@ -552,10 +552,18 @@ impl ProjectStore {
         dataset_id: &str,
         item_id: &str,
         checks: &[QualityCheck],
+        expected_content_hash: Option<&str>,
+        expected_caption_hash: Option<&str>,
     ) -> ProjectStoreResult<Option<QualityAck>> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
-        TrainingDatasetStore::new(project_path)
-            .set_item_quality_ack(project_id, dataset_id, item_id, checks)
+        TrainingDatasetStore::new(project_path).set_item_quality_ack(
+            project_id,
+            dataset_id,
+            item_id,
+            checks,
+            expected_content_hash,
+            expected_caption_hash,
+        )
     }
 
     /// Persist the dataset's CLIP embeddings sidecar (sc-6535). Locked wrapper over

@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   aestheticScore,
+  alignmentPercent,
   badgeForSeverity,
+  captionAlignmentFlaggedItemIds,
+  captionHash,
   datasetDoctorSummary,
   dismissedChecks,
   diversityPercent,
@@ -31,6 +34,14 @@ function report(overrides = {}) {
     ...overrides,
   };
 }
+
+describe("captionHash", () => {
+  it("matches lowercase SHA-256 hex for the exact caption text", async () => {
+    expect(await captionHash("tiny test image")).toBe(
+      "d93dcd03ca0197eb0ae2041bfc1b3c3b78399bb19e904c901713bcc85cc39cf7",
+    );
+  });
+});
 
 describe("badges", () => {
   it("maps worst severity to the three states, treating info/clean as good", () => {
@@ -68,7 +79,7 @@ describe("flagReason", () => {
   });
 
   it("has plain-language copy for the Tier-1 embedding checks (sc-6535)", () => {
-    for (const check of ["near_duplicate_embedding", "low_diversity"]) {
+    for (const check of ["near_duplicate_embedding", "low_diversity", "caption_alignment"]) {
       const text = flagReason({ check });
       expect(text).toBeTruthy();
       expect(text).not.toBe("Flagged for review");
@@ -160,6 +171,33 @@ describe("datasetDoctorSummary", () => {
     expect(text).toContain("more variety");
   });
 
+  it("phrases caption alignment warnings as re-captioning advice (sc-6537)", () => {
+    const text = datasetDoctorSummary(
+      report({
+        gate: "needs_attention",
+        itemCount: 6,
+        items: [
+          { itemId: "a", flags: [{ check: "caption_alignment", severity: "warn" }] },
+          { itemId: "b", flags: [{ check: "caption_alignment", severity: "warn" }] },
+        ],
+      }),
+    );
+    expect(text).toContain("2 captions may not match their images");
+    expect(text).toContain("Re-captioning");
+  });
+
+  it("uses singular copy for one caption alignment warning (sc-6537)", () => {
+    const text = datasetDoctorSummary(
+      report({
+        gate: "needs_attention",
+        itemCount: 6,
+        items: [{ itemId: "a", flags: [{ check: "caption_alignment", severity: "warn" }] }],
+      }),
+    );
+    expect(text).toContain("1 caption may not match its image");
+    expect(text).toContain("Re-captioning this can improve training");
+  });
+
   it("surfaces the style-only aesthetic advisory as a non-blocking heads-up (sc-6537)", () => {
     const text = datasetDoctorSummary(
       report({
@@ -237,6 +275,33 @@ describe("gate + sub-scores", () => {
     expect(aestheticScore(report({ subScores: { technical: 0.8, aesthetic: 5.34 } }))).toBe(5.3);
     expect(aestheticScore(report({ subScores: { technical: 0.8 } }))).toBeNull();
     expect(aestheticScore(null)).toBeNull();
+  });
+
+  it("rescales the alignment sub-score from raw CLIP cosine to a meter % (sc-6537)", () => {
+    // Raw image↔text cosines are low/compressed; the meter rescales [0.05, 0.18] → [0, 100], so a
+    // good caption (~0.15) reads ~77% instead of an alarming 15%, and a mismatch (~0.05) reads 0%.
+    expect(alignmentPercent(report({ subScores: { technical: 0.8, alignment: 0.15 } }))).toBe(77);
+    expect(alignmentPercent(report({ subScores: { technical: 0.8, alignment: 0.05 } }))).toBe(0);
+    expect(alignmentPercent(report({ subScores: { technical: 0.8, alignment: 0.3 } }))).toBe(100);
+    expect(alignmentPercent(report({ subScores: { technical: 0.8 } }))).toBeNull();
+    expect(alignmentPercent(null)).toBeNull();
+  });
+
+  it("collects active caption-alignment-flagged item IDs for the re-caption action (sc-6537)", () => {
+    const flagged = report({
+      items: [
+        { itemId: "a", flags: [{ check: "caption_alignment", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "blur", severity: "warn" }] },
+        {
+          itemId: "c",
+          flags: [{ check: "caption_alignment", severity: "warn", acknowledged: true }],
+        },
+        { itemId: "d", flags: [{ check: "caption_alignment", severity: "warn" }] },
+      ],
+    });
+    expect(captionAlignmentFlaggedItemIds(flagged)).toEqual(["a", "d"]);
+    expect(captionAlignmentFlaggedItemIds(report({ items: [] }))).toEqual([]);
+    expect(captionAlignmentFlaggedItemIds(null)).toEqual([]);
   });
 });
 

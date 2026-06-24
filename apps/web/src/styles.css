@@ -7850,6 +7850,21 @@ details[open] > summary.lora-scope-group-heading::before,
   background: oklch(0.62 0.16 285);
 }
 
+/* Caption match (sc-6537) is a semantic text-image score, distinct from visual variety and polish. */
+.dataset-doctor-meter-alignment {
+  background: color-mix(in oklch, oklch(0.68 0.13 205) 20%, var(--surface-2));
+}
+
+.dataset-doctor-meter-alignment .dataset-doctor-meter-fill {
+  background: oklch(0.68 0.13 205);
+}
+
+/* The re-caption action (sc-6537): surfaced under the readout when items carry a caption-alignment
+   flag, so the user can act on the finding rather than just read about it. */
+.dataset-doctor-actions {
+  margin-top: 0.5rem;
+}
+
 /* The Aesthetic meter (sc-6537) — STYLE datasets only, a warm hue distinct from the technical and
    variety meters; it reads as advisory polish, not overall health. */
 .dataset-doctor-meter-aesthetic {

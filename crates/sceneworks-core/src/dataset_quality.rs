@@ -13,9 +13,10 @@
 //! Catalog, thresholds, and the warn-not-block framing come from the spike,
 //! `docs/sc-6530/dataset-doctor-metrics.md`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 
 use crate::contracts::string_enum;
 
@@ -44,6 +45,10 @@ string_enum! {
         // pose/angle/lighting/background), so the LoRA won't generalize. Carries the "add some from
         // other angles" recommendation.
         LowDiversity => "low_diversity",
+        // CaptionAlignment: per-image — CLIP text/image cosine is low for this item's caption,
+        // suggesting the caption describes something different from the image. Advisory only; it
+        // nudges re-captioning and never counts as a technical-quality failure.
+        CaptionAlignment => "caption_alignment",
         // LowAesthetic: dataset-level, STYLE datasets ONLY (sc-6537) — the set scores low on the LAION
         // CLIP+MLP aesthetic predictor. Advisory, never gates: low-aesthetic candids are often the best
         // identity shots, so this is never raised on person/object datasets (documented bias).
@@ -537,6 +542,10 @@ impl CachedTier0Scalars {
 #[serde(rename_all = "camelCase")]
 pub struct QualityAck {
     pub content_hash: String,
+    /// Caption hash for caption-dependent checks. Older/image-only acks leave this absent; those
+    /// continue to apply to image-quality checks but never to `caption_alignment`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_hash: Option<String>,
     pub checks: Vec<QualityCheck>,
 }
 
@@ -547,14 +556,31 @@ impl QualityAck {
         content_hash == Some(self.content_hash.as_str())
     }
 
-    /// The dismissed checks that still apply, or empty when the ack is stale. The single source of
-    /// truth for ack reuse — kept here, pure and tested, not in the API layer.
+    /// The dismissed checks that still apply for image-only checks, or empty when the image hash is
+    /// stale. Caption-dependent checks require [`QualityAck::effective_checks_for_caption`].
     pub fn effective_checks(&self, content_hash: Option<&str>) -> Vec<QualityCheck> {
-        if self.valid_for(content_hash) {
-            self.checks.clone()
-        } else {
-            Vec::new()
+        self.effective_checks_for_caption(content_hash, None)
+    }
+
+    /// The dismissed checks that still apply, including caption-dependent checks. A
+    /// `caption_alignment` ack is valid only when both the image bytes and caption text still match.
+    pub fn effective_checks_for_caption(
+        &self,
+        content_hash: Option<&str>,
+        caption_hash: Option<&str>,
+    ) -> Vec<QualityCheck> {
+        if !self.valid_for(content_hash) {
+            return Vec::new();
         }
+        self.checks
+            .iter()
+            .filter(|check| {
+                **check != QualityCheck::CaptionAlignment
+                    || (self.caption_hash.as_deref().is_some()
+                        && self.caption_hash.as_deref() == caption_hash)
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -734,6 +760,7 @@ fn default_min_items(kind: &DatasetKind) -> u32 {
 pub fn build_readiness_report(
     evaluation: Tier0Evaluation,
     tier1: Option<&Tier1Evaluation>,
+    alignment: Option<&CaptionAlignmentEvaluation>,
     aesthetic: Option<&AestheticEvaluation>,
 ) -> DatasetReadinessReport {
     let item_count = evaluation.items.len() as u32;
@@ -750,10 +777,21 @@ pub fn build_readiness_report(
                 .collect()
         })
         .unwrap_or_default();
+    let alignment_by_item: HashMap<&str, &[QualityFlag]> = alignment
+        .map(|a| {
+            a.items
+                .iter()
+                .map(|entry| (entry.item_id.as_str(), entry.flags.as_slice()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     for entry in &evaluation.items {
         let mut flags = entry.flags.clone();
         if let Some(extra) = tier1_by_item.get(entry.item_id.as_str()) {
+            flags.extend(extra.iter().cloned());
+        }
+        if let Some(extra) = alignment_by_item.get(entry.item_id.as_str()) {
             flags.extend(extra.iter().cloned());
         }
         // Acknowledged findings (sc-6534) are dropped from every rollup — counts, the badge, the
@@ -808,7 +846,7 @@ pub fn build_readiness_report(
             technical,
             diversity: tier1.map(|t| t.diversity),
             identity: None,
-            alignment: None,
+            alignment: alignment.map(|a| a.score),
             aesthetic: aesthetic.map(|a| a.score),
         },
         counts,
@@ -862,7 +900,22 @@ pub struct DatasetEmbeddings {
     /// The embedding space (e.g. `"clip-vit-l14"`); guards against mixing encoders on reuse.
     pub space: String,
     /// `content_hash` → raw embedding (the encoder's un-normalized output).
-    pub embeddings: std::collections::BTreeMap<String, Vec<f32>>,
+    pub embeddings: BTreeMap<String, Vec<f32>>,
+    /// `content_hash:caption_hash` → raw CLIP text embedding. The caption hash is part of the key so
+    /// re-captioning the same image bytes cannot accidentally reuse stale text vectors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub text_embeddings: BTreeMap<String, Vec<f32>>,
+}
+
+/// Stable SHA-256 over the exact caption text that was embedded.
+pub fn caption_hash(caption: &str) -> String {
+    format!("{:x}", Sha256::digest(caption.as_bytes()))
+}
+
+/// Key for the text-embedding sidecar. Both halves are SHA-256 hex strings in normal use, so `:` is a
+/// safe separator and keeps the JSON shape compact.
+pub fn dataset_text_embedding_key(content_hash: &str, caption_hash: &str) -> String {
+    format!("{content_hash}:{caption_hash}")
 }
 
 /// Tier-1 thresholds (sc-6536). Calibrated in sc-6535 against real CLIP ViT-L/14 embeddings over the
@@ -1021,6 +1074,151 @@ pub fn evaluate_tier1(items: &[ItemEmbedding], thresholds: &Tier1Thresholds) -> 
         dataset,
         diversity,
     }
+}
+
+/// One item's paired CLIP image/text embeddings for caption alignment. Both vectors are raw encoder
+/// outputs; `evaluate_caption_alignment` L2-normalizes internally before cosine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemCaptionAlignment {
+    pub item_id: String,
+    pub image_embedding: Vec<f32>,
+    pub text_embedding: Vec<f32>,
+    /// Per-image overrides (sc-6534): lets a user dismiss a low caption-alignment finding after
+    /// reviewing the caption. Mirrors Tier-0/Tier-1 per-item ack semantics.
+    pub acknowledged: Vec<QualityCheck>,
+}
+
+/// Caption↔image CLIP alignment thresholds (sc-6537). `0.15` from a real-weights, production-faithful
+/// sweep: 12 dreambooth photos captioned by the real JoyCaption job ("Descriptive/long"), CLIP-L
+/// image/text cosines, matched (own caption) vs cross-subject mismatched.
+///
+/// The decisive finding: the cosine only separates when the **first sentence** of the caption is
+/// embedded (see [`caption_alignment_text`]). Full 256-token captions put matched and mismatched at the
+/// *same* median (≈0.11, no signal); first-sentence embedding gives matched min ≈0.18 / median ≈0.25 vs
+/// mismatched max ≈0.16 — a clean gap. At `0.15`: 0/12 correct captions flagged, ~93% of cross-subject
+/// mismatches caught, with headroom below the matched minimum. **The floor is only meaningful when the
+/// `text_embedding` was produced from [`caption_alignment_text`]** — the worker must apply it before
+/// embedding, or this threshold sits in no-man's-land.
+///
+/// **Provisional, photographic-subject only.** The 4 calibration subjects are maximally distinct, so
+/// this validates *gross wrong-subject* detection (dog photo ↔ teapot caption), not subtle mis-caption,
+/// and only on single-subject photos. CLIP scores style/illustration imagery lower, so a *correct*
+/// first sentence there could dip below `0.15` and false-flag — the sibling diversity/aesthetic floors
+/// ship flagged-provisional for the same reason. A broader/style sweep (and possibly a per-kind floor,
+/// like [`Tier1Thresholds`]) is future work; until then this stays a single conservative scalar and the
+/// finding is a dismissable advisory `Warn`, never a gate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaptionAlignmentThresholds {
+    /// Cosine similarity below this ⇒ `caption_alignment` warning.
+    pub cosine_floor: f64,
+}
+
+impl Default for CaptionAlignmentThresholds {
+    fn default() -> Self {
+        Self { cosine_floor: 0.15 }
+    }
+}
+
+/// Reduce a caption to the subject phrase used for caption↔image CLIP alignment (sc-6537).
+///
+/// JoyCaption "Descriptive/long" captions lead with a subject sentence ("Photograph of a Shiba Inu
+/// dog ...") then continue with paragraphs of scene/lighting/background detail. CLIP's text encoder
+/// truncates at 77 tokens and that trailing detail is generic across single-subject photos, so it
+/// washes the subject noun out of the embedding — the full-caption cosine carries no
+/// matched-vs-mismatched signal (calibration: both medians ≈0.11). Embedding only the first sentence
+/// restores a clean separation (matched min ≈0.18 vs mismatched max ≈0.16). Short or single-sentence
+/// captions pass through essentially unchanged, so this is safe for hand-written captions too.
+///
+/// "First sentence" = up to and including the first sentence-ending `.` on the first non-empty line,
+/// else the whole first line. A `.` only ends the sentence when it sits at end-of-line or is followed
+/// by whitespace, so decimals ("a 3.5 inch teapot.") and ellipses don't truncate the phrase mid-token.
+/// (A trailing-period abbreviation followed by a space — "U.S. flag" — is a rare, accepted early cut;
+/// image-caption subject sentences seldom open with one, and CLIP tolerates the shorter phrase.) The
+/// worker must apply this before `embed_text` so the embedding matches the
+/// [`CaptionAlignmentThresholds`] floor calibration.
+pub fn caption_alignment_text(caption: &str) -> &str {
+    let line = caption.trim().lines().next().unwrap_or("").trim();
+    for (i, _) in line.match_indices('.') {
+        let ends_sentence = match line[i + 1..].chars().next() {
+            None => true,
+            Some(next) => next.is_whitespace(),
+        };
+        if ends_sentence {
+            return line[..=i].trim();
+        }
+    }
+    line
+}
+
+/// Result of caption↔image alignment: per-item flags and the mean cosine score that fills
+/// `ReadinessSubScores.alignment`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptionAlignmentEvaluation {
+    pub items: Vec<ItemQualityFlags>,
+    pub score: f64,
+}
+
+/// Evaluate caption↔image CLIP alignment (sc-6537). Returns `None` when no comparable pairs have
+/// non-degenerate vectors, keeping `subScores.alignment` absent until the analysis job has usable
+/// image+text embeddings.
+pub fn evaluate_caption_alignment(
+    items: &[ItemCaptionAlignment],
+    thresholds: &CaptionAlignmentThresholds,
+) -> Option<CaptionAlignmentEvaluation> {
+    let mut per_item: Vec<ItemQualityFlags> = items
+        .iter()
+        .map(|item| ItemQualityFlags {
+            item_id: item.item_id.clone(),
+            flags: Vec::new(),
+        })
+        .collect();
+    let mut sum = 0.0_f64;
+    let mut count = 0_u64;
+
+    for (idx, item) in items.iter().enumerate() {
+        if item.image_embedding.len() != item.text_embedding.len() {
+            continue;
+        }
+        let (Some(image), Some(text)) = (
+            l2_normalize(&item.image_embedding),
+            l2_normalize(&item.text_embedding),
+        ) else {
+            continue;
+        };
+        let cosine = dot(&image, &text);
+        sum += cosine;
+        count += 1;
+        if cosine < thresholds.cosine_floor {
+            per_item[idx].flags.push(QualityFlag {
+                check: QualityCheck::CaptionAlignment,
+                severity: Severity::Warn,
+                value: Some(cosine),
+                threshold: Some(thresholds.cosine_floor),
+                peers: Vec::new(),
+                acknowledged: false,
+            });
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    for (idx, item) in items.iter().enumerate() {
+        if item.acknowledged.is_empty() {
+            continue;
+        }
+        for flag in &mut per_item[idx].flags {
+            if flag.severity != Severity::Fatal && item.acknowledged.contains(&flag.check) {
+                flag.acknowledged = true;
+            }
+        }
+    }
+
+    Some(CaptionAlignmentEvaluation {
+        items: per_item,
+        score: (sum / count as f64).clamp(0.0, 1.0),
+    })
 }
 
 /// L2-normalize a vector for cosine, or `None` when it has no magnitude (a degenerate embedding).
@@ -1524,7 +1722,7 @@ mod tests {
     #[test]
     fn gate_is_ready_when_every_item_is_clean() {
         let eval = evaluate_tier0(&[sharp("a", 0xAA), sharp("b", 0x55)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None, None);
+        let report = build_readiness_report(eval, None, None, None);
         assert_eq!(report.gate, ReadinessGate::Ready);
         assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
         assert!(report.sub_scores.diversity.is_none()); // Tier-1 not computed yet
@@ -1537,7 +1735,7 @@ mod tests {
         let mut soft = item("soft");
         soft.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0x0F; 8]));
         let eval = evaluate_tier0(&[soft, sharp("ok", 0xF0)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None, None);
+        let report = build_readiness_report(eval, None, None, None);
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
         assert!(report.counts.warn >= 1);
         assert!((report.sub_scores.technical - 0.5).abs() < 1e-9);
@@ -1550,7 +1748,7 @@ mod tests {
     #[test]
     fn gate_blocks_when_too_few_images() {
         let eval = evaluate_tier0(&[item("a"), item("b")], 512, 12, &thresholds());
-        let report = build_readiness_report(eval, None, None);
+        let report = build_readiness_report(eval, None, None, None);
         assert_eq!(report.gate, ReadinessGate::Blocked);
         assert!(report.counts.fatal >= 1);
         assert!(report
@@ -1579,7 +1777,7 @@ mod tests {
                 peers: Vec::new(),
                 acknowledged: false,
             });
-        let report = build_readiness_report(eval, None, None);
+        let report = build_readiness_report(eval, None, None, None);
         assert!((report.sub_scores.technical - 0.5).abs() < 1e-9);
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
     }
@@ -1607,7 +1805,7 @@ mod tests {
     #[test]
     fn report_round_trips_as_camelcase_json() {
         let eval = evaluate_tier0(&[sharp("a", 0x11)], 512, 1, &thresholds());
-        let report = build_readiness_report(eval, None, None);
+        let report = build_readiness_report(eval, None, None, None);
         let json = serde_json::to_string(&report).expect("serialize");
         assert!(json.contains("\"subScores\""));
         assert!(json.contains("\"itemCount\""));
@@ -1662,7 +1860,7 @@ mod tests {
             .expect("blur flag on b");
         assert!(!b_blur.acknowledged);
 
-        let report = build_readiness_report(eval, None, None);
+        let report = build_readiness_report(eval, None, None, None);
         assert_eq!(report.counts.warn, 1, "only b's warning counts");
         assert!(
             (report.sub_scores.technical - 0.5).abs() < 1e-9,
@@ -1680,6 +1878,7 @@ mod tests {
         soft.acknowledged = vec![QualityCheck::Blur];
         let report = build_readiness_report(
             evaluate_tier0(std::slice::from_ref(&soft), 512, 1, &thresholds()),
+            None,
             None,
             None,
         );
@@ -1727,6 +1926,7 @@ mod tests {
     fn quality_ack_voids_when_content_hash_changes() {
         let ack = QualityAck {
             content_hash: "abc".to_owned(),
+            caption_hash: None,
             checks: vec![QualityCheck::Blur],
         };
         assert!(ack.valid_for(Some("abc")));
@@ -1737,6 +1937,32 @@ mod tests {
         assert!(ack.effective_checks(None).is_empty());
     }
 
+    #[test]
+    fn caption_alignment_ack_requires_current_caption_hash() {
+        let current = caption_hash("current caption");
+        let old = caption_hash("old caption");
+        let ack = QualityAck {
+            content_hash: "abc".to_owned(),
+            caption_hash: Some(current.clone()),
+            checks: vec![QualityCheck::Blur, QualityCheck::CaptionAlignment],
+        };
+
+        assert_eq!(
+            ack.effective_checks_for_caption(Some("abc"), Some(&current)),
+            vec![QualityCheck::Blur, QualityCheck::CaptionAlignment]
+        );
+        assert_eq!(
+            ack.effective_checks_for_caption(Some("abc"), Some(&old)),
+            vec![QualityCheck::Blur],
+            "caption_alignment ack voids when the caption changes"
+        );
+        assert_eq!(
+            ack.effective_checks(Some("abc")),
+            vec![QualityCheck::Blur],
+            "caption-dependent checks never apply through the image-only helper"
+        );
+    }
+
     // ----- Tier-1 embedding analysis (sc-6536) -----
 
     fn emb(id: &str, vector: &[f32]) -> ItemEmbedding {
@@ -1744,6 +1970,20 @@ mod tests {
             item_id: id.to_owned(),
             embedding: vector.to_vec(),
             acknowledged: Vec::new(),
+        }
+    }
+
+    fn caption_pair(
+        id: &str,
+        image: &[f32],
+        text: &[f32],
+        acknowledged: &[QualityCheck],
+    ) -> ItemCaptionAlignment {
+        ItemCaptionAlignment {
+            item_id: id.to_owned(),
+            image_embedding: image.to_vec(),
+            text_embedding: text.to_vec(),
+            acknowledged: acknowledged.to_vec(),
         }
     }
 
@@ -1941,7 +2181,7 @@ mod tests {
             &[emb("a", &[1.0, 0.0, 0.0]), emb("b", &[1.0, 0.0, 0.0])],
             &tier1_thresholds(),
         );
-        let report = build_readiness_report(tier0, Some(&tier1), None);
+        let report = build_readiness_report(tier0, Some(&tier1), None, None);
 
         // Embedding dup raises the badge + gate, but the images are technically fine → technical 1.0.
         assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
@@ -1963,8 +2203,10 @@ mod tests {
             evaluate_tier0(std::slice::from_ref(&ok), 512, 1, &thresholds()),
             None,
             None,
+            None,
         );
         assert_eq!(report.sub_scores.diversity, None);
+        assert_eq!(report.sub_scores.alignment, None);
         assert_eq!(report.sub_scores.aesthetic, None);
     }
 
@@ -2007,5 +2249,125 @@ mod tests {
             !b_flag.acknowledged,
             "b's near-dup stands (per-side dismissal)"
         );
+    }
+
+    #[test]
+    fn caption_embedding_key_changes_when_caption_changes() {
+        let first = caption_hash("a red square");
+        let second = caption_hash("a blue square");
+        assert_ne!(first, second);
+        assert_eq!(caption_hash("a red square"), first);
+        assert_ne!(
+            dataset_text_embedding_key("image_hash", &first),
+            dataset_text_embedding_key("image_hash", &second),
+            "same image bytes with a new caption must not reuse stale text embeddings"
+        );
+    }
+
+    #[test]
+    fn caption_alignment_flags_low_pairs_and_scores_mean() {
+        let thresholds = CaptionAlignmentThresholds { cosine_floor: 0.5 };
+        let eval = evaluate_caption_alignment(
+            &[
+                caption_pair("good", &[1.0, 0.0], &[1.0, 0.0], &[]),
+                caption_pair("bad", &[1.0, 0.0], &[0.0, 1.0], &[]),
+            ],
+            &thresholds,
+        )
+        .expect("alignment score");
+
+        assert!((eval.score - 0.5).abs() < 1e-9);
+        assert!(eval.items.iter().any(|entry| {
+            entry.item_id == "bad"
+                && entry.flags.iter().any(|flag| {
+                    flag.check == QualityCheck::CaptionAlignment
+                        && flag.severity == Severity::Warn
+                        && flag.value == Some(0.0)
+                        && flag.threshold == Some(0.5)
+                })
+        }));
+        assert!(eval
+            .items
+            .iter()
+            .find(|entry| entry.item_id == "good")
+            .expect("good item")
+            .flags
+            .is_empty());
+    }
+
+    #[test]
+    fn caption_alignment_text_reduces_to_subject_sentence() {
+        // Long JoyCaption "Descriptive" caption → just the leading subject sentence (incl. its period).
+        assert_eq!(
+            caption_alignment_text(
+                "Photograph of a Shiba Inu dog. The fluffy double coat is cream and orange. Behind it, a blurred forest.",
+            ),
+            "Photograph of a Shiba Inu dog.",
+        );
+        // Short / single-sentence captions pass through (trimmed), so hand-written captions are unharmed.
+        assert_eq!(
+            caption_alignment_text("  a ginger tabby cat  "),
+            "a ginger tabby cat"
+        );
+        // First *line* wins before first period when the caption is newline-structured.
+        assert_eq!(
+            caption_alignment_text("A pink backpack\non a rocky ridge."),
+            "A pink backpack",
+        );
+        // A decimal mid-sentence is NOT a sentence break (the `.` isn't followed by whitespace) —
+        // regression guard for the truncation bug that would have returned "A 3.".
+        assert_eq!(
+            caption_alignment_text("A 3.5 inch matte teapot. On a wooden table."),
+            "A 3.5 inch matte teapot.",
+        );
+        assert_eq!(
+            caption_alignment_text("A 3.5 inch matte teapot"),
+            "A 3.5 inch matte teapot"
+        );
+        // Degenerate inputs never panic.
+        assert_eq!(caption_alignment_text(""), "");
+        assert_eq!(caption_alignment_text("   \n  "), "");
+    }
+
+    #[test]
+    fn caption_alignment_ignores_mismatched_embedding_dimensions() {
+        let eval = evaluate_caption_alignment(
+            &[caption_pair("bad-dims", &[1.0, 0.0, 0.0], &[1.0, 0.0], &[])],
+            &CaptionAlignmentThresholds::default(),
+        );
+
+        assert_eq!(
+            eval, None,
+            "image/text vectors from different spaces must not produce a truncated cosine"
+        );
+    }
+
+    #[test]
+    fn caption_alignment_merges_into_report_without_touching_technical() {
+        let mut ok = item("bad-caption");
+        ok.scalars = Some(scalars(5000.0, 0.0, 0.0, vec![1; 8]));
+        let tier0 = evaluate_tier0(std::slice::from_ref(&ok), 512, 1, &thresholds());
+        let alignment = evaluate_caption_alignment(
+            &[caption_pair("bad-caption", &[1.0, 0.0], &[0.0, 1.0], &[])],
+            &CaptionAlignmentThresholds { cosine_floor: 0.5 },
+        )
+        .expect("alignment");
+
+        let report = build_readiness_report(tier0, None, Some(&alignment), None);
+
+        assert_eq!(report.gate, ReadinessGate::NeedsAttention);
+        assert_eq!(report.counts.warn, 1);
+        assert_eq!(report.sub_scores.alignment, Some(0.0));
+        assert!((report.sub_scores.technical - 1.0).abs() < 1e-9);
+        let item = report
+            .items
+            .iter()
+            .find(|entry| entry.item_id == "bad-caption")
+            .expect("item");
+        assert_eq!(item.severity, Some(Severity::Warn));
+        assert!(item
+            .flags
+            .iter()
+            .any(|flag| flag.check == QualityCheck::CaptionAlignment));
     }
 }

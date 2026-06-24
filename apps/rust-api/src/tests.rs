@@ -1358,6 +1358,14 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     assert_eq!(analysis_job["type"], "dataset_analysis");
     assert_eq!(analysis_job["payload"]["embedder"], "clip_vit_l14");
     assert_eq!(analysis_job["payload"]["items"][0]["itemId"], "item_0001");
+    assert_eq!(
+        analysis_job["payload"]["items"][0]["captionText"],
+        "studio portrait"
+    );
+    assert_eq!(
+        analysis_job["payload"]["items"][0]["captionHash"],
+        sceneworks_core::dataset_quality::caption_hash("studio portrait")
+    );
     let analysis_image_path = analysis_job["payload"]["items"][0]["imagePath"]
         .as_str()
         .expect("analysis image path");
@@ -1852,6 +1860,269 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     assert!(
         report["subScores"]["aesthetic"].is_number(),
         "a style dataset + embedding sidecar lights up the aesthetic sub-score"
+    );
+    assert!(
+        report["subScores"]["alignment"].is_null(),
+        "image-only sidecars do not pretend caption alignment has run"
+    );
+
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
+        ),
+        json!({
+            "space": "clip-vit-l14",
+            "items": [{
+                "contentHash": upload_hash.clone(),
+                "embedding": embedding.clone(),
+                "captionHash": sceneworks_core::dataset_quality::caption_hash("tiny test image"),
+                "textEmbedding": [1.0, 0.0]
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "textEmbedding length must match embedding length."
+    );
+
+    let stale_caption_hash = sceneworks_core::dataset_quality::caption_hash("old caption");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
+        ),
+        json!({
+            "space": "clip-vit-l14",
+            "items": [{
+                "contentHash": upload_hash.clone(),
+                "embedding": embedding.clone(),
+                "captionHash": stale_caption_hash,
+                "textEmbedding": embedding.clone()
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, report) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=style&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        report["subScores"]["alignment"].is_null(),
+        "a text embedding keyed to an old caption must not be reused after re-captioning"
+    );
+
+    let current_caption_hash = sceneworks_core::dataset_quality::caption_hash("tiny test image");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
+        ),
+        json!({
+            "space": "clip-vit-l14",
+            "items": [{
+                "contentHash": upload_hash.clone(),
+                "embedding": embedding.clone(),
+                "captionHash": current_caption_hash,
+                "textEmbedding": embedding
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, report) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=style&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        report["subScores"]["alignment"].is_number(),
+        "current caption text + text embedding lights up caption alignment"
+    );
+
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/items/{item_id}/quality-ack"
+        ),
+        json!({
+            "checks": ["caption_alignment"],
+            "expectedContentHash": upload_hash.clone(),
+            "expectedCaptionHash": sceneworks_core::dataset_quality::caption_hash("old caption")
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "Caption acknowledgement is stale; refresh dataset readiness."
+    );
+
+    let (status, ack) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/items/{item_id}/quality-ack"
+        ),
+        json!({
+            "checks": ["caption_alignment"],
+            "expectedContentHash": upload_hash,
+            "expectedCaptionHash": current_caption_hash
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ack["captionHash"], current_caption_hash);
+    assert_eq!(ack["checks"], json!(["caption_alignment"]));
+}
+
+#[tokio::test]
+async fn training_dataset_caption_alignment_requires_current_text_embedding_coverage() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Alignment Coverage Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, upload) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/training/uploads"),
+        "Tiny.PNG",
+        "image/png",
+        PNG_32X32,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let upload_hash = upload["file"]["contentHash"]
+        .as_str()
+        .expect("content hash")
+        .to_owned();
+    let staged_path = upload["file"]["path"]
+        .as_str()
+        .expect("staged path")
+        .to_owned();
+
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Caption coverage set",
+            "items": [
+                {
+                    "path": staged_path,
+                    "displayName": "Tiny A.PNG",
+                    "caption": { "text": "first caption" }
+                },
+                {
+                    "path": staged_path,
+                    "displayName": "Tiny B.PNG",
+                    "caption": { "text": "second caption" }
+                }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    assert_eq!(dataset["items"].as_array().expect("items").len(), 2);
+
+    let embedding: Vec<f64> = {
+        let mut values = vec![0.0; 768];
+        values[0] = 1.0;
+        values
+    };
+    let first_caption_hash = sceneworks_core::dataset_quality::caption_hash("first caption");
+    let second_caption_hash = sceneworks_core::dataset_quality::caption_hash("second caption");
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
+        ),
+        json!({
+            "space": "clip-vit-l14",
+            "items": [{
+                "contentHash": upload_hash.clone(),
+                "embedding": embedding.clone(),
+                "captionHash": first_caption_hash,
+                "textEmbedding": embedding.clone()
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, report) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=style&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        report["subScores"]["alignment"].is_null(),
+        "one fresh caption embedding must not look like whole-dataset caption coverage"
+    );
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
+        ),
+        json!({
+            "space": "clip-vit-l14",
+            "items": [{
+                "contentHash": upload_hash.clone(),
+                "embedding": embedding.clone(),
+                "captionHash": second_caption_hash,
+                "textEmbedding": embedding
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, report) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness?targetResolution=64&recommendedFor=style&minItems=1"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        report["subScores"]["alignment"].is_number(),
+        "same-space sidecar merges text embeddings until every current caption is covered"
     );
 }
 

@@ -68,6 +68,12 @@ pub(crate) struct ReadinessQuery {
 pub(crate) struct QualityAckBody {
     #[serde(default)]
     pub(crate) checks: Vec<sceneworks_core::dataset_quality::QualityCheck>,
+    /// Client-side freshness guard. The ack applies only to the exact image bytes the user reviewed.
+    #[serde(default)]
+    pub(crate) expected_content_hash: Option<String>,
+    /// Freshness guard for caption-dependent checks such as `caption_alignment`.
+    #[serde(default)]
+    pub(crate) expected_caption_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +408,12 @@ pub(crate) struct DatasetEmbeddingRecord {
     pub(crate) content_hash: String,
     /// The raw (un-normalized) embedding vector.
     pub(crate) embedding: Vec<f32>,
+    /// SHA-256 of the caption text embedded by the worker. Required when `textEmbedding` is present.
+    #[serde(default)]
+    pub(crate) caption_hash: Option<String>,
+    /// The raw (un-normalized) CLIP text embedding for the caption.
+    #[serde(default)]
+    pub(crate) text_embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

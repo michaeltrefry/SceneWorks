@@ -200,7 +200,11 @@ export function DatasetEditorPanel({
             <span className={health.valid ? "training-valid-dot valid" : "training-valid-dot"} />
             <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets to build this dataset"}</span>
           </div>
-          <DatasetDoctorReadout report={readiness} loading={readinessLoading} />
+          <DatasetDoctorReadout
+            report={readiness}
+            loading={readinessLoading}
+            onRecaptionFlagged={(itemIds) => setCaptionDialog({ type: "flagged", itemIds })}
+          />
           {readiness?.distributions ? (
             <details className="dataset-doctor-advanced">
               <summary>Metric distributions (advanced)</summary>
@@ -325,7 +329,9 @@ export function DatasetEditorPanel({
                       type: "item",
                       name: captionDialog.member.displayName ?? imageAssetName(captionDialog.member),
                     }
-                  : { type: "all" }
+                  : captionDialog.type === "flagged"
+                    ? { type: "flagged", count: captionDialog.itemIds?.length ?? 0 }
+                    : { type: "all" }
               }
               settings={captionSettings}
             />

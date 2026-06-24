@@ -477,6 +477,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-clip"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=30ce2c295043b468dce110f512fd40bd8bda66ab#30ce2c295043b468dce110f512fd40bd8bda66ab"
+dependencies = [
+ "candle-core",
+ "candle-gen",
+ "candle-gen-sdxl",
+ "candle-nn",
+ "candle-transformers",
+ "inventory",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
 name = "candle-gen-face"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/candle-gen?rev=30ce2c295043b468dce110f512fd40bd8bda66ab#30ce2c295043b468dce110f512fd40bd8bda66ab"
@@ -4357,7 +4371,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -5454,6 +5468,7 @@ dependencies = [
  "candle-gen",
  "candle-gen-boogu",
  "candle-gen-chroma",
+ "candle-gen-clip",
  "candle-gen-face",
  "candle-gen-flux",
  "candle-gen-flux2",
@@ -7715,7 +7730,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

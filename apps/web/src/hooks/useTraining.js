@@ -82,14 +82,21 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
   // metadata write — it does not bump the dataset version — so callers refetch readiness, not the
   // dataset, afterward.
   const setTrainingDatasetItemQualityAck = useCallback(
-    async (datasetId, itemId, checks, projectId = activeProject?.id) => {
+    async (datasetId, itemId, checks, optionsOrProjectId = {}, explicitProjectId = activeProject?.id) => {
+      const options = typeof optionsOrProjectId === "string" ? {} : (optionsOrProjectId ?? {});
+      const projectId = typeof optionsOrProjectId === "string" ? optionsOrProjectId : explicitProjectId;
       if (!projectId || !datasetId || !itemId) {
         throw new Error("Select a training dataset item first.");
       }
+      const body = {
+        checks,
+        ...(options.expectedContentHash ? { expectedContentHash: options.expectedContentHash } : {}),
+        ...(options.expectedCaptionHash ? { expectedCaptionHash: options.expectedCaptionHash } : {}),
+      };
       return apiFetch(
         `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/items/${encodeURIComponent(itemId)}/quality-ack`,
         token,
-        { method: "POST", body: JSON.stringify({ checks }) },
+        { method: "POST", body: JSON.stringify(body) },
       );
     },
     [token, activeProject],

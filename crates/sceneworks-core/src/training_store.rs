@@ -5,7 +5,9 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::dataset_quality::{CachedTier0Scalars, DatasetEmbeddings, QualityAck, QualityCheck};
+use crate::dataset_quality::{
+    caption_hash, CachedTier0Scalars, DatasetEmbeddings, QualityAck, QualityCheck,
+};
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     atomic_write, ensure_column, is_safe_id, is_safe_relative_path, parse_string_enum, random_hex,
@@ -370,6 +372,8 @@ impl TrainingDatasetStore {
         dataset_id: &str,
         item_id: &str,
         checks: &[QualityCheck],
+        expected_content_hash: Option<&str>,
+        expected_caption_hash: Option<&str>,
     ) -> ProjectStoreResult<Option<QualityAck>> {
         let mut dataset = self.read_dataset_by_id(dataset_id)?;
         ensure_dataset_project(project_id, &dataset)?;
@@ -385,13 +389,43 @@ impl TrainingDatasetStore {
             .filter(|check| !matches!(check, QualityCheck::Decode | QualityCheck::Count))
             .cloned()
             .collect();
-        // A hashless item (shouldn't happen post-upload) can't be keyed, so it also clears.
-        let ack = match (kept.is_empty(), item.content_hash.clone()) {
-            (false, Some(content_hash)) => Some(QualityAck {
-                content_hash,
+        let expected_content_hash = expected_content_hash
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest(
+                    "Quality acknowledgements require expectedContentHash.".to_owned(),
+                )
+            })?;
+        if item.content_hash.as_deref() != Some(expected_content_hash) {
+            return Err(ProjectStoreError::BadRequest(
+                "Quality acknowledgement is stale; refresh dataset readiness.".to_owned(),
+            ));
+        }
+        let expected_caption_hash = expected_caption_hash
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(expected_caption_hash) = expected_caption_hash {
+            if caption_hash(&item.caption.text) != expected_caption_hash {
+                return Err(ProjectStoreError::BadRequest(
+                    "Caption acknowledgement is stale; refresh dataset readiness.".to_owned(),
+                ));
+            }
+        } else if kept.contains(&QualityCheck::CaptionAlignment) {
+            return Err(ProjectStoreError::BadRequest(
+                "Caption alignment acknowledgements require expectedCaptionHash.".to_owned(),
+            ));
+        }
+        let ack = if kept.is_empty() {
+            None
+        } else {
+            Some(QualityAck {
+                content_hash: expected_content_hash.to_owned(),
+                caption_hash: kept
+                    .contains(&QualityCheck::CaptionAlignment)
+                    .then(|| caption_hash(&item.caption.text)),
                 checks: kept,
-            }),
-            _ => None,
+            })
         };
         item.quality_ack = ack.clone();
         self.save_dataset(&dataset)?;
@@ -1479,6 +1513,8 @@ mod tests {
                     QualityCheck::Decode,
                     QualityCheck::Count,
                 ],
+                Some("h1"),
+                None,
             )
             .expect("set ack")
             .expect("ack stored");
@@ -1504,16 +1540,79 @@ mod tests {
         let store = saved_dataset(dir.path());
 
         store
-            .set_item_quality_ack("proj", "ds_test", "item_1", &[QualityCheck::Blur])
+            .set_item_quality_ack(
+                "proj",
+                "ds_test",
+                "item_1",
+                &[QualityCheck::Blur],
+                Some("h1"),
+                None,
+            )
             .expect("set ack");
         // An empty set (or a set of only unacknowledgeable checks) clears the override.
         let cleared = store
-            .set_item_quality_ack("proj", "ds_test", "item_1", &[QualityCheck::Decode])
+            .set_item_quality_ack(
+                "proj",
+                "ds_test",
+                "item_1",
+                &[QualityCheck::Decode],
+                Some("h1"),
+                None,
+            )
             .expect("clear ack");
         assert!(cleared.is_none());
 
         let reloaded = store.get_dataset("proj", "ds_test").expect("reload");
         let item_1 = reloaded.items.iter().find(|i| i.id == "item_1").unwrap();
         assert!(item_1.quality_ack.is_none());
+    }
+
+    #[test]
+    fn set_item_quality_ack_rejects_stale_expected_hashes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+
+        let stale_content = store.set_item_quality_ack(
+            "proj",
+            "ds_test",
+            "item_1",
+            &[QualityCheck::Blur],
+            Some("old_hash"),
+            None,
+        );
+        assert!(matches!(
+            stale_content,
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+
+        let stale_caption = store.set_item_quality_ack(
+            "proj",
+            "ds_test",
+            "item_1",
+            &[QualityCheck::CaptionAlignment],
+            Some("h1"),
+            Some(&caption_hash("old caption")),
+        );
+        assert!(matches!(
+            stale_caption,
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+
+        let current_caption = caption_hash("");
+        let stored = store
+            .set_item_quality_ack(
+                "proj",
+                "ds_test",
+                "item_1",
+                &[QualityCheck::CaptionAlignment],
+                Some("h1"),
+                Some(&current_caption),
+            )
+            .expect("set current caption ack")
+            .expect("ack stored");
+        assert_eq!(
+            stored.caption_hash.as_deref(),
+            Some(current_caption.as_str())
+        );
     }
 }

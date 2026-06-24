@@ -105,7 +105,14 @@ pub(crate) async fn set_training_dataset_item_quality_ack(
 ) -> Result<Json<Option<sceneworks_core::dataset_quality::QualityAck>>, ApiError> {
     Ok(Json(
         project_call(state, move |store| {
-            store.set_dataset_item_quality_ack(&project_id, &dataset_id, &item_id, &payload.checks)
+            store.set_dataset_item_quality_ack(
+                &project_id,
+                &dataset_id,
+                &item_id,
+                &payload.checks,
+                payload.expected_content_hash.as_deref(),
+                payload.expected_caption_hash.as_deref(),
+            )
         })
         .await?,
     ))
@@ -122,8 +129,10 @@ fn dataset_readiness_report(
     query: &ReadinessQuery,
 ) -> Result<sceneworks_core::dataset_quality::DatasetReadinessReport, ProjectStoreError> {
     use sceneworks_core::dataset_quality::{
-        evaluate_aesthetic, evaluate_tier1, readiness_context, AestheticThresholds,
-        CachedTier0Scalars, DatasetKind, ItemEmbedding, Tier1Thresholds,
+        caption_hash, dataset_text_embedding_key, evaluate_aesthetic, evaluate_caption_alignment,
+        evaluate_tier1, readiness_context, AestheticThresholds, CachedTier0Scalars,
+        CaptionAlignmentThresholds, DatasetKind, ItemCaptionAlignment, ItemEmbedding,
+        Tier1Thresholds,
     };
     use sceneworks_image_quality::{aesthetic_predictor, compute_readiness, ReadinessItem};
 
@@ -160,7 +169,13 @@ fn dataset_readiness_report(
             let acknowledged = item
                 .quality_ack
                 .as_ref()
-                .map(|ack| ack.effective_checks(item.content_hash.as_deref()))
+                .map(|ack| {
+                    let caption_digest = caption_hash(&item.caption.text);
+                    ack.effective_checks_for_caption(
+                        item.content_hash.as_deref(),
+                        Some(caption_digest.as_str()),
+                    )
+                })
                 .unwrap_or_default();
             ReadinessItem {
                 item_id: item.id.clone(),
@@ -178,8 +193,9 @@ fn dataset_readiness_report(
     // (embedding near-duplicates + low set diversity) into the report. Each item's dismissed checks
     // (sc-6534) carry through, so an acknowledged near-dup drops from the rollups. No sidecar (the
     // job hasn't run) → `None` → the report stays Tier-0 only, exactly as before.
-    let embeddings: Vec<ItemEmbedding> = store
-        .read_dataset_embeddings(project_id, dataset_id)?
+    let sidecar = store.read_dataset_embeddings(project_id, dataset_id)?;
+    let embeddings: Vec<ItemEmbedding> = sidecar
+        .as_ref()
         .map(|sidecar| {
             dataset
                 .items
@@ -190,7 +206,13 @@ fn dataset_readiness_report(
                     let acknowledged = item
                         .quality_ack
                         .as_ref()
-                        .map(|ack| ack.effective_checks(item.content_hash.as_deref()))
+                        .map(|ack| {
+                            let caption_digest = caption_hash(&item.caption.text);
+                            ack.effective_checks_for_caption(
+                                item.content_hash.as_deref(),
+                                Some(caption_digest.as_str()),
+                            )
+                        })
                         .unwrap_or_default();
                     Some(ItemEmbedding {
                         item_id: item.id.clone(),
@@ -201,10 +223,55 @@ fn dataset_readiness_report(
                 .collect()
         })
         .unwrap_or_default();
+    let alignment_required_count = dataset
+        .items
+        .iter()
+        .filter(|item| item.content_hash.is_some() && !item.caption.text.trim().is_empty())
+        .count();
+    let alignments: Vec<ItemCaptionAlignment> = sidecar
+        .as_ref()
+        .map(|sidecar| {
+            dataset
+                .items
+                .iter()
+                .filter_map(|item| {
+                    let content_hash = item.content_hash.as_deref()?;
+                    if item.caption.text.trim().is_empty() {
+                        return None;
+                    }
+                    let image_embedding = sidecar.embeddings.get(content_hash)?.clone();
+                    let caption_digest = caption_hash(&item.caption.text);
+                    let text_key = dataset_text_embedding_key(content_hash, &caption_digest);
+                    let text_embedding = sidecar.text_embeddings.get(&text_key)?.clone();
+                    let acknowledged = item
+                        .quality_ack
+                        .as_ref()
+                        .map(|ack| {
+                            ack.effective_checks_for_caption(
+                                item.content_hash.as_deref(),
+                                Some(caption_digest.as_str()),
+                            )
+                        })
+                        .unwrap_or_default();
+                    Some(ItemCaptionAlignment {
+                        item_id: item.id.clone(),
+                        image_embedding,
+                        text_embedding,
+                        acknowledged,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     // A sidecar with no current item matching it (every image changed since the analysis) is not
     // Tier-1 data — fall back to Tier-0 only rather than a misleading 1.0 diversity.
     let tier1 = (!embeddings.is_empty())
         .then(|| evaluate_tier1(&embeddings, &Tier1Thresholds::for_kind(&context.kind)));
+    // Caption alignment is a dataset-level readout; a partial sidecar (some captions stale/missing)
+    // stays absent rather than making one fresh pair look like whole-dataset coverage.
+    let alignment = (alignment_required_count > 0 && alignments.len() == alignment_required_count)
+        .then(|| evaluate_caption_alignment(&alignments, &CaptionAlignmentThresholds::default()))
+        .flatten();
     // Aesthetic (sc-6537): STYLE datasets only — score the same embeddings with the bundled LAION
     // predictor. Person/object never get an aesthetic sub-score or flag (documented bias).
     let aesthetic = if context.kind == DatasetKind::Style {
@@ -224,6 +291,7 @@ fn dataset_readiness_report(
         context.min_items,
         &context.thresholds,
         tier1.as_ref(),
+        alignment.as_ref(),
         aesthetic.as_ref(),
     );
 
@@ -412,10 +480,14 @@ pub(crate) async fn create_training_dataset_analysis_job(
             None => true,
         })
         .map(|item| {
+            let caption_text = item.caption.text.clone();
+            let caption_hash = sceneworks_core::dataset_quality::caption_hash(&caption_text);
             json!({
                 "itemId": item.id.clone(),
                 "imagePath": dataset_root.join(&item.path).display().to_string(),
                 "contentHash": item.content_hash.clone(),
+                "captionText": caption_text,
+                "captionHash": caption_hash,
             })
         })
         .collect::<Vec<_>>();
@@ -482,20 +554,58 @@ pub(crate) async fn write_training_dataset_analysis_embeddings(
     Path((project_id, dataset_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<DatasetEmbeddingsBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut image_embeddings = std::collections::BTreeMap::new();
+    let mut text_embeddings = std::collections::BTreeMap::new();
+    for record in payload.items {
+        image_embeddings.insert(record.content_hash.clone(), record.embedding);
+        match (record.caption_hash, record.text_embedding) {
+            (Some(caption_hash), Some(text_embedding)) if !caption_hash.trim().is_empty() => {
+                if let Some(image_embedding) = image_embeddings.get(&record.content_hash) {
+                    if image_embedding.len() != text_embedding.len() {
+                        return Err(ApiError::bad_request(
+                            "textEmbedding length must match embedding length.",
+                        ));
+                    }
+                }
+                text_embeddings.insert(
+                    sceneworks_core::dataset_quality::dataset_text_embedding_key(
+                        &record.content_hash,
+                        caption_hash.trim(),
+                    ),
+                    text_embedding,
+                );
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Text embedding records require both captionHash and textEmbedding.",
+                ));
+            }
+        }
+    }
     let embeddings = sceneworks_core::dataset_quality::DatasetEmbeddings {
         space: payload.space,
-        embeddings: payload
-            .items
-            .into_iter()
-            .map(|record| (record.content_hash, record.embedding))
-            .collect(),
+        embeddings: image_embeddings,
+        text_embeddings,
     };
     let stored = embeddings.embeddings.len();
+    let stored_text = embeddings.text_embeddings.len();
     project_call(state, move |store| {
-        store.write_dataset_embeddings(&project_id, &dataset_id, &embeddings)
+        let mut merged = embeddings;
+        if let Some(existing) = store.read_dataset_embeddings(&project_id, &dataset_id)? {
+            if existing.space == merged.space {
+                let mut image_embeddings = existing.embeddings;
+                image_embeddings.extend(std::mem::take(&mut merged.embeddings));
+                let mut text_embeddings = existing.text_embeddings;
+                text_embeddings.extend(std::mem::take(&mut merged.text_embeddings));
+                merged.embeddings = image_embeddings;
+                merged.text_embeddings = text_embeddings;
+            }
+        }
+        store.write_dataset_embeddings(&project_id, &dataset_id, &merged)
     })
     .await?;
-    Ok(Json(json!({ "stored": stored })))
+    Ok(Json(json!({ "stored": stored, "storedText": stored_text })))
 }
 
 pub(crate) fn validate_training_caption_job_request(

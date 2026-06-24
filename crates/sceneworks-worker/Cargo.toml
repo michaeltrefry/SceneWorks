@@ -409,6 +409,9 @@ backend-candle = [
     # sc-5098 (epic 5095): the candle JoyCaption captioner (image->text), wired into the worker's
     # caption job path via the neutral `gen_core::load_captioner` seam.
     "dep:candle-gen-joycaption",
+    # sc-6537: the candle CLIP image + text embedders for the Dataset Doctor analysis job — wired via
+    # the neutral `gen_core::load_image_embedder` / `load_text_embedder` seams (dataset_analysis_jobs.rs).
+    "dep:candle-gen-clip",
     # sc-5525 (epic 5095): the candle prompt-refine LLM (Llama-3.2-3B-Instruct), wired into the
     # worker's prompt_refine job via the neutral `gen_core::load_textllm` seam (sc-5500 contract).
     "dep:candle-gen-prompt-refine",
@@ -1119,6 +1122,10 @@ candle-gen-scail2 = { git = "https://github.com/michaeltrefry/candle-gen", rev =
 # captioner id `fancyfeast/llama-joycaption-beta-one-hf-llava` (image->text). Force-linked in
 # caption_jobs.rs (`use candle_gen_joycaption as _;`). Same rev as the others.
 candle-gen-joycaption = { git = "https://github.com/michaeltrefry/candle-gen", rev = "30ce2c295043b468dce110f512fd40bd8bda66ab", features = ["cuda"], optional = true }
+# Candle CLIP ViT-L/14 image + text embedders (sc-6537) — Windows/CUDA sibling of mlx-gen-clip.
+# Registers `clip_vit_l14` (image) + `clip_vit_l14_text` (text, backend `candle`) for the Dataset
+# Doctor analysis job. Force-linked in dataset_analysis_jobs.rs. Same rev as the others.
+candle-gen-clip = { git = "https://github.com/michaeltrefry/candle-gen", rev = "30ce2c295043b468dce110f512fd40bd8bda66ab", features = ["cuda"], optional = true }
 # Candle Lens / Lens-Turbo provider (epic 5107 / sc-5126) — Windows/CUDA sibling of mlx-gen-lens.
 # Self-registers TWO ids: `lens` (base, 20-step/CFG 5.0) + `lens_turbo` (distilled, 4-step/g 1.0).
 # gpt-oss-20b MoE text encoder + 48-layer dual-stream MMDiT + the Flux.2 VAE; pure T2I (no

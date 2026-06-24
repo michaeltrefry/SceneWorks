@@ -15,6 +15,12 @@
 
 import { datasetItemSelectionKey } from "./datasetHelpers.js";
 
+export async function captionHash(caption) {
+  const bytes = new TextEncoder().encode(caption ?? "");
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 // Thumbnail badge per worst-severity (sc-6534 acceptance): ✓ good / ⚠ needs
 // attention / ✕ likely to hurt — plus a neutral "pending" for items the report
 // hasn't covered yet (just-added/unsaved, or first fetch in flight). A map miss
@@ -68,6 +74,7 @@ const CHECK_REASON = {
   near_duplicate: "Nearly identical to another photo",
   near_duplicate_embedding: "Looks very similar to other photos",
   low_diversity: "The set isn't varied enough — too many similar-looking shots",
+  caption_alignment: "Caption may not match this image — re-captioning can help",
   low_aesthetic: "Lower aesthetic score for a style set — advisory only",
   count: "Not enough photos to train well yet",
   decode: "This image couldn't be read",
@@ -127,6 +134,7 @@ const METRIC_LABEL = {
   exact_duplicate: "Hamming distance",
   near_duplicate_embedding: "cosine similarity",
   low_diversity: "diversity score",
+  caption_alignment: "caption-image cosine similarity",
   low_aesthetic: "aesthetic score",
   count: "item count",
   decode: "decoded",
@@ -168,6 +176,8 @@ const CHECK_PHRASE = {
   exact_duplicate: (n) => (n === 1 ? "1 is an exact duplicate" : `${n} are exact duplicates`),
   near_duplicate_embedding: (n) =>
     n === 1 ? "1 looks very similar to others" : `${n} look very similar to others`,
+  caption_alignment: (n) =>
+    n === 1 ? "1 caption may not match its image" : `${n} captions may not match their images`,
   resolution: (n) => `${n} ${n === 1 ? "is" : "are"} low-resolution`,
   crop_loss: (n) => `${n} lose${n === 1 ? "s" : ""} a lot to cropping`,
   exposure: (n) => `${n} ${n === 1 ? "is" : "are"} over- or under-exposed`,
@@ -179,6 +189,7 @@ const PHRASE_ORDER = [
   "blur",
   "near_duplicate",
   "near_duplicate_embedding",
+  "caption_alignment",
   "exact_duplicate",
   "resolution",
   "crop_loss",
@@ -251,6 +262,10 @@ export function datasetDoctorSummary(report) {
   } else if (countFlag) {
     const need = Math.round(countFlag.threshold ?? 0);
     parts.push(`Aim for ${need}+ photos with some variety to make it stronger.`);
+  } else if (counts.caption_alignment && fragments.length === 1) {
+    parts.push(`Re-captioning ${counts.caption_alignment === 1 ? "this" : "these"} can improve training.`);
+  } else if (counts.caption_alignment && fragments.length) {
+    parts.push("Re-captioning the mismatched captions and replacing weak images would make the LoRA stronger.");
   } else if (fragments.length) {
     parts.push("Replacing or removing these would make the LoRA stronger.");
   } else if (!lowDiversity && !lowAesthetic) {
@@ -288,6 +303,32 @@ export function diversityPercent(report) {
     return null;
   }
   return Math.round(value * 100);
+}
+
+// Caption↔image CLIP alignment as a 0–100 meter score. The source value is mean CLIP cosine,
+// clamped by the server for display; absent until text embeddings exist for the current caption hash.
+// The caption-alignment sub-score is the mean RAW CLIP image↔text cosine — low and compressed
+// (matched pairs land ~0.13–0.16, clear mismatches ~0.03–0.05). Showing it ×100 reads alarmingly (a
+// good caption as "15%"), so the meter rescales the meaningful range [0.05, 0.18] → [0, 100]. This is
+// display-only — the stored sub-score stays the raw cosine. sc-6537.
+const ALIGNMENT_DISPLAY_LO = 0.05;
+const ALIGNMENT_DISPLAY_HI = 0.18;
+export function alignmentPercent(report) {
+  const value = report?.subScores?.alignment;
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const scaled =
+    ((value - ALIGNMENT_DISPLAY_LO) / (ALIGNMENT_DISPLAY_HI - ALIGNMENT_DISPLAY_LO)) * 100;
+  return Math.round(Math.min(100, Math.max(0, scaled)));
+}
+
+// Item IDs whose active (non-dismissed) flags include `caption_alignment` — the targets for the
+// "Re-caption flagged" action surfaced from the readout. sc-6537.
+export function captionAlignmentFlaggedItemIds(report) {
+  return (report?.items ?? [])
+    .filter((item) => activeFlags(item).some((flag) => flag.check === "caption_alignment"))
+    .map((item) => item.itemId);
 }
 
 // Aesthetic sub-score — the mean LAION-Aesthetics score (~[1, 10]) for STYLE datasets only; `null`

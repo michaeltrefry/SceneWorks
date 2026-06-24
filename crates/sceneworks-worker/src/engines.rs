@@ -607,14 +607,19 @@ pub(crate) fn registry_capabilities(
     }) {
         push(Cap::TrainingCaption, &mut caps);
     }
-    // Dataset Doctor CLIP image embedder (sc-6535): mlx-gen-clip registers a `gen_core::ImageEmbedder`
-    // under `clip_vit_l14`. Advertise `dataset_analysis` only when that embedder is registered and its
-    // backend is enabled — so before mlx-gen-clip is force-linked (dataset_analysis_jobs.rs) the job
-    // stays queued rather than mis-claimed. Mirrors the captioner derivation above.
-    if gen_core::registry::image_embedders().any(|r| {
+    // Dataset Doctor CLIP embedders (sc-6535/sc-6537): mlx-gen-clip registers paired image/text
+    // embedders under `clip_vit_l14` + `clip_vit_l14_text`. Advertise `dataset_analysis` only when
+    // both are registered on an enabled backend, so the worker cannot claim a caption-alignment job
+    // with only half the CLIP pair linked.
+    let has_clip_image = gen_core::registry::image_embedders().any(|r| {
         let d = (r.descriptor)();
         backends.contains(&d.backend) && d.id == "clip_vit_l14"
-    }) {
+    });
+    let has_clip_text = gen_core::registry::text_embedders().any(|r| {
+        let d = (r.descriptor)();
+        backends.contains(&d.backend) && d.id == "clip_vit_l14_text"
+    });
+    if has_clip_image && has_clip_text {
         push(Cap::DatasetAnalysis, &mut caps);
     }
     // Prompt-refinement (sc-5500 contract). Two provider paths advertise the `prompt_refine` cap:

@@ -234,9 +234,28 @@ L2-normalized CLIP embeddings — STYLE datasets only, `Info`/advisory (never ga
 guess). Validated on real style sets (hokusai mean 6.30, monkey-island 5.47), so the `5.0` mean-score
 floor doesn't false-fire — but it's a **placeholder** pending a proper style-set sweep to set the band.
 
+### Caption alignment (sc-6537 ②) — floor `0.10`, sweep harness ready
+The `CaptionAlignmentThresholds::cosine_floor` default is `0.10`, a **probe-grounded placeholder**.
+Raw CLIP image↔text cosines are low and **strongly caption-style-dependent**: a real-weights probe put
+*conversational* matched captions ("a man") at ~0.13–0.16 and clear mismatches at ~0.03–0.05; the
+`dreambooth` sweep with *canonical* `"a photo of a <subject>"` captions put matched at ~0.20–0.26 and
+mismatches at ~0.13–0.16. So the floor **must be set on the production caption style (JoyCaption)** — a
+floor tuned on one style mis-flags the other.
+
+A reproducible harness ships in `crates/sceneworks-worker/src/dataset_analysis_jobs.rs`
+(`sweep_caption_alignment`, `#[ignore]`d): point `CALIB_DIR` at a dataset captioned by the real
+JoyCaption job (images + sibling `<stem>.txt`), and it dumps the MATCHED vs MISMATCHED cosine
+distributions + a floor-crossing table (% good-flagged vs % wrong-caught) — pick the floor where
+good-flagged stays ~0% and wrong-caught is maximized.
+```
+JoyCaption a dataset → CALIB_DIR=<that> RUST_TEST_THREADS=1 \
+  cargo test -p sceneworks-worker sweep_caption_alignment -- --ignored --nocapture
+```
+`0.10` stays conservative (won't false-flag the lower-scoring JoyCaption style) until that sweep runs.
+
 ### Still pending a sweep
 - Background contamination: detection method (patch-region embeddings? a separate signal).
-- Caption alignment floor (CLIPScore is unnormalized; needs a per-kind floor) — sc-6537 ② (alignment).
+- Caption alignment floor: re-tune from `0.10` once a JoyCaption-captioned dataset exists (harness ↑).
 - Aesthetic floor `5.0`: placeholder, see above.
 
 ---
