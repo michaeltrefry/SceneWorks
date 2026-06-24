@@ -321,6 +321,8 @@ async fn generate_candle_pulid_stream(
                     steps: steps as usize,
                     guidance,
                     id_weight,
+                    sampler: None,
+                    scheduler: None,
                     seed: seed as u64,
                     cancel: cancel.clone(),
                 };

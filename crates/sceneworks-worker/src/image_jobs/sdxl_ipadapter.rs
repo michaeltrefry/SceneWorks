@@ -295,6 +295,8 @@ async fn generate_candle_sdxl_ipadapter_stream(
                     steps: steps as usize,
                     guidance,
                     ip_adapter_scale: ip_scale,
+                    sampler: None,
+                    scheduler: None,
                     seed: seed as u64,
                     cancel: cancel.clone(),
                 };
