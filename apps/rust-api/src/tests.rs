@@ -9350,3 +9350,84 @@ fn builtin_manifest_registers_the_joycaption_model() {
         "${HF_CACHE}/fancyfeast/llama-joycaption-beta-one-hf-llava"
     );
 }
+
+/// sc-6539: the synchronous smart-crop + EXIF-strip endpoints rewrite an item's pixels and re-point
+/// it in one round-trip — the response carries the updated dataset (immediate UI refresh).
+#[tokio::test]
+async fn smart_crop_and_strip_exif_rewrite_and_repoint_items() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Crop Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // A 64×16 PNG: crop-loss (64-16)/64 = 0.75, well over the 0.35 flag.
+    let mut wide = image::RgbImage::new(64, 16);
+    for (x, _, pixel) in wide.enumerate_pixels_mut() {
+        *pixel = image::Rgb([(x * 4) as u8, 80, 160]);
+    }
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(wide)
+        .write_to(&mut buffer, image::ImageFormat::Png)
+        .expect("encode png");
+    let png = buffer.into_inner();
+
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "wide.png",
+        "image/png",
+        &png,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({ "name": "wide set", "items": [{ "assetId": asset_id }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    assert_eq!(dataset["items"][0]["width"], 64);
+    assert_eq!(dataset["items"][0]["height"], 16);
+
+    // Smart-crop the wide item: short edge kept, long edge trimmed below the flag, version bumped.
+    let (status, cropped) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/smart-crop"),
+        json!({ "itemIds": ["item_0001"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cropped["applied"], 1);
+    let item = &cropped["dataset"]["items"][0];
+    assert_eq!(item["height"], 16, "short edge kept in full");
+    let new_w = item["width"].as_u64().expect("width");
+    assert!(new_w < 64, "long edge trimmed (was 64, now {new_w})");
+    let after = (new_w as f64 - 16.0) / new_w as f64;
+    assert!(after < 0.35, "crop-loss cleared the flag (now {after})");
+    assert_eq!(cropped["dataset"]["version"], 2, "version bumped");
+
+    // Strip EXIF from all items (none named) — re-encodes, version bumps again.
+    let (status, stripped) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/strip-exif"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stripped["applied"], 1);
+    assert_eq!(stripped["dataset"]["version"], 3);
+}

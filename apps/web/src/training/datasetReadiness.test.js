@@ -6,6 +6,7 @@ import {
   badgeForSeverity,
   captionAlignmentFlaggedItemIds,
   captionHash,
+  cropLossFlaggedItemIds,
   datasetDoctorSummary,
   dismissedChecks,
   diversityPercent,
@@ -334,6 +335,20 @@ describe("gate + sub-scores", () => {
     expect(lowResolutionFlaggedItemIds(flagged)).toEqual(["a", "d"]);
     expect(lowResolutionFlaggedItemIds(report({ items: [] }))).toEqual([]);
     expect(lowResolutionFlaggedItemIds(null)).toEqual([]);
+  });
+
+  it("collects crop_loss-flagged item IDs for the smart-crop action (sc-6539)", () => {
+    const flagged = report({
+      items: [
+        { itemId: "a", flags: [{ check: "crop_loss", severity: "warn" }] },
+        { itemId: "b", flags: [{ check: "resolution", severity: "warn" }] },
+        { itemId: "c", flags: [{ check: "crop_loss", severity: "warn", acknowledged: true }] },
+        { itemId: "d", flags: [{ check: "crop_loss", severity: "warn" }] },
+      ],
+    });
+    expect(cropLossFlaggedItemIds(flagged)).toEqual(["a", "d"]);
+    expect(cropLossFlaggedItemIds(report({ items: [] }))).toEqual([]);
+    expect(cropLossFlaggedItemIds(null)).toEqual([]);
   });
 });
 

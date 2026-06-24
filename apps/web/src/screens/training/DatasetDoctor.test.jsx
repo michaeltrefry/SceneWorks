@@ -199,6 +199,51 @@ describe("DatasetDoctorReadout gating states", () => {
     expect(onUpscaleLowRes).toHaveBeenCalledWith(["a", "c"]);
   });
 
+  it("surfaces a smart-crop action for crop_loss-flagged items (sc-6539)", () => {
+    const onSmartCrop = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          items: [
+            { itemId: "a", flags: [{ check: "crop_loss", severity: "warn" }] },
+            { itemId: "b", flags: [] },
+            { itemId: "c", flags: [{ check: "crop_loss", severity: "warn" }] },
+          ],
+        })}
+        onSmartCrop={onSmartCrop}
+      />,
+    );
+    const button = [...container.querySelectorAll(".dataset-doctor-actions button")].find((node) =>
+      node.textContent.includes("Smart-crop"),
+    );
+    expect(button).toBeTruthy();
+    expect(button.textContent).toContain("Smart-crop 2 images");
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onSmartCrop).toHaveBeenCalledWith(["a", "c"]);
+  });
+
+  it("surfaces a strip-metadata action for every item when wired (sc-6539)", () => {
+    const onStripExif = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          items: [
+            { itemId: "a", flags: [] },
+            { itemId: "b", flags: [] },
+          ],
+        })}
+        onStripExif={onStripExif}
+      />,
+    );
+    const button = [...container.querySelectorAll(".dataset-doctor-actions button")].find((node) =>
+      node.textContent.includes("Strip metadata"),
+    );
+    expect(button).toBeTruthy();
+    expect(button.textContent).toContain("Strip metadata from 2 images");
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onStripExif).toHaveBeenCalled();
+  });
+
   it("renders the blocked headline when the set is untrainable", () => {
     mount(
       <DatasetDoctorReadout

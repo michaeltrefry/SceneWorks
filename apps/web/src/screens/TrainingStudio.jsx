@@ -303,6 +303,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     batchRenameTrainingDataset,
     createTrainingDatasetCaptionJob,
     createTrainingDatasetUpscaleJob,
+    smartCropTrainingDataset,
+    stripExifTrainingDataset,
     createTrainingJob,
     trainingPresets: trainingPresetsCatalog,
     trainingPresetsError = "",
@@ -1227,6 +1229,56 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // One-tap smart-crop (sc-6539): synchronously crop the crop-loss-flagged items toward a trainable
+  // aspect, then reload the dataset (re-derives selection — re-pointed items become dataset-owned).
+  async function smartCropItems(itemIds) {
+    if (!itemIds?.length || savingDataset) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before cropping.");
+        return;
+      }
+      const result = await smartCropTrainingDataset(saved.id, itemIds);
+      await openDataset(saved.id);
+      setDatasetMessage(`Smart-cropped ${result?.applied ?? itemIds.length} image(s).`);
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
+    }
+  }
+
+  // One-tap EXIF-strip (sc-6539): bake orientation + drop metadata from every item (no `itemIds`),
+  // then reload. Not flag-gated — a blanket privacy/orientation hygiene pass.
+  async function stripExifItems() {
+    if (savingDataset || !activeDataset?.id) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before stripping metadata.");
+        return;
+      }
+      const result = await stripExifTrainingDataset(saved.id, null);
+      await openDataset(saved.id);
+      setDatasetMessage(`Stripped metadata from ${result?.applied ?? 0} image(s).`);
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
+    }
+  }
+
   async function submitTrainingJob() {
     if (!configReady || submittingJob || readinessBlocksTraining) {
       return;
@@ -1378,6 +1430,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onToggleItemAck={toggleItemQualityAck}
                   onRemoveDuplicates={removeDuplicates}
                   onUpscaleLowRes={upscaleLowRes}
+                  onSmartCrop={smartCropItems}
+                  onStripExif={stripExifItems}
                   canSave={canSave}
                   saveDataset={saveDataset}
                   savingDataset={savingDataset}
@@ -1456,6 +1510,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   readinessBlocksTraining={readinessBlocksTraining}
                   onRemoveDuplicates={removeDuplicates}
                   onUpscaleLowRes={upscaleLowRes}
+                  onSmartCrop={smartCropItems}
+                  onStripExif={stripExifItems}
                 />
               ) : null}
             </section>

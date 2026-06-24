@@ -677,6 +677,8 @@ export function App() {
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
     createTrainingDatasetUpscaleJob,
+    smartCropTrainingDataset,
+    stripExifTrainingDataset,
     createTrainingJob,
   } = useTraining({ token, activeProject, setError, setJobs });
 
@@ -1879,6 +1881,8 @@ export function App() {
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
     createTrainingDatasetUpscaleJob,
+    smartCropTrainingDataset,
+    stripExifTrainingDataset,
     createTrainingJob,
     trainingPresets,
     trainingPresetsError,
@@ -1925,7 +1929,7 @@ export function App() {
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
-    createTrainingDatasetCaptionJob, createTrainingDatasetUpscaleJob, createTrainingJob, trainingPresets, trainingPresetsError,
+    createTrainingDatasetCaptionJob, createTrainingDatasetUpscaleJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
     trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, characters,
     createCharacter, updateCharacter, archiveCharacter, unarchiveCharacter, listArchivedCharacters,
     addCharacterReference, updateCharacterReference,

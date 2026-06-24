@@ -80,6 +80,8 @@ export function DatasetEditorPanel({
   onToggleItemAck,
   onRemoveDuplicates,
   onUpscaleLowRes,
+  onSmartCrop,
+  onStripExif,
   canSave,
   saveDataset,
   savingDataset,
@@ -208,6 +210,8 @@ export function DatasetEditorPanel({
             onRecaptionFlagged={(itemIds) => setCaptionDialog({ type: "flagged", itemIds })}
             onRemoveDuplicates={onRemoveDuplicates}
             onUpscaleLowRes={onUpscaleLowRes}
+            onSmartCrop={onSmartCrop}
+            onStripExif={onStripExif}
           />
           {readiness?.distributions ? (
             <details className="dataset-doctor-advanced">

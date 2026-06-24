@@ -714,6 +714,137 @@ pub(crate) async fn repoint_training_dataset_items(
     ))
 }
 
+/// Crop-loss target the smart-crop fix trims to — comfortably under the 0.35 flag threshold so the
+/// crop clears the CropLoss flag with margin (sc-6539).
+const SMART_CROP_TARGET: f64 = 0.25;
+
+/// Apply a per-image pixel transform to the named (or all) dataset items and re-point each at the
+/// result, synchronously (sc-6539 smart-crop / EXIF-strip). The transform writes an upright PNG to a
+/// temp file under the dataset; `repoint_dataset_items` then copies it into `images/`, recomputes
+/// dims + hash, and bumps the version. Temp copies are cleaned up on both the success and error
+/// paths. Returns the updated dataset + the number of items processed.
+fn apply_dataset_image_fix(
+    store: &ProjectStore,
+    project_id: &str,
+    dataset_id: &str,
+    item_ids: Option<&[String]>,
+    transform: impl Fn(&std::path::Path, &std::path::Path) -> Result<(), String>,
+) -> Result<(TrainingDataset, usize), ProjectStoreError> {
+    let (dataset, root, _stem) = store.training_dataset_for_plan(project_id, dataset_id)?;
+    let target: Option<std::collections::HashSet<&str>> =
+        item_ids.map(|ids| ids.iter().map(String::as_str).collect());
+    let targets: Vec<(String, String)> = dataset
+        .items
+        .iter()
+        .filter(|item| {
+            target
+                .as_ref()
+                .map_or(true, |set| set.contains(item.id.as_str()))
+        })
+        .map(|item| (item.id.clone(), item.path.clone()))
+        .collect();
+    if targets.is_empty() {
+        return Ok((dataset, 0));
+    }
+
+    let tmp_dir = root.join("transform-tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let mut repoints = Vec::new();
+    let mut tmp_files = Vec::new();
+    let mut failure: Option<ProjectStoreError> = None;
+    for (item_id, path) in &targets {
+        let out_abs = tmp_dir.join(format!("{item_id}.png"));
+        match transform(&root.join(path), &out_abs) {
+            Ok(()) => {
+                tmp_files.push(out_abs);
+                repoints.push(DatasetItemRepoint {
+                    item_id: item_id.clone(),
+                    asset_id: None,
+                    source_path: format!(
+                        "training/datasets/{dataset_id}/transform-tmp/{item_id}.png"
+                    ),
+                });
+            }
+            Err(detail) => {
+                failure = Some(ProjectStoreError::BadRequest(format!(
+                    "Could not process image for item {item_id}: {detail}"
+                )));
+                break;
+            }
+        }
+    }
+
+    let outcome = match failure {
+        Some(error) => Err(error),
+        None => store
+            .repoint_dataset_items(project_id, dataset_id, &repoints)
+            .map(|updated| (updated, repoints.len())),
+    };
+    // Best-effort cleanup on BOTH paths: repoint already copied the temps into images/, so they are
+    // redundant on success and stale on error.
+    for path in &tmp_files {
+        let _ = std::fs::remove_file(path);
+    }
+    let _ = std::fs::remove_dir(&tmp_dir);
+    outcome
+}
+
+/// Smart-crop the named (CropLoss-flagged) items toward a trainable aspect (sc-6539). Synchronous —
+/// the response carries the updated dataset so the UI refreshes immediately.
+pub(crate) async fn smart_crop_training_dataset_items(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetImageFixBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (dataset, applied) = project_call(state, move |store| {
+        apply_dataset_image_fix(
+            &store,
+            &project_id,
+            &dataset_id,
+            payload.item_ids.as_deref(),
+            |src, out| {
+                sceneworks_image_quality::transform::write_smart_cropped(
+                    src,
+                    SMART_CROP_TARGET,
+                    None,
+                    out,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            },
+        )
+    })
+    .await?;
+    Ok(Json(
+        json!({ "applied": applied, "version": dataset.version, "dataset": dataset }),
+    ))
+}
+
+/// Strip EXIF/metadata (and bake orientation) from the named items, or every item when none are
+/// named (sc-6539). Synchronous; returns the updated dataset.
+pub(crate) async fn strip_exif_training_dataset_items(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetImageFixBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (dataset, applied) = project_call(state, move |store| {
+        apply_dataset_image_fix(
+            &store,
+            &project_id,
+            &dataset_id,
+            payload.item_ids.as_deref(),
+            |src, out| {
+                sceneworks_image_quality::transform::write_metadata_stripped(src, out)
+                    .map_err(|error| error.to_string())
+            },
+        )
+    })
+    .await?;
+    Ok(Json(
+        json!({ "applied": applied, "version": dataset.version, "dataset": dataset }),
+    ))
+}
+
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {

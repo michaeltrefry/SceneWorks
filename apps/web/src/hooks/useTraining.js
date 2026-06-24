@@ -226,6 +226,39 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     [token, activeProject, setJobs, setError],
   );
 
+  // sc-6539 synchronous one-tap fixes: POST returns { dataset, applied } for immediate refresh.
+  const smartCropTrainingDataset = useCallback(
+    async (datasetId, itemIds, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId) {
+        throw new Error("Select a training dataset first.");
+      }
+      const result = await apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/smart-crop`,
+        token,
+        { method: "POST", body: JSON.stringify({ itemIds }) },
+      );
+      setError("");
+      return result;
+    },
+    [token, activeProject, setError],
+  );
+
+  const stripExifTrainingDataset = useCallback(
+    async (datasetId, itemIds, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId) {
+        throw new Error("Select a training dataset first.");
+      }
+      const result = await apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/strip-exif`,
+        token,
+        { method: "POST", body: JSON.stringify(itemIds ? { itemIds } : {}) },
+      );
+      setError("");
+      return result;
+    },
+    [token, activeProject, setError],
+  );
+
   const createTrainingJob = useCallback(
     async (request, projectId = activeProject?.id) => {
       if (!projectId) {
@@ -261,6 +294,8 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
     createTrainingDatasetUpscaleJob,
+    smartCropTrainingDataset,
+    stripExifTrainingDataset,
     createTrainingJob,
   };
 }

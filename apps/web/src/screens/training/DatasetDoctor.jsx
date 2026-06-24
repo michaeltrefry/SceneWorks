@@ -4,6 +4,7 @@ import {
   aestheticScore,
   alignmentPercent,
   captionAlignmentFlaggedItemIds,
+  cropLossFlaggedItemIds,
   datasetDoctorSummary,
   diversityPercent,
   duplicateRemovalItemIds,
@@ -179,6 +180,8 @@ export function DatasetDoctorReadout({
   onRecaptionFlagged,
   onRemoveDuplicates,
   onUpscaleLowRes,
+  onSmartCrop,
+  onStripExif,
 }) {
   if (!report) {
     if (loading) {
@@ -212,6 +215,12 @@ export function DatasetDoctorReadout({
   // consumer wired `onUpscaleLowRes`.
   const lowResIds =
     typeof onUpscaleLowRes === "function" ? lowResolutionFlaggedItemIds(report) : [];
+  // sc-6539: extreme-aspect images the one-tap smart-crop would trim toward a trainable aspect.
+  const cropLossIds =
+    typeof onSmartCrop === "function" ? cropLossFlaggedItemIds(report) : [];
+  // sc-6539: EXIF-strip is a blanket hygiene pass (not flag-gated), so its count is every item.
+  const stripExifCount =
+    typeof onStripExif === "function" ? (report.items ?? []).length : 0;
   return (
     <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
       <div className="dataset-doctor-head">
@@ -279,7 +288,11 @@ export function DatasetDoctorReadout({
           {counts.warn ? <span className="tone-warn">{counts.warn} to review</span> : null}
         </div>
       ) : null}
-      {recaptionFlaggedIds.length || removeDuplicateIds.length || lowResIds.length ? (
+      {recaptionFlaggedIds.length ||
+      removeDuplicateIds.length ||
+      lowResIds.length ||
+      cropLossIds.length ||
+      stripExifCount ? (
         <div className="dataset-doctor-actions">
           {removeDuplicateIds.length ? (
             <button
@@ -299,6 +312,22 @@ export function DatasetDoctorReadout({
             >
               Upscale {lowResIds.length} low-res{" "}
               {lowResIds.length === 1 ? "image" : "images"}
+            </button>
+          ) : null}
+          {cropLossIds.length ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => onSmartCrop(cropLossIds)}
+            >
+              Smart-crop {cropLossIds.length}{" "}
+              {cropLossIds.length === 1 ? "image" : "images"}
+            </button>
+          ) : null}
+          {stripExifCount ? (
+            <button type="button" className="secondary-action" onClick={() => onStripExif()}>
+              Strip metadata from {stripExifCount}{" "}
+              {stripExifCount === 1 ? "image" : "images"}
             </button>
           ) : null}
           {recaptionFlaggedIds.length ? (

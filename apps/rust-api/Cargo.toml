@@ -52,6 +52,8 @@ backend-candle = ["sceneworks-worker/backend-candle"]
 [dev-dependencies]
 tempfile = "3.13"
 tower = { version = "0.5", features = ["util"] }
+# Encode real test images for the synchronous image-fix round-trips (sc-6539).
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

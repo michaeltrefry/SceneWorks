@@ -63,6 +63,8 @@ export function ConfigureJobPanel({
   readinessBlocksTraining = false,
   onRemoveDuplicates,
   onUpscaleLowRes,
+  onSmartCrop,
+  onStripExif,
 }) {
   return (
     <>
@@ -410,6 +412,8 @@ export function ConfigureJobPanel({
             compact
             onRemoveDuplicates={onRemoveDuplicates}
             onUpscaleLowRes={onUpscaleLowRes}
+            onSmartCrop={onSmartCrop}
+            onStripExif={onStripExif}
           />
           {readinessBlocksTraining ? (
             <p className="inline-warning">

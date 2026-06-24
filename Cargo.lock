@@ -5432,6 +5432,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "glob",
+ "image",
  "mime_guess",
  "nix",
  "parking_lot",

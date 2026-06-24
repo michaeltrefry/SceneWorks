@@ -349,6 +349,14 @@ export function lowResolutionFlaggedItemIds(report) {
     .map((item) => item.itemId);
 }
 
+// Item IDs whose active flags include `crop_loss` — extreme-aspect images that lose too much to the
+// training-bucket crop, which the one-tap "Smart-crop" action trims toward a trainable aspect (sc-6539).
+export function cropLossFlaggedItemIds(report) {
+  return (report?.items ?? [])
+    .filter((item) => activeFlags(item).some((flag) => flag.check === "crop_loss"))
+    .map((item) => item.itemId);
+}
+
 // Aesthetic sub-score — the mean LAION-Aesthetics score (~[1, 10]) for STYLE datasets only; `null`
 // for person/object (never computed) or until the embedding job runs. Surfaced as an advisory
 // "Aesthetic" readout (rounded to one decimal), never a gate.
