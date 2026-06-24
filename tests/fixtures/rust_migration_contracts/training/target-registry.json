@@ -399,6 +399,114 @@
       }
     },
     {
+      "id": "krea_2_raw_lora",
+      "name": "Krea 2 LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "krea_2",
+      "baseModel": "krea_2_raw",
+      "baseModelRepo": "krea/Krea-2-Raw",
+      "kernel": "krea_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "backend": "mlx",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "sampleGuidanceScale": 3.5,
+          "sampleSteps": 28,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "appleSiliconOnly": true,
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "qualityPresets": [
+          "speed",
+          "balanced",
+          "quality"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "requiresBackend": "mlx",
+        "resolutions": [
+          768,
+          1024,
+          1536
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "appleSiliconOnly": true,
+        "backend": "mlx",
+        "datasetModality": "image",
+        "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon only (native MLX).",
+        "label": "Krea 2 LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
       "id": "ltx_video_lora",
       "name": "LTX-2.3 Video LoRA",
       "modality": "video",

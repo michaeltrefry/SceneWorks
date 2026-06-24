@@ -1971,4 +1971,29 @@ mod tests {
         )
         .is_ok());
     }
+
+    #[test]
+    fn validate_lora_compatibility_accepts_krea_raw_lora_on_turbo() {
+        // epic 7565 P3 (sc-7578): a Krea LoRA trained on Krea 2 Raw records
+        // `family: krea_2` / `baseModel: krea_2_raw` and applies at Krea 2 Turbo inference
+        // by family match. `krea_2` is NOT base-model-gated (only wan-video is), so the Raw
+        // base model differing from the served Turbo model id does NOT reject — the Lens /
+        // Z-Image train-on-base → infer-on-Turbo precedent.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "k", "family": "krea_2", "baseModel": "krea_2_raw" })],
+            Some("krea_2"),
+            "mlx_krea",
+            Some("krea_2_turbo"),
+        )
+        .is_ok());
+        // A foreign-family LoRA is still rejected on the Krea Turbo model.
+        let err = validate_lora_compatibility(
+            &[json!({ "id": "sdxllora", "family": "sdxl" })],
+            Some("krea_2"),
+            "mlx_krea",
+            Some("krea_2_turbo"),
+        )
+        .unwrap_err();
+        assert!(err.contains("sdxllora"), "got: {err}");
+    }
 }

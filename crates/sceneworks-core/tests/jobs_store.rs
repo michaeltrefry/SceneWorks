@@ -3707,6 +3707,67 @@ fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
+#[test]
+fn krea_training_is_mlx_worker_only_with_no_torch_fallback() {
+    let store = store("mlx-training-krea-only");
+    // Krea 2 (epic 7565 P3, sc-7578) trains on the native `mlx-gen-krea` trainer and has no
+    // torch path, so — like LTX — a torch worker must NOT claim a `krea_lora` job; it stays
+    // queued for the mlx worker (the candle Krea trainer is the separate P4 path).
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    let job = store
+        .create_job(mlx_training_job(
+            "krea_lora",
+            "krea_2_raw",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+
+    // The mlx worker is the only home for it.
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the Krea training job");
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn lokr_krea_training_stays_mlx_eligible() {
+    let store = store("mlx-training-krea-lokr");
+    // Unlike Wan (no MLX Kronecker merge), Krea's native trainer + Turbo inference seam both
+    // handle LoKr, so a LoKr `krea_lora` job stays MLX-eligible and is NOT shed to torch.
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+    let job = store
+        .create_job(mlx_training_job(
+            "krea_lora",
+            "krea_2_raw",
+            "lokr",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    // Torch defers (Krea is MLX-only); the mlx worker claims the LoKr job.
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims the Krea LoKr training job");
+    assert_eq!(claimed.id, job.id);
+}
+
 // --- Video routing (epic 3018, sc-3036) ---
 
 fn video_caps() -> Vec<WorkerCapability> {

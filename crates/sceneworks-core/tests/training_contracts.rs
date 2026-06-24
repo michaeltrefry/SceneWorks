@@ -105,11 +105,13 @@ fn builtin_targets_gate_network_types() {
             .is_some_and(|types| types.iter().any(|entry| entry.as_str() == Some(value)))
     };
 
-    // Every target advertises `lora`; only the validated torch/PEFT backends
-    // (epic 2193) advertise `lokr`: the Z-Image/SDXL image backends (v1), the
-    // Kolors image backend (SDXL-architecture, epic 1929 / sc-2217), the Lens
-    // sidecar backend (sc-2218), and the Wan2.2 5B video backend (sc-2211).
-    // MLX-only and MoE targets stay lora-only.
+    // Every target advertises `lora`; the validated torch/PEFT backends (epic 2193)
+    // advertise `lokr`: the Z-Image/SDXL image backends (v1), the Kolors image backend
+    // (SDXL-architecture, epic 1929 / sc-2217), the Lens sidecar backend (sc-2218), and
+    // the Wan2.2 5B video backend (sc-2211). Krea 2 (epic 7565) is the first *native-MLX*
+    // LoKr target: its `mlx-gen-krea` trainer reports `supports_lokr` and builds LoKr targets
+    // natively, and the Turbo inference loader applies LoKr through the shared adapter seam
+    // (sc-7911). The older MLX-only LTX and the Wan MoE targets stay lora-only.
     let lokr_targets: Vec<&str> = registry
         .targets
         .iter()
@@ -131,6 +133,7 @@ fn builtin_targets_gate_network_types() {
             "sdxl_lora",
             "kolors_lora",
             "lens_turbo_lora",
+            "krea_2_raw_lora",
             "wan_lora"
         ]
     );
@@ -287,6 +290,43 @@ fn builtin_registry_exposes_kolors_target() {
     assert_eq!(
         target.limits.get("networkTypes"),
         Some(&serde_json::json!(["lora", "lokr"]))
+    );
+}
+
+#[test]
+fn builtin_registry_exposes_krea_target() {
+    // Krea 2 (epic 7565 P3) trains on the undistilled `krea/Krea-2-Raw` 12B single-stream
+    // DiT via the native `mlx-gen-krea` `krea_lora` kernel and applies at Krea 2 Turbo
+    // inference (family `krea_2`, no base-model gating). Native MLX, Apple-Silicon only.
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "krea_2_raw_lora")
+        .expect("krea_2_raw_lora target present");
+
+    assert_eq!(target.modality, TrainingModality::Image);
+    assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+    assert_eq!(target.family, "krea_2");
+    assert_eq!(target.base_model, "krea_2_raw");
+    assert_eq!(target.kernel, "krea_lora");
+    assert_eq!(target.base_model_repo.as_deref(), Some("krea/Krea-2-Raw"));
+    // Single-stream DiT attention modules (separate q/k/v + the joint-attention output
+    // projection `to_out.0`), matching the engine trainer's default target set.
+    assert_eq!(
+        target.defaults.advanced.get("loraTargetModules"),
+        Some(&serde_json::json!(["to_q", "to_k", "to_v", "to_out.0"]))
+    );
+    // First native-MLX LoKr target (the `mlx-gen-krea` trainer + the Turbo inference seam
+    // both handle LoKr).
+    assert_eq!(
+        target.limits.get("networkTypes"),
+        Some(&serde_json::json!(["lora", "lokr"]))
+    );
+    // No torch Krea trainer — Apple-Silicon/MLX-only, like the LTX video target.
+    assert_eq!(
+        target.limits.get("appleSiliconOnly"),
+        Some(&serde_json::Value::Bool(true))
     );
 }
 
