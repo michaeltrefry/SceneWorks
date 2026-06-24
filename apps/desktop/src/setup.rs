@@ -847,6 +847,13 @@ fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
                     "SCENEWORKS_CONFIG_DIR",
                     config_dir().to_string_lossy().to_string(),
                 );
+            // sc-7821 (epic 7819): the user's GPU memory ceiling, as fraction × total unified
+            // memory. run_worker_loop applies it to the MLX runtime process-globally (covers
+            // generations, upscales, AND LoRA training). Absent ⇒ no env ⇒ MLX default budget.
+            // Read here at spawn, so a slider change takes effect on the next worker restart.
+            if let Some(bytes) = crate::settings::gpu_memory_limit_bytes() {
+                command = command.env("SCENEWORKS_GPU_MEMORY_LIMIT_BYTES", bytes.to_string());
+            }
             // The worker muxes generated video with ffmpeg; the desktop ships no
             // system ffmpeg, so point it at the bundled binary (as spawn_api does).
             if let Some(ffmpeg) = resolve_bundled_ffmpeg(&app) {

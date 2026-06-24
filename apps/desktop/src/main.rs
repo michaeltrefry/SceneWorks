@@ -48,6 +48,8 @@ fn main() {
             settings::delete_credential,
             settings::restart_worker,
             settings::get_gpu_info,
+            // GPU memory cap (epic 7819).
+            settings::set_gpu_memory_limit,
             // LAN remote access (epic 4484, stories 4/5).
             settings::get_remote_access,
             settings::set_remote_access,

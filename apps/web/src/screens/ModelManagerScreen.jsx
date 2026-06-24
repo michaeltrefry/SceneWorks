@@ -295,6 +295,9 @@ export function ModelManagerScreen() {
   // auth-protected REST signal (epic 4484 story 9). `isDesktop`/`tauriInvoke` come
   // from the unified runtime helper (story 6).
   const [unifiedMemoryGb, setUnifiedMemoryGb] = useState(null);
+  // GPU memory cap (epic 7819): when the user caps GPU memory, per-model fit must be judged
+  // against the *effective* ceiling, not physical RAM. Desktop reads the persisted fraction.
+  const [gpuLimitFraction, setGpuLimitFraction] = useState(null);
   // Gated-model credential presence (sc-1898): only fetched when the catalog has a
   // gated model, so non-gated deployments make no extra credential request.
   const [credentials, setCredentials] = useState([]);
@@ -308,6 +311,15 @@ export function ModelManagerScreen() {
   const isMoeBaseModel = WAN_MOE_BASE_MODELS.has(importForm.baseModel);
   const showSecondaryFileSlot = isMoeBaseModel && importForm.mode === "file";
   const moeMissingSecondary = showSecondaryFileSlot && Boolean(importForm.file) && !importForm.secondaryFile;
+  // Effective GPU memory available to generations under the user's cap (epic 7819). A capped app
+  // can run fewer models than the Mac's physical memory implies, so gate per-model fit on this.
+  const memoryIsCapped =
+    unifiedMemoryGb != null &&
+    typeof gpuLimitFraction === "number" &&
+    Number.isFinite(gpuLimitFraction) &&
+    gpuLimitFraction > 0 &&
+    gpuLimitFraction < 1;
+  const effectiveMemoryGb = memoryIsCapped ? unifiedMemoryGb * gpuLimitFraction : unifiedMemoryGb;
 
   useEffect(() => {
     if (familyFilter !== "all" && !families.includes(familyFilter)) {
@@ -337,6 +349,16 @@ export function ModelManagerScreen() {
         .then((info) => {
           if (!cancelled && info && typeof info.unifiedMemoryMb === "number") {
             setUnifiedMemoryGb(info.unifiedMemoryMb / 1024);
+          }
+        })
+        .catch(() => {});
+      // GPU memory cap (epic 7819): the persisted fraction lowers the effective ceiling used for
+      // per-model fit, so a capped app flags the models it can no longer hold.
+      tauriInvoke("get_app_settings")
+        .then((appSettings) => {
+          if (!cancelled && appSettings) {
+            const fraction = appSettings.gpuMemoryLimitFraction;
+            setGpuLimitFraction(typeof fraction === "number" ? fraction : null);
           }
         })
         .catch(() => {});
@@ -588,7 +610,7 @@ export function ModelManagerScreen() {
     // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
     const mlxState = model.mlxConversionState;
     const mlxMinGb = model.mlx?.minMemoryGb ?? null;
-    const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
+    const mlxEnoughMemory = effectiveMemoryGb == null || mlxMinGb == null || effectiveMemoryGb >= mlxMinGb;
     const convertJobs = convertJobsFor(model);
     const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
     const failedConvert = convertJobs.find((job) => terminalStatuses.has(job.status) && job.status !== "completed");
@@ -669,7 +691,11 @@ export function ModelManagerScreen() {
             <p>{mlxStatusText(model)}</p>
             {!mlxEnoughMemory ? (
               <p className="inline-warning">
-                Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
+                Needs ≥ {mlxMinGb} GB unified memory;{" "}
+                {memoryIsCapped
+                  ? `the app is limited to ~${Math.round(effectiveMemoryGb)} GB by your GPU memory cap`
+                  : `this Mac has ~${Math.round(effectiveMemoryGb)} GB`}
+                . It may run out of memory.
               </p>
             ) : null}
             {convertJob ? <WorkerProgressCard job={convertJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} /> : null}

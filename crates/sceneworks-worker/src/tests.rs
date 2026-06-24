@@ -2735,6 +2735,7 @@ fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) 
         utility_workers: 1,
         backend_mlx_enabled: true,
         backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
     }
 }
 
