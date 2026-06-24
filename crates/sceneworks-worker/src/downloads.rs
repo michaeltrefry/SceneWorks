@@ -1179,6 +1179,7 @@ mod ensure_cached_file_tests {
             utility_workers: 1,
             backend_mlx_enabled: true,
             backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
         };
         let api = ApiClient::new(&settings);
         let context = DownloadContext {

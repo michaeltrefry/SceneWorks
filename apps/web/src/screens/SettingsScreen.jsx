@@ -17,6 +17,14 @@ import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
 // server / remote browser). `isDesktop`/`invoke` come from the unified runtime
 // helper (story 6).
 
+// GPU memory cap (epic 7819). The persisted value is a fraction (0.1–0.99) of total unified
+// memory, or null/absent for "no limit". The slider works in whole percent; 100% means Off.
+const GPU_LIMIT_MIN_PERCENT = 10;
+function fractionToPercent(fraction) {
+  if (typeof fraction !== "number" || !Number.isFinite(fraction) || fraction >= 1) return 100;
+  return Math.min(100, Math.max(GPU_LIMIT_MIN_PERCENT, Math.round(fraction * 100)));
+}
+
 export function SettingsScreen() {
   const [settings, setSettings] = useState(null);
   const [gpu, setGpu] = useState(null);
@@ -31,6 +39,9 @@ export function SettingsScreen() {
   const [remote, setRemote] = useState(null);
   const [remotePort, setRemotePort] = useState("");
   const [remotePassword, setRemotePassword] = useState("");
+  // GPU memory cap (epic 7819). Local slider percent for smooth dragging; committed to the shell
+  // on release. 100 = Off (no limit). Synced from persisted settings once they load.
+  const [gpuLimitPercent, setGpuLimitPercent] = useState(100);
 
   const refresh = useCallback(async () => {
     try {
@@ -59,6 +70,11 @@ export function SettingsScreen() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Keep the slider in sync with the persisted cap (also after a commit echoes settings back).
+  useEffect(() => {
+    if (settings) setGpuLimitPercent(fractionToPercent(settings.gpuMemoryLimitFraction));
+  }, [settings]);
 
   const secretStore = gpu?.platform === "windows" ? "Credential Manager" : "Keychain";
   const credentialLocation = isDesktop
@@ -124,6 +140,22 @@ export function SettingsScreen() {
         await apiFetch("/api/v1/worker/restart", serverToken(), { method: "POST" });
       }
       setStatus("Restarting the inference worker…");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function commitGpuMemoryLimit(percent) {
+    try {
+      // 100% = no limit → send null so the shell clears the cap; otherwise a fraction (0.1–0.99).
+      const fraction = percent >= 100 ? null : percent / 100;
+      const updated = await invoke("set_gpu_memory_limit", { fraction });
+      setSettings(updated);
+      setStatus(
+        fraction == null
+          ? "GPU memory limit removed. Restart the worker to apply."
+          : `GPU memory limit set to ${percent}%. Restart the worker to apply.`,
+      );
     } catch (error) {
       setStatus(String(error));
     }
@@ -412,6 +444,35 @@ export function SettingsScreen() {
                 ? ` · GPU cap: ${Math.round(gpu.wiredLimitMb / 1024)} GB`
                 : ""}
             </p>
+          ) : null}
+          {gpu?.platform === "macos" && gpu?.unifiedMemoryMb ? (
+            <div className="settings-gpu-cap">
+              <label htmlFor="gpu-memory-cap">
+                GPU memory limit:{" "}
+                {gpuLimitPercent >= 100
+                  ? "Off — no limit"
+                  : `${Math.round((gpu.unifiedMemoryMb / 1024) * (gpuLimitPercent / 100))} GB of ` +
+                    `${Math.round(gpu.unifiedMemoryMb / 1024)} GB (${gpuLimitPercent}%)`}
+              </label>
+              <input
+                id="gpu-memory-cap"
+                type="range"
+                min={GPU_LIMIT_MIN_PERCENT}
+                max={100}
+                step={5}
+                value={gpuLimitPercent}
+                aria-label="GPU memory limit (percent of unified memory)"
+                onChange={(event) => setGpuLimitPercent(Number(event.target.value))}
+                onMouseUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
+                onKeyUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
+                onTouchEnd={(event) => commitGpuMemoryLimit(Number(event.target.value))}
+              />
+              <p className="settings-help">
+                Caps the shared memory generations and LoRA training may use, leaving the rest for
+                the system. This is a soft target, not a hard limit — set it too low and large models
+                may slow down or fail. Takes effect when you restart the worker.
+              </p>
+            </div>
           ) : null}
           {gpu?.platform === "macos" ? (
             <p className="settings-help">

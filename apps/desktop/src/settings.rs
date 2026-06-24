@@ -180,6 +180,13 @@ pub struct AppSettings {
     /// `credentials` gate, sc-5891). LAN cannot be enabled while this is false.
     #[serde(default)]
     pub remote_password_set: bool,
+    /// User-set GPU memory cap as a fraction (0.1–1.0) of total unified memory (epic 7819).
+    /// `None` = no limit (MLX keeps its own default budget). Stored as a fraction so it's portable
+    /// across machines; the MLX worker spawn derives `fraction × hw.memsize` bytes and applies it to
+    /// the MLX runtime process-globally, covering generations, upscales, AND LoRA training. macOS/MLX
+    /// only today — the candle/Windows path is tracked separately (sc-7826).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_memory_limit_fraction: Option<f32>,
 }
 
 fn settings_path() -> PathBuf {
@@ -482,6 +489,44 @@ fn run_capture(program: &str, args: &[&str]) -> Option<String> {
 #[tauri::command]
 pub fn get_app_settings() -> AppSettings {
     load_settings()
+}
+
+/// Floor for the user's GPU memory fraction — below this even small models can't load and the
+/// worker would just OOM on every job, so the slider clamps here (epic 7819).
+const MIN_GPU_MEMORY_FRACTION: f32 = 0.1;
+
+/// Persist the user's GPU memory cap as a fraction of total unified memory, or clear it. `None`
+/// (and a non-finite or ≥ 1.0 value — 100% is "use everything" = no constraint) clears the cap;
+/// otherwise the value is clamped to `[MIN_GPU_MEMORY_FRACTION, 0.99]`. Mirrors `set_remote_access`:
+/// **persist only** — the worker reads the derived byte ceiling at spawn, so the change takes effect
+/// on the next "Restart worker" (the UI drives that), not mid-job. Returns the updated settings.
+#[tauri::command]
+pub fn set_gpu_memory_limit(fraction: Option<f32>) -> Result<AppSettings, String> {
+    let mut settings = load_settings();
+    settings.gpu_memory_limit_fraction = match fraction {
+        Some(value) if value.is_finite() && value < 1.0 => {
+            Some(value.clamp(MIN_GPU_MEMORY_FRACTION, 0.99))
+        }
+        _ => None,
+    };
+    save_settings(&settings)?;
+    Ok(settings)
+}
+
+/// The configured GPU memory ceiling in BYTES for the MLX worker, or `None` for no limit:
+/// `fraction × hw.memsize` (total unified memory). Read at worker spawn (`supervise_mlx_worker`)
+/// and passed as `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES`, which `run_worker_loop` applies process-
+/// globally. macOS only — the fraction is meaningless without a unified-memory total; the
+/// candle/Windows path is tracked separately (sc-7826).
+#[cfg(target_os = "macos")]
+pub fn gpu_memory_limit_bytes() -> Option<u64> {
+    let fraction = load_settings().gpu_memory_limit_fraction?;
+    if !(fraction.is_finite() && (MIN_GPU_MEMORY_FRACTION..1.0).contains(&fraction)) {
+        return None;
+    }
+    let total =
+        run_capture("sysctl", &["-n", "hw.memsize"]).and_then(|value| value.parse::<u64>().ok())?;
+    Some((total as f64 * fraction as f64).round() as u64)
 }
 
 /// First-run storage state for the splash Step 1 + the in-app wizard gate. The

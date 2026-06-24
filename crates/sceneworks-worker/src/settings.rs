@@ -39,6 +39,13 @@ pub struct Settings {
     /// env var still overrides either way (set `0` to force a candle build back onto the Python
     /// torch fallback during a staged rollout).
     pub backend_candle_enabled: bool,
+    /// Soft ceiling, in bytes, on the shared/unified GPU memory the MLX runtime may use, from
+    /// `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES` (epic 7819, sc-7820). `0` (the default / unset) leaves
+    /// MLX at its own budget — byte-identical to prior behavior. When non-zero it is applied
+    /// **process-globally** at worker startup via `generator_cache::apply_gpu_memory_limit`, so a
+    /// single value covers generations, upscales, AND LoRA training in this process. macOS/MLX only;
+    /// inert on candle/CPU builds (the cross-platform path is tracked separately as sc-7826).
+    pub gpu_memory_limit_bytes: u64,
 }
 
 impl Settings {
@@ -99,6 +106,7 @@ impl Settings {
                 "SCENEWORKS_BACKEND_CANDLE_ENABLED",
                 cfg!(feature = "backend-candle"),
             ),
+            gpu_memory_limit_bytes: env_u64_any(&["SCENEWORKS_GPU_MEMORY_LIMIT_BYTES"], 0),
         }
     }
 }

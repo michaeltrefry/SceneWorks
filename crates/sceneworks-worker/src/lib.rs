@@ -360,6 +360,10 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
         gpuId = %settings.gpu_id,
         "rust_worker gen-core contract version"
     );
+    // sc-7820 (epic 7819): apply the user's GPU memory ceiling to the MLX runtime once at startup,
+    // before any model load. The MLX limit is process-global, so this single call covers
+    // generations, upscales, AND LoRA training. No-op when unset (0) and on non-macOS/candle builds.
+    generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
     let gpu = discover_gpu(&settings).await;
     let api = ApiClient::new(&settings);
     let http_client = reqwest::Client::new();

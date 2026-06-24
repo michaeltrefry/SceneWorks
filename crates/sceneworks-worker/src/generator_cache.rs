@@ -227,6 +227,44 @@ fn release_backend_cache_after_evict() {
 #[cfg(any(not(target_os = "macos"), test))]
 fn release_backend_cache_after_evict() {}
 
+/// Apply the user-configured GPU memory ceiling to the MLX runtime (epic 7819, sc-7820).
+///
+/// `bytes == 0` is a no-op — MLX keeps its own default budget (1.5× the device recommended working
+/// set), so an unset limit is byte-identical to prior behavior. When non-zero we set two MLX knobs:
+/// - `set_memory_limit` — soft backpressure: when active memory exceeds the limit MLX blocks and
+///   waits for in-flight GPU work to drain rather than hard-failing. It is a target, not a hard
+///   sandbox; a single oversized allocation can still exceed it (and on a too-low cap a model whose
+///   working set genuinely needs more will thrash/swap or hit a Metal OOM — already contained by the
+///   `catch_unwind` guard above).
+/// - `set_wired_limit` — caps pinned (non-pageable) residency so the OS can reclaim the rest of
+///   unified memory for other apps. macOS 15+.
+///
+/// We deliberately leave `set_cache_limit` at its default: forcing it low causes reallocation storms
+/// between steps (the fork's own doc warns about this).
+///
+/// The MLX limit is **process-global**, so calling this once at worker startup (before any model
+/// load) covers generations, upscales, AND LoRA training — even though training takes a separate
+/// path from the generator cache.
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn apply_gpu_memory_limit(bytes: u64) {
+    if bytes == 0 {
+        return;
+    }
+    let bytes = bytes as usize;
+    let previous_limit = mlx_rs::memory::set_memory_limit(bytes);
+    let previous_wired = mlx_rs::memory::set_wired_limit(bytes);
+    tracing::info!(
+        event = "gpu_memory_limit_applied",
+        limitBytes = bytes,
+        previousLimitBytes = previous_limit,
+        previousWiredLimitBytes = previous_wired,
+        "applied user-configured GPU memory ceiling to the MLX runtime"
+    );
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) fn apply_gpu_memory_limit(_bytes: u64) {}
+
 /// Best-effort human-readable text from a caught panic payload — the `&str`/`String` a `panic!`
 /// produces. mlx-rs `.unwrap()`/`.expect()` panics carry their formatted message as a `String`
 /// (e.g. the `[metal::malloc] Attempting to allocate …` Metal OOM), so this surfaces the real cause.
