@@ -421,6 +421,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sdxl_lora_target(),
             kolors_lora_target(),
             lens_turbo_lora_target(),
+            krea_raw_lora_target(),
             ltx_video_lora_target(),
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
@@ -435,6 +436,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let target = z_image_turbo_lora_target();
     let sdxl_target = sdxl_lora_target();
     let kolors_target = kolors_lora_target();
+    let krea_target = krea_raw_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -686,6 +688,52 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 object(json!({
                     "description": "768px preset for tighter-VRAM Kolors training.",
                     "order": 40
+                })),
+            ),
+            krea_preset(
+                &krea_target,
+                "krea_2_raw_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on Krea 2 (trains on Raw, applies to Turbo).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &krea_target,
+                "krea_2_raw_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            krea_preset(
+                &krea_target,
+                "krea_2_raw_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity style LoRA defaults for texture and look transfer.",
+                    "order": 30
                 })),
             ),
             wan_preset(
@@ -947,6 +995,44 @@ where
     }
 }
 
+/// Build a Krea 2 LoRA preset. The flow-matching knobs (timestep sampling, Raw-base preview
+/// settings, gradient checkpointing, target modules) live on the target defaults, so the preset only
+/// overrides the optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/LR).
+fn krea_preset<F>(
+    target: &TrainingTarget,
+    id: &str,
+    name: &str,
+    recommended_for: &[&str],
+    optimizer_quality: (&str, &str),
+    mutate: F,
+    ui: JsonObject,
+) -> TrainingPreset
+where
+    F: FnOnce(TrainingConfig) -> TrainingConfig,
+{
+    let (optimizer, quality_preset) = optimizer_quality;
+    let mut config = mutate(target.defaults.clone());
+    config.optimizer = optimizer.to_owned();
+    config
+        .advanced
+        .insert("qualityPreset".to_owned(), json!(quality_preset));
+    TrainingPreset {
+        id: id.to_owned(),
+        version: 1,
+        target_id: target.id.clone(),
+        name: name.to_owned(),
+        recommended_for: recommended_for
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        optimizer: optimizer.to_owned(),
+        quality_preset: quality_preset.to_owned(),
+        config,
+        ui,
+        extra: ExtraFields::new(),
+    }
+}
+
 fn z_image_turbo_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "z_image_turbo_lora".to_owned(),
@@ -1115,6 +1201,111 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             "label": "Lens LoRA",
             "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
             "recommendedFor": ["character", "style"]
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Krea 2 LoRA training, trained on the undistilled `krea/Krea-2-Raw` 12B DiT and applied at
+/// inference to Krea 2 Turbo (epic 7565 P3). Same train-on-base → infer-on-Turbo pattern as Lens
+/// and Z-Image: the output registers as a `krea_2` family LoRA the Turbo adapter loads at generation
+/// time by **family match, no base-model gating** (`lora_family.rs` gates only `wan-video`). The
+/// Turbo manifest declares `loraCompatibility.families: [krea_2]`.
+///
+/// Native MLX, **Apple-Silicon only**: the `krea_lora` kernel runs the in-process `mlx-gen-krea`
+/// Rust trainer (a functional-autograd flow-match velocity loop on the single-stream DiT). There is
+/// no torch Krea trainer, so — like the LTX MLX video target — the job has no non-Rust fallback
+/// (`MLX_ONLY_TRAINING_KERNELS` keeps it queued for the mlx worker) and the target is Mac-gated in
+/// the UI via `MacTrainingSupport::supported_kernels`.
+///
+/// `base_model_repo` points the plan's `baseModelPath` at the ungated public `krea/Krea-2-Raw`
+/// diffusers tree (Krea 2 Community License), independent of the served `krea_2_turbo` model. The
+/// single-stream DiT uses separate `to_q`/`to_k`/`to_v` attention projections plus the joint-attention
+/// output projection (`to_out` is an `nn.ModuleList([Linear, Identity])`, so the trainable Linear is
+/// `to_out.0`), matching the engine trainer's `DEFAULT_TARGET_MODULES`.
+fn krea_raw_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "krea_2_raw_lora".to_owned(),
+        name: "Krea 2 LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "krea_2".to_owned(),
+        base_model: "krea_2_raw".to_owned(),
+        base_model_repo: Some("krea/Krea-2-Raw".to_owned()),
+        kernel: "krea_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            // MLX training aliases `adamw8bit` → AdamW (bitsandbytes 8-bit is CUDA-only); the label
+            // stays consistent with the other image targets (the engine normalizes it).
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                // Flow-matching noise sampling (see the Z-Image target); the high-noise bias
+                // emphasizes the region the few-step distilled Turbo relies on at inference, the
+                // same reasoning the Lens base→Turbo target uses.
+                "timestepType": "sigmoid",
+                "timestepBias": "high_noise",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                // Learning-rate scheduler (see the Z-Image target); the worker honors
+                // `constant`/`linear`/`cosine` with an optional warmup.
+                "lrScheduler": "constant",
+                // Krea's single-stream DiT uses separate q/k/v projections plus the joint-attention
+                // output projection. `to_out` is a ModuleList, so its trainable Linear is `to_out.0`
+                // — the engine trainer's default target set (`mlx-gen-krea` DEFAULT_TARGET_MODULES).
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+                // In-training previews render on the loaded undistilled Raw base (not the distilled
+                // CFG-free Turbo), so they use Raw's real-CFG settings — a few-step / CFG-0 preview
+                // on the non-distilled base is garbage. Heavier than Turbo previews, so a wider
+                // cadence by default (the Lens base-preview precedent).
+                "sampleEvery": 500,
+                "sampleSteps": 28,
+                "sampleGuidanceScale": 3.5,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto",
+                // Native MLX trainer (surfaced for the UI; Apple-Silicon only).
+                "backend": "mlx"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [768, 1024, 1536],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Both LoRA and LoKr round-trip the engine's `apply_adapters_strict` seam at Turbo
+            // inference (the `mlx-gen-krea` trainer builds both; the apply path handles both).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "qualityPresets": ["speed", "balanced", "quality"],
+            "outputScopes": ["project", "global"],
+            // Native MLX trainer — no torch Krea path (mirrors the LTX MLX target).
+            "requiresBackend": "mlx",
+            "appleSiliconOnly": true
+        })),
+        ui: object(json!({
+            "label": "Krea 2 LoRA",
+            "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon only (native MLX).",
+            "recommendedFor": ["character", "style"],
+            "appleSiliconOnly": true,
+            "backend": "mlx",
+            "datasetModality": "image"
         })),
         extra: ExtraFields::new(),
     }

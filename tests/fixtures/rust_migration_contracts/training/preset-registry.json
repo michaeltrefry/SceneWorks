@@ -681,6 +681,163 @@
       }
     },
     {
+      "id": "krea_2_raw_lora.character.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "krea_2_raw_lora",
+      "name": "Character balanced",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "backend": "mlx",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "sampleGuidanceScale": 3.5,
+          "sampleSteps": 28,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "default": true,
+        "description": "Balanced first run for 12-25 clean character images on Krea 2 (trains on Raw, applies to Turbo).",
+        "order": 10
+      }
+    },
+    {
+      "id": "krea_2_raw_lora.character.adamw8bit.conservative",
+      "version": 1,
+      "targetId": "krea_2_raw_lora",
+      "name": "Character conservative",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "conservative",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.00005,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "backend": "mlx",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "conservative",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "sampleGuidanceScale": 3.5,
+          "sampleSteps": 28,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+        "order": 20
+      }
+    },
+    {
+      "id": "krea_2_raw_lora.style.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "krea_2_raw_lora",
+      "name": "Style balanced",
+      "recommendedFor": [
+        "style"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "backend": "mlx",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "sampleGuidanceScale": 3.5,
+          "sampleSteps": 28,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Higher-capacity style LoRA defaults for texture and look transfer.",
+        "order": 30
+      }
+    },
+    {
       "id": "wan_lora.character.adamw.balanced",
       "version": 1,
       "targetId": "wan_lora",

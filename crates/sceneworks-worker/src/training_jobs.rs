@@ -43,6 +43,8 @@ use gen_core::{
 #[cfg(target_os = "macos")]
 use mlx_gen_kolors as _;
 #[cfg(target_os = "macos")]
+use mlx_gen_krea as _;
+#[cfg(target_os = "macos")]
 use mlx_gen_lens as _;
 #[cfg(target_os = "macos")]
 use mlx_gen_ltx as _;
@@ -308,6 +310,9 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // Lens trains the base `microsoft/Lens` DiT; the engine registers its LoRA/LoKr trainer
         // under the base generator id `"lens"` (arch-identical to lens_turbo), sc-5148.
         "lens_lora" => Some("lens"),
+        // Krea trains the undistilled `krea/Krea-2-Raw` DiT; the engine registers its LoRA/LoKr
+        // trainer under the base id `"krea_2_raw"` (arch-identical to krea_2_turbo), sc-7577/7578.
+        "krea_lora" => Some("krea_2_raw"),
         "ltx_mlx_lora" => Some("ltx_2_3"),
         // Dense Wan2.2-TI2V-5B.
         "wan_lora" => Some("wan2_2_ti2v_5b"),
@@ -1690,6 +1695,9 @@ mod tests {
             // Lens gained a native mlx-gen trainer (sc-5148) and now routes here (sc-5180); the
             // trainer registers under the base generator id `"lens"`.
             ("lens_lora", "lens", Some("lens")),
+            // Krea trains the undistilled Raw DiT; the engine trainer registers under the base id
+            // `"krea_2_raw"` (sc-7577/7578).
+            ("krea_lora", "krea_2_raw", Some("krea_2_raw")),
             // Unknown A14B base model variant.
             ("wan_moe_lora", "wan_2_2_mystery", None),
         ];
