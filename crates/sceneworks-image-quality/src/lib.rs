@@ -24,6 +24,9 @@ use sceneworks_core::dataset_quality::{
     ReadinessDistributions, Severity, Tier0Scalars, Tier0Thresholds, Tier1Evaluation,
 };
 
+/// One-tap pixel-rewriting fixes (sc-6539 smart-crop + EXIF-strip).
+pub mod transform;
+
 /// Luma at or below this counts as crushed-to-black (8-bit).
 const SHADOW_CUTOFF: u8 = 4;
 /// Luma at or above this counts as blown-to-white (8-bit).

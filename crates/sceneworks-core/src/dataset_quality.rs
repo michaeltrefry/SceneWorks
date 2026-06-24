@@ -322,6 +322,71 @@ fn push_resolution_flags(
     }
 }
 
+/// A pixel crop window (origin + size), guaranteed to lie within the source image bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CropRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Plan a crop (sc-6539 smart-crop fix) that brings an image's crop-loss `(long-short)/long` down
+/// to at most `target_crop_loss`, by trimming the LONG edge only (the short edge is kept in full).
+/// Returns `None` when the image is already within target (no crop needed) or is degenerate.
+///
+/// `bias` is an optional focal point in normalized `[0,1]²` coordinates that the crop window is
+/// centered on along the trimmed axis; `None` centers it — the saliency-free heuristic. A saliency
+/// centroid can be passed here later without changing the signature.
+///
+/// Callers should pass a `target_crop_loss` comfortably under the [`Tier0Thresholds`] flag
+/// threshold (e.g. 0.25 vs the 0.35 flag) so the crop clears the flag with margin rather than
+/// landing exactly on it.
+pub fn plan_smart_crop(
+    width: u32,
+    height: u32,
+    target_crop_loss: f64,
+    bias: Option<(f64, f64)>,
+) -> Option<CropRect> {
+    if width == 0 || height == 0 || !(0.0..1.0).contains(&target_crop_loss) {
+        return None;
+    }
+    let (w, h) = (f64::from(width), f64::from(height));
+    let (long, short) = if w >= h { (w, h) } else { (h, w) };
+    if (long - short) / long <= target_crop_loss {
+        return None;
+    }
+    // Largest long edge whose crop-loss is within target: (n - short)/n <= t  =>  n <= short/(1-t).
+    let new_long = (short / (1.0 - target_crop_loss)).floor() as u32;
+    let new_long = new_long.clamp(short as u32, width.max(height));
+    let (bx, by) = bias.unwrap_or((0.5, 0.5));
+    if width >= height {
+        let new_w = new_long.min(width);
+        Some(CropRect {
+            x: window_origin(width, new_w, bx),
+            y: 0,
+            width: new_w,
+            height,
+        })
+    } else {
+        let new_h = new_long.min(height);
+        Some(CropRect {
+            x: 0,
+            y: window_origin(height, new_h, by),
+            width,
+            height: new_h,
+        })
+    }
+}
+
+/// Place a `window`-long span inside `extent`, centered on the normalized focal `bias` (0..1),
+/// clamped to stay in bounds.
+fn window_origin(extent: u32, window: u32, bias: f64) -> u32 {
+    let max_origin = extent.saturating_sub(window);
+    let center = f64::from(extent) * bias.clamp(0.0, 1.0) - f64::from(window) / 2.0;
+    center.round().clamp(0.0, f64::from(max_origin)) as u32
+}
+
 fn push_scalar_flags(
     flags: &mut Vec<QualityFlag>,
     item: &ItemQualityInput,
@@ -2610,5 +2675,66 @@ mod tests {
             .flags
             .iter()
             .any(|flag| flag.check == QualityCheck::CaptionAlignment));
+    }
+
+    // --- smart-crop geometry (sc-6539), pure ---
+
+    /// The crop-loss of a rect, mirroring the flag formula `(long-short)/long`.
+    fn crop_loss_of(w: u32, h: u32) -> f64 {
+        let (long, short) = if w >= h { (w, h) } else { (h, w) };
+        f64::from(long - short) / f64::from(long)
+    }
+
+    #[test]
+    fn smart_crop_trims_the_long_edge_and_clears_the_flag_with_margin() {
+        // A 200×64 landscape: crop-loss 0.68, well over the 0.35 flag.
+        let rect = plan_smart_crop(200, 64, 0.25, None).expect("needs a crop");
+        assert_eq!(rect.height, 64, "short edge kept in full");
+        assert!(
+            rect.width < 200 && rect.width >= 64,
+            "long edge trimmed, not below short"
+        );
+        // centered window: equal margins either side (±1px for rounding).
+        assert!((i64::from(rect.x) - i64::from((200 - rect.width) / 2)).abs() <= 1);
+        assert_eq!(rect.y, 0);
+        let after = crop_loss_of(rect.width, rect.height);
+        assert!(after <= 0.25 + 1e-9, "hits the 0.25 target");
+        assert!(
+            after < 0.35,
+            "clears the 0.35 flag with margin (was {after})"
+        );
+    }
+
+    #[test]
+    fn smart_crop_handles_portrait_on_the_vertical_axis() {
+        let rect = plan_smart_crop(64, 200, 0.25, None).expect("needs a crop");
+        assert_eq!(rect.width, 64, "short edge (width) kept");
+        assert!(rect.height < 200 && rect.height >= 64);
+        assert_eq!(rect.x, 0);
+        assert!((i64::from(rect.y) - i64::from((200 - rect.height) / 2)).abs() <= 1);
+    }
+
+    #[test]
+    fn smart_crop_returns_none_when_already_within_target() {
+        assert!(plan_smart_crop(100, 100, 0.25, None).is_none(), "square");
+        assert!(
+            plan_smart_crop(100, 80, 0.25, None).is_none(),
+            "crop-loss 0.20 ≤ 0.25"
+        );
+        assert!(plan_smart_crop(0, 100, 0.25, None).is_none(), "degenerate");
+        assert!(
+            plan_smart_crop(200, 64, 1.5, None).is_none(),
+            "nonsense target"
+        );
+    }
+
+    #[test]
+    fn smart_crop_bias_shifts_the_window_and_stays_in_bounds() {
+        // Bias hard-left keeps x at 0; hard-right pins it at the far edge — always in bounds.
+        let left = plan_smart_crop(300, 60, 0.25, Some((0.0, 0.5))).expect("crop");
+        assert_eq!(left.x, 0);
+        let right = plan_smart_crop(300, 60, 0.25, Some((1.0, 0.5))).expect("crop");
+        assert_eq!(right.x, 300 - right.width);
+        assert!(right.x + right.width <= 300);
     }
 }
