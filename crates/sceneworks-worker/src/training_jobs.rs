@@ -2336,9 +2336,14 @@ mod tests {
         assert!(output.steps >= 1, "expected at least one micro-step");
         assert!(output.final_loss.is_finite(), "final loss must be finite");
         assert!(last_loss.is_finite(), "a training-step loss was observed");
+        // Assert on the path the trainer actually wrote (`output.adapter_path`), not
+        // `output_dir.join(file_name)` — the Wan MoE trainer emits a `{stem}.high_noise` /
+        // `{stem}.low_noise` PAIR (adapter_path points at the high-noise expert), so a bare `file_name`
+        // check is wrong for it; the single-adapter families write exactly `file_name`.
         assert!(
-            output_dir.join(file_name).exists(),
-            "trained adapter was written"
+            output.adapter_path.exists(),
+            "trained adapter was written at {}",
+            output.adapter_path.display()
         );
     }
 
@@ -2381,5 +2386,40 @@ mod tests {
             true,
             "candle_z_image_smoke.safetensors",
         );
+    }
+
+    /// sc-7817 — the candle Wan A14B **T2V** training smoke. Loads `load_trainer("wan2_2_t2v_14b", …)`
+    /// from the installed `Wan-AI/Wan2.2-T2V-A14B-Diffusers` snapshot (`tokenizer/ text_encoder/
+    /// transformer/ transformer_2/ vae/`) and trains two LoRA micro-steps — the MoE alternates one
+    /// high-noise expert step + one low-noise. Gradient checkpointing is REQUIRED: the two 14B experts
+    /// are the working set (~56 GB bf16), so a dense backward materializes ~another model of
+    /// frozen-weight grads on candle and OOMs (the Wan-14B finding). Run on demand (one smoke per GPU):
+    /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored candle_wan_real_weights --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs real Wan2.2-T2V-A14B weights + a CUDA device; run one smoke per GPU (two 14B experts)"]
+    fn candle_wan_real_weights_trains_a_lora_step() {
+        let snapshot =
+            candle_hf_snapshot("models--Wan-AI--Wan2.2-T2V-A14B-Diffusers", "transformer_2");
+        candle_real_weights_smoke(
+            "wan2_2_t2v_14b",
+            &snapshot,
+            256,
+            true,
+            "candle_wan_smoke.safetensors",
+        );
+    }
+
+    /// sc-7817 — the candle Lens training smoke. Loads `load_trainer("lens", …)` from the installed
+    /// `microsoft/Lens` snapshot (`tokenizer/ text_encoder/ transformer/ vae/`) and trains two LoRA
+    /// micro-steps at resolution 64 (the gpt-oss-20b encoder load dominates; the per-step DiT graph
+    /// stays tiny). Checkpointing on for the large 48-layer MMDiT. Run on demand (one smoke per GPU):
+    /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored candle_lens_real_weights --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs real microsoft/Lens weights + a CUDA device; loads the gpt-oss-20b encoder"]
+    fn candle_lens_real_weights_trains_a_lora_step() {
+        let snapshot = candle_hf_snapshot("models--microsoft--Lens", "transformer");
+        candle_real_weights_smoke("lens", &snapshot, 64, true, "candle_lens_smoke.safetensors");
     }
 }
