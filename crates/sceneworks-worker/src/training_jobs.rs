@@ -2132,11 +2132,19 @@ mod tests {
     /// Shared body for the candle real-weight training smokes: two LoRA micro-steps on a one-image
     /// swatch dataset, asserting a finite loss and a written adapter — the candle twin of the macOS
     /// `z_image_1024_bf16_trains_past_the_first_step` / `kolors_real_weights_*` smokes.
+    ///
+    /// `gradient_checkpointing` matters per-family on candle: UNLIKE MLX/torch, candle's matmul
+    /// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
+    /// multi-billion-param DiT (Z-Image, Wan) OOMs even at 512² on a 96 GB card — checkpointing
+    /// (sc-5246) recomputes activations and avoids retaining those frozen-weight grads. SDXL's smaller
+    /// U-Net fits dense; Z-Image needs checkpointing on. (A real training job carries this from its
+    /// preset; the smoke sets it explicitly per family.)
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     fn candle_real_weights_smoke(
         engine_id: &str,
         snapshot: &std::path::Path,
         resolution: u32,
+        gradient_checkpointing: bool,
         file_name: &str,
     ) {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2156,7 +2164,7 @@ mod tests {
             steps: 2,
             batch_size: 1,
             gradient_accumulation: 1,
-            gradient_checkpointing: false,
+            gradient_checkpointing,
             train_dtype: "bf16".to_owned(),
             resolution,
             save_every: 0,
@@ -2226,29 +2234,41 @@ mod tests {
 
     /// sc-7817 — the candle SDXL training smoke. Loads `load_trainer("sdxl", …)` from the installed
     /// `stabilityai/stable-diffusion-xl-base-1.0` diffusers snapshot (`text_encoder/ text_encoder_2/
-    /// unet/`) and trains two LoRA micro-steps. Run on demand on the RTX box:
-    /// `cargo test -p sceneworks-worker --lib --release --features backend-candle -- --ignored candle_sdxl_real_weights --nocapture`.
+    /// unet/`) and trains two LoRA micro-steps; the smaller U-Net fits a dense backward (no
+    /// checkpointing). GPU-validated on RTX PRO 6000 (2 steps, finite loss ~0.02, adapter written).
+    /// Run on demand on the RTX box (one smoke per GPU — two full models at once OOM):
+    /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored candle_sdxl_real_weights --nocapture`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    #[ignore = "needs real SDXL weights + a CUDA device; release build (debug_assert dup-id panic)"]
+    #[ignore = "needs real SDXL weights + a CUDA device; run one smoke per GPU (two full models OOM)"]
     fn candle_sdxl_real_weights_trains_a_lora_step() {
         let snapshot =
             candle_hf_snapshot("models--stabilityai--stable-diffusion-xl-base-1.0", "unet");
-        candle_real_weights_smoke("sdxl", &snapshot, 512, "candle_sdxl_smoke.safetensors");
+        candle_real_weights_smoke(
+            "sdxl",
+            &snapshot,
+            512,
+            false,
+            "candle_sdxl_smoke.safetensors",
+        );
     }
 
     /// sc-7817 — the candle Z-Image training smoke. Loads `load_trainer("z_image_turbo", …)` from the
-    /// installed `Tongyi-MAI/Z-Image-Turbo` snapshot and trains two LoRA micro-steps. Run on demand:
-    /// `cargo test -p sceneworks-worker --lib --release --features backend-candle -- --ignored candle_z_image_real_weights --nocapture`.
+    /// installed `Tongyi-MAI/Z-Image-Turbo` snapshot and trains two LoRA micro-steps with
+    /// **gradient checkpointing ON** — REQUIRED on candle: the Z-Image DiT's dense backward OOMs even
+    /// at 512² on a 96 GB card because candle materializes a grad for the frozen base weight too
+    /// (sc-5246; the Wan-14B finding). Run on demand on the RTX box (one smoke per GPU):
+    /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored candle_z_image_real_weights --nocapture`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    #[ignore = "needs real Z-Image-Turbo weights + a CUDA device; release build (debug_assert dup-id panic)"]
+    #[ignore = "needs real Z-Image-Turbo weights + a CUDA device; run one smoke per GPU (two full models OOM)"]
     fn candle_z_image_real_weights_trains_a_lora_step() {
         let snapshot = candle_hf_snapshot("models--Tongyi-MAI--Z-Image-Turbo", "");
         candle_real_weights_smoke(
             "z_image_turbo",
             &snapshot,
             512,
+            true,
             "candle_z_image_smoke.safetensors",
         );
     }
