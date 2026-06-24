@@ -312,8 +312,6 @@ async fn generate_candle_kolors_ipadapter_stream(
                     steps: steps as usize,
                     guidance,
                     ip_adapter_scale: ip_scale,
-                    sampler: None,
-                    scheduler: None,
                     seed: seed as u64,
                     sampler: sampler.clone(),
                     scheduler: scheduler.clone(),

@@ -298,8 +298,6 @@ async fn generate_candle_kolors_control_stream(
                     steps: steps as usize,
                     guidance,
                     control_scale,
-                    sampler: None,
-                    scheduler: None,
                     seed: seed as u64,
                     sampler: sampler.clone(),
                     scheduler: scheduler.clone(),
