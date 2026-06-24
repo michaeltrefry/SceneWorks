@@ -416,6 +416,15 @@ pub(crate) struct DatasetEmbeddingRecord {
     pub(crate) text_embedding: Option<Vec<f32>>,
 }
 
+/// Body for the synchronous one-tap image fixes (sc-6539 smart-crop / EXIF-strip). `itemIds` scopes
+/// the fix; when absent it applies to every item in the dataset (EXIF-strip-all).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetImageFixBody {
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+}
+
 /// Request to upscale flagged low-resolution items in a training dataset (sc-6539 one-tap fix).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

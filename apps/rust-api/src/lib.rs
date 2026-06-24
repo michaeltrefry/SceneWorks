@@ -756,6 +756,14 @@ pub(crate) fn create_app_with_state(
             post(repoint_training_dataset_items),
         )
         .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/smart-crop",
+            post(smart_crop_training_dataset_items),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/strip-exif",
+            post(strip_exif_training_dataset_items),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/jobs",
             post(create_training_job),
         )
