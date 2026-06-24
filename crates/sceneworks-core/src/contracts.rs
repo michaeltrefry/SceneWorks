@@ -420,11 +420,12 @@ string_enum! {
         // so a real run only routes to a worker that can actually train. See
         // jobs_store::worker_supports_job and apps/worker/scene_worker/runtime.py.
         LoraTrainExecute => "lora_train_execute",
-        // Prompt refinement (LLM rewrite of a user prompt) by a small in-process instruction LLM
-        // (Llama-3.2-3B-Instruct). Advertised via the native `TextLlm` provider
-        // (`gen_core::load_textllm`, zero torch), derived in engines::registry_capabilities: MLX on
-        // macOS (sc-5552) and candle on the Windows/CUDA build when `backend_candle_enabled`
-        // (sc-5525). The torch `PromptRefiner` remains only as the fallback on platforms with neither
+        // Prompt refinement (LLM rewrite of a user prompt) by a small in-process instruction LLM.
+        // Advertised via the native `core_llm::TextLlm` provider (resolved model-first, zero torch; the
+        // legacy `gen_core::load_textllm` seam was retired in sc-7189), derived in
+        // engines::registry_capabilities: MLX on macOS (sc-5552 / sc-7158) and candle on the
+        // Windows/CUDA build when `backend_candle_enabled` (sc-5525 / sc-7404). The torch
+        // `PromptRefiner` remains only as the fallback on platforms with neither
         // native provider (e.g. the candle-less Desktop installer / Linux). The model is provisioned
         // from the catalog (`prompt_refine_anubis_8b`, sc-5605/sc-6550) into the HF cache the worker
         // resolves; the native path does not auto-download. Routed by capability match. See

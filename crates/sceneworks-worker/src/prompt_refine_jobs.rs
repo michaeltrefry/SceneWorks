@@ -321,9 +321,10 @@ pub(crate) fn clean_json_output(text: &str) -> String {
 }
 
 // ----------------------------------------------------------------------------------------------
-// Job handler — native MLX on macOS (sc-5552) and candle on the Windows candle build (sc-5525). The
-// body is backend-agnostic: `gen_core::load_textllm("prompt_refine", …)` resolves whichever provider
-// is force-linked above. The Python torch `PromptRefiner` remains the fallback on other platforms.
+// Job handler — native MLX on macOS (sc-5552 / sc-7158) and candle on the Windows candle build
+// (sc-5525 / sc-7404). The body is backend-agnostic: `core_llm::load_for_model` resolves whichever
+// provider is force-linked above (mlx-llama on macOS, candle-llama on the candle build) model-first.
+// The Python torch `PromptRefiner` remains the fallback on other platforms.
 // ----------------------------------------------------------------------------------------------
 
 #[cfg(any(

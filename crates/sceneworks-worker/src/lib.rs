@@ -668,12 +668,12 @@ async fn run_utility_job(
         JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, &job)
             .await
             .map_err(|error| ("Dataset face analysis failed.", error)),
-        // Native candle prompt refinement (epic 5095, sc-5525): routes `prompt_refine` to the candle
-        // `TextLlm` provider (Llama-3.2-3B) via `gen_core::load_textllm`. The candle worker advertises
-        // `prompt_refine` only when `backend_candle_enabled` (engines::registry_capabilities from the
-        // registered TextLlm); off the Windows candle build the capability is never advertised, so this
-        // arm is unreachable there and the Python torch refiner serves the job (sc-5525 keeps it as the
-        // Mac + default-installer fallback).
+        // Native candle prompt refinement (epic 5095, sc-5525; consolidated onto candle-llm in sc-7404):
+        // routes `prompt_refine` to the candle `core_llm::TextLlm` provider (candle-llama, resolved
+        // model-first). The candle worker advertises `prompt_refine` only when `backend_candle_enabled`
+        // (engines::registry_capabilities from the registered core_llm provider); off the Windows candle
+        // build the capability is never advertised, so this arm is unreachable there and the Python torch
+        // refiner serves the job (sc-5525 keeps it as the Mac + default-installer fallback).
         JobType::PromptRefine => run_prompt_refine_job(api, settings, &job)
             .await
             .map_err(|error| ("Prompt refinement failed.", error)),

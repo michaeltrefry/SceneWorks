@@ -4248,10 +4248,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
 #[ignore = "loads the real Anubis-Mini-8B refiner + Ideogram 4 snapshot; run manually on a Mac"]
 #[test]
 fn ideogram_4_headless_auto_caption_renders_real_image() {
-    use gen_core::{
-        CancelFlag, LoadSpec, Progress, TextLlmConstraint, TextLlmRequest, TextLlmSampling,
-        WeightsSource,
-    };
+    use gen_core::CancelFlag;
 
     let Some(ideogram) = ideogram_dir() else {
         eprintln!("skipping: no SceneWorks/ideogram-4-mlx q4 snapshot found");
@@ -4280,30 +4277,49 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
     //    MAX_CAPTION_ATTEMPTS re-sample). Scoped so the refiner frees before Ideogram loads, mirroring
     //    the API running this as a separate prompt_refine job (no 3B/Ideogram co-residency).
     let caption = {
-        let refiner = gen_core::load_textllm(
-            "prompt_refine",
-            &LoadSpec::new(WeightsSource::Dir(refine_dir)),
-        )
-        .expect("load prompt_refine (Anubis-8B)");
+        // sc-7189: the legacy `gen_core::load_textllm`/`TextLlm` contract was retired; resolve the
+        // refiner model-first through `core_llm::TextLlm` exactly as the production magic_prompt job
+        // does (prompt_refine_jobs.rs macOS lane) — the JSON constraint steers resolution to a
+        // JSON-capable provider (mlx-llama), which renders the model's own chat template.
+        use gen_core::core_llm::{
+            load_for_model_with, Constraint, LoadSpec, Message, ModelRequirements, Sampling,
+            StreamEvent, TextLlmRequest,
+        };
         let (system, user) =
             crate::prompt_refine_jobs::build_magic_prompt_messages(PLAIN_TEXT, "1:1");
-        let mut found = None;
-        for attempt in 1..=6 {
-            let req = TextLlmRequest {
-                system: system.clone(),
-                prompt: user.clone(),
-                sampling: TextLlmSampling {
+        let make_request = || {
+            let mut messages = Vec::with_capacity(2);
+            if !system.trim().is_empty() {
+                messages.push(Message::system(system.clone()));
+            }
+            messages.push(Message::user(user.clone()));
+            TextLlmRequest {
+                messages,
+                sampling: Sampling {
                     temperature: 0.4,
                     top_p: 0.9,
-                    max_new_tokens: 2048,
-                    seed: None,
+                    ..Sampling::default()
                 },
+                max_new_tokens: 2048,
+                seed: None,
                 // sc-6585: constrain to the JSON grammar so the caption is structurally valid in one
                 // shot (the resample loop below should now succeed on attempt 1).
-                constraint: Some(TextLlmConstraint::Json),
-                cancel: CancelFlag::new(),
-            };
-            let mut noop = |_p: Progress| {};
+                constraint: Some(Constraint::Json),
+                ..Default::default()
+            }
+        };
+        let refiner = load_for_model_with(
+            &LoadSpec {
+                source: refine_dir.to_string_lossy().into_owned(),
+                quantize: None,
+            },
+            &ModelRequirements::from_request(&make_request()),
+        )
+        .expect("load prompt_refine (Anubis-8B) model-first");
+        let mut found = None;
+        for attempt in 1..=6 {
+            let req = make_request();
+            let mut noop = |_e: StreamEvent| {};
             let raw = refiner
                 .generate(&req, &mut noop)
                 .expect("magic_prompt generate")
