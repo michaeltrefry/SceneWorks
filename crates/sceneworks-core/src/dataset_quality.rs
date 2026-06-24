@@ -682,6 +682,141 @@ pub struct DatasetReadinessReport {
     /// leaves it `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distributions: Option<ReadinessDistributions>,
+    /// One-tap "drop duplicates" plan (sc-6539): which exact/near-duplicate copies to remove, keeping
+    /// the sharpest of each group. Populated by the extraction layer (which holds the sharpness/size
+    /// signal), so the pure core rollup leaves it `None`. `None` (and omitted) when nothing is
+    /// safely removable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_removal: Option<DuplicateRemovalPlan>,
+}
+
+/// One item's input to the one-tap duplicate-removal planner (sc-6539). `duplicate_peers` are the
+/// other items this one is an exact-or-near (pHash) duplicate of. The caller passes ONLY
+/// `ExactDuplicate` + `NearDuplicate` peers — CLIP `NearDuplicateEmbedding` is deliberately excluded:
+/// it flags same-content/different-crop frames that are legitimate training variety, and
+/// auto-removing them would contradict the sibling `LowDiversity` check. `sharpness` (Laplacian
+/// variance) then `pixels` (width×height) decide which copy to KEEP; an unmeasured copy (`None`) sorts
+/// last, so it is dropped before a measured one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DuplicateCandidate {
+    pub item_id: String,
+    pub duplicate_peers: Vec<String>,
+    pub sharpness: Option<f64>,
+    pub pixels: Option<u64>,
+}
+
+/// One resolved duplicate cluster: the single copy to keep and the others to drop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateGroup {
+    /// The copy kept — sharpest, then largest, then lexically-first id of the cluster.
+    pub keep: String,
+    /// The duplicates to remove (never includes `keep`), sorted for a stable payload.
+    pub remove: Vec<String>,
+}
+
+/// One-tap duplicate-removal plan (sc-6539): the exact/near-duplicate clusters and which copies to
+/// drop, keeping the sharpest of each. Advisory and reversible — removal drops items from the
+/// dataset's asset selection; the underlying uploads/assets are preserved, so a dropped image can be
+/// re-added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateRemovalPlan {
+    pub groups: Vec<DuplicateGroup>,
+}
+
+impl DuplicateRemovalPlan {
+    /// Every item id slated for removal, across all groups.
+    pub fn removed_item_ids(&self) -> Vec<String> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.remove.iter().cloned())
+            .collect()
+    }
+}
+
+/// Plan one-tap duplicate removal (sc-6539). Clusters candidates by their (undirected) duplicate-peer
+/// edges via union-find, and within each cluster keeps the best copy — sharpest, then largest, then
+/// lexically-first id for determinism — marking the rest for removal. Returns `None` when no cluster
+/// has a removable duplicate, so the caller can omit the plan entirely.
+///
+/// Peer edges are intersected with the present candidate set: a peer id not in `candidates` is
+/// ignored (the report may be stale relative to later edits). Acknowledged duplicates must be filtered
+/// out by the caller before building candidates.
+pub fn plan_duplicate_removal(candidates: &[DuplicateCandidate]) -> Option<DuplicateRemovalPlan> {
+    if candidates.len() < 2 {
+        return None;
+    }
+    let index: HashMap<&str, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, candidate)| (candidate.item_id.as_str(), i))
+        .collect();
+
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let mut parent: Vec<usize> = (0..candidates.len()).collect();
+    for (i, candidate) in candidates.iter().enumerate() {
+        for peer in &candidate.duplicate_peers {
+            if let Some(&j) = index.get(peer.as_str()) {
+                let (root_i, root_j) = (find(&mut parent, i), find(&mut parent, j));
+                if root_i != root_j {
+                    parent[root_i] = root_j;
+                }
+            }
+        }
+    }
+
+    // Cluster member indices keyed by canonical root (BTreeMap → deterministic iteration).
+    let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..candidates.len() {
+        let root = find(&mut parent, i);
+        clusters.entry(root).or_default().push(i);
+    }
+
+    // KEEP = max by (has-sharpness, sharpness, pixels); tie → lexically-smallest id.
+    let rank = |candidate: &DuplicateCandidate| {
+        (
+            candidate.sharpness.is_some(),
+            candidate.sharpness.unwrap_or(f64::NEG_INFINITY),
+            candidate.pixels.unwrap_or(0),
+        )
+    };
+    let mut groups = Vec::new();
+    for members in clusters.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let keep_idx = *members
+            .iter()
+            .max_by(|&&a, &&b| {
+                rank(&candidates[a])
+                    .partial_cmp(&rank(&candidates[b]))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    // On an equal rank the SMALLER id is kept, so reverse the id comparison.
+                    .then_with(|| candidates[b].item_id.cmp(&candidates[a].item_id))
+            })
+            .expect("cluster has >= 2 members");
+        let keep = candidates[keep_idx].item_id.clone();
+        let mut remove: Vec<String> = members
+            .iter()
+            .filter(|&&i| i != keep_idx)
+            .map(|&i| candidates[i].item_id.clone())
+            .collect();
+        remove.sort();
+        groups.push(DuplicateGroup { keep, remove });
+    }
+
+    if groups.is_empty() {
+        return None;
+    }
+    groups.sort_by(|a, b| a.keep.cmp(&b.keep));
+    Some(DuplicateRemovalPlan { groups })
 }
 
 /// Resolved inputs for an evaluation, derived from the chosen training target/preset and the
@@ -854,6 +989,7 @@ pub fn build_readiness_report(
         items,
         dataset_flags,
         distributions: None,
+        duplicate_removal: None,
     }
 }
 
@@ -1631,6 +1767,111 @@ mod tests {
             .expect("exact-dup flag on a");
         assert_eq!(a_dup.peers, vec!["b".to_owned()]);
         assert!(!has(&eval, "c", QualityCheck::ExactDuplicate));
+    }
+
+    fn cand(
+        id: &str,
+        peers: &[&str],
+        sharpness: Option<f64>,
+        pixels: Option<u64>,
+    ) -> DuplicateCandidate {
+        DuplicateCandidate {
+            item_id: id.to_owned(),
+            duplicate_peers: peers.iter().map(|p| (*p).to_owned()).collect(),
+            sharpness,
+            pixels,
+        }
+    }
+
+    #[test]
+    fn plan_dedupe_keeps_sharpest_and_removes_the_rest() {
+        // a~b~c are one duplicate cluster; b is the sharpest, so it survives.
+        let plan = plan_duplicate_removal(&[
+            cand("a", &["b", "c"], Some(100.0), Some(1_000)),
+            cand("b", &["a", "c"], Some(500.0), Some(1_000)),
+            cand("c", &["a", "b"], Some(50.0), Some(1_000)),
+        ])
+        .expect("a removable cluster");
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].keep, "b");
+        assert_eq!(plan.groups[0].remove, vec!["a".to_owned(), "c".to_owned()]);
+        assert_eq!(
+            plan.removed_item_ids(),
+            vec!["a".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn plan_dedupe_breaks_ties_by_pixels_then_smallest_id() {
+        // Equal sharpness → larger image wins.
+        let by_pixels = plan_duplicate_removal(&[
+            cand("a", &["b"], Some(100.0), Some(1_000)),
+            cand("b", &["a"], Some(100.0), Some(4_000)),
+        ])
+        .expect("cluster");
+        assert_eq!(by_pixels.groups[0].keep, "b");
+
+        // Fully tied (exact duplicates have identical bytes) → lexically-smallest id is kept.
+        let by_id = plan_duplicate_removal(&[
+            cand("z", &["a"], Some(100.0), Some(1_000)),
+            cand("a", &["z"], Some(100.0), Some(1_000)),
+        ])
+        .expect("cluster");
+        assert_eq!(by_id.groups[0].keep, "a");
+        assert_eq!(by_id.groups[0].remove, vec!["z".to_owned()]);
+    }
+
+    #[test]
+    fn plan_dedupe_prefers_a_measured_copy_over_an_unmeasured_one() {
+        // An un-decoded copy (no sharpness) is dropped before a measured one, even if it sorts first.
+        let plan = plan_duplicate_removal(&[
+            cand("a", &["b"], None, None),
+            cand("b", &["a"], Some(10.0), None),
+        ])
+        .expect("cluster");
+        assert_eq!(plan.groups[0].keep, "b");
+        assert_eq!(plan.groups[0].remove, vec!["a".to_owned()]);
+    }
+
+    #[test]
+    fn plan_dedupe_merges_clusters_transitively() {
+        // a-b and b-c edges → one cluster of three, not two pairs.
+        let plan = plan_duplicate_removal(&[
+            cand("a", &["b"], Some(10.0), None),
+            cand("b", &["a", "c"], Some(30.0), None),
+            cand("c", &["b"], Some(20.0), None),
+        ])
+        .expect("cluster");
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].keep, "b");
+        assert_eq!(plan.groups[0].remove, vec!["a".to_owned(), "c".to_owned()]);
+    }
+
+    #[test]
+    fn plan_dedupe_is_none_without_a_removable_cluster() {
+        assert!(plan_duplicate_removal(&[]).is_none());
+        assert!(plan_duplicate_removal(&[cand("solo", &[], Some(1.0), None)]).is_none());
+        // Two items, neither referencing the other → no cluster.
+        assert!(
+            plan_duplicate_removal(&[cand("a", &[], None, None), cand("b", &[], None, None)])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn plan_dedupe_ignores_peer_ids_not_present() {
+        // A peer pointing at an item that was edited away is dropped; the remaining real pair stands.
+        let plan = plan_duplicate_removal(&[
+            cand("a", &["ghost", "b"], Some(10.0), None),
+            cand("b", &["a"], Some(99.0), None),
+        ])
+        .expect("cluster from the present pair");
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].keep, "b");
+        assert_eq!(plan.groups[0].remove, vec!["a".to_owned()]);
+
+        // A lone item whose only peer is absent yields nothing.
+        assert!(plan_duplicate_removal(&[cand("a", &["ghost"], Some(10.0), None)]).is_none());
     }
 
     #[test]

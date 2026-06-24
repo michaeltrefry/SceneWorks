@@ -22,6 +22,7 @@ import {
   datasetPayload,
   imageAssetName,
   normalizeDatasetAssetIds,
+  selectionAfterDuplicateRemoval,
   summarizeDatasets,
 } from "../training/datasetHelpers.js";
 import {
@@ -1048,17 +1049,31 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // Persist membership + caption edits. Returns the saved dataset (or null) and
   // re-syncs local state from it. Shared by Save, Apply ordered names, and the
   // caption dialog so captioning/rename always act on the live persisted items.
-  async function persistDataset() {
+  async function persistDataset(selectionOverride, baseOverride) {
+    // `baseOverride` lets a follow-up save (e.g. dedupe's second persist) act on a just-saved dataset
+    // whose React state hasn't flushed yet — without it, `activeDataset`/`assetsById` are stale and a
+    // re-materialized item key can miss `assetsById`, silently dropping kept images. Rebuild the
+    // asset map from the override so every kept item resolves.
+    const base = baseOverride ?? activeDataset;
+    const baseAssetsById = baseOverride
+      ? new Map([
+          ...assetsById,
+          ...datasetOwnedAssets(baseOverride, activeProject?.id, assets).map((asset) => [
+            asset.id,
+            asset,
+          ]),
+        ])
+      : assetsById;
     const payload = datasetPayload({
-      activeDataset,
-      assetsById,
+      activeDataset: base,
+      assetsById: baseAssetsById,
       associatedCharacterId,
       captionDraftById,
       name: draftName,
-      selectedAssetIds,
+      selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });
-    const dataset = activeDataset
-      ? await updateDataset(activeDataset.id, payload)
+    const dataset = base
+      ? await updateDataset(base.id, payload)
       : await createDataset(payload);
     if (dataset) {
       setActiveDataset(dataset);
@@ -1136,6 +1151,45 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDatasetError(err.message);
     } finally {
       setCaptioning(false);
+    }
+  }
+
+  // One-tap "drop duplicates" (sc-6539): remove the exact/near-duplicate copies the readiness report
+  // chose (keeping the sharpest of each), then re-persist. Saves first so the plan's item ids line up
+  // with the live dataset, then maps them to selection keys and drops them. Non-destructive: the
+  // originals stay in the library/uploads and can be re-added.
+  async function removeDuplicates(removeIds) {
+    if (!removeIds?.length || savingDataset) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before removing duplicates.");
+        return;
+      }
+      const { nextSelection, removedCount } = selectionAfterDuplicateRemoval({
+        dataset: saved,
+        currentSelection: normalizeDatasetAssetIds(saved, assets),
+        removeIds,
+      });
+      if (!removedCount) {
+        setDatasetError("Those duplicates are no longer in the dataset.");
+        return;
+      }
+      const updated = await persistDataset(nextSelection, saved);
+      if (updated) {
+        setDatasetMessage(
+          `Removed ${removedCount} duplicate${removedCount === 1 ? "" : "s"}, keeping the sharpest of each. The originals stay in your library.`,
+        );
+      }
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
     }
   }
 
@@ -1288,6 +1342,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   readinessLoading={readinessLoading}
                   readinessByKey={readinessByKey}
                   onToggleItemAck={toggleItemQualityAck}
+                  onRemoveDuplicates={removeDuplicates}
                   canSave={canSave}
                   saveDataset={saveDataset}
                   savingDataset={savingDataset}
@@ -1364,6 +1419,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   readiness={readiness}
                   readinessLoading={readinessLoading}
                   readinessBlocksTraining={readinessBlocksTraining}
+                  onRemoveDuplicates={removeDuplicates}
                 />
               ) : null}
             </section>

@@ -89,6 +89,25 @@ export function normalizeDatasetAssetIds(dataset, catalogAssets = []) {
     .filter(Boolean);
 }
 
+// Map the readiness report's duplicate item ids (server item ids) to the selection keys to drop, and
+// return the dataset's selection with those removed (sc-6539 one-tap dedupe). Pure so the mutating
+// apply path is testable without rendering the studio: callers pass the freshly-saved dataset (for a
+// stable id→key mapping) and its current selection. `removedCount` is the number actually matched —
+// 0 when the plan's ids are no longer present, so the caller can skip a no-op write.
+export function selectionAfterDuplicateRemoval({ dataset, currentSelection = [], removeIds = [] }) {
+  const removeSet = new Set(removeIds);
+  const removeKeys = new Set();
+  (dataset?.items ?? []).forEach((item, index) => {
+    if (removeSet.has(item.id)) {
+      removeKeys.add(datasetItemSelectionKey(dataset, item, index));
+    }
+  });
+  return {
+    nextSelection: (currentSelection ?? []).filter((key) => !removeKeys.has(key)),
+    removedCount: removeKeys.size,
+  };
+}
+
 export function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) {
   const assetsById = new Map(imageAssets.map((asset) => [asset.id, asset]));
   const selectedAssets = selectedAssetIds.map((id) => assetsById.get(id)).filter(Boolean);

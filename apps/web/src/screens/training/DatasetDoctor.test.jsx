@@ -140,6 +140,44 @@ describe("DatasetDoctorReadout gating states", () => {
     expect(container.querySelector(".dataset-doctor-actions")).toBeNull();
   });
 
+  it("surfaces a drop-duplicates action and removes the planned copies (sc-6539)", () => {
+    const onRemoveDuplicates = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          duplicateRemoval: {
+            groups: [
+              { keep: "a", remove: ["b"] },
+              { keep: "c", remove: ["d", "e"] },
+            ],
+          },
+        })}
+        onRemoveDuplicates={onRemoveDuplicates}
+      />,
+    );
+    const button = container.querySelector(".dataset-doctor-actions button");
+    expect(button).not.toBeNull();
+    expect(button.textContent).toContain("Remove 3 duplicates");
+    expect(button.textContent).toContain("keeps the sharpest");
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onRemoveDuplicates).toHaveBeenCalledWith(["b", "d", "e"]);
+  });
+
+  it("hides the drop-duplicates action with no plan or no handler (sc-6539)", () => {
+    // A plan present but no handler (e.g. a read-only consumer) → no button.
+    mount(
+      <DatasetDoctorReadout
+        report={report({ duplicateRemoval: { groups: [{ keep: "a", remove: ["b"] }] } })}
+      />,
+    );
+    expect(container.querySelector(".dataset-doctor-actions")).toBeNull();
+    // A handler but no removable duplicates → no button.
+    mount(
+      <DatasetDoctorReadout report={report({})} onRemoveDuplicates={() => {}} />,
+    );
+    expect(container.querySelector(".dataset-doctor-actions")).toBeNull();
+  });
+
   it("renders the blocked headline when the set is untrainable", () => {
     mount(
       <DatasetDoctorReadout

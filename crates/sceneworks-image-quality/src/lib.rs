@@ -12,15 +12,16 @@
 //! soft, which is the correct signal). The perceptual hash is taken on the full image — it
 //! self-normalizes by downscaling internally. See `docs/sc-6530/dataset-doctor-metrics.md`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use image::{imageops::FilterType, DynamicImage, GrayImage, Luma, RgbImage};
 use image_hasher::{HashAlg, Hasher, HasherConfig};
 use sceneworks_core::dataset_quality::{
-    build_readiness_report, evaluate_tier0, AestheticEvaluation, AestheticPredictor,
-    CaptionAlignmentEvaluation, DatasetReadinessReport, ItemQualityInput, MetricDistribution,
-    QualityCheck, QualityFlag, ReadinessDistributions, Severity, Tier0Scalars, Tier0Thresholds,
-    Tier1Evaluation,
+    build_readiness_report, evaluate_tier0, plan_duplicate_removal, AestheticEvaluation,
+    AestheticPredictor, CaptionAlignmentEvaluation, DatasetReadinessReport, DuplicateCandidate,
+    DuplicateRemovalPlan, ItemQualityInput, MetricDistribution, QualityCheck, QualityFlag,
+    ReadinessDistributions, Severity, Tier0Scalars, Tier0Thresholds, Tier1Evaluation,
 };
 
 /// Luma at or below this counts as crushed-to-black (8-bit).
@@ -153,7 +154,69 @@ pub fn compute_readiness(
 
     let mut report = build_readiness_report(evaluation, tier1, alignment, aesthetic);
     report.distributions = build_distributions(&inputs, thresholds);
+    report.duplicate_removal = plan_dataset_duplicate_removal(&report, &inputs);
     (report, extracted)
+}
+
+/// One-tap "drop duplicates" plan (sc-6539), built from the report's exact/near-duplicate flags and
+/// the sharpness/size already gathered for evaluation, so the web carries it in the one report
+/// payload. Only `ExactDuplicate` + `NearDuplicate` (pHash) feed the auto-plan — CLIP
+/// `NearDuplicateEmbedding` is excluded on purpose (same-content/different-crop frames are legitimate
+/// training variety, and removing them would fight the sibling `LowDiversity` check). Acknowledged
+/// duplicates are skipped, so an image the user chose to keep never lands in the plan. `None` when
+/// nothing is safely removable.
+fn plan_dataset_duplicate_removal(
+    report: &DatasetReadinessReport,
+    inputs: &[ItemQualityInput],
+) -> Option<DuplicateRemovalPlan> {
+    // Sharpness (Laplacian variance) + pixel count rank which copy to keep; both already on hand.
+    let signal: HashMap<&str, (Option<f64>, Option<u64>)> = inputs
+        .iter()
+        .map(|input| {
+            let pixels = input
+                .width
+                .zip(input.height)
+                .map(|(w, h)| u64::from(w) * u64::from(h));
+            (
+                input.item_id.as_str(),
+                (input.scalars.as_ref().map(|s| s.blur_variance), pixels),
+            )
+        })
+        .collect();
+
+    let candidates: Vec<DuplicateCandidate> = report
+        .items
+        .iter()
+        .filter_map(|item| {
+            let peers: Vec<String> = item
+                .flags
+                .iter()
+                .filter(|flag| {
+                    !flag.acknowledged
+                        && matches!(
+                            flag.check,
+                            QualityCheck::ExactDuplicate | QualityCheck::NearDuplicate
+                        )
+                })
+                .flat_map(|flag| flag.peers.iter().cloned())
+                .collect();
+            if peers.is_empty() {
+                return None;
+            }
+            let (sharpness, pixels) = signal
+                .get(item.item_id.as_str())
+                .copied()
+                .unwrap_or((None, None));
+            Some(DuplicateCandidate {
+                item_id: item.item_id.clone(),
+                duplicate_peers: peers,
+                sharpness,
+                pixels,
+            })
+        })
+        .collect();
+
+    plan_duplicate_removal(&candidates)
 }
 
 /// Per-metric distributions for the Advanced view (sc-6534), built from the scalars already gathered
@@ -492,6 +555,92 @@ mod tests {
             .find(|i| i.item_id == "flat")
             .expect("flat");
         assert!(flat.flags.iter().any(|f| f.check == QualityCheck::Blur));
+    }
+
+    #[test]
+    fn compute_readiness_plans_dropping_exact_duplicates_keeping_sharpest() {
+        use sceneworks_core::dataset_quality::{DatasetKind, Tier0Thresholds};
+
+        // Two byte-identical copies (same content hash + pHash) → exact duplicates; the sharper one is
+        // kept. cached_scalars lets the test set sharpness without writing image files.
+        let thresholds = Tier0Thresholds::for_kind(&DatasetKind::Person);
+        let dup = |id: &str, blur: f64| ReadinessItem {
+            item_id: id.to_owned(),
+            width: Some(64),
+            height: Some(64),
+            content_hash: Some("same".to_owned()),
+            image_path: None,
+            cached_scalars: Some(Tier0Scalars {
+                blur_variance: blur,
+                shadow_clip: 0.0,
+                highlight_clip: 0.0,
+                phash: vec![0, 0, 0, 0, 0, 0, 0, 0],
+            }),
+            acknowledged: Vec::new(),
+        };
+        let items = vec![dup("soft", 5000.0), dup("sharp", 9000.0)];
+
+        let (report, _) = compute_readiness(&items, 64, 1, &thresholds, None, None, None);
+        let plan = report
+            .duplicate_removal
+            .expect("exact duplicates produce a removal plan");
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].keep, "sharp");
+        assert_eq!(plan.groups[0].remove, vec!["soft".to_owned()]);
+    }
+
+    #[test]
+    fn compute_readiness_does_not_auto_remove_clip_near_duplicates() {
+        use sceneworks_core::dataset_quality::{
+            evaluate_tier1, DatasetKind, ItemEmbedding, Tier0Thresholds, Tier1Thresholds,
+        };
+
+        // Two distinct files (different content hash + far-apart pHash, so NO Tier-0 duplicate), but
+        // identical CLIP embeddings → a NearDuplicateEmbedding. That is legitimate training variety,
+        // so it must surface as a flag yet NEVER become a one-tap auto-remove (it would fight the
+        // sibling LowDiversity check).
+        let thresholds = Tier0Thresholds::for_kind(&DatasetKind::Person);
+        let clean = |id: &str, phash: Vec<u8>, hash: &str| ReadinessItem {
+            item_id: id.to_owned(),
+            width: Some(64),
+            height: Some(64),
+            content_hash: Some(hash.to_owned()),
+            image_path: None,
+            cached_scalars: Some(Tier0Scalars {
+                blur_variance: 5000.0,
+                shadow_clip: 0.0,
+                highlight_clip: 0.0,
+                phash,
+            }),
+            acknowledged: Vec::new(),
+        };
+        let items = vec![
+            clean("a", vec![0, 0, 0, 0, 0, 0, 0, 0], "ha"),
+            clean("b", vec![255, 255, 255, 255, 255, 255, 255, 255], "hb"),
+        ];
+        let embedding = |id: &str| ItemEmbedding {
+            item_id: id.to_owned(),
+            embedding: vec![1.0, 0.0],
+            acknowledged: Vec::new(),
+        };
+        let tier1 = evaluate_tier1(
+            &[embedding("a"), embedding("b")],
+            &Tier1Thresholds::for_kind(&DatasetKind::Person),
+        );
+
+        let (report, _) = compute_readiness(&items, 64, 1, &thresholds, Some(&tier1), None, None);
+        assert!(
+            report
+                .items
+                .iter()
+                .flat_map(|item| &item.flags)
+                .any(|flag| flag.check == QualityCheck::NearDuplicateEmbedding),
+            "the CLIP near-duplicate is still surfaced as a flag"
+        );
+        assert!(
+            report.duplicate_removal.is_none(),
+            "CLIP near-duplicates must not become an auto-remove plan"
+        );
     }
 
     #[test]

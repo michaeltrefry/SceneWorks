@@ -9,6 +9,7 @@ import {
   datasetDoctorSummary,
   dismissedChecks,
   diversityPercent,
+  duplicateRemovalItemIds,
   flagCountsByCheck,
   flagMetric,
   flagReason,
@@ -302,6 +303,21 @@ describe("gate + sub-scores", () => {
     expect(captionAlignmentFlaggedItemIds(flagged)).toEqual(["a", "d"]);
     expect(captionAlignmentFlaggedItemIds(report({ items: [] }))).toEqual([]);
     expect(captionAlignmentFlaggedItemIds(null)).toEqual([]);
+  });
+
+  it("flattens the duplicate-removal plan to the item IDs to drop (sc-6539)", () => {
+    const withPlan = report({
+      duplicateRemoval: {
+        groups: [
+          { keep: "a", remove: ["b"] },
+          { keep: "c", remove: ["d", "e"] },
+        ],
+      },
+    });
+    expect(duplicateRemovalItemIds(withPlan)).toEqual(["b", "d", "e"]);
+    // No plan / no report → nothing to remove.
+    expect(duplicateRemovalItemIds(report({}))).toEqual([]);
+    expect(duplicateRemovalItemIds(null)).toEqual([]);
   });
 });
 

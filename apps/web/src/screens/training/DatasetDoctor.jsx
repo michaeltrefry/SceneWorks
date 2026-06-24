@@ -6,6 +6,7 @@ import {
   captionAlignmentFlaggedItemIds,
   datasetDoctorSummary,
   diversityPercent,
+  duplicateRemovalItemIds,
   flagMetric,
   flagReason,
   gateMeta,
@@ -175,6 +176,7 @@ export function DatasetDoctorReadout({
   loading = false,
   compact = false,
   onRecaptionFlagged,
+  onRemoveDuplicates,
 }) {
   if (!report) {
     if (loading) {
@@ -200,6 +202,10 @@ export function DatasetDoctorReadout({
   // unless a consumer wired `onRecaptionFlagged` (so the compact readout never shows the button).
   const recaptionFlaggedIds =
     typeof onRecaptionFlagged === "function" ? captionAlignmentFlaggedItemIds(report) : [];
+  // sc-6539: exact/near-duplicate copies the one-tap action would drop (keeping the sharpest of each).
+  // Empty unless a consumer wired `onRemoveDuplicates`, so the compact readout stays button-free there.
+  const removeDuplicateIds =
+    typeof onRemoveDuplicates === "function" ? duplicateRemovalItemIds(report) : [];
   return (
     <div className={`dataset-doctor tone-${gate.tone}${compact ? " compact" : ""}`} aria-label="Dataset Doctor">
       <div className="dataset-doctor-head">
@@ -267,16 +273,28 @@ export function DatasetDoctorReadout({
           {counts.warn ? <span className="tone-warn">{counts.warn} to review</span> : null}
         </div>
       ) : null}
-      {recaptionFlaggedIds.length ? (
+      {recaptionFlaggedIds.length || removeDuplicateIds.length ? (
         <div className="dataset-doctor-actions">
-          <button
-            type="button"
-            className="secondary-action"
-            onClick={() => onRecaptionFlagged(recaptionFlaggedIds)}
-          >
-            Re-caption {recaptionFlaggedIds.length}{" "}
-            {recaptionFlaggedIds.length === 1 ? "flagged image" : "flagged images"}
-          </button>
+          {removeDuplicateIds.length ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => onRemoveDuplicates(removeDuplicateIds)}
+            >
+              Remove {removeDuplicateIds.length}{" "}
+              {removeDuplicateIds.length === 1 ? "duplicate" : "duplicates"} (keeps the sharpest)
+            </button>
+          ) : null}
+          {recaptionFlaggedIds.length ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => onRecaptionFlagged(recaptionFlaggedIds)}
+            >
+              Re-caption {recaptionFlaggedIds.length}{" "}
+              {recaptionFlaggedIds.length === 1 ? "flagged image" : "flagged images"}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>

@@ -331,6 +331,15 @@ export function captionAlignmentFlaggedItemIds(report) {
     .map((item) => item.itemId);
 }
 
+// Item IDs the one-tap "drop duplicates" action would remove (sc-6539): every group's `remove` list
+// from the server-computed plan, which keeps the sharpest copy of each exact/near-duplicate cluster.
+// Empty when nothing is safely removable. Only exact + pHash duplicates reach here — CLIP
+// near-duplicates are deliberately left in place (legitimate training variety), so this never strips
+// the diversity the sibling Variety check rewards.
+export function duplicateRemovalItemIds(report) {
+  return (report?.duplicateRemoval?.groups ?? []).flatMap((group) => group?.remove ?? []);
+}
+
 // Aesthetic sub-score — the mean LAION-Aesthetics score (~[1, 10]) for STYLE datasets only; `null`
 // for person/object (never computed) or until the embedding job runs. Surfaced as an advisory
 // "Aesthetic" readout (rounded to one decimal), never a gate.

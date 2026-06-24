@@ -61,6 +61,7 @@ export function ConfigureJobPanel({
   readiness = null,
   readinessLoading = false,
   readinessBlocksTraining = false,
+  onRemoveDuplicates,
 }) {
   return (
     <>
@@ -402,7 +403,12 @@ export function ConfigureJobPanel({
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it
               only hard-blocks training when the gate is Blocked (too few images / a
               fatal flag); warnings stay informational. */}
-          <DatasetDoctorReadout report={readiness} loading={readinessLoading} compact />
+          <DatasetDoctorReadout
+            report={readiness}
+            loading={readinessLoading}
+            compact
+            onRemoveDuplicates={onRemoveDuplicates}
+          />
           {readinessBlocksTraining ? (
             <p className="inline-warning">
               This dataset isn’t ready to train yet — open Data Sets to add or fix images.
