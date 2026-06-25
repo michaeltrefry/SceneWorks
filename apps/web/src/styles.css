@@ -3474,6 +3474,20 @@ label {
   width: auto;
 }
 
+/* Non-commercial marker on the PiD decoder toggle (epic 7840): PiD output is
+   licensed for research/evaluation only, unlike the rest of the pipeline. */
+.badge-nc {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  background: var(--warn-soft, var(--danger-soft));
+  color: var(--warn, var(--danger));
+}
+
 /* ---------- Library grid ---------- */
 .library-layout {
   display: grid;

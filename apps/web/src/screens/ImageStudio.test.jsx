@@ -919,3 +919,96 @@ describe("ImageStudio Ideogram 4 auto-expand on plain-text Generate (sc-6501)", 
     expect(surfaced).toBe(true);
   });
 });
+
+describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // PiD-eligible image model: declares the qwenimage backbone via ui.pid (mirrors the
+  // manifest + worker pid_backbone_for). The checkpoint rides the full catalog (`models`)
+  // as its own installable entry (sc-7852), distinct from the image-model picker.
+  const PID_QWEN = { ...Z_IMAGE, id: "qwen_image", name: "Qwen Image", ui: { pid: { checkpointId: "pid_qwenimage" } } };
+  const PID_CKPT = (installState) => ({ id: "pid_qwenimage", type: "utility", installState });
+
+  const openAdvanced = async () =>
+    click([...container.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
+  const pidLabel = () =>
+    [...container.querySelectorAll("label")].find((l) => l.textContent.includes("PiD decoder"));
+  const generateButton = () =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+
+  it("shows the toggle (default off) when eligible AND the checkpoint is installed", async () => {
+    await render(baseContext({ imageModels: [PID_QWEN], models: [PID_QWEN, PID_CKPT("installed")] }));
+    await openAdvanced();
+    await act(async () => {});
+    const toggle = pidLabel();
+    expect(toggle).toBeTruthy();
+    // NC marker is surfaced on the toggle copy.
+    expect(toggle.textContent).toContain("NC");
+    expect(toggle.querySelector('input[type="checkbox"]').checked).toBe(false);
+  });
+
+  it("hides the toggle when the checkpoint is present but not installed (fail-closed)", async () => {
+    await render(baseContext({ imageModels: [PID_QWEN], models: [PID_QWEN, PID_CKPT("missing")] }));
+    await openAdvanced();
+    await act(async () => {});
+    expect(pidLabel()).toBeFalsy();
+  });
+
+  it("hides the toggle when the checkpoint entry is absent from the catalog (today's pre-sc-7852 state)", async () => {
+    await render(baseContext({ imageModels: [PID_QWEN], models: [PID_QWEN] }));
+    await openAdvanced();
+    await act(async () => {});
+    expect(pidLabel()).toBeFalsy();
+  });
+
+  it("hides the toggle for a non-eligible model even when a PiD checkpoint is installed", async () => {
+    await render(baseContext({ imageModels: [Z_IMAGE], models: [Z_IMAGE, PID_CKPT("installed")] }));
+    await openAdvanced();
+    await act(async () => {});
+    expect(pidLabel()).toBeFalsy();
+  });
+
+  it("emits advanced.usePid:true only when shown AND toggled on", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({ createImageJob, imageModels: [PID_QWEN], models: [PID_QWEN, PID_CKPT("installed")] }),
+    );
+    await openAdvanced();
+    await act(async () => {});
+
+    // Default off → no usePid in the payload.
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("usePid");
+
+    // Toggle on → usePid:true rides advanced.
+    await act(async () => pidLabel().querySelector('input[type="checkbox"]').click());
+    await click(generateButton());
+    expect(createImageJob.mock.calls[1][0].advanced.usePid).toBe(true);
+  });
+});

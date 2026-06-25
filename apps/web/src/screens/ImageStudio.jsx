@@ -94,6 +94,7 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor, imageModelUsable } from "../modelEligibility.js";
+import { pidToggleVisible } from "../pidEligibility.js";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -392,6 +393,12 @@ export function ImageStudio() {
   // Boogu precision toggle (sc-6568): off = the packed Q8 default; on emits `advanced.mlxQuantize: 0`
   // (the full-precision bf16 build, fetched on demand by the worker). Sticky pref, default off (Q8).
   const [bf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
+  // PiD decoder toggle (epic 7840, sc-7851): off = the model's native VAE decode; on emits
+  // `advanced.usePid: true`, routing decode through the optional PiD pixel-diffusion decoder
+  // (decode + 2K/4K super-resolve, non-commercial output). Sticky pref, default off; the
+  // toggle only renders + emits when the model is PiD-eligible AND its checkpoint is installed
+  // (showPidToggle), so a stale `true` on a non-eligible model is inert — mirrors bf16Precision.
+  const [usePid, setUsePid] = useState(saved.usePid ?? false);
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
@@ -589,6 +596,11 @@ export function ImageStudio() {
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
   // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
   const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
+  // PiD decoder toggle visibility (epic 7840, sc-7851): the model's latent space has a PiD
+  // backbone (ui.pid) AND that backbone's PiD checkpoint is installed. Hidden otherwise — for
+  // non-eligible models (e.g. SenseNova) and for eligible models whose checkpoint isn't
+  // downloaded yet (provisioned by sc-7852), where the worker would no-op to the native VAE.
+  const showPidToggle = useMemo(() => pidToggleVisible(selectedModel, models), [selectedModel, models]);
   // Whether the model supports multi-image reference editing (sc-6211) — edit_image mode shows a
   // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
@@ -1022,6 +1034,7 @@ export function ImageStudio() {
     flashAttn,
     enhancePrompt,
     bf16Precision,
+    usePid,
   });
 
   // Snapshot the current working config into a named recipe preset in the
@@ -1257,6 +1270,13 @@ export function ImageStudio() {
           // exposes the precision toggle AND bf16 is selected; the default Q8 emits nothing (the
           // worker reads manifest mlx.quantize and fetches the `<variant>-bf16/` subfolder on demand).
           ...(precisionToggle && bf16Precision ? { mlxQuantize: 0 } : {}),
+          // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
+          // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
+          // VAE for the PiD decode + 2K/4K super-resolve pass; it rides `advanced` (opaque
+          // pass-through, zero contract-snapshot drift) and is cloned into the asset's
+          // rawAdapterSettings — that recorded `usePid:true` is the output's non-commercial
+          // marker. The worker independently no-ops to the native VAE if the checkpoint is gone.
+          ...(showPidToggle && usePid ? { usePid: true } : {}),
           // IP-Adapter / InstantID reference strength only applies when a character
           // reference is attached AND the model uses the IP-Adapter knob; Qwen's
           // edit pipeline ignores this scalar (hideReferenceStrength gates it out).
@@ -1863,6 +1883,19 @@ export function ImageStudio() {
                       type="checkbox"
                     />
                     Full precision (bf16)
+                  </label>
+                ) : null}
+                {showPidToggle ? (
+                  <label
+                    className="checkline pid-decoder-toggle"
+                    title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass, so output comes out at 2K/4K (sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
+                  >
+                    <input
+                      checked={usePid}
+                      onChange={(event) => setUsePid(event.target.checked)}
+                      type="checkbox"
+                    />
+                    PiD decoder · 2K/4K <span className="badge badge-nc">NC</span>
                   </label>
                 ) : null}
                 <label className="checkline upscale-toggle">

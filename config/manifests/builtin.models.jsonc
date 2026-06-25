@@ -205,6 +205,13 @@
         "label": "Qwen Image",
         "description": "Higher-control Qwen text-to-image target backed by Diffusers.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        // PiD pixel-diffusion decoder (epic 7840): an optional per-generation VAE
+        // replacement that decodes + super-resolves to 2K/4K in one pass. `checkpointId`
+        // names the downloadable PiD checkpoint for this latent space (qwenimage); the
+        // Studio surfaces the toggle only once that checkpoint catalog entry is installed
+        // (provisioned by sc-7852). Eligibility mirrors the worker `pid_backbone_for` map
+        // (sc-7849). PiD output is non-commercial (research/evaluation) only.
+        "pid": { "checkpointId": "pid_qwenimage" },
         "promptGuide": {
           "title": "Qwen Image Prompt Guide",
           "path": "/prompt-guides/qwen-image.md",
@@ -274,6 +281,9 @@
         "label": "Qwen Image Edit (2511)",
         "description": "December 2025 iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2511) on the multi-image `QwenImageEditPlusPipeline`. Mitigates image drift, improves character consistency in multi-person scenes, integrates popular LoRAs into the base, and strengthens geometric reasoning. Apache-2.0, ungated. Recommended 40 steps at trueCfgScale 4.0 / guidanceScale 1.0; bf16 MPS-supported per Qwen. trueCfgScale is the slider lever — identity stays steady across the range, the knob is a prompt-adherence vs reference-surroundings tradeoff (sc-2013 spike on the 2509 release; same Plus pipeline shape).",
         "recommendedFor": ["edit_image", "character_image"],
+        // PiD decoder (epic 7840, qwenimage latent space) — optional per-generation
+        // VAE replacement, decode + 2K/4K SR; NC output. See `qwen_image` for detail.
+        "pid": { "checkpointId": "pid_qwenimage" },
         // Qwen-Image-Edit's slider is true_cfg_scale (not an IP-Adapter
         // reference-strength scalar): the existing "Reference strength" slider
         // would be a no-op here. Hide it and surface variationStrength instead so
@@ -347,6 +357,9 @@
         "label": "Qwen Image Edit (2511) Lightning",
         "description": "4-step distilled Qwen-Image-Edit-2511 — ~10× faster at a small quality trade-off. Shares the Qwen-Image-Edit-2511 base weights; the lightx2v 4-step distill LoRA fuses on first use. CFG is disabled by default (distill drops the guidance signal); the variation knob (trueCfgScale) pins to 1.0. Apache-2.0 base + LoRA.",
         "recommendedFor": ["edit_image", "character_image"],
+        // PiD decoder (epic 7840, qwenimage latent space) — optional per-generation
+        // VAE replacement, decode + 2K/4K SR; NC output. See `qwen_image` for detail.
+        "pid": { "checkpointId": "pid_qwenimage" },
         "hideReferenceStrength": true,
         // Distill is trained at cfg 1.0; the variation slider is exposed only as
         // a narrow safety lever (1.0–2.0) for users willing to trade some
@@ -1398,6 +1411,10 @@
         "label": "Krea 2 Turbo",
         "description": "Krea 2 Turbo — Krea AI's from-scratch foundation image model, distilled to a fast few-step (~8), CFG-free variant: a 28-block single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). Strong photorealism up to 2048². Pre-quantized Q8 (~20.5 GB download, default). Krea 2 Community License (non-commercial). Needs a 48 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
+        // PiD decoder (epic 7840, qwenimage latent space — Krea 2 Turbo reuses the Qwen
+        // VAE) — optional per-generation VAE replacement, decode + 2K/4K SR; NC output.
+        // See `qwen_image` for detail.
+        "pid": { "checkpointId": "pid_qwenimage" },
         "promptGuide": {
           "title": "Krea 2 Prompt Guide",
           "path": "/prompt-guides/krea-2.md",
