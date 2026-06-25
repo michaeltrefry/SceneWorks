@@ -273,6 +273,12 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "chroma" => Some("chroma_diffusers"),
         "kolors" => Some("kolors_diffusers"),
         "sdxl" => Some("sdxl_diffusers"),
+        // SD3 / SD3.5 is the native-MLX port (epic 7841); there is no Torch/diffusers
+        // adapter wired in SceneWorks. This label is recorded in recipe/lineage only —
+        // the job is MLX-routed by engine id, never instantiated through a Torch adapter
+        // (mirrors bernini / scail2). sc-7874 declares the LoRA family; engine wiring is
+        // a later slice.
+        "sd3" => Some("sd3"),
         "ltx-video" => Some("ltx_video"),
         "wan-video" => Some("wan_video"),
         "svd" => Some("svd_video"),
@@ -304,6 +310,11 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         ("image", "chroma") => vec!["text_to_image", "style_variations"],
         ("image", "kolors") => vec!["text_to_image", "character_image", "style_variations"],
         ("image", "sdxl") => vec!["text_to_image", "edit_image", "style_variations"],
+        // SD3 / SD3.5 (epic 7841, native MLX). Text-to-image flow-matching MMDiT;
+        // img2img/inpaint are exposed by the diffusers pipelines but are not wired in
+        // SceneWorks yet, so the family default advertises only what the native port
+        // serves today (sc-7874 declares the LoRA-compatibility family).
+        ("image", "sd3") => vec!["text_to_image", "style_variations"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
@@ -397,6 +408,9 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
         "ltxpipeline" | "ltxvideopipeline" | "ltximagetovideopipeline" => {
             Some("ltx-video".to_owned())
         }
+        "stablediffusion3pipeline"
+        | "stablediffusion3img2imgpipeline"
+        | "stablediffusion3inpaintpipeline" => Some("sd3".to_owned()),
         "stablediffusionpipeline" | "stablediffusionimg2imgpipeline" => Some("sd1.5".to_owned()),
         "stablediffusionxlpipeline" | "stablediffusionxlimg2imgpipeline" => Some("sdxl".to_owned()),
         _ => None,
@@ -419,6 +433,7 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
         Bucket::Flux => Some("flux".to_owned()),
         Bucket::Flux2 => Some("flux2".to_owned()),
         Bucket::LtxVideo => Some("ltx-video".to_owned()),
+        Bucket::Sd3 => Some("sd3".to_owned()),
         Bucket::Sdxl => Some("sdxl".to_owned()),
         Bucket::Sd15 => Some("sd1.5".to_owned()),
         Bucket::MmDit => disambiguate_mm_dit(&keys),
@@ -431,6 +446,14 @@ enum Bucket {
     Flux,
     Flux2,
     LtxVideo,
+    /// Stable Diffusion 3 / 3.5 (Large, Large Turbo, Medium). A dual-stream
+    /// MMDiT like Qwen-Image / Z-Image, but distinguished by its
+    /// `ff`/`ff_context` feedforward + `*_context` norms + `context_embedder`
+    /// naming (it never uses the `img_mlp`/`txt_mlp` dual-MLP names) and its
+    /// optional dual-attention `attn2` blocks (sd3.5 only). Bucketed separately
+    /// so SD3.5 community LoRAs are positively recognized rather than falling
+    /// into the Qwen/Z-Image block-count disambiguation (sc-7874).
+    Sd3,
     MmDit,
     Sdxl,
     Sd15,
@@ -591,6 +614,97 @@ const SIGNATURES: &[BucketSignature] = &[
         markers: &["transformer.transformer_blocks.", ".attn1.", ".attn2."],
     },
     BucketSignature {
+        bucket: Bucket::Sd3,
+        // Stable Diffusion 3 / 3.5 (diffusers format). Like Qwen-Image / Z-Image
+        // it is a dual-stream MMDiT with `transformer.transformer_blocks.<n>.`
+        // joint attention (`attn.{to_q,to_k,to_v,to_out.0}` for the image stream +
+        // `attn.{add_q_proj,add_k_proj,add_v_proj,to_add_out}` for the text stream),
+        // but its feedforwards are named `ff` / `ff_context` and its context norms
+        // `*_context` (Qwen / Z-Image use `img_mlp` / `txt_mlp` instead, and never
+        // carry a `ff_context` / `*_context` / `context_embedder` key). Requiring one
+        // of those SD3-only context keys cleanly separates SD3 from the Qwen/Z-Image
+        // bucket. SD3.5 (not SD3.0) also trains optional dual-attention `attn2`
+        // sub-blocks (joint blocks 0..=12); `attn2` is allowed here. LTX-Video also
+        // uses `transformer.transformer_blocks.` + `attn1`/`attn2`, but has no
+        // joint-attention `add_q_proj` (it is single-stream cross-attention), so
+        // requiring `add_q_proj`/`add_k_proj` keeps SD3 distinct from LTX.
+        require_all_of: &[
+            &["transformer.transformer_blocks."],
+            &["add_q_proj", "add_k_proj", "add_v_proj", "to_add_out"],
+            &[".ff_context.", ".norm1_context.", "context_embedder"],
+        ],
+        disqualifiers: &[
+            "single_transformer_blocks.",
+            "transformer.blocks.",
+            ".img_mlp.",
+            ".txt_mlp.",
+            ".attn1.",
+        ],
+        markers: &[
+            "transformer.transformer_blocks.",
+            ".attn.add_q_proj",
+            ".attn.add_k_proj",
+            ".attn.add_v_proj",
+            ".attn.to_add_out",
+            ".attn.to_q.",
+            ".attn.to_k.",
+            ".attn.to_v.",
+            ".attn.to_out.",
+            ".attn2.",
+            ".ff.",
+            ".ff_context.",
+            ".norm1_context.",
+            ".norm2_context.",
+            "context_embedder",
+        ],
+    },
+    BucketSignature {
+        bucket: Bucket::Sd3,
+        // kohya / sd-scripts / LyCORIS flatten the SD3 dual-stream module path into
+        // underscore-delimited keys behind a `lora_unet_` / `lora_transformer_` /
+        // `lycoris_` prefix, e.g.
+        // `lora_transformer_transformer_blocks_0_attn_add_q_proj.lora_down.weight`
+        // or `..._ff_context_net_0_proj.lora_down.weight`. The dotted SD3 signature
+        // above can't see these (no `transformer.transformer_blocks.` segment).
+        // `_transformer_blocks_` (underscores both sides) + the joint-attention
+        // `add_q_proj` + an SD3-only context key (`_ff_context_` / `_norm1_context_` /
+        // `context_embedder`) discriminates it from Qwen/Z-Image kohya (which carry
+        // `_img_mlp_`/`_txt_mlp_` and never a `_ff_context_`) and from Wan/SD/SDXL
+        // kohya (which do not nest `_transformer_blocks_` under joint attention).
+        require_all_of: &[
+            &["_transformer_blocks_"],
+            &["add_q_proj", "add_k_proj", "add_v_proj", "to_add_out"],
+            &["_ff_context_", "_norm1_context_", "context_embedder"],
+        ],
+        disqualifiers: &[
+            "single_transformer_blocks",
+            "single_blocks_",
+            "_img_mlp_",
+            "_txt_mlp_",
+            ".img_mlp.",
+            ".txt_mlp.",
+            "_attn1_",
+            ".attn1.",
+        ],
+        markers: &[
+            "_transformer_blocks_",
+            "_attn_add_q_proj",
+            "_attn_add_k_proj",
+            "_attn_add_v_proj",
+            "_attn_to_add_out",
+            "_attn_to_q",
+            "_attn_to_k",
+            "_attn_to_v",
+            "_attn_to_out",
+            "_attn2_",
+            "_ff_net_",
+            "_ff_context_",
+            "_norm1_context_",
+            "_norm2_context_",
+            "context_embedder",
+        ],
+    },
+    BucketSignature {
         bucket: Bucket::MmDit,
         // Dual-stream MMDiT covers Qwen-Image and Z-Image. They share a key
         // layout in current Diffusers releases; per-family disambiguation
@@ -610,6 +724,15 @@ const SIGNATURES: &[BucketSignature] = &[
             "single_transformer_blocks.",
             "transformer.blocks.",
             ".attn2.",
+            // SD3 / SD3.5 shares the joint-attention `add_q_proj` keys but is a
+            // separate bucket (it uses `ff`/`ff_context` + `*_context` norms, never
+            // `img_mlp`/`txt_mlp`). Disqualify on its context-only keys so a
+            // non-dual-attention SD3 LoRA never co-scores here and trips the
+            // runner-up margin against the SD3 signature (sc-7874).
+            ".ff_context.",
+            ".norm1_context.",
+            ".norm2_context.",
+            "context_embedder",
         ],
         markers: &[
             "transformer.transformer_blocks.",
@@ -654,6 +777,15 @@ const SIGNATURES: &[BucketSignature] = &[
             ".attn2.",
             "_attn1_",
             "_attn2_",
+            // SD3 / SD3.5 kohya/LyCORIS export shares `_transformer_blocks_` +
+            // joint-attention `add_q_proj`, but is the separate SD3 bucket
+            // (`_ff_context_` / `_norm1_context_` / `context_embedder`, never
+            // `_img_mlp_`/`_txt_mlp_`). Disqualify on those SD3-only context keys
+            // (sc-7874).
+            "_ff_context_",
+            "_norm1_context_",
+            "_norm2_context_",
+            "context_embedder",
         ],
         markers: &[
             "_transformer_blocks_",
@@ -846,6 +978,20 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     }
     if normalized.contains("wan") {
         return Some("wan-video".to_owned());
+    }
+    // Check SD3 before sdxl / sd1.5: SD3 / SD3.5 architecture strings
+    // ("sd3", "sd-3", "sd3.5", "stable-diffusion-3", "stable-diffusion-3.5")
+    // are a distinct dual-stream MMDiT family, not the UNet-based SDXL / SD1.5.
+    // None of the SDXL / SD1.5 markers below contain a bare "sd3" or
+    // "stable-diffusion-3", so ordering here is safe (sc-7874).
+    if normalized.contains("sd3")
+        || normalized.contains("sd-3")
+        || normalized.contains("sd_3")
+        || normalized.contains("stable-diffusion-3")
+        || normalized.contains("stable_diffusion_3")
+        || normalized.contains("stablediffusion3")
+    {
+        return Some("sd3".to_owned());
     }
     if normalized.contains("sdxl") {
         return Some("sdxl".to_owned());
@@ -1590,6 +1736,274 @@ mod tests {
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert!(detect_lora_family(&header).is_none());
+    }
+
+    /// Diffusers-format SD3 / SD3.5 LoRA keys. Mirrors a community SD3.5 LoRA
+    /// trained via `StableDiffusion3Pipeline.save_lora_weights`: dual-stream joint
+    /// attention (`attn.{to_q,to_k,to_v,to_out.0}` image stream +
+    /// `attn.{add_q_proj,add_k_proj,add_v_proj,to_add_out}` text stream), the SD3
+    /// `ff` / `ff_context` feedforwards and `*_context` norms. When `dual_attention`
+    /// is set the first 13 joint blocks also train an `attn2` (sd3.5, not sd3.0).
+    fn diffusers_sd3_keys(block_count: usize, dual_attention: bool) -> Vec<String> {
+        let mut keys = Vec::new();
+        for block in 0..block_count {
+            for module in [
+                "attn.to_q",
+                "attn.to_k",
+                "attn.to_v",
+                "attn.to_out.0",
+                "attn.add_q_proj",
+                "attn.add_k_proj",
+                "attn.add_v_proj",
+                "attn.to_add_out",
+                "ff.net.0.proj",
+                "ff.net.2",
+                "ff_context.net.0.proj",
+                "ff_context.net.2",
+                "norm1_context.linear",
+            ] {
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_B.weight"
+                ));
+            }
+            // SD3.5 dual-attention joint blocks (0..=12) add an `attn2` (image-stream
+            // self-attention only, no joint `add_*` projections).
+            if dual_attention && block <= 12 {
+                for module in ["attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0"] {
+                    keys.push(format!(
+                        "transformer.transformer_blocks.{block}.{module}.lora_A.weight"
+                    ));
+                    keys.push(format!(
+                        "transformer.transformer_blocks.{block}.{module}.lora_B.weight"
+                    ));
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn detects_sd3_5_large_diffusers() {
+        // SD3.5 Large: 38 joint blocks, dual attention in blocks 0..=12.
+        let keys = diffusers_sd3_keys(38, true);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("sd3"));
+    }
+
+    #[test]
+    fn detects_sd3_5_medium_diffusers() {
+        // SD3.5 Medium: 24 joint blocks, dual attention in blocks 0..=12.
+        let keys = diffusers_sd3_keys(24, true);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("sd3"));
+    }
+
+    #[test]
+    fn detects_sd3_no_dual_attention_diffusers() {
+        // An SD3.0-style / attention-only SD3.5 LoRA without `attn2`: it still has the
+        // joint `add_q_proj` + SD3 `ff_context` context keys, so it must detect as sd3
+        // and never co-score into the Qwen/Z-Image MMDiT bucket.
+        let keys = diffusers_sd3_keys(38, false);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("sd3"));
+    }
+
+    #[test]
+    fn sd3_attention_only_lora_detects_as_sd3() {
+        // A sparse SD3 LoRA that trains ONLY the joint attention projections (the
+        // recommended "attention-only" SD3.5 recipe) — no `ff`/`ff_context` — still
+        // carries `norm1_context` (the AdaLN-Zero context modulation rides alongside
+        // attention) which marks it SD3. Use the `context_embedder` top-level key as
+        // the SD3-only anchor, mirroring real attention-only exports.
+        let mut keys = Vec::new();
+        for block in 0..38 {
+            for module in [
+                "attn.to_q",
+                "attn.to_k",
+                "attn.to_v",
+                "attn.to_out.0",
+                "attn.add_q_proj",
+                "attn.add_k_proj",
+                "attn.add_v_proj",
+                "attn.to_add_out",
+            ] {
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "transformer.transformer_blocks.{block}.{module}.lora_B.weight"
+                ));
+            }
+        }
+        keys.push("transformer.context_embedder.lora_A.weight".to_owned());
+        keys.push("transformer.context_embedder.lora_B.weight".to_owned());
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("sd3"));
+    }
+
+    /// kohya / sd-scripts / LyCORIS underscore-flattened SD3 keys behind `prefix`.
+    fn underscore_sd3_keys(prefix: &str, block_count: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for block in 0..block_count {
+            for module in [
+                "attn_to_q",
+                "attn_to_k",
+                "attn_to_v",
+                "attn_to_out_0",
+                "attn_add_q_proj",
+                "attn_add_k_proj",
+                "attn_add_v_proj",
+                "attn_to_add_out",
+                "ff_net_0_proj",
+                "ff_net_2",
+                "ff_context_net_0_proj",
+                "ff_context_net_2",
+                "norm1_context_linear",
+            ] {
+                let base = format!("{prefix}_transformer_blocks_{block}_{module}");
+                keys.push(format!("{base}.lora_down.weight"));
+                keys.push(format!("{base}.lora_up.weight"));
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn detects_kohya_underscore_sd3() {
+        let keys = underscore_sd3_keys("lora_unet", 38);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("sd3"));
+    }
+
+    #[test]
+    fn detects_lycoris_underscore_sd3() {
+        let keys = underscore_sd3_keys("lora_transformer", 24);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("sd3"));
+    }
+
+    #[test]
+    fn sd3_keys_do_not_detect_as_qwen_or_z_image() {
+        // The whole point of a dedicated SD3 bucket: SD3.5 Large has 38 blocks, which
+        // is below the Qwen block-count gate (>=39) but above Z-Image's range — under
+        // the old Qwen/Z-Image-only MMDiT path it would have been inconclusive. It
+        // must now positively resolve to sd3, never to qwen-image or z-image.
+        let keys = diffusers_sd3_keys(38, true);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        let detected = detect_lora_family(&header);
+        assert_eq!(detected.as_deref(), Some("sd3"));
+        assert_ne!(detected.as_deref(), Some("qwen-image"));
+        assert_ne!(detected.as_deref(), Some("z-image"));
+    }
+
+    #[test]
+    fn qwen_image_keys_do_not_detect_as_sd3() {
+        // Conversely, a real Qwen-Image LoRA (img_mlp/txt_mlp, no ff_context) must
+        // never be swallowed by the new SD3 signature.
+        let keys = diffusers_double_stream_keys("transformer", 60);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+    }
+
+    #[test]
+    fn detects_sd3_metadata_before_keys() {
+        // Metadata-stamped SD3 LoRA (sd-scripts records `ss_base_model_version`).
+        for arch in [
+            "sd3",
+            "sd3.5",
+            "sd-3.5-large",
+            "stable-diffusion-3.5-large/lora",
+            "stable_diffusion_3_medium",
+        ] {
+            let mut header = header_from_keys(&[
+                "transformer.transformer_blocks.0.attn.add_q_proj.lora_A.weight",
+                "transformer.transformer_blocks.0.attn.add_q_proj.lora_B.weight",
+            ]);
+            header["__metadata__"] = json!({ "modelspec.architecture": arch });
+            assert_eq!(
+                detect_lora_family(&header).as_deref(),
+                Some("sd3"),
+                "architecture {arch} should map to sd3"
+            );
+        }
+    }
+
+    #[test]
+    fn sd3_metadata_not_confused_with_sdxl_or_sd15() {
+        // The sd3 metadata branch runs before sdxl / sd1.5; an SDXL or SD1.5 arch
+        // string must still resolve to its own family (no bare "sd3" substring).
+        let mut sdxl = header_from_keys(&["lora_unet_x.lora_down.weight"]);
+        sdxl["__metadata__"] = json!({ "ss_base_model_version": "sdxl_base_v1-0" });
+        assert_eq!(detect_lora_family(&sdxl).as_deref(), Some("sdxl"));
+
+        let mut sd15 = header_from_keys(&["lora_unet_x.lora_down.weight"]);
+        sd15["__metadata__"] = json!({ "ss_base_model_version": "sd1.5" });
+        assert_eq!(detect_lora_family(&sd15).as_deref(), Some("sd1.5"));
+    }
+
+    #[test]
+    fn sd3_diffusers_class_names_map_to_sd3_family() {
+        assert_eq!(
+            diffusers_class_name_to_family("StableDiffusion3Pipeline").as_deref(),
+            Some("sd3")
+        );
+        assert_eq!(
+            diffusers_class_name_to_family("StableDiffusion3Img2ImgPipeline").as_deref(),
+            Some("sd3")
+        );
+        assert_eq!(
+            diffusers_class_name_to_family("StableDiffusion3InpaintPipeline").as_deref(),
+            Some("sd3")
+        );
+    }
+
+    #[test]
+    fn sd3_family_maps_to_sd3_adapter_and_image_capabilities() {
+        assert_eq!(model_adapter_for_family("sd3"), Some("sd3"));
+        assert_eq!(
+            model_capabilities_for_type_and_family("image", "sd3"),
+            vec!["text_to_image", "style_variations"],
+        );
+    }
+
+    #[test]
+    fn validate_lora_compatibility_accepts_sd3_lora_on_sd3_model() {
+        // A community SD3.5 LoRA declares `family: sd3` and applies on an sd3 model.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "s", "family": "sd3" })],
+            Some("sd3"),
+            "mlx_sd3",
+            Some("sd3_5_large"),
+        )
+        .is_ok());
+        // sd3 is NOT base-model-gated (only wan-video is): a LoRA recording a
+        // different sd3 base model still applies by family match.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "s", "family": "sd3", "baseModel": "sd3_5_medium" })],
+            Some("sd3"),
+            "mlx_sd3",
+            Some("sd3_5_large"),
+        )
+        .is_ok());
+        // A foreign-family LoRA is still rejected on an sd3 model.
+        let err = validate_lora_compatibility(
+            &[json!({ "id": "sdxllora", "family": "sdxl" })],
+            Some("sd3"),
+            "mlx_sd3",
+            Some("sd3_5_large"),
+        )
+        .unwrap_err();
+        assert!(err.contains("sdxllora"), "got: {err}");
     }
 
     #[test]
