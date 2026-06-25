@@ -2986,7 +2986,12 @@ label {
   color: var(--accent);
 }
 
-.preset-rail-row {
+/* Scoped to the rail ancestors so it outranks the `.control-grid` 3-column rule
+   the row element also carries (which appears later in the file at equal
+   specificity). VideoStudio's `.render-rail .preset-rail-row` already wins this
+   way; ImageStudio's rail needs the same. */
+.preset-rail .preset-rail-row,
+.render-rail .preset-rail-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
@@ -5567,18 +5572,27 @@ details[open] > summary.lora-scope-group-heading::before,
   border: 1px solid var(--border);
 }
 
-/* Checkbox toggles in the controls grid are single-line rows (checkbox + label
-   + any badge), not the stacked label-over-control grid every other field uses.
-   Without overriding the more-specific `.studio-controls label` grid rule they
-   stack vertically and stretch inline children (e.g. the PiD NC badge) to full
-   column width. Bottom-align them so each checkbox sits on the same baseline as
-   the select/input boxes beside it, keeping every row the same height. */
+/* Checkbox toggles are single-line rows (checkbox + label + any badge), not the
+   stacked label-over-control grid every other field uses — without overriding
+   the more-specific `.studio-controls label` grid rule they stack vertically and
+   stretch inline children (the PiD NC badge) to full column width. */
 .studio-controls label.checkline,
 .advanced-panel label.checkline {
   display: flex;
   align-items: center;
-  align-self: end;
   min-height: 38px;
+}
+
+/* Span the full grid: at the narrow 2-column cell width the checkbox was being
+   flex-shrunk to zero and the label/badge wrapped. Full width gives the checkbox,
+   label, and badge room to sit on one line. */
+.advanced-panel label.checkline {
+  grid-column: 1 / -1;
+}
+
+/* The checkbox itself must never shrink away inside the flex row. */
+.checkline input[type="checkbox"] {
+  flex: none;
 }
 
 .advanced-panel .prompt-field,
