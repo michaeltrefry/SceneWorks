@@ -407,6 +407,69 @@ export const fallbackModels = [
     },
   },
   {
+    // Stable Diffusion 3.5 Large Turbo (epic 7841 / S4 sc-7873) — the fast default
+    // of the SD3.5 family: ADD-distilled few-step (~4), CFG-free 8B MMDiT, native
+    // MLX (Apple Silicon). Catalog-driven gating (macOnly + gated) comes from the
+    // manifest/macSupport; this fallback entry only seeds the picker + per-variant
+    // defaults until the live catalog loads. Recommended (the fast SD3.5 default).
+    id: "sd3_5_large_turbo",
+    name: "Stable Diffusion 3.5 Large Turbo",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    // Few-step CFG-free: 4 steps, guidance ~1.0 (the negative prompt is inert).
+    defaults: { steps: 4, guidanceScale: 1.0, sampler: "euler", scheduler: "default" },
+    limits: {
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"],
+    },
+    ui: {
+      description:
+        "Stable Diffusion 3.5 Large Turbo — the few-step (~4), CFG-free distilled SD3.5 flagship: fast iteration at flagship quality on the native MLX engine (Apple Silicon). Best for quick text-to-image; native 1024×1024. Stability AI Community License (gated).",
+      promptGuide: { title: "Stable Diffusion 3.5 Prompt Guide", path: "/prompt-guides/sd3-5.md" },
+    },
+  },
+  {
+    // Stable Diffusion 3.5 Large (epic 7841 / S4 sc-7873) — the high-fidelity
+    // flagship: 8B MMDiT + triple text encoder + true CFG with negative prompts.
+    // ~28 steps at guidance 3.5. Native MLX (Apple Silicon), gated.
+    id: "sd3_5_large",
+    name: "Stable Diffusion 3.5 Large",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    // High-fidelity true-CFG flagship: 28 steps, guidance 3.5 (+negative prompt).
+    defaults: { steps: 28, guidanceScale: 3.5, sampler: "euler", scheduler: "default" },
+    limits: {
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"],
+    },
+    ui: {
+      description:
+        "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship for the highest fidelity, native MLX (Apple Silicon). Triple text encoder for strong prompt adherence and in-image text; true CFG with negative prompts. ~28 steps at guidance 3.5; native 1024×1024. Stability AI Community License (gated).",
+      promptGuide: { title: "Stable Diffusion 3.5 Prompt Guide", path: "/prompt-guides/sd3-5.md" },
+    },
+  },
+  {
+    // Stable Diffusion 3.5 Medium (epic 7841 / S4 sc-7873) — the smaller-RAM
+    // mid-tier: 2.5B MMDiT-X (dual-attention) + the same triple TE + true CFG,
+    // renders up to 1440². ~40 steps at guidance 4.5. Native MLX (Apple Silicon),
+    // gated; the lightest SD3.5 footprint.
+    id: "sd3_5_medium",
+    name: "Stable Diffusion 3.5 Medium",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    // Smaller-RAM mid-tier: a few more steps + slightly higher guidance than Large.
+    defaults: { steps: 40, guidanceScale: 4.5, sampler: "euler", scheduler: "default" },
+    limits: {
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"],
+    },
+    ui: {
+      description:
+        "Stability AI Stable Diffusion 3.5 Medium — the 2.5B MMDiT-X (dual-attention) mid-tier with the lightest SD3.5 memory footprint, native MLX (Apple Silicon). Same triple text encoder and true CFG as Large; renders up to 1440×1440. ~40 steps at guidance 4.5. Stability AI Community License (gated).",
+      promptGuide: { title: "Stable Diffusion 3.5 Prompt Guide", path: "/prompt-guides/sd3-5.md" },
+    },
+  },
+  {
     id: "ltx_2_3",
     name: "LTX-2.3",
     type: "video",

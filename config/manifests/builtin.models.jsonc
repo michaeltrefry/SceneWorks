@@ -2198,10 +2198,10 @@
       "mlx": {
         // 8B MMDiT + triple text encoder (CLIP-L + CLIP-G + ~4.7B T5-XXL) + 16-ch VAE. Converted to
         // a packed MLX dir at install (mlx.requiresConversion + the `sd3_5_large_quant` converter,
-        // REGISTERED IN S2/S3 — this entry only declares it). minMemoryGb is a PLACEHOLDER consistent
-        // with sibling large flow models (krea_2 48, Boogu 64); E5 measured Large Q8 ~2.67 GB RSS but
-        // MLX Metal-wired memory is higher and generate is activation-bound — E7 (sc-78xx) refines.
-        "minMemoryGb": 48,
+        // REGISTERED IN S2/S3 — this entry only declares it). minMemoryGb 64 — E7 profiled the real
+        // OS peak memory footprint at ~59 GB Q8 (MLX Metal-wired memory, not RSS, dominated by the
+        // T5-XXL TE + activations); 64 leaves headroom over that measured peak.
+        "minMemoryGb": 64,
         "quantize": 8,
         "requiresConversion": true,
         "converter": "sd3_5_large_quant",
@@ -2293,9 +2293,10 @@
       },
       "mlx": {
         // Same footprint as Large (same backbone weights, few-step schedule). Converted to a packed
-        // MLX dir at install (`sd3_5_large_turbo_quant` converter, REGISTERED IN S2/S3). minMemoryGb
-        // PLACEHOLDER mirroring Large; E7 refines.
-        "minMemoryGb": 48,
+        // MLX dir at install (`sd3_5_large_turbo_quant` converter, REGISTERED IN S2/S3). minMemoryGb 64
+        // — E7 measured the same ~59 GB Q8 OS peak footprint as Large (identical backbone); 64 with
+        // headroom.
+        "minMemoryGb": 64,
         "quantize": 8,
         "requiresConversion": true,
         "converter": "sd3_5_large_turbo_quant",
@@ -2380,11 +2381,12 @@
         "types": ["style", "enhance", "character"]
       },
       "mlx": {
-        // 2.5B MMDiT-X + the same triple TE + 16-ch VAE (the TEs dominate the footprint, so Medium is
-        // not dramatically lighter than Large at load). Converted to a packed MLX dir at install
-        // (`sd3_5_medium_quant` converter, REGISTERED IN S2/S3). minMemoryGb PLACEHOLDER (lower than
-        // Large given the smaller backbone, but the triple TE keeps it non-trivial); E7 refines.
-        "minMemoryGb": 32,
+        // 2.5B MMDiT-X + the same triple TE + 16-ch VAE (the smaller backbone keeps the footprint
+        // well under Large). Converted to a packed MLX dir at install (`sd3_5_medium_quant` converter,
+        // REGISTERED IN S2/S3). minMemoryGb 16 — M3 measured the real OS peak at ~16 GB Q8 / ~12 GB Q4;
+        // 16 admits Medium on smaller Apple Silicon (the lightest SD3.5 tier) while gating Large/Turbo
+        // to 64 GB machines.
+        "minMemoryGb": 16,
         "quantize": 8,
         "requiresConversion": true,
         "converter": "sd3_5_medium_quant",

@@ -370,6 +370,27 @@ export function ModelManagerScreen() {
     writeLicenseAck(modelId, acknowledged);
     setLicenseAcks((current) => ({ ...current, [modelId]: acknowledged }));
   };
+  // The `useState` initializer above runs only on first mount, but `models`
+  // arrives asynchronously (the catalog fetch resolves after the screen mounts).
+  // A returning user's persisted localStorage ack would otherwise never re-seed
+  // for gated models that weren't in the initial (often empty) catalog. Re-seed
+  // whenever the catalog changes: merge in any persisted ack for a gated model
+  // we haven't already recorded, without clobbering an in-session toggle (the
+  // user's explicit checkbox state always wins over the persisted value).
+  useEffect(() => {
+    setLicenseAcks((current) => {
+      let next = current;
+      for (const model of models) {
+        if (model.gated && current[model.id] === undefined && readLicenseAck(model.id)) {
+          if (next === current) {
+            next = { ...current };
+          }
+          next[model.id] = true;
+        }
+      }
+      return next;
+    });
+  }, [models]);
   const hasGatedModel = models.some((model) => model.gated);
   const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
   // Wan A14B MoE paired upload (sc-1991): when the user targets the wan-video

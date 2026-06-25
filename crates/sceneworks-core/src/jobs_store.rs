@@ -3615,6 +3615,13 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     // Krea 2 Turbo (epic 7565 / sc-7572): native `mlx-gen-krea` text-to-image engine
     // (adapter `mlx_krea`) over the packed Q8/Q4 turnkey. CFG-free Turbo is text-to-image only.
     "krea_2_turbo",
+    // Stable Diffusion 3.5 (epic 7841 / S2 sc-7871 worker MODEL_TABLE, surfaced S4 sc-7873): the three
+    // native `mlx-gen-sd3` variants (adapter `mlx_sd3`), macOS-only (no torch backend, gated). All are
+    // text-to-image only — Large + Medium run true CFG (28 / 40 steps), Turbo is the CFG-free few-step
+    // distill (4 steps). `edit_image` has no source/reference path, so it's rejected (mirrors Krea/Lens).
+    "sd3_5_large",
+    "sd3_5_large_turbo",
+    "sd3_5_medium",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -3678,6 +3685,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "ideogram_4" | "ideogram_4_turbo" => ideogram_mlx_eligible(payload),
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => boogu_mlx_eligible(payload),
         "krea_2_turbo" => krea_mlx_eligible(payload),
+        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -4945,6 +4953,16 @@ fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// engine serves the Turbo text-to-image surface only; `edit_image` has no source/reference
 /// path, so reject that defensive shape the same way Lens does.
 fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
+/// Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841, surfaced S4 sc-7873) MLX-eligibility.
+/// The native `mlx-gen-sd3` engine serves the **text-to-image** surface only (Large + Medium run true
+/// CFG, Turbo is the CFG-free few-step distill); there is no source/reference/edit path, so an
+/// `edit_image` request is rejected (the same defensive shape Krea / Lens reject). This keeps
+/// `model_mac_support`'s `features.edit` false for all three (it probes with `mode: edit_image`).
+/// macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so nothing defers.
+fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
@@ -8144,6 +8162,40 @@ mod mlx_routing_tests {
         let support = model_mac_support("krea_2_turbo", "image");
         assert!(support.supported, "krea_2_turbo must be Mac-supported");
         assert!(!support.features.edit, "krea_2_turbo is text-to-image only");
+    }
+
+    #[test]
+    fn sd3_5_text_to_image_routes_to_mlx() {
+        // sc-7873 (epic 7841): the three SD3.5 variants have native `mlx-gen-sd3` text-to-image engines
+        // (S2 MODEL_TABLE), so they must reach the Text → Image picker (macSupport.supported) rather than
+        // being hidden as torch-only. All three are text-to-image only — `edit_image` is rejected.
+        for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            assert!(
+                image_request_mlx_eligible(
+                    model,
+                    &object(json!({ "model": model, "prompt": "a misty alpine lake at dawn" }))
+                ),
+                "{model} text-to-image must route to MLX"
+            );
+            assert!(
+                image_request_mlx_eligible(model, &Map::new()),
+                "{model} bare payload"
+            );
+            assert!(
+                !image_request_mlx_eligible(
+                    model,
+                    &object(
+                        json!({ "model": model, "mode": "edit_image", "sourceAssetId": "asset_1" })
+                    )
+                ),
+                "{model} edit is not supported (text-to-image only)"
+            );
+
+            // UI gating oracle: Mac-supported (reaches the picker), text-to-image only (no edit tab).
+            let support = model_mac_support(model, "image");
+            assert!(support.supported, "{model} must be Mac-supported");
+            assert!(!support.features.edit, "{model} is text-to-image only");
+        }
     }
 
     #[test]

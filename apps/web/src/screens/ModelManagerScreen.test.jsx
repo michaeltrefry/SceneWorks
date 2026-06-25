@@ -255,6 +255,26 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(downloadButton.disabled).toBe(false);
   });
 
+  // sc-7873 (Fix B): the catalog arrives asynchronously, so the screen may mount with an empty
+  // `models` list before the gated model loads. The once-only useState initializer would then miss
+  // a returning user's persisted ack; a `useEffect([models])` re-seeds from localStorage when the
+  // catalog updates. Render empty first (initializer sees no gated model), then re-render with the
+  // SD3.5 model after the ack is persisted → the download must be unblocked without a manual check.
+  it("re-seeds the license-ack from localStorage when the catalog loads late (sc-7873)", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:sd3_5_large", "true");
+    // Initial mount with an empty catalog (initializer records nothing).
+    await render([]);
+    // Catalog resolves asynchronously, bringing in the gated SD3.5 model.
+    await render([SD3_5_MODEL]);
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    expect(ackCheckbox).toBeTruthy();
+    expect(ackCheckbox.checked).toBe(true);
+    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find(
+      (button) => button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton.disabled).toBe(false);
+  });
+
   // sc-7872: a non-gated model has no ack gate — its download stays enabled.
   it("does not gate a non-gated model's download on any acknowledgment (sc-7872)", async () => {
     await render([PLAIN_MODEL]);

@@ -52,6 +52,30 @@ describe("modelEligibility predicates", () => {
     expect(hasUsableModelFor([missing], imageModelUsable, caps)).toBe(false);
   });
 
+  // SD3.5 surfacing + eligibility/gating (epic 7841 / sc-7873). The three native MLX variants are
+  // text-to-image image models, so they are usable on Image Studio (text_to_image mode) when their
+  // macSupport oracle reports supported. Under active Mac gating an unsupported variant (e.g. one
+  // without an MLX engine, or any model off-Mac) is blocked from the picker; with gating off the Mac
+  // blocks are no-ops so they always surface (Image Studio is the macOnly-aware path).
+  it("imageModelUsable surfaces the SD3.5 variants and respects Mac gating", () => {
+    const activeCaps = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "macos" };
+    for (const id of ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"]) {
+      const supported = {
+        id,
+        type: "image",
+        capabilities: ["text_to_image", "style_variations"],
+        macSupport: { supported: true, features: {} },
+      };
+      // Mac-supported native MLX variant → usable on Image Studio under active gating.
+      expect(imageModelUsable(supported, activeCaps)).toBe(true);
+      // Gating off (non-Mac / observe mode) → Mac block is a no-op, still usable.
+      expect(imageModelUsable(supported, caps)).toBe(true);
+      // Unsupported (no MLX engine for this variant) → hidden from the picker under active gating.
+      const unsupported = { ...supported, macSupport: { supported: false } };
+      expect(imageModelUsable(unsupported, activeCaps)).toBe(false);
+    }
+  });
+
   it("downloadOffersFor prefers recommended, falls back to any eligible, skips installed", () => {
     const models = [
       { id: "rec", type: "image", capabilities: ["text_to_image"], installState: "missing", recommended: true },
