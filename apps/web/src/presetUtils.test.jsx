@@ -6,6 +6,7 @@ import {
   clearPresetDefault,
   editModelForAsset,
   finiteNumberOrUndefined,
+  loraWeight,
   presetMatchesModel,
   presetNameTaken,
   slugifyPresetId,
@@ -109,6 +110,31 @@ describe("finiteNumberOrUndefined", () => {
     expect(finiteNumberOrUndefined(null)).toBeUndefined();
     expect(finiteNumberOrUndefined("abc")).toBeUndefined();
     expect(finiteNumberOrUndefined(undefined)).toBeUndefined();
+  });
+});
+
+describe("loraWeight", () => {
+  it("defaults a generic LoRA to 0.8", () => {
+    expect(loraWeight({ id: "sdxl_style", family: "sdxl" })).toBe(0.8);
+    expect(loraWeight(null)).toBe(0.8);
+  });
+
+  it("defaults a krea-2-family LoRA higher (1.5) for the distilled-Turbo attenuation (sc-7932)", () => {
+    // The family token is normalized (krea_2 -> krea-2), and the bump applies via any of the
+    // family-bearing shapes extractFamilies() reads.
+    expect(loraWeight({ id: "k", family: "krea_2" })).toBe(1.5);
+    expect(loraWeight({ id: "k", compatibility: { families: ["krea_2"] } })).toBe(1.5);
+  });
+
+  it("lets an explicit weight win over the krea-2 family default", () => {
+    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: 1.0 })).toBe(1.0);
+    expect(loraWeight({ id: "k", family: "krea_2", weight: 0.7 })).toBe(0.7);
+    expect(loraWeight({ id: "k", family: "krea_2" }, { weight: 2.0 })).toBe(2.0);
+  });
+
+  it("falls back to the family default when an explicit value is non-finite", () => {
+    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: "nope" })).toBe(1.5);
+    expect(loraWeight({ id: "g", family: "sdxl", defaultWeight: "nope" })).toBe(0.8);
   });
 });
 

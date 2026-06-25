@@ -68,6 +68,18 @@ realistic subjects you don't need to say "photorealistic"; that's already the de
 - **Quantization:** Q8 is the default (near-lossless, ~27 GB peak — needs a 48 GB-class Mac); Q4 is a
   lighter option.
 
+## Using LoRAs
+
+Krea LoRAs train on the full **Krea 2 Raw** base and apply at inference on the distilled **Turbo**.
+Because Turbo is few-step and CFG-free it adheres tightly to the prompt, so a LoRA's effect reads
+softer here than it would on the Raw base. To compensate, Krea LoRAs start at a **higher default apply
+weight (1.5)** than other families — they stay coherent well above that, so:
+
+- If a LoRA's style or subject isn't coming through on a strongly-described scene, raise the weight
+  toward **2.0** and leave the prompt a little room rather than over-specifying every detail.
+- If a LoRA over-dominates, lower it. The weight slider is the main lever; the default is just a
+  starting point tuned for the distilled Turbo.
+
 ## Example Prompts
 
 `A weathered lighthouse on a rocky cliff at golden hour, waves breaking below, gulls in the distance.

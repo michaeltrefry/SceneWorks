@@ -208,9 +208,17 @@ export function presetLoraId(presetLora) {
   return typeof presetLora === "string" ? presetLora : presetLora?.id ?? presetLora?.loraId;
 }
 
+// Krea 2's distilled, CFG-free Turbo attenuates Raw-trained LoRAs (sc-7579 / sc-7932): the generic
+// 0.8 default under-expresses on the few-step student, so a krea-2-family LoRA defaults to a higher
+// apply weight (real-weight-validated coherent through scale 4). This is still a DEFAULT — an explicit
+// preset weight, a stored `defaultWeight`, or the LoRA's own `weight` still wins. Family token is the
+// normalized form (`normalizeLoraFamily`: krea_2 → krea-2).
+const KREA_LORA_DEFAULT_WEIGHT = 1.5;
+
 export function loraWeight(lora, presetLora = {}) {
-  const value = Number(presetLora.weight ?? lora?.defaultWeight ?? lora?.weight ?? 0.8);
-  return Number.isFinite(value) ? value : 0.8;
+  const fallback = loraFamilies(lora).includes("krea-2") ? KREA_LORA_DEFAULT_WEIGHT : 0.8;
+  const value = Number(presetLora.weight ?? lora?.defaultWeight ?? lora?.weight ?? fallback);
+  return Number.isFinite(value) ? value : fallback;
 }
 
 export function serializePresetLora(lora, presetLora = {}) {
