@@ -1792,4 +1792,50 @@ mod gated_credential_tests {
     fn no_downloads_yields_none() {
         assert_eq!(derive_credential_host(&map(json!({}))), None);
     }
+
+    // sc-7872: the SD3.5 gated entries download direct from the gated stabilityai/*
+    // repos (no re-host), so the credential host derives to huggingface.co exactly
+    // like FLUX.2-dev — driving the same stored-HF-token download path.
+    #[test]
+    fn derives_huggingface_host_for_stabilityai_sd3_5_repos() {
+        for repo in [
+            "stabilityai/stable-diffusion-3.5-large",
+            "stabilityai/stable-diffusion-3.5-large-turbo",
+            "stabilityai/stable-diffusion-3.5-medium",
+        ] {
+            let model = map(json!({
+                "downloads": [{ "provider": "huggingface", "repo": repo, "files": ["transformer/*"] }]
+            }));
+            assert_eq!(
+                derive_credential_host(&model).as_deref(),
+                Some("huggingface.co"),
+                "repo {repo} should derive huggingface.co",
+            );
+        }
+    }
+
+    // sc-7872: a gated SD3.5 entry round-trips through apply_gating_fields with its
+    // explicit huggingface.co credential host preserved (the field the web client
+    // reads to gate the download + surface the credential prompt). licenseUrl is
+    // untouched, so the model card links the stabilityai license page.
+    #[test]
+    fn sd3_5_gated_entry_preserves_credential_host_and_license() {
+        let mut model = map(json!({
+            "id": "sd3_5_large",
+            "gated": true,
+            "credentialHost": "huggingface.co",
+            "licenseUrl": "https://huggingface.co/stabilityai/stable-diffusion-3.5-large",
+            "downloads": [{ "provider": "huggingface", "repo": "stabilityai/stable-diffusion-3.5-large", "files": ["transformer/*"] }]
+        }));
+        apply_gating_fields(&mut model);
+        assert_eq!(model.get("gated").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            model.get("credentialHost").and_then(Value::as_str),
+            Some("huggingface.co"),
+        );
+        assert_eq!(
+            model.get("licenseUrl").and_then(Value::as_str),
+            Some("https://huggingface.co/stabilityai/stable-diffusion-3.5-large"),
+        );
+    }
 }

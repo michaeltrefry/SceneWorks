@@ -150,6 +150,45 @@ function gatedRepoUrl(model) {
   return repo ? `https://${host}/${repo}` : null;
 }
 
+// Per-model license acknowledgment (sc-7872). Gated models (FLUX.2 [dev],
+// SD3.5 Large/Turbo/Medium, …) carry a non-commercial / community license the
+// user must accept on Hugging Face before access is granted; we also require an
+// explicit in-app acknowledgment before queuing the download so the license terms
+// are surfaced and confirmed at the point of action. The ack is persisted per
+// model id in localStorage (origin-scoped, same store as the theme/token caches);
+// it's a UX gate only — the server-side download still needs the HF credential +
+// granted access. localStorage may be unavailable (private mode, quota), so the
+// getters/setters swallow failures and default to "not acknowledged".
+const LICENSE_ACK_KEY_PREFIX = "sceneworks-license-ack:";
+
+function readLicenseAck(modelId) {
+  if (!modelId) {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem(`${LICENSE_ACK_KEY_PREFIX}${modelId}`) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeLicenseAck(modelId, acknowledged) {
+  if (!modelId) {
+    return;
+  }
+  try {
+    const key = `${LICENSE_ACK_KEY_PREFIX}${modelId}`;
+    if (acknowledged) {
+      window.localStorage.setItem(key, "true");
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // localStorage unavailable — the ack just won't persist this session. The
+    // in-memory state still gates the download for the current view.
+  }
+}
+
 // Gated models (e.g. FLUX.1 [dev]) need an accepted license + a saved credential
 // before a download can succeed. The catalog flags these with `gated`/
 // `credentialHost`/`licenseUrl` (sc-1898). When the matching credential is already
@@ -159,7 +198,17 @@ function gatedRepoUrl(model) {
 // `repoUrl` links the gated repo so the user can request access (sc-5999); shown
 // alongside `licenseUrl` only when the license lives on a different page (e.g.
 // Ideogram 4, whose terms are on the source repo but access is on the SceneWorks repo).
-function GatedModelNotice({ host, repoUrl, licenseUrl, present, onOpenSettings }) {
+// `acknowledged`/`onAcknowledgeChange` drive the in-app license-acknowledgment gate
+// (sc-7872): the download button stays disabled until the user checks the box.
+function GatedModelNotice({
+  host,
+  repoUrl,
+  licenseUrl,
+  present,
+  acknowledged,
+  onAcknowledgeChange,
+  onOpenSettings,
+}) {
   const hostLabel = host || "the required service";
   const showSeparateLicense = licenseUrl && licenseUrl !== repoUrl;
   return (
@@ -186,6 +235,14 @@ function GatedModelNotice({ host, repoUrl, licenseUrl, present, onOpenSettings }
           </a>
         ) : null}
       </div>
+      <label className="model-license-ack">
+        <input
+          type="checkbox"
+          checked={acknowledged}
+          onChange={(event) => onAcknowledgeChange(event.target.checked)}
+        />
+        <span>I have read and accept this model&rsquo;s license.</span>
+      </label>
     </div>
   );
 }
@@ -298,6 +355,21 @@ export function ModelManagerScreen() {
   // Gated-model credential presence (sc-1898): only fetched when the catalog has a
   // gated model, so non-gated deployments make no extra credential request.
   const [credentials, setCredentials] = useState([]);
+  // Per-model license acknowledgments (sc-7872), seeded from localStorage so a
+  // returning user keeps prior accepts. Keyed by model id; toggling the gated
+  // notice checkbox both updates this map and persists to localStorage.
+  const [licenseAcks, setLicenseAcks] = useState(() =>
+    models.reduce((acc, model) => {
+      if (model.gated && readLicenseAck(model.id)) {
+        acc[model.id] = true;
+      }
+      return acc;
+    }, {}),
+  );
+  const setLicenseAck = (modelId, acknowledged) => {
+    writeLicenseAck(modelId, acknowledged);
+    setLicenseAcks((current) => ({ ...current, [modelId]: acknowledged }));
+  };
   const hasGatedModel = models.some((model) => model.gated);
   const visibleLoras = loras.filter((lora) => matchesFamily(lora, familyFilter));
   // Wan A14B MoE paired upload (sc-1991): when the user targets the wan-video
@@ -595,6 +667,11 @@ export function ModelManagerScreen() {
     const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
     const gated = Boolean(model.gated);
     const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
+    // License-acknowledgment gate (sc-7872): an uninstalled gated model can't be
+    // downloaded until the user accepts its license in-app. Already-installed
+    // gated models (no notice shown) are never blocked.
+    const licenseAcknowledged = licenseAcks[model.id] === true;
+    const licenseAckRequired = gated && !installed && !licenseAcknowledged;
     return (
       <article className="model-card" key={model.id}>
         <div>
@@ -630,6 +707,8 @@ export function ModelManagerScreen() {
             repoUrl={gatedRepoUrl(model) ?? model.licenseUrl ?? null}
             licenseUrl={model.licenseUrl}
             present={credentialPresent}
+            acknowledged={licenseAcknowledged}
+            onAcknowledgeChange={(checked) => setLicenseAck(model.id, checked)}
             onOpenSettings={() => setActiveView("Settings")}
           />
         ) : null}
@@ -692,7 +771,8 @@ export function ModelManagerScreen() {
         ) : null}
         <div className="model-card-actions">
           <button
-            disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob)}
+            disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
+            title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
             onClick={() =>
               failedDownload
                 ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })

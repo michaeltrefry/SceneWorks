@@ -4104,6 +4104,20 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 13px;
 }
 
+/* License-acknowledgment gate (sc-7872): the download button stays disabled
+   until this box is checked for an uninstalled gated model. */
+.model-license-ack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.model-license-ack input {
+  margin: 0;
+}
+
 .mlx-status {
   display: grid;
   gap: 8px;

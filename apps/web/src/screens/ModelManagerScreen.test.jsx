@@ -51,12 +51,33 @@ const PLAIN_MODEL = {
   ui: { description: "Open model." },
 };
 
+// SD3.5 Large is gated on the stabilityai/* repo with the Stability AI Community
+// License (sc-7872). It must surface the HF repo link + license-ack gate exactly
+// like FLUX.2-dev, driven entirely off the manifest `gated`/`credentialHost`/
+// `licenseUrl` fields — no per-model code.
+const SD3_5_MODEL = {
+  id: "sd3_5_large",
+  name: "Stable Diffusion 3.5 Large",
+  type: "image",
+  family: "sd3.5",
+  installState: "missing",
+  downloadable: true,
+  gated: true,
+  credentialHost: "huggingface.co",
+  licenseUrl: "https://huggingface.co/stabilityai/stable-diffusion-3.5-large",
+  downloads: [
+    { provider: "huggingface", repo: "stabilityai/stable-diffusion-3.5-large", files: ["transformer/*"] },
+  ],
+  ui: { description: "Gated SD3.5 Large model." },
+};
+
 describe("ModelManagerScreen gated-model notice", () => {
   let container;
   let root;
   let invoke;
   let credentials;
   let setActiveView;
+  let createModelDownloadJob;
   let ModelManagerScreen;
   let AppContext;
 
@@ -64,6 +85,12 @@ describe("ModelManagerScreen gated-model notice", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     credentials = [];
     setActiveView = vi.fn();
+    createModelDownloadJob = vi.fn();
+    try {
+      window.localStorage.clear();
+    } catch {
+      // ignore — jsdom localStorage is always available
+    }
     invoke = vi.fn(async (command) => {
       switch (command) {
         case "get_gpu_info":
@@ -103,7 +130,7 @@ describe("ModelManagerScreen gated-model notice", () => {
       setActiveView,
       deleteLora: () => {},
       deleteModel: () => {},
-      createModelDownloadJob: () => {},
+      createModelDownloadJob,
       createModelConvertJob: () => {},
       createLoraImportJob: () => {},
       createModelImportJob: () => {},
@@ -165,6 +192,77 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(invoke).not.toHaveBeenCalledWith("list_credentials", undefined);
     expect(container.textContent).not.toContain("Gated download");
     expect(container.querySelector(".model-gated-notice")).toBeNull();
+  });
+
+  // sc-7872: the SD3.5 gated entries surface the stabilityai HF repo link on the
+  // card exactly like FLUX.2-dev, driven off the manifest fields with no per-model
+  // code. The license URL equals the access repo, so a single request-access link.
+  it("surfaces the stabilityai HF repo link on the SD3.5 model card (sc-7872)", async () => {
+    await render([SD3_5_MODEL]);
+    expect(container.textContent).toContain("Gated download");
+    const links = [...container.querySelectorAll(".model-gated-actions a")];
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe("Request access on Hugging Face");
+    expect(links[0].getAttribute("href")).toBe(
+      "https://huggingface.co/stabilityai/stable-diffusion-3.5-large",
+    );
+  });
+
+  // sc-7872: the in-app license-acknowledgment gate blocks the download until the
+  // user checks the box. Applies generically to every gated model (FLUX.2-dev +
+  // SD3.5). The download button is disabled until then.
+  it("blocks the gated download until the license is acknowledged (sc-7872)", async () => {
+    await render([SD3_5_MODEL]);
+    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find(
+      (button) => button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton).toBeTruthy();
+    expect(downloadButton.disabled).toBe(true);
+
+    // Clicking while blocked does not queue a download.
+    await click(downloadButton);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+
+    // Acknowledge the license → button enables and the download queues.
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    expect(ackCheckbox).toBeTruthy();
+    await act(async () => {
+      // Drive the checkbox through React's value tracker (a bare `.checked =`
+      // assignment is pre-recorded by React and the onChange is skipped).
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(
+        ackCheckbox,
+        true,
+      );
+      ackCheckbox.dispatchEvent(new window.Event("click", { bubbles: true }));
+    });
+    expect(downloadButton.disabled).toBe(false);
+    await click(downloadButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "sd3_5_large" }),
+    );
+  });
+
+  // sc-7872: the ack persists to localStorage, so a returning user keeps a prior
+  // accept and the download is unblocked on first render.
+  it("seeds the license-ack from localStorage so a prior accept stays unblocked (sc-7872)", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:sd3_5_large", "true");
+    await render([SD3_5_MODEL]);
+    const ackCheckbox = container.querySelector(".model-license-ack input");
+    expect(ackCheckbox.checked).toBe(true);
+    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find(
+      (button) => button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton.disabled).toBe(false);
+  });
+
+  // sc-7872: a non-gated model has no ack gate — its download stays enabled.
+  it("does not gate a non-gated model's download on any acknowledgment (sc-7872)", async () => {
+    await render([PLAIN_MODEL]);
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find(
+      (button) => button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton.disabled).toBe(false);
   });
 });
 
