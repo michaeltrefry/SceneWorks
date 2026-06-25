@@ -968,8 +968,8 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
     await act(async () => {});
     const toggle = pidLabel();
     expect(toggle).toBeTruthy();
-    // NC marker is surfaced on the toggle copy.
-    expect(toggle.textContent).toContain("NC");
+    // Non-commercial marker is surfaced on the toggle copy.
+    expect(toggle.textContent).toContain("Non-Commercial");
     expect(toggle.querySelector('input[type="checkbox"]').checked).toBe(false);
   });
 

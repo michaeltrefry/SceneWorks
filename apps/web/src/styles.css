@@ -64,6 +64,8 @@
   --warm-soft: oklch(0.95 0.03 var(--warm-h));
   --danger: oklch(0.62 0.18 25);
   --danger-soft: oklch(0.95 0.04 25);
+  --warn: oklch(0.66 0.15 70);
+  --warn-soft: oklch(0.94 0.07 80);
   --success: oklch(0.62 0.13 155);
 
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 1px rgba(15, 23, 42, 0.03);
@@ -100,6 +102,8 @@
   --warm: oklch(0.78 0.11 var(--warm-h));
   --warm-soft: oklch(0.32 0.05 var(--warm-h));
   --danger-soft: oklch(0.3 0.06 25);
+  --warn: oklch(0.82 0.14 80);
+  --warn-soft: oklch(0.33 0.07 70);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.38), 0 1px 2px rgba(0, 0, 0, 0.45);
@@ -2984,8 +2988,22 @@ label {
 
 .preset-rail-row {
   display: grid;
-  grid-template-columns: 1fr 1.4fr;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+/* Uniform control height down the preset rail so the model picker, save-preset
+   name + button, and the variations/aspect row all read as one consistent column
+   of boxes. box-sizing is border-box globally, so a single height value aligns
+   every control regardless of its own padding. The project-scope segment is left
+   at its original height — it's a distinct two-option toggle, not a plain box. */
+.preset-rail > label select,
+.preset-rail .save-preset-name,
+.preset-rail .save-preset-btn,
+.preset-rail .preset-rail-row input,
+.preset-rail .preset-rail-row select {
+  height: 36px;
+  min-height: 36px;
 }
 
 /* "Save as Preset" — inline sidebar control that snapshots the current setup. */
@@ -3484,8 +3502,8 @@ label {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.03em;
-  background: var(--warn-soft, var(--danger-soft));
-  color: var(--warn, var(--danger));
+  background: var(--warn-soft);
+  color: color-mix(in oklch, var(--warn) 78%, var(--text));
 }
 
 /* ---------- Library grid ---------- */
@@ -5549,9 +5567,18 @@ details[open] > summary.lora-scope-group-heading::before,
   border: 1px solid var(--border);
 }
 
-.advanced-panel .upscale-toggle {
-  min-height: 44px;
+/* Checkbox toggles in the controls grid are single-line rows (checkbox + label
+   + any badge), not the stacked label-over-control grid every other field uses.
+   Without overriding the more-specific `.studio-controls label` grid rule they
+   stack vertically and stretch inline children (e.g. the PiD NC badge) to full
+   column width. Bottom-align them so each checkbox sits on the same baseline as
+   the select/input boxes beside it, keeping every row the same height. */
+.studio-controls label.checkline,
+.advanced-panel label.checkline {
+  display: flex;
+  align-items: center;
   align-self: end;
+  min-height: 38px;
 }
 
 .advanced-panel .prompt-field,

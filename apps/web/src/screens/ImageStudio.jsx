@@ -1895,7 +1895,7 @@ export function ImageStudio() {
                       onChange={(event) => setUsePid(event.target.checked)}
                       type="checkbox"
                     />
-                    PiD decoder · 2K/4K <span className="badge badge-nc">NC</span>
+                    PiD decoder · 2K/4K <span className="badge badge-nc">Non-Commercial</span>
                   </label>
                 ) : null}
                 <label className="checkline upscale-toggle">
