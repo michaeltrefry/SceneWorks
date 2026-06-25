@@ -60,6 +60,12 @@ use mlx_gen_kolors as _;
 // drops its `ModelRegistration` and `gen_core::load("krea_2_turbo")` returns "no generator registered").
 #[cfg(target_os = "macos")]
 use mlx_gen_krea as _;
+// Stable Diffusion 3.5 (epic 7841 / sc-7871) — force-link so `inventory::submit!` registers
+// `sd3_5_large` (true-CFG) + `sd3_5_large_turbo` (ADD-distilled, CFG-off); else linker GC drops their
+// `ModelRegistration` and `gen_core::load("sd3_5_large")` returns "no generator registered". Both reach
+// the generic MODEL_TABLE / `generate_stream` path. (Medium has a converter but no generator yet — M3.)
+#[cfg(target_os = "macos")]
+use mlx_gen_sd3 as _;
 // Lens / Lens-Turbo (epic 3164 engine / sc-5105) — an inventory-registered `Generator` under the ids
 // `lens` + `lens_turbo`, reached through the generic MODEL_TABLE / `generate_stream` path. Force-link
 // or the linker GCs its `ModelRegistration` and `gen_core::load("lens_turbo")` returns "no generator

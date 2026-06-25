@@ -572,6 +572,90 @@ fn convert_flux2_dev_prequant(
     )
 }
 
+/// SD3.5 gated diffusers snapshot → packed Q`bits` MLX dir (sc-7871). SD3.5's snapshot is
+/// self-contained (its own transformer + triple text encoder + tokenizer + VAE), and the engine
+/// loader reads the diffusers layout directly, reusing the SDXL CLIP encoders, the FLUX T5 encoder,
+/// and the Z-Image 16-ch VAE — all loaded DENSE. So conversion pre-quantizes ONLY the MMDiT
+/// `transformer/` on disk (the bulk: an 8B DiT) and symlinks the unchanged text encoders / tokenizers
+/// / VAE / scheduler / model_index.json through. Absolute symlinks survive the worker's temp→final
+/// atomic rename, and `model_index.json` doubles as the catalog's "converted" marker. `variant`
+/// selects the MMDiT arch (Large/Turbo share one layout; Medium is the MMDiT-X dual-attention layout).
+/// Runs MLX, so macOS-only.
+#[cfg(target_os = "macos")]
+fn convert_sd3_prequant(
+    source_dir: &Path,
+    out_dir: &Path,
+    variant: Sd3Variant,
+    bits: i32,
+    group_size: i32,
+) -> Result<(), String> {
+    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
+    let arch = match variant {
+        Sd3Variant::Large | Sd3Variant::LargeTurbo => mlx_gen_sd3::Sd3Arch::large(),
+        Sd3Variant::Medium => mlx_gen_sd3::Sd3Arch::medium(),
+    };
+    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    let src_transformer = source_dir.join("transformer");
+    if !src_transformer.is_dir() {
+        return Err(
+            "SD3.5 source is missing `transformer/` — expected the gated diffusers snapshot of \
+             stabilityai/stable-diffusion-3.5-* (transformer/ text_encoder/ text_encoder_2/ \
+             text_encoder_3/ tokenizer/ tokenizer_2/ tokenizer_3/ vae/ model_index.json)."
+                .to_owned(),
+        );
+    }
+    // Quantize the MMDiT transformer/ on disk (validates the arch first, writes a packed dir).
+    mlx_gen_sd3::quantize_sd3_dir(
+        &arch,
+        &src_transformer,
+        &out_dir.join("transformer"),
+        bits,
+        group_size,
+    )
+    .map_err(|error| format!("quantize SD3.5 transformer: {error}"))?;
+    // Symlink the dense (reused-as-is) text encoders / tokenizers / VAE / scheduler / model_index.json.
+    for sub in [
+        "text_encoder",
+        "text_encoder_2",
+        "text_encoder_3",
+        "tokenizer",
+        "tokenizer_2",
+        "tokenizer_3",
+        "vae",
+        "scheduler",
+        "model_index.json",
+    ] {
+        let src = source_dir.join(sub);
+        if !src.exists() {
+            // scheduler/ is optional metadata for the engine (the pipeline uses a static flow-match
+            // Euler schedule), so only the load-bearing modules are hard-required.
+            if sub == "scheduler" {
+                continue;
+            }
+            return Err(format!(
+                "SD3.5 source is missing `{sub}` — expected the full gated diffusers snapshot of \
+                 stabilityai/stable-diffusion-3.5-* (the triple text encoder + tokenizers + 16-ch VAE \
+                 are reused dense)."
+            ));
+        }
+        let canonical = std::fs::canonicalize(&src).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&canonical, out_dir.join(sub))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_sd3_prequant(
+    _source_dir: &Path,
+    _out_dir: &Path,
+    _variant: Sd3Variant,
+    _bits: i32,
+    _group_size: i32,
+) -> Result<(), String> {
+    Err("SD3.5 conversion requires macOS (mlx-gen-sd3); this model is macOS-only.".to_owned())
+}
+
 /// The base `Lightricks/LTX-2.3` latent upsampler the LTX loader hard-requires (emitted as
 /// `upsampler.safetensors` in the converted dir). Neither the eros nor the base single-file
 /// checkpoint bundles it, so the converter merges it from the base repo at convert time.
@@ -633,6 +717,28 @@ enum ConvertPlan {
         bits: i32,
         group_size: i32,
     },
+    /// SD3.5 gated diffusers snapshot → packed Q`bits` dir (sc-7871): pre-quantize ONLY the MMDiT
+    /// `transformer/` on disk (the triple text encoder + VAE are reused dense and symlinked through
+    /// unchanged). `variant` selects the MMDiT arch (Large/Turbo share one layout; Medium is MMDiT-X).
+    Sd3 {
+        source_dir: PathBuf,
+        variant: Sd3Variant,
+        bits: i32,
+        group_size: i32,
+    },
+}
+
+/// The SD3.5 MMDiT variant a `sd3_5_*_quant` conversion targets — a target-neutral mirror of
+/// `mlx_gen_sd3::Sd3Variant` (which is macOS-only), so [`ConvertPlan`] stays buildable on every
+/// target. The macOS converter maps it back to the engine variant in [`convert_sd3_prequant`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sd3Variant {
+    /// `sd3_5_large_quant` — SD3.5 Large (8B MMDiT, true-CFG).
+    Large,
+    /// `sd3_5_large_turbo_quant` — SD3.5 Large Turbo (same MMDiT layout, ADD-distilled).
+    LargeTurbo,
+    /// `sd3_5_medium_quant` — SD3.5 Medium (2.5B MMDiT-X, dual-attention first 13 blocks).
+    Medium,
 }
 
 /// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully
@@ -640,7 +746,8 @@ enum ConvertPlan {
 /// be downloaded into the Hugging Face cache (via a model_download job). The converter is selected by
 /// the manifest `mlx.converter` discriminator: `flux2_klein_diffusers` (sc-3136), `ltx_video`
 /// (mlx-gen-ltx), or `flux2_dev_quant` (FLUX.2-dev pre-quantization, sc-5921) — the models that
-/// install via in-app conversion. The Python
+/// install via in-app conversion, plus `sd3_5_large_quant` / `sd3_5_large_turbo_quant` /
+/// `sd3_5_medium_quant` (SD3.5 transformer pre-quantization, sc-7871). The Python
 /// `mlx_video.convert_wan` subprocess + `SCENEWORKS_PYTHON` wiring were retired here (sc-3240); the
 /// Wan2.2 converters were decommissioned once those models flipped to pre-converted SceneWorks
 /// downloads (sc-5603, epic 5594).
@@ -818,6 +925,31 @@ pub(crate) async fn run_model_convert_job(
                 group_size,
             }
         }
+        // SD3.5 (epic 7841 / sc-7871) — the gated diffusers snapshot is self-contained (its own
+        // transformer/ + triple text encoder + tokenizer + VAE), so the whole snapshot dir is the
+        // convert source: pre-quantize ONLY the MMDiT transformer/ on disk and symlink the dense TE /
+        // VAE / tokenizer / scheduler / model_index.json through. Default Q8 / group-size 64 (the
+        // manifest `quantize: 8`, reference group size) when the request omits them. The converter id
+        // selects the MMDiT arch variant.
+        converter @ ("sd3_5_large_quant" | "sd3_5_large_turbo_quant" | "sd3_5_medium_quant") => {
+            let bits = quantize_bits.map_or(8, |bits| bits as i32);
+            let group_size = job
+                .payload
+                .get("quantizeGroupSize")
+                .and_then(Value::as_u64)
+                .map_or(64, |group| group as i32);
+            let variant = match converter {
+                "sd3_5_large_quant" => Sd3Variant::Large,
+                "sd3_5_large_turbo_quant" => Sd3Variant::LargeTurbo,
+                _ => Sd3Variant::Medium,
+            };
+            ConvertPlan::Sd3 {
+                source_dir: checkpoint_dir.clone(),
+                variant,
+                bits,
+                group_size,
+            }
+        }
         "" => {
             fail_job(
                 api,
@@ -916,6 +1048,17 @@ pub(crate) async fn run_model_convert_job(
         } => {
             tokio::task::spawn_blocking(move || {
                 convert_flux2_dev_prequant(&source_dir, &temp, bits, group_size)
+            })
+            .await
+        }
+        ConvertPlan::Sd3 {
+            source_dir,
+            variant,
+            bits,
+            group_size,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                convert_sd3_prequant(&source_dir, &temp, variant, bits, group_size)
             })
             .await
         }

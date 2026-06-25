@@ -720,6 +720,13 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // (supports_guidance=false) with no user negative prompt (supports_negative_prompt=false) — the
         // z_image_turbo / boogu_image_turbo distilled-turbo pattern.
         ("krea_2_turbo", false, false),
+        // SD3.5 Large (epic 7841 / sc-7871): true-CFG MMDiT flagship — supports_guidance=true +
+        // supports_negative_prompt=true (the `sd3_5_large` descriptor advertises supports_true_cfg).
+        ("sd3_5_large", true, true),
+        // SD3.5 Large Turbo (epic 7841 / sc-7871): the ADD-distilled few-step, CFG-off sibling — the
+        // `sd3_5_large_turbo` descriptor drops guidance + negative prompt (supports_guidance=false,
+        // supports_negative_prompt=false), the distilled-turbo pattern.
+        ("sd3_5_large_turbo", false, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
