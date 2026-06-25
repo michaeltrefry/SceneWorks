@@ -135,6 +135,11 @@ mod realvisxl_lightning_gpu_smoke;
 // dense diffusers snapshot — the worker-lane validation backing the off-Mac candle routing wire.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_dev_gpu_smoke;
+// Real-weight MLX smoke for the Krea 2 Turbo worker lane (epic 7565 sc-7575). Test-only + macOS-only;
+// drives `gen_core::load("krea_2_turbo")` with a Q8 LoadSpec against the packed `q8/` turnkey subdir —
+// the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
+#[cfg(all(test, target_os = "macos"))]
+mod krea_turbo_mlx_smoke;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +
