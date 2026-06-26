@@ -385,6 +385,48 @@ describe("StructuredPromptBuilder", () => {
     expect(expandedRows()[0].querySelector("textarea").value).toBe("one");
   });
 
+  it("keeps a LATER expanded row open by STABLE key when an EARLIER middle row is removed (sc-8115)", async () => {
+    // This is the distinguishing case for stable-key vs index tracking. The
+    // earlier "...middle row is removed" test expands index 0 and removes index
+    // 1, so an index impl would keep index 0 expanded too — it can't tell the
+    // implementations apart. Here we expand a LATER row and remove an EARLIER
+    // one, so the surviving expanded element SHIFTS index: an index impl would
+    // leave the wrong row (or nothing) expanded; only stable-key keeps "three".
+    await mount();
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "one"));
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "two"));
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "three"));
+
+    // The third row ("three", index 2) is expanded — each add auto-expands the
+    // newest row, so we don't need to click anything.
+    expect(snap.caption.compositional_deconstruction.elements.map((e) => e.desc)).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+    expect(expandedRows()).toHaveLength(1);
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("three");
+
+    // Remove the EARLIER middle row ("two", index 1). This shifts "three" from
+    // index 2 down to index 1. The removed row is NOT the expanded one, so the
+    // expanded element must remain "three".
+    const twoRow = elementRows().find(
+      (r) => r.querySelector(".structured-element-summary-text")?.textContent.includes("two"),
+    );
+    const removeTwo = [...twoRow.querySelectorAll("button")].find((b) => b.textContent.trim() === "Remove");
+    await act(async () => click(removeTwo));
+
+    expect(snap.caption.compositional_deconstruction.elements.map((e) => e.desc)).toEqual(["one", "three"]);
+    expect(expandedRows()).toHaveLength(1);
+    // With an index impl, expandedIndex 2 would now be out of range (only
+    // indices 0 and 1 remain) or point at the wrong row; only the stable-key
+    // impl keeps the SHIFTED "three" row expanded.
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("three");
+  });
+
   it("falls back to a neighbour when the EXPANDED row is removed (sc-8115)", async () => {
     await mount({
       initialCaption: captionWithElements([
