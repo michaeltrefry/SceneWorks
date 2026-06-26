@@ -4436,6 +4436,83 @@
           ]
         }
       }
+    },
+    {
+      // Vision-caption utility LLM (epic 8102, sc-8107) — the model the `image_caption` worker path
+      // loads. The native worker (`prompt_refine_jobs.rs`, the `task: "image_caption"` branch, sc-8105)
+      // sends a reference image (Content::Image) + the embedded `ideogram_image_caption_v1.txt` system
+      // prompt through the `core_llm::TextLlm` VISION path and emits a JSON-constrained Ideogram caption
+      // (style + grounded composition, bboxes kept). It resolves the weights by REPO STRING (the job
+      // payload's `model`, default `DEFAULT_REFINE_MODEL`) via the same
+      // `resolve_app_managed_model_dir` → `huggingface_snapshot_dir` seam that only *resolves* an
+      // already-cached snapshot (no auto-download). Cataloging it lets Model Manager download the
+      // snapshot into the HF cache the worker reads from, so the job resolves on a fresh macOS install
+      // (mirrors `joycaption_beta_one` / `prompt_refine_anubis_8b`).
+      //
+      // CANONICAL ID `vision_caption_qwen3vl_8b` — sibling stories sc-8110 (web surface) and sc-8108
+      // (API headless) reference this id. Default model decided by Michael (sc-8112):
+      // `huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated` — an abliterated Qwen3-VL-8B-Instruct
+      // (`model_type: qwen3_vl`, 36-layer text + 27-layer vision tower, intact `vision_config`). Making
+      // the default a one-line `downloads.repo` + `paths.model` swap keeps the 8B-vs-27B gate cheap.
+      //
+      // DOWNLOAD SOURCE = DIRECT (no re-host, no tokenizer overlay). HF verification (2026-06-26,
+      // https://huggingface.co/huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated): the repo is
+      // apache-2.0 and NOT gated; ships a FAST `tokenizer.json` (11.4 MB) + `tokenizer_config.json` +
+      // `config.json` + 4 sharded `model-0000N-of-00004.safetensors` + `model.safetensors.index.json` +
+      // `preprocessor_config.json` + `chat_template.jinja` — the standard MLX-loadable layout the
+      // mlx-llm Qwen-VL loader reads directly (dense bf16, no MLX conversion/quant). So the epic-5594
+      // re-host pattern and the DERIVED_TOKENIZER_OVERLAYS pattern do NOT apply; `files: []` pulls the
+      // whole repo (weights + tokenizer + README/license) as-is. Total ~17.6 GB: 4 safetensors shards
+      // (5.0 + 4.92 + 4.92 + 2.7 ≈ 17.54e9) + tokenizer/vocab/merges (~0.3e9) ≈ 17.85e9 bytes. The
+      // `estimatedSizeBytes` below is only a fallback — the API queries HF for the live size at load.
+      //
+      // macOnly: true for now (the Candle lane is epic 8103). HARD DEPENDENCY (sc-8171): this entry only
+      // becomes end-to-end LOADABLE after the engine pin bump that teaches the pinned mlx-llm to build
+      // the qwen3_vl vision tower; until then the engine silently mis-loads qwen3_vl as text-only. This
+      // story (sc-8107) is provisioning only — it makes the model DOWNLOADABLE into the HF cache.
+      //
+      // autoDownload: false + minMemoryGb 64: ~18 GB bf16 / ~19 GB resident, badged-but-unchecked
+      // (pulled on demand via Model Manager / the caption affordance) and gated to 64 GB+ machines.
+      "id": "vision_caption_qwen3vl_8b",
+      "recommended": true,
+      "autoDownload": false,
+      "macOnly": true,
+      "minMemoryGb": 64,
+      "name": "Vision Captioner (Qwen3-VL-8B)",
+      "family": "vision-caption",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated",
+          "files": [],
+          "estimatedSizeBytes": 17850000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Vision Captioner (Qwen3-VL-8B)",
+        "description": "Vision-language model used to turn a reference image into a structured Ideogram-style JSON caption (style + grounded composition) for image-to-prompt variations. Runs in-process on the native MLX worker (Apple Silicon).",
+        "recommendedFor": ["image_caption"],
+        "promptGuide": {
+          "title": "Vision Captioner Guide",
+          "path": "/prompt-guides/vision-caption.md",
+          "sources": [
+            { "label": "Huihui Qwen3-VL-8B-Instruct-abliterated model card", "url": "https://huggingface.co/huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated" },
+            { "label": "Qwen3-VL-8B-Instruct (base) model card", "url": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct" }
+          ]
+        }
+      }
     }
   ]
 }
