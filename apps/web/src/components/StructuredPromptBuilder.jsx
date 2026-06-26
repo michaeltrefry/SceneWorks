@@ -47,6 +47,16 @@ function getElements(caption) {
   return Array.isArray(els) ? els : [];
 }
 
+// One-line summary shown when an element row is collapsed (sc-8115): the chosen
+// label (the rendered `text` for text elements, else the `desc`) truncated, so
+// the accordion stays compact without losing the gist of each element.
+function summarizeElement(el) {
+  const raw = (el?.type === "text" ? el?.text : el?.desc) ?? "";
+  const text = raw.trim();
+  if (!text) return el?.type === "text" ? "(empty text)" : "(no description)";
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+}
+
 // Four integer inputs for a [ymin, xmin, ymax, xmax] box (0–1000). The visual
 // drag canvas is sc-5995; this is the typed fallback.
 function BboxField({ bbox, onChange, onRemove }) {
@@ -140,11 +150,25 @@ export default function StructuredPromptBuilder({
   // own — an id key would be an unknown schema key).
   const keyCounter = useRef(0);
   const [elementKeys, setElementKeys] = useState(() => elements.map(() => (keyCounter.current += 1)));
+
+  // Accordion (sc-8115): exactly one element row is expanded at a time; the rest
+  // collapse to a one-line summary. Expansion is tracked by the STABLE element
+  // key (not the array index), so adding/removing/reordering a row never expands
+  // the wrong element. `null` means every row is collapsed.
+  const [expandedElementKey, setExpandedElementKey] = useState(() => elementKeys[elementKeys.length - 1] ?? null);
+
   useEffect(() => {
     setElementKeys((prev) => {
       if (prev.length === elements.length) return prev;
       const next = prev.slice(0, elements.length);
-      while (next.length < elements.length) next.push((keyCounter.current += 1));
+      if (next.length < elements.length) {
+        while (next.length < elements.length) next.push((keyCounter.current += 1));
+        // The list grew from OUTSIDE this component (magic-prompt expand, JSON
+        // edit); expand the last freshly-minted row so the user lands on
+        // something editable. Setting the same key twice (StrictMode) is a
+        // harmless no-op; in-component add/remove already set the key directly.
+        setExpandedElementKey(next[next.length - 1]);
+      }
       return next;
     });
   }, [elements.length]);
@@ -188,12 +212,24 @@ export default function StructuredPromptBuilder({
   }
   function addElement(type) {
     const el = type === "text" ? makeTextElement({}) : makeObjElement({});
-    setElementKeys((prev) => [...prev, (keyCounter.current += 1)]);
+    const newKey = (keyCounter.current += 1);
+    setElementKeys((prev) => [...prev, newKey]);
     setElements([...elements, el]);
+    // The element being added is the expanded one (accordion single-expand).
+    setExpandedElementKey(newKey);
   }
   function removeElement(index) {
+    const removedKey = elementKeys[index];
     setElementKeys((prev) => prev.filter((_, i) => i !== index));
     setElements(elements.filter((_, i) => i !== index));
+    // If the expanded row was the one removed, fall back to a neighbouring row
+    // (prefer the previous, else the next) keyed by its STABLE key — never the
+    // index, so the right element stays open. No rows left => collapse all.
+    if (removedKey === expandedElementKey) {
+      const remaining = elementKeys.filter((_, i) => i !== index);
+      const next = remaining[index - 1] ?? remaining[index] ?? remaining[remaining.length - 1] ?? null;
+      setExpandedElementKey(next);
+    }
   }
   function setElementType(index, type) {
     updateElement(index, (el) => {
@@ -425,59 +461,101 @@ export default function StructuredPromptBuilder({
               </div>
             </div>
             {elements.length === 0 ? <p className="structured-hint">Add objects and text blocks to place them on the canvas.</p> : null}
-            {elements.map((el, i) => (
-              <div className="structured-element" key={elementKeys[i] ?? i}>
-                <div className="structured-element-head">
-                  <div className="segmented-control structured-kind" role="tablist" aria-label={`Element ${i + 1} type`}>
-                    <button type="button" aria-selected={el.type !== "text"} className={el.type !== "text" ? "active" : ""} onClick={() => setElementType(i, "obj")}>
-                      Object
-                    </button>
-                    <button type="button" aria-selected={el.type === "text"} className={el.type === "text" ? "active" : ""} onClick={() => setElementType(i, "text")}>
-                      Text
-                    </button>
-                  </div>
-                  <button type="button" className="structured-link" onClick={() => removeElement(i)}>
-                    Remove
-                  </button>
+            {elements.map((el, i) => {
+              const key = elementKeys[i] ?? i;
+              const expanded = key === expandedElementKey;
+              const isText = el.type === "text";
+              const hasBox = "bbox" in el;
+              const hasPalette = Array.isArray(el.color_palette) && el.color_palette.length > 0;
+              return (
+                <div className={`structured-element${expanded ? " expanded" : " collapsed"}`} key={key}>
+                  {expanded ? (
+                    <>
+                      <div className="structured-element-head">
+                        <button
+                          type="button"
+                          className="structured-element-toggle"
+                          aria-expanded="true"
+                          aria-label={`Collapse element ${i + 1}`}
+                          onClick={() => setExpandedElementKey(null)}
+                        >
+                          <span className="structured-element-caret" aria-hidden="true">▾</span>
+                          <span className="structured-element-badge">{isText ? "Text" : "Object"}</span>
+                        </button>
+                        <div className="segmented-control structured-kind" role="tablist" aria-label={`Element ${i + 1} type`}>
+                          <button type="button" aria-selected={!isText} className={!isText ? "active" : ""} onClick={() => setElementType(i, "obj")}>
+                            Object
+                          </button>
+                          <button type="button" aria-selected={isText} className={isText ? "active" : ""} onClick={() => setElementType(i, "text")}>
+                            Text
+                          </button>
+                        </div>
+                        <button type="button" className="structured-link" onClick={() => removeElement(i)}>
+                          Remove
+                        </button>
+                      </div>
+                      {isText ? (
+                        <label className="structured-field">
+                          <span>Text to render</span>
+                          <input type="text" placeholder="The exact characters to render" value={el.text ?? ""} onChange={(e) => updateElement(i, (cur) => ({ ...cur, text: e.target.value }))} />
+                        </label>
+                      ) : null}
+                      <label className="structured-field">
+                        <span>Description</span>
+                        <textarea className="structured-textarea" placeholder="Material, pose, expression, lighting on this element" value={el.desc ?? ""} onChange={(e) => updateElement(i, (cur) => ({ ...cur, desc: e.target.value }))} />
+                      </label>
+                      {hasBox ? (
+                        <BboxField
+                          bbox={el.bbox}
+                          onChange={(bbox) => updateElement(i, (cur) => ({ ...cur, bbox }))}
+                          onRemove={() => updateElement(i, (cur) => {
+                            const next = { ...cur };
+                            delete next.bbox;
+                            return next;
+                          })}
+                        />
+                      ) : (
+                        <button type="button" className="structured-link" onClick={() => updateElement(i, (cur) => ({ ...cur, bbox: [0, 0, BBOX_MAX, BBOX_MAX] }))}>
+                          + Bounding box
+                        </button>
+                      )}
+                      <PaletteEditor
+                        label={`Palette (max ${ELEMENT_PALETTE_MAX})`}
+                        value={el.color_palette}
+                        max={ELEMENT_PALETTE_MAX}
+                        onChange={(colors) => updateElement(i, (cur) => {
+                          const next = { ...cur };
+                          if (colors) next.color_palette = colors;
+                          else delete next.color_palette;
+                          return next;
+                        })}
+                      />
+                    </>
+                  ) : (
+                    <div className="structured-element-summary-row">
+                      <button
+                        type="button"
+                        className="structured-element-summary"
+                        aria-expanded="false"
+                        aria-label={`Expand element ${i + 1}`}
+                        onClick={() => setExpandedElementKey(key)}
+                      >
+                        <span className="structured-element-caret" aria-hidden="true">▸</span>
+                        <span className="structured-element-badge">{isText ? "Text" : "Object"}</span>
+                        <span className="structured-element-summary-text">{summarizeElement(el)}</span>
+                        <span className="structured-element-indicators" aria-hidden="true">
+                          {hasBox ? <span className="structured-element-chip" title="Has bounding box">box</span> : null}
+                          {hasPalette ? <span className="structured-element-chip" title="Has color palette">palette</span> : null}
+                        </span>
+                      </button>
+                      <button type="button" className="structured-link" onClick={() => removeElement(i)}>
+                        Remove
+                      </button>
+                    </div>
+                  )}
                 </div>
-                {el.type === "text" ? (
-                  <label className="structured-field">
-                    <span>Text to render</span>
-                    <input type="text" placeholder="The exact characters to render" value={el.text ?? ""} onChange={(e) => updateElement(i, (cur) => ({ ...cur, text: e.target.value }))} />
-                  </label>
-                ) : null}
-                <label className="structured-field">
-                  <span>Description</span>
-                  <textarea className="structured-textarea" placeholder="Material, pose, expression, lighting on this element" value={el.desc ?? ""} onChange={(e) => updateElement(i, (cur) => ({ ...cur, desc: e.target.value }))} />
-                </label>
-                {"bbox" in el ? (
-                  <BboxField
-                    bbox={el.bbox}
-                    onChange={(bbox) => updateElement(i, (cur) => ({ ...cur, bbox }))}
-                    onRemove={() => updateElement(i, (cur) => {
-                      const next = { ...cur };
-                      delete next.bbox;
-                      return next;
-                    })}
-                  />
-                ) : (
-                  <button type="button" className="structured-link" onClick={() => updateElement(i, (cur) => ({ ...cur, bbox: [0, 0, BBOX_MAX, BBOX_MAX] }))}>
-                    + Bounding box
-                  </button>
-                )}
-                <PaletteEditor
-                  label={`Palette (max ${ELEMENT_PALETTE_MAX})`}
-                  value={el.color_palette}
-                  max={ELEMENT_PALETTE_MAX}
-                  onChange={(colors) => updateElement(i, (cur) => {
-                    const next = { ...cur };
-                    if (colors) next.color_palette = colors;
-                    else delete next.color_palette;
-                    return next;
-                  })}
-                />
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       ) : null}

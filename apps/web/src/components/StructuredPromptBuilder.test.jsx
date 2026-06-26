@@ -261,4 +261,223 @@ describe("StructuredPromptBuilder", () => {
     expect(snap.validation.ok).toBe(false);
     expect(container.querySelector(".structured-issues-error")).toBeTruthy();
   });
+
+  // ----- accordion / collapsible elements (sc-8115) -----
+
+  // Helpers scoped to the element list. An expanded row renders the editable
+  // <textarea>; a collapsed row renders only the one-line summary button.
+  const elementRows = () => [...container.querySelectorAll(".structured-element")];
+  const expandedRows = () => [...container.querySelectorAll(".structured-element.expanded")];
+  const summaryButtons = () => [...container.querySelectorAll(".structured-element-summary")];
+
+  const captionWithElements = (els) => ({
+    compositional_deconstruction: { background: "bg", elements: els },
+  });
+
+  it("collapses non-edited elements to a one-line summary, exactly one expanded (sc-8115)", async () => {
+    await mount({
+      initialCaption: captionWithElements([
+        { type: "obj", desc: "a red fox" },
+        { type: "text", text: "HELLO", desc: "bold headline" },
+        { type: "obj", bbox: [0, 0, 1000, 1000], desc: "a snowy hill", color_palette: ["#FFFFFF"] },
+      ]),
+    });
+
+    // Three rows render, but only one is expanded at a time.
+    expect(elementRows()).toHaveLength(3);
+    expect(expandedRows()).toHaveLength(1);
+    // The other two collapse to summaries.
+    expect(summaryButtons()).toHaveLength(2);
+
+    // Summaries carry the chosen label: `desc` for objects, `text` for text
+    // elements (the first two rows are collapsed by default — last is expanded).
+    const summaryText = summaryButtons()
+      .map((b) => b.querySelector(".structured-element-summary-text").textContent)
+      .join("|");
+    expect(summaryText).toContain("a red fox");
+    expect(summaryText).toContain("HELLO");
+
+    // The bbox/palette indicators show on the collapsed row that has them.
+    // (Row 3 is expanded by default, so collapse it to inspect its summary.)
+    click(summaryButtons()[0]); // expand row 1, collapsing row 3
+    await act(async () => {});
+    const row3Summary = summaryButtons().find((b) =>
+      b.querySelector(".structured-element-summary-text").textContent.includes("a snowy hill"),
+    );
+    expect(row3Summary.querySelectorAll(".structured-element-chip")).toHaveLength(2); // box + palette
+  });
+
+  it("expands a clicked collapsed row and collapses the others (single-expand) (sc-8115)", async () => {
+    await mount({
+      initialCaption: captionWithElements([
+        { type: "obj", desc: "first" },
+        { type: "obj", desc: "second" },
+        { type: "obj", desc: "third" },
+      ]),
+    });
+    // Default expanded is the last row.
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("third");
+
+    // Click the summary for the "first" row.
+    const firstSummary = summaryButtons().find((b) =>
+      b.querySelector(".structured-element-summary-text").textContent.includes("first"),
+    );
+    await act(async () => click(firstSummary));
+
+    // Still exactly one expanded, and it is now "first".
+    expect(expandedRows()).toHaveLength(1);
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("first");
+  });
+
+  it("expands the newly added element, collapsing whatever was open (sc-8115)", async () => {
+    await mount({
+      initialCaption: captionWithElements([{ type: "obj", desc: "existing" }]),
+    });
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("existing");
+
+    await act(async () => click(buttonByText("+ Object")));
+
+    // The new (empty) element is the expanded one; the prior row collapsed.
+    expect(elementRows()).toHaveLength(2);
+    expect(expandedRows()).toHaveLength(1);
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("");
+    // Edits land on the new element, confirming it is the editable one.
+    await act(async () => setValue(byPlaceholder("Material, pose"), "brand new"));
+    expect(snap.caption.compositional_deconstruction.elements[1].desc).toBe("brand new");
+  });
+
+  it("keeps the right row expanded by STABLE key when a middle row is removed (sc-8115)", async () => {
+    await mount();
+    // Add three objects; each add expands the new one, so after this the third
+    // is expanded. Tag each so we can identify them by content, not index.
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "one"));
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "two"));
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "three"));
+
+    expect(snap.caption.compositional_deconstruction.elements.map((e) => e.desc)).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+
+    // Expand the FIRST row ("one") so the expanded key points at element index 0.
+    const oneSummary = summaryButtons().find((b) =>
+      b.querySelector(".structured-element-summary-text").textContent.includes("one"),
+    );
+    await act(async () => click(oneSummary));
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("one");
+
+    // Remove the MIDDLE row ("two"). The expanded element was "one" (index 0),
+    // which is NOT the removed row — if expansion were tracked by index, the
+    // remaining "one" (still index 0) would stay expanded only by luck; the real
+    // proof is that after removing the middle, "one" is still the expanded one.
+    const twoRow = elementRows().find(
+      (r) => r.querySelector(".structured-element-summary-text")?.textContent.includes("two"),
+    );
+    const removeTwo = [...twoRow.querySelectorAll("button")].find((b) => b.textContent.trim() === "Remove");
+    await act(async () => click(removeTwo));
+
+    expect(snap.caption.compositional_deconstruction.elements.map((e) => e.desc)).toEqual(["one", "three"]);
+    expect(expandedRows()).toHaveLength(1);
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("one");
+  });
+
+  it("keeps a LATER expanded row open by STABLE key when an EARLIER middle row is removed (sc-8115)", async () => {
+    // This is the distinguishing case for stable-key vs index tracking. The
+    // earlier "...middle row is removed" test expands index 0 and removes index
+    // 1, so an index impl would keep index 0 expanded too — it can't tell the
+    // implementations apart. Here we expand a LATER row and remove an EARLIER
+    // one, so the surviving expanded element SHIFTS index: an index impl would
+    // leave the wrong row (or nothing) expanded; only stable-key keeps "three".
+    await mount();
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "one"));
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "two"));
+    await act(async () => click(buttonByText("+ Object")));
+    await act(async () => setValue(byPlaceholder("Material, pose"), "three"));
+
+    // The third row ("three", index 2) is expanded — each add auto-expands the
+    // newest row, so we don't need to click anything.
+    expect(snap.caption.compositional_deconstruction.elements.map((e) => e.desc)).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+    expect(expandedRows()).toHaveLength(1);
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("three");
+
+    // Remove the EARLIER middle row ("two", index 1). This shifts "three" from
+    // index 2 down to index 1. The removed row is NOT the expanded one, so the
+    // expanded element must remain "three".
+    const twoRow = elementRows().find(
+      (r) => r.querySelector(".structured-element-summary-text")?.textContent.includes("two"),
+    );
+    const removeTwo = [...twoRow.querySelectorAll("button")].find((b) => b.textContent.trim() === "Remove");
+    await act(async () => click(removeTwo));
+
+    expect(snap.caption.compositional_deconstruction.elements.map((e) => e.desc)).toEqual(["one", "three"]);
+    expect(expandedRows()).toHaveLength(1);
+    // With an index impl, expandedIndex 2 would now be out of range (only
+    // indices 0 and 1 remain) or point at the wrong row; only the stable-key
+    // impl keeps the SHIFTED "three" row expanded.
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("three");
+  });
+
+  it("falls back to a neighbour when the EXPANDED row is removed (sc-8115)", async () => {
+    await mount({
+      initialCaption: captionWithElements([
+        { type: "obj", desc: "alpha" },
+        { type: "obj", desc: "beta" },
+        { type: "obj", desc: "gamma" },
+      ]),
+    });
+    // Default expanded is the last ("gamma"). Remove it.
+    const gammaRow = elementRows().find((r) => r.querySelector("textarea")?.value === "gamma");
+    const removeGamma = [...gammaRow.querySelectorAll("button")].find((b) => b.textContent.trim() === "Remove");
+    await act(async () => click(removeGamma));
+
+    // A neighbour stays expanded (the previous row, "beta"), never zero/orphaned.
+    expect(snap.caption.compositional_deconstruction.elements.map((e) => e.desc)).toEqual(["alpha", "beta"]);
+    expect(expandedRows()).toHaveLength(1);
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("beta");
+  });
+
+  it("expands the last freshly-minted element after an external (magic-prompt) expand (sc-8115)", async () => {
+    const expanded = {
+      high_level_description: "a red fox",
+      compositional_deconstruction: {
+        background: "snow",
+        elements: [
+          { type: "obj", desc: "a red fox" },
+          { type: "text", text: "WINTER", desc: "title" },
+        ],
+      },
+    };
+    const onMagicExpand = vi.fn(async () => expanded);
+    await mount({ initialMode: "plain", initialPlain: "a red fox in the snow", onMagicExpand });
+    await clickAndSettle(buttonByText("✨ Expand to caption"));
+
+    // Dropped into the builder with both elements present, exactly one expanded
+    // (the last freshly-minted row), the rest collapsed to summaries.
+    expect(snap.mode).toBe("form");
+    expect(elementRows()).toHaveLength(2);
+    expect(expandedRows()).toHaveLength(1);
+    expect(expandedRows()[0].querySelector("textarea").value).toBe("title");
+  });
+
+  it("collapses everything when the open row is collapsed via its toggle (sc-8115)", async () => {
+    await mount({
+      initialCaption: captionWithElements([{ type: "obj", desc: "solo" }]),
+    });
+    expect(expandedRows()).toHaveLength(1);
+    // Click the expanded row's toggle to collapse it -> zero expanded.
+    const toggle = container.querySelector(".structured-element-toggle");
+    await act(async () => click(toggle));
+    expect(expandedRows()).toHaveLength(0);
+    expect(summaryButtons()).toHaveLength(1);
+  });
 });

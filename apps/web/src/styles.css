@@ -1667,10 +1667,102 @@ label {
   padding: 10px 12px;
 }
 
+.structured-element.collapsed {
+  padding: 0;
+}
+
 .structured-element-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+/* Accordion (sc-8115): collapsed rows show a one-line summary; the expanded row
+   shows the full editor. The summary is the whole clickable header. */
+.structured-element-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.structured-element-summary-row .structured-link {
+  flex: none;
+}
+
+.structured-element-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+}
+
+.structured-element-summary:hover {
+  background: var(--surface-hover);
+  border-radius: var(--r-sm);
+}
+
+.structured-element-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+}
+
+.structured-element-caret {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.structured-element-badge {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.structured-element-summary-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.structured-element-indicators {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+
+.structured-element-chip {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
 }
 
 .structured-bbox-row {
