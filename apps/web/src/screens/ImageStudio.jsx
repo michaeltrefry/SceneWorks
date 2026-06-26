@@ -96,6 +96,7 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor, imageModelUsable } from "../modelEligibility.js";
 import { pidToggleVisible } from "../pidEligibility.js";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { pickClosestResolution } from "../resolutionMatch.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
@@ -721,6 +722,21 @@ export function ImageStudio() {
         ? selectedModel.limits.resolutions
         : DEFAULT_RESOLUTION_OPTIONS,
     [selectedModel],
+  );
+  // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
+  // image's natural dimensions become known, snap the resolution picker to whichever
+  // option best matches its aspect ratio. The caption's bboxes are normalized 0–1000
+  // to the FRAME, so a reference grounded for (say) 4:5 but rendered at 16:9 comes out
+  // wrong-shaped — matching the aspect keeps the captured composition valid. This is a
+  // plain seam: the reference-image upload handler (the picker UI itself lands in
+  // sc-8108) calls onReferenceImageLoaded(width, height) once the image has loaded.
+  // setResolution still leaves the picker fully user-overridable.
+  const onReferenceImageLoaded = useCallback(
+    (referenceWidth, referenceHeight) => {
+      const match = pickClosestResolution(referenceWidth, referenceHeight, resolutionOptions);
+      if (match) setResolution(match);
+    },
+    [resolutionOptions],
   );
   // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
   // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
@@ -1384,6 +1400,10 @@ export function ImageStudio() {
                 onMagicExpand={magicPrompt ? onMagicExpand : undefined}
                 magicModelMissing={magicModelMissing}
                 onDownloadMagicModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
+                // sc-8109 seam: the reference-image picker (sc-8108) calls this with the
+                // uploaded image's natural dimensions to auto-preset the resolution to the
+                // nearest aspect. No-op until that picker lands.
+                onReferenceImageLoaded={onReferenceImageLoaded}
               />
             ) : (
               <textarea

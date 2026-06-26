@@ -91,6 +91,12 @@ export default function StructuredPromptBuilder({
   onMagicExpand,
   magicModelMissing = false,
   onDownloadMagicModel,
+  // sc-8109 / epic 8102 seam: invoked with the natural (width, height) of an uploaded
+  // reference image so the parent can auto-preset the generation resolution to the
+  // nearest aspect (the caption's bboxes are normalized 0–1000 to the frame). The
+  // reference-image picker that calls this lands in sc-8108; until then this is unused.
+  // eslint-disable-next-line no-unused-vars
+  onReferenceImageLoaded,
 }) {
   const composition = getComposition(caption);
   const elements = getElements(caption);
