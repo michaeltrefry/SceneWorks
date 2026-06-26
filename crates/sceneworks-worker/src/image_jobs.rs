@@ -1152,7 +1152,10 @@ async fn apply_inline_upscale(
                 JobStatus::Running,
                 ProgressStage::Running,
                 0.9,
-                &format!("Upscaling image {}/{total} {factor}x with {engine_id}.", i + 1),
+                &format!(
+                    "Upscaling image {}/{total} {factor}x with {engine_id}.",
+                    i + 1
+                ),
                 Some(streaming_result(plan, asset_writes)),
                 backend,
             ),
