@@ -1154,16 +1154,22 @@ mod tests {
         );
     }
 
-    /// Weightless resolution proof (the Issue-1 settler). With a Qwen-VL (`qwen3_5`) snapshot
-    /// `config.json` on disk and the real `mlx-llm` inventory linked, demanding `vision:true` +
-    /// `[Json]` (what `ModelRequirements::from_request` derives from an image request) makes core-llm's
-    /// model-first `select` FAIL with `Error::Unsupported` — no provider statically advertises BOTH
-    /// vision and Json for a Qwen-VL snapshot (`mlx-llama` is text+Json until load; `mlx-joycaption` is
-    /// vision-but-no-constraints + only serves LLaVA). This is the reviewer's BLOCKER, reproduced.
-    /// macOS-only (the `mlx-llm` providers link there); no weights — resolution reads only `config.json`.
+    /// Weightless resolution proof — UPDATED for the sc-8171 engine bump (mlx-llm 6c052ba → 7041411).
+    /// On the OLD engine, demanding `vision:true` + `[Json]` for a Qwen-VL (`qwen3_5`) snapshot FAILED
+    /// `select` with `Error::Unsupported`: `mlx-llama`'s STATIC descriptor was `supports_vision:false`
+    /// (vision flipped on only at LOAD), so no provider statically satisfied both vision and Json. The
+    /// bump adds the per-snapshot `weightless_vision` probe (mlx-llm provider.rs / core-llm sc-8077): the
+    /// resolver now recognizes a `qwen3_5`/`qwen3_vl` wrapper as vision-capable from `config.json` ALONE,
+    /// so vision+Json RESOLVES `mlx-llama` and reaches `load` (which then fails only on the missing
+    /// weight shards, NOT an `Unsupported` capability gap). This test pins that lifted limitation.
+    ///
+    /// NB: the PRODUCTION image_caption path is unaffected — it deliberately resolves on the JSON
+    /// constraint ALONE and acquires vision at load (see the resolution note on the blocking task), so it
+    /// worked before AND after the bump. This test just proves the resolver gained resolution-time vision
+    /// recognition. macOS-only (the `mlx-llm` providers link there); no weights — reads only `config.json`.
     #[cfg(target_os = "macos")]
     #[test]
-    fn vision_plus_json_resolution_fails_for_qwen_vl_snapshot() {
+    fn vision_plus_json_resolution_now_resolves_for_qwen_vl_snapshot() {
         use gen_core::core_llm::{load_for_model_with, Constraint, LoadSpec, ModelRequirements};
         use mlx_llm as _; // force-link the providers into core-llm's inventory
 
@@ -1174,22 +1180,24 @@ mod tests {
         let reqs = ModelRequirements::default()
             .with_vision()
             .with_constraint(Constraint::Json);
-        let result = load_for_model_with(
+        let err = load_for_model_with(
             &LoadSpec {
                 source: dir.path().to_string_lossy().into_owned(),
                 quantize: None,
             },
             &reqs,
-        );
-        let err = result
-            .err()
-            .expect("vision+Json must not resolve for a Qwen-VL snapshot");
+        )
+        .err()
+        .expect("no weight shards on disk, so the LOAD fails after the provider is selected");
         let msg = err.to_string();
-        // The failure is a capability/resolution gap (Unsupported), surfaced BEFORE any weight load —
-        // not a missing-weights load error. The message is core-llm's `unmet_caps_msg`.
+        // Post-bump: a provider WAS selected (the weightless_vision probe satisfied the vision gate), so
+        // the error is a weight-load failure — NOT the pre-bump `Unsupported` capability-resolution gap.
         assert!(
-            msg.contains("loadable, but no linked provider meets") || msg.contains("unsupported"),
-            "expected an Unsupported capability-resolution error, got: {msg}"
+            !msg.contains("no linked provider meets")
+                && !msg.contains("no registered provider can serve")
+                && !msg.contains("unsupported"),
+            "vision+Json must now resolve a provider for a Qwen-VL snapshot (then fail on missing \
+             weights) thanks to the weightless_vision probe; got: {msg}"
         );
     }
 
@@ -1269,6 +1277,122 @@ mod tests {
                 "vision_config":{"model_type":"qwen3_5","depth":27}}"#,
         )
         .expect("write qwen-vl config.json");
+    }
+
+    /// A minimal **`qwen3_vl`** VLM-wrapper `config.json` — the architecture of the chosen default
+    /// image_caption model (`huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated`). `model_type`
+    /// `qwen3_vl` (+ `text_config.model_type` `qwen3_vl_text`) is the family the sc-8171 engine bump
+    /// (mlx-llm 6c052ba → 7041411) teaches the inventory to recognize: before the bump `qwen3_vl`
+    /// silently fell through to a text-only `Architecture::Qwen3` (no vision tower); after it,
+    /// `Architecture::Qwen3Vl` + the per-snapshot `weightless_vision` probe make a `qwen3_vl` snapshot
+    /// resolve vision-capable. No weight shards / tokenizer: resolution reads only this file.
+    #[cfg(target_os = "macos")]
+    fn write_qwen3_vl_config(dir: &Path) {
+        std::fs::write(
+            dir.join("config.json"),
+            br#"{"architectures":["Qwen3VLForConditionalGeneration"],
+                "model_type":"qwen3_vl",
+                "text_config":{"model_type":"qwen3_vl_text"},
+                "vision_config":{"model_type":"qwen3_vl","depth":27}}"#,
+        )
+        .expect("write qwen3_vl config.json");
+    }
+
+    /// Weightless resolution proof for the **`qwen3_vl`** default model (sc-8171, the whole point of
+    /// the engine bump). The SAME shape as `json_only_resolution_selects_a_provider_for_qwen_vl_snapshot`
+    /// but on a `qwen3_vl` snapshot: under the worker's image_caption requirements (JSON constraint
+    /// ALONE), core-llm's `select` admits `mlx-llama` for the `qwen3_vl` wrapper. CRUCIALLY this test
+    /// ALSO proves the bump's purpose — that the SAME `qwen3_vl` snapshot resolves to a *vision-capable*
+    /// provider — by replicating core-llm's per-snapshot vision predicate (`weightless_vision` probe →
+    /// `serves_vision`) over the live registry. On the OLD engine (mlx-llm 6c052ba) a `qwen3_vl`
+    /// `config.json` parsed to a text-only `Architecture::Qwen3` with NO `weightless_vision` probe, so
+    /// this vision assertion would fail; on the bumped engine (7041411) it passes. macOS-only (the
+    /// `mlx-llm` providers link there); no weights — resolution reads only `config.json`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn json_only_resolution_selects_vision_capable_provider_for_qwen3_vl_snapshot() {
+        use gen_core::core_llm::{
+            load_for_model_with, textllms, Constraint, LoadSpec, ModelRequirements,
+        };
+        use mlx_llm as _; // force-link the providers into core-llm's inventory
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_qwen3_vl_config(dir.path());
+        let spec = LoadSpec {
+            source: dir.path().to_string_lossy().into_owned(),
+            quantize: None,
+        };
+
+        // (1) Selection: the worker's image_caption resolution requirements (JSON constraint only)
+        // resolve a provider for the qwen3_vl snapshot — the LOAD then fails on missing weights, NOT
+        // the `Unsupported` capability-resolution error (proving a provider WAS selected).
+        let reqs = ModelRequirements::default().with_constraint(Constraint::Json);
+        let err = load_for_model_with(&spec, &reqs)
+            .err()
+            .expect("no weights on disk, so the LOAD fails after the provider is selected");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("no linked provider meets")
+                && !msg.contains("no registered provider can serve"),
+            "JSON-only requirements must resolve a provider for a qwen3_vl snapshot (then fail on \
+             missing weights), got: {msg}"
+        );
+
+        // (2) The selected Json provider for this qwen3_vl snapshot is `mlx-llama` — the one whose
+        // loaded Qwen3-VL tower reads the `Content::Image` at generate time.
+        let json_viable: Vec<String> = textllms()
+            .filter(|r| (r.can_load)(&spec))
+            .filter(|r| {
+                let caps = (r.descriptor)().capabilities;
+                reqs.constraints
+                    .iter()
+                    .all(|c| caps.supports_constraint(*c))
+            })
+            .map(|r| (r.descriptor)().id)
+            .collect();
+        assert!(
+            json_viable.iter().any(|id| id == "mlx-llama"),
+            "JSON-only resolution must admit `mlx-llama` for a qwen3_vl snapshot; viable: {json_viable:?}"
+        );
+
+        // (3) THE BUMP'S PURPOSE: the same qwen3_vl snapshot is recognized as vision-capable. Replicate
+        // core-llm's per-snapshot vision predicate (the `weightless_vision` probe added in mlx-llm
+        // 7041411 / sc-8077, OR a statically-vision descriptor) over the live registry. At least one
+        // provider that `can_load` this snapshot must serve it WITH vision — impossible on the old
+        // engine, where `qwen3_vl` was a text-only `Qwen3` with no probe.
+        let vision_capable: Vec<String> = textllms()
+            .filter(|r| (r.can_load)(&spec))
+            .filter(|r| {
+                r.weightless_vision.map(|p| p(&spec)).unwrap_or(false)
+                    || (r.descriptor)().capabilities.supports_vision
+            })
+            .map(|r| (r.descriptor)().id)
+            .collect();
+        assert!(
+            vision_capable.iter().any(|id| id == "mlx-llama"),
+            "the sc-8171 bump must make a qwen3_vl snapshot resolve to a vision-capable `mlx-llama` \
+             provider (weightless_vision probe); vision-capable providers were: {vision_capable:?}"
+        );
+
+        // (4) End-to-end resolver proof of the bump: demanding vision + Json at RESOLUTION now RESOLVES
+        // a provider for the qwen3_vl snapshot (the `weightless_vision` probe satisfies the vision gate
+        // from `config.json` alone), reaching `load` — which fails only on the missing weight shards, NOT
+        // the pre-bump `Unsupported` capability gap. (Production still resolves on Json alone and acquires
+        // vision at load; this assertion proves the resolver itself gained resolution-time vision.)
+        let vision_json = ModelRequirements::default()
+            .with_vision()
+            .with_constraint(Constraint::Json);
+        let vj_msg = load_for_model_with(&spec, &vision_json)
+            .err()
+            .expect("no weight shards on disk, so the LOAD fails after the provider is selected")
+            .to_string();
+        assert!(
+            !vj_msg.contains("no linked provider meets")
+                && !vj_msg.contains("no registered provider can serve")
+                && !vj_msg.contains("unsupported"),
+            "vision+Json must now resolve a provider for a qwen3_vl snapshot (then fail on missing \
+             weights) thanks to the weightless_vision probe; got: {vj_msg}"
+        );
     }
 
     /// Real-weight image-caption smoke (sc-8105 → validated under sc-8113): examines a reference image

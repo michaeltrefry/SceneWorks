@@ -1056,6 +1056,9 @@ mod tests {
             descriptor: stub_textllm_descriptor,
             load: stub_textllm_load,
             can_load: stub_textllm_can_load,
+            // No per-snapshot vision probe (sc-8077 / mlx-llm 7041411): this candle text-only stub
+            // never serves vision, so it stays as the static `supports_vision=false` descriptor says.
+            weightless_vision: None,
         }
     }
 
