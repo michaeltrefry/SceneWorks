@@ -478,8 +478,15 @@ export default function StructuredPromptBuilder({
 
       {mode !== "plain" ? (
         <div className="structured-preview">
-          <div className="structured-preview-head">Generated caption (sent to the model)</div>
-          <pre aria-label="Caption preview">{prettyCaption(caption)}</pre>
+          {/* The JSON tab's textarea already shows the canonical JSON, so the
+              read-only preview pane is a duplicate there — only render it in the
+              form builder. Schema errors/warnings stay on both tabs (sc-8114). */}
+          {mode === "form" ? (
+            <>
+              <div className="structured-preview-head">Generated caption (sent to the model)</div>
+              <pre aria-label="Caption preview">{prettyCaption(caption)}</pre>
+            </>
+          ) : null}
           {errors.length ? (
             <ul className="structured-issues structured-issues-error">
               {errors.map((issue, i) => (

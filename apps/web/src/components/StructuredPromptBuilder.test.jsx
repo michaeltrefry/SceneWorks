@@ -227,4 +227,38 @@ describe("StructuredPromptBuilder", () => {
     expect(snap.validation.ok).toBe(false);
     expect(container.querySelector(".structured-issues-error")).toBeTruthy();
   });
+
+  it("shows the read-only caption preview in form mode (sc-8114)", async () => {
+    await mount({ initialMode: "form" });
+    expect(container.querySelector('[aria-label="Caption preview"]')).toBeTruthy();
+  });
+
+  it("hides the duplicate read-only caption preview on the JSON tab (sc-8114)", async () => {
+    await mount({ initialMode: "json" });
+    // The JSON textarea already shows the canonical JSON, so the duplicate
+    // read-only <pre> preview must NOT render on the JSON tab.
+    expect(container.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
+    // The editable JSON textarea is still present.
+    expect(container.querySelector('textarea[aria-label="JSON caption"]')).toBeTruthy();
+  });
+
+  it("hides the read-only caption preview in plain mode (sc-8114)", async () => {
+    await mount({ initialMode: "plain" });
+    expect(container.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
+  });
+
+  it("still surfaces schema validation errors on the JSON tab without the preview (sc-8114)", async () => {
+    const bad = {
+      compositional_deconstruction: {
+        background: "bg",
+        elements: [{ type: "obj", bbox: [0, 0, 5000, 10], desc: "d" }],
+      },
+    };
+    await mount({ initialMode: "json", initialCaption: bad });
+    // No duplicate preview pane...
+    expect(container.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
+    // ...but the schema validation errors are still visible on the JSON tab.
+    expect(snap.validation.ok).toBe(false);
+    expect(container.querySelector(".structured-issues-error")).toBeTruthy();
+  });
 });
