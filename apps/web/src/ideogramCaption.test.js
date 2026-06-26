@@ -12,10 +12,13 @@ import {
   orderCaption,
   parseCaption,
   parseMagicPromptCaption,
+  parseVisionCaption,
   runtimePromptFromRecipe,
   serializeCaption,
+  stripJsonFence,
   STYLE_KEY_ORDER_NON_PHOTO,
   validateCaption,
+  validateVisionCaption,
   verifyCaption,
   verifyRaw,
 } from "./ideogramCaption.js";
@@ -317,6 +320,144 @@ describe("parseMagicPromptCaption", () => {
   it("errors on non-JSON and on non-object JSON", () => {
     expect(parseMagicPromptCaption("not json").error).toBeTruthy();
     expect(parseMagicPromptCaption("[1, 2]").error).toBeTruthy();
+  });
+});
+
+describe("parseVisionCaption (epic 8102)", () => {
+  // What the vision path emits: a top-level aspect_ratio + IMAGE-DERIVED bboxes on
+  // elements. The differentiator vs magic-prompt: those bboxes are KEPT.
+  const VISION_OUTPUT =
+    '{"aspect_ratio": "16:9", "high_level_description": "A red fox in the snow", "compositional_deconstruction": {"background": "a snowy forest", "elements": [{"type": "obj", "bbox": [250, 320, 950, 760], "desc": "a red fox"}]}}';
+
+  it("drops aspect_ratio and validates clean", () => {
+    const { caption, error } = parseVisionCaption(VISION_OUTPUT);
+    expect(error).toBe(null);
+    expect("aspect_ratio" in caption).toBe(false);
+    expect(validateCaption(caption).ok).toBe(true);
+  });
+
+  it("KEEPS element bboxes (the key difference vs magic-prompt)", () => {
+    const { caption } = parseVisionCaption(VISION_OUTPUT);
+    expect(caption.compositional_deconstruction.elements[0].bbox).toEqual([250, 320, 950, 760]);
+
+    // Contrast: the magic-prompt path strips the same bboxes by default.
+    const magic = parseMagicPromptCaption(VISION_OUTPUT).caption;
+    expect("bbox" in magic.compositional_deconstruction.elements[0]).toBe(false);
+  });
+
+  it("handles a ```json-fenced model reply", () => {
+    const fenced = "```json\n" + VISION_OUTPUT + "\n```";
+    const { caption, error } = parseVisionCaption(fenced);
+    expect(error).toBe(null);
+    expect("aspect_ratio" in caption).toBe(false);
+    expect(caption.compositional_deconstruction.elements[0].bbox).toEqual([250, 320, 950, 760]);
+  });
+
+  it("handles a bare ``` fence and surrounding prose", () => {
+    const wrapped = "Here is the caption:\n```\n" + VISION_OUTPUT + "\n```\nHope that helps!";
+    const { caption, error } = parseVisionCaption(wrapped);
+    expect(error).toBe(null);
+    expect(caption.compositional_deconstruction.elements[0].bbox).toEqual([250, 320, 950, 760]);
+  });
+
+  it("extracts JSON embedded in prose without a fence", () => {
+    const prose = "Sure! " + VISION_OUTPUT + " Let me know if you want changes.";
+    const { caption, error } = parseVisionCaption(prose);
+    expect(error).toBe(null);
+    expect(caption.compositional_deconstruction.elements[0].bbox).toEqual([250, 320, 950, 760]);
+  });
+
+  it("errors on non-JSON, non-object JSON, and empty input", () => {
+    expect(parseVisionCaption("the model refused to answer").error).toBeTruthy();
+    expect(parseVisionCaption("[1, 2]").error).toBeTruthy();
+    expect(parseVisionCaption("").error).toBeTruthy();
+    expect(parseVisionCaption("   ").error).toBeTruthy();
+  });
+});
+
+describe("stripJsonFence", () => {
+  const BODY = '{"a": 1}';
+
+  it("strips a ```json fence", () => {
+    expect(stripJsonFence("```json\n" + BODY + "\n```")).toBe(BODY);
+  });
+
+  it("strips a bare ``` fence", () => {
+    expect(stripJsonFence("```\n" + BODY + "\n```")).toBe(BODY);
+  });
+
+  it("returns clean JSON unchanged", () => {
+    expect(stripJsonFence(BODY)).toBe(BODY);
+  });
+
+  it("extracts the object span out of surrounding prose", () => {
+    expect(stripJsonFence("noise " + BODY + " trailing")).toBe(BODY);
+  });
+
+  it("is safe on non-string and empty input", () => {
+    expect(stripJsonFence(null)).toBe("");
+    expect(stripJsonFence(undefined)).toBe("");
+    expect(stripJsonFence("")).toBe("");
+  });
+});
+
+describe("validateVisionCaption — inject gate (sc-8108 consumes)", () => {
+  const VISION_OUTPUT =
+    '{"aspect_ratio": "16:9", "high_level_description": "A red fox in the snow", "compositional_deconstruction": {"background": "a snowy forest", "elements": [{"type": "obj", "bbox": [250, 320, 950, 760], "desc": "a red fox"}]}}';
+
+  it("returns ok with the cleaned caption for a well-formed reply (bboxes kept)", () => {
+    const result = validateVisionCaption(VISION_OUTPUT);
+    expect(result.ok).toBe(true);
+    expect(result.error).toBe(null);
+    expect("aspect_ratio" in result.caption).toBe(false);
+    expect(result.caption.compositional_deconstruction.elements[0].bbox).toEqual([250, 320, 950, 760]);
+  });
+
+  it("ok for a fenced reply", () => {
+    const result = validateVisionCaption("```json\n" + VISION_OUTPUT + "\n```");
+    expect(result.ok).toBe(true);
+    expect(result.caption.compositional_deconstruction.elements[0].bbox).toEqual([250, 320, 950, 760]);
+  });
+
+  it("surfaces a clear error for non-caption / refusal text", () => {
+    const result = validateVisionCaption("I'm sorry, I can't help with that.");
+    expect(result.ok).toBe(false);
+    expect(result.caption).toBe(null);
+    expect(typeof result.error).toBe("string");
+    expect(result.error.length).toBeGreaterThan(0);
+  });
+
+  it("surfaces a clear error for empty / garbage input", () => {
+    expect(validateVisionCaption("").ok).toBe(false);
+    expect(validateVisionCaption("   ").ok).toBe(false);
+    expect(validateVisionCaption("{ not json").ok).toBe(false);
+    expect(validateVisionCaption("[1, 2, 3]").ok).toBe(false);
+    // each carries a non-empty surfaceable message
+    expect(validateVisionCaption("[1, 2, 3]").error).toBeTruthy();
+  });
+
+  it("rejects structurally-invalid captions (missing compositional_deconstruction)", () => {
+    const result = validateVisionCaption('{"high_level_description": "just a sentence"}');
+    expect(result.ok).toBe(false);
+    expect(result.caption).toBe(null);
+    expect(result.error).toBeTruthy();
+  });
+
+  it("rejects a caption whose bbox is out of range (bad model output)", () => {
+    const bad =
+      '{"compositional_deconstruction": {"background": "b", "elements": [{"type": "obj", "bbox": [0, 0, 2000, 10], "desc": "d"}]}}';
+    const result = validateVisionCaption(bad);
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeTruthy();
+  });
+
+  it("does NOT block on advisory warnings (key-order / missing-recommended)", () => {
+    // Drifted key order + no high_level_description/style_description — warnings only.
+    const drifted =
+      '{"compositional_deconstruction": {"elements": [{"type": "obj", "desc": "d", "bbox": [0, 0, 10, 10]}], "background": "b"}}';
+    const result = validateVisionCaption(drifted);
+    expect(result.ok).toBe(true);
+    expect(result.caption.compositional_deconstruction.elements[0].bbox).toEqual([0, 0, 10, 10]);
   });
 });
 

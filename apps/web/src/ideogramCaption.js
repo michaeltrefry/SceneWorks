@@ -243,6 +243,69 @@ export function parseMagicPromptCaption(rawText, { stripBboxes = true } = {}) {
   return { caption: out, error: null };
 }
 
+// Pull the JSON body out of a raw model reply. VLMs commonly wrap their answer
+// in a Markdown code fence (```json … ``` or a bare ``` … ```) and sometimes add
+// a sentence of preamble; this strips a single leading/trailing fence and falls
+// back to the first `{ … }` span so the parser sees clean JSON. Returns the raw
+// string unchanged when there is nothing to strip.
+export function stripJsonFence(rawText) {
+  if (typeof rawText !== "string") return "";
+  let text = rawText.trim();
+  const fence = text.match(/^```(?:json|JSON)?\s*\n?([\s\S]*?)\n?```$/);
+  if (fence) {
+    text = fence[1].trim();
+  }
+  // After (or without) a fence, prefer the outermost JSON object span if the
+  // reply still carries prose around it (e.g. "Here is the caption: { … }").
+  if (!text.startsWith("{")) {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+      text = text.slice(start, end + 1);
+    }
+  }
+  return text;
+}
+
+// Turn a vision-grounded model reply (epic 8102) into a schema-clean caption.
+// This is the magic-prompt cleanup with ONE deliberate difference: the VLM
+// derives bboxes from the actual reference image, so they are KEPT (magic-prompt
+// guesses boxes and strips them). We also tolerate code-fenced replies, since
+// VLM output is frequently wrapped in a Markdown fence. Drops only the non-schema
+// top-level `aspect_ratio` key; serializeCaption drops any other unknown keys.
+export function parseVisionCaption(rawText) {
+  return parseMagicPromptCaption(stripJsonFence(rawText), { stripBboxes: false });
+}
+
+// Validation entry point the vision inject flow (sc-8108) calls: given a raw
+// model reply, return `{ ok, caption, error }`. `ok` is true only when the reply
+// parsed into a STRUCTURED caption that passes the verifier (the `is_caption`
+// equivalent — `compositional_deconstruction` present etc.). On malformed or
+// non-caption output it returns `ok: false` with a clear, user-surfaceable error
+// message (and `caption: null`) so the caller can show an error and allow retry,
+// mirroring the magic-prompt error UI. Warnings (key-order, missing-recommended)
+// never block — the caption is still returned and `ok` stays true.
+export function validateVisionCaption(rawText) {
+  const { caption, error } = parseVisionCaption(rawText);
+  if (error || !caption) {
+    return {
+      ok: false,
+      caption: null,
+      error: error || "The model did not return a structured caption.",
+    };
+  }
+  const result = validateCaption(caption);
+  if (!result.ok) {
+    const first = result.errors[0];
+    return {
+      ok: false,
+      caption: null,
+      error: first ? first.message : "The model returned an invalid caption.",
+    };
+  }
+  return { ok: true, caption, error: null };
+}
+
 // ----- verifier (faithful mirror of CaptionVerifier) -----------------------
 //
 // Returns structured issues `{ code, path, severity, message }`. `severity` is
