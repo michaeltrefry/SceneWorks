@@ -3742,6 +3742,37 @@ fn detail_feather_ramps_over_overlap() {
     assert!((at(8, 0) - at(8, 15)).abs() < 1e-6);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn compose_feathered_no_boundary_vignette() {
+    // sc-8229: a single edge tile covers the whole frame; its raised-cosine feather ramps
+    // toward ~0 over the `overlap` border. Recompose must normalize by the true accumulated
+    // weight so the border keeps its full source value (not a dark rounded-corner vignette).
+    let (width, height) = (32u32, 32u32);
+    let overlap = 8;
+    let feather = detail_feather(width, height, overlap);
+    let mut acc = vec![0.0f32; (width * height * 3) as usize];
+    let mut wsum = vec![0.0f32; (width * height) as usize];
+    // Uniform mid-gray source refined by one full-frame tile.
+    const SRC: f32 = 200.0;
+    for i in 0..(width * height) as usize {
+        let f = feather[i];
+        acc[i * 3] += SRC * f;
+        acc[i * 3 + 1] += SRC * f;
+        acc[i * 3 + 2] += SRC * f;
+        wsum[i] += f;
+    }
+    let out = compose_feathered(&acc, &wsum, width, height);
+    // Every pixel — corners and edges included — recovers the source value, not a ramp to black.
+    for (x, y) in [(0, 0), (0, height - 1), (width - 1, 0), (15, 0), (0, 15), (15, 15)] {
+        let px = out.get_pixel(x, y).0;
+        assert!(
+            px.iter().all(|&c| c.abs_diff(SRC as u8) <= 1),
+            "pixel ({x},{y}) = {px:?} darkened toward the border (expected ~{SRC})"
+        );
+    }
+}
+
 /// sc-3625 real-Mac E2E (epic 3621): drive the WORKER's FLUX.1 XLabs IP-Adapter reference path
 /// end to end on real weights — `resolve_flux_ip_adapter_dir` staging from the real HF cache +
 /// `load_engine` + a real `Conditioning::Reference` dev `true_cfg` render against the
