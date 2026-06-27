@@ -81,6 +81,12 @@ const ACCEL_DEVICE: &str = "cuda";
 const MAX_UPSCALE_TARGET_DIMENSION: u32 = 8192;
 const MAX_UPSCALE_TARGET_PIXELS: u64 =
     MAX_UPSCALE_TARGET_DIMENSION as u64 * MAX_UPSCALE_TARGET_DIMENSION as u64;
+/// SeedVR2's engine-enforced per-side output cap (the registry descriptor's `max_size`; the engine
+/// errors `"size … outside supported range 16..=4096"` past it). Tighter than the generic
+/// [`MAX_UPSCALE_TARGET_DIMENSION`], so a >2048px source at ×2 (or >1024 at ×4) must be rejected with a
+/// clear, actionable message here rather than failing deep in the engine as a raw "Image upscale failed"
+/// (sc-8228 secondary gap).
+const SEEDVR2_MAX_OUTPUT_DIMENSION: u32 = 4096;
 const CANCEL_MESSAGE: &str = "Image upscale canceled by user.";
 
 /// SceneWorks-owned HuggingFace repo hosting the pre-exported ONNX (reproducible from
@@ -518,6 +524,15 @@ async fn run_seedvr2_upscale(
     let target_w = round_to_16(src_w.saturating_mul(u32::from(factor)));
     let target_h = round_to_16(src_h.saturating_mul(u32::from(factor)));
     validate_upscale_target_dimensions(target_w, target_h)?;
+    // SeedVR2 hard-caps each output side at 4096 (engine `max_size`); pre-validate so an oversized
+    // target surfaces a clear, actionable message instead of a raw engine failure (sc-8228).
+    if target_w > SEEDVR2_MAX_OUTPUT_DIMENSION || target_h > SEEDVR2_MAX_OUTPUT_DIMENSION {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SeedVR2 supports up to {SEEDVR2_MAX_OUTPUT_DIMENSION}px per side; a {factor}× upscale of \
+             {src_w}x{src_h} would be {target_w}x{target_h}. Use a smaller factor or source image, or \
+             pick the Real-ESRGAN upscaler for larger targets."
+        )));
+    }
     let image = GenImage {
         width: src_w,
         height: src_h,
