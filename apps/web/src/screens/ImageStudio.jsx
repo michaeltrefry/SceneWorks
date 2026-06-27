@@ -94,7 +94,7 @@ import {
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { downloadOffersFor, imageModelUsable } from "../modelEligibility.js";
+import { downloadOffersFor, imageModelUsable, visionCaptionModelUsable } from "../modelEligibility.js";
 import { pidToggleVisible } from "../pidEligibility.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { pickClosestResolution } from "../resolutionMatch.js";
@@ -297,12 +297,24 @@ export function ImageStudio() {
     () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
     [models],
   );
-  // Vision-captioner catalog entry (sc-8107) — drives the "download the vision model" affordance in
-  // the reference-image caption flow (sc-8108) when captioning fails because the model isn't installed.
-  // The eligibility/download gate proper is the sibling sc-8110; this is the inline fallback affordance.
+  // Vision-captioner catalog entry (sc-8107) — drives the reference-image caption flow (sc-8108).
   const visionModel = useMemo(
     () => models.find((entry) => entry.id === VISION_CAPTION_MODEL_ID),
     [models],
+  );
+  // Reference-image caption gate (sc-8110): the picker + "Generate JSON from image" button only goes
+  // live once the vision captioner is present (installed/incomplete) AND usable on this platform
+  // (visionCaptionModelUsable respects macOnly + Mac gating). When it's absent the section renders the
+  // shared ModelAvailabilityGate download offer instead of a button that would only fail on click —
+  // ONE coherent gate, formalizing sc-8108's inline error-driven affordance. `ready` matches the
+  // catalog state (hasUsableModelFor counts non-missing models); offers come from downloadOffersFor.
+  const visionCaptionReady =
+    Boolean(visionModel) &&
+    visionModel.installState !== "missing" &&
+    visionCaptionModelUsable(visionModel, macCapabilities);
+  const visionCaptionOffers = useMemo(
+    () => downloadOffersFor(models, visionCaptionModelUsable, macCapabilities),
+    [models, macCapabilities],
   );
   // Recent Assets list (sc-2088). When the new context value is available, use
   // the bounded 20-most-recent list; fall back to the legacy single-generation
@@ -1450,8 +1462,16 @@ export function ImageStudio() {
                 referenceCharacters={characters}
                 importAsset={importAsset}
                 projectId={activeProject?.id ?? ""}
-                visionModelMissing={visionModel?.installState === "missing"}
-                onDownloadVisionModel={visionModel ? () => createModelDownloadJob(visionModel) : undefined}
+                // Reference-image caption gate (sc-8110): the section's availability is now driven by the
+                // catalog (visionCaptionReady) through the shared ModelAvailabilityGate, not an inline
+                // error-after-click affordance. When the captioner is missing, the gate offers a download.
+                visionCaptionReady={visionCaptionReady}
+                visionCaptionOffers={visionCaptionOffers}
+                visionCaptionDownloadJobs={modelDownloadJobs}
+                onDownloadModel={createModelDownloadJob}
+                onOpenModels={() => setActiveView("Models")}
+                onOpenQueue={onOpenQueue}
+                onCancelJob={onCancelJob}
               />
             ) : (
               <textarea

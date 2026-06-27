@@ -9,7 +9,9 @@ import {
   imageModelUsable,
   poseModelUsable,
   videoModelUsable,
+  visionCaptionModelUsable,
 } from "./modelEligibility.js";
+import { VISION_CAPTION_MODEL_ID } from "./constants.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
 
@@ -74,6 +76,40 @@ describe("modelEligibility predicates", () => {
       const unsupported = { ...supported, macSupport: { supported: false } };
       expect(imageModelUsable(unsupported, activeCaps)).toBe(false);
     }
+  });
+
+  // Reference-image vision captioner gate (epic 8102, sc-8110). The captioner is a single pinned
+  // utility model; usability = "this IS that model AND it can run here", and macOnly keeps it hidden
+  // on non-macOS platforms until the candle path (epic 8103) lands.
+  it("visionCaptionModelUsable matches only the captioner model and respects macOnly", () => {
+    const captioner = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: true };
+    // macOS (or pre-load empty platform) → usable.
+    expect(visionCaptionModelUsable(captioner, { ...caps, platform: "macos" })).toBe(true);
+    expect(visionCaptionModelUsable(captioner, caps)).toBe(true); // platform "" → no-op pre-load
+    // Non-Mac platform with a macOnly model → hidden (epic 8103 flips this).
+    expect(visionCaptionModelUsable(captioner, { ...caps, platform: "windows" })).toBe(false);
+    expect(visionCaptionModelUsable(captioner, { ...caps, platform: "linux" })).toBe(false);
+    // A different model id is never the captioner.
+    expect(visionCaptionModelUsable({ id: "some_other_model", macOnly: true }, { ...caps, platform: "macos" })).toBe(false);
+    // Active Mac gating with the model's MLX oracle reporting unsupported → blocked.
+    const blockedCaps = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "macos" };
+    const unsupported = { ...captioner, macSupport: { supported: false } };
+    expect(visionCaptionModelUsable(unsupported, blockedCaps)).toBe(false);
+  });
+
+  it("hasUsableModelFor / downloadOffersFor drive the captioner gate (sc-8110)", () => {
+    const macCaps = { ...caps, platform: "macos" };
+    const installed = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: true, installState: "installed" };
+    const missing = { id: VISION_CAPTION_MODEL_ID, type: "utility", macOnly: true, installState: "missing", recommended: true };
+    // Present (installed) → screen is "ready".
+    expect(hasUsableModelFor([installed], visionCaptionModelUsable, macCaps)).toBe(true);
+    // Absent (missing) → not ready, and it surfaces as a recommended-first download offer.
+    expect(hasUsableModelFor([missing], visionCaptionModelUsable, macCaps)).toBe(false);
+    expect(downloadOffersFor([missing], visionCaptionModelUsable, macCaps).map((m) => m.id)).toEqual([
+      VISION_CAPTION_MODEL_ID,
+    ]);
+    // On Windows the predicate rejects it, so there is no offer (feature stays hidden).
+    expect(downloadOffersFor([missing], visionCaptionModelUsable, { ...caps, platform: "windows" })).toEqual([]);
   });
 
   it("downloadOffersFor prefers recommended, falls back to any eligible, skips installed", () => {

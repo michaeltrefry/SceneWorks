@@ -33,8 +33,13 @@ describe("StructuredPromptBuilder", () => {
     onImageCaption,
     referenceAssets = [],
     projectId = "",
-    visionModelMissing = false,
-    onDownloadVisionModel,
+    visionCaptionReady = true,
+    visionCaptionOffers = [],
+    visionCaptionDownloadJobs = [],
+    onDownloadModel,
+    onOpenModels,
+    onOpenQueue,
+    onCancelJob,
     onReferenceImageLoaded,
   }) {
     const [caption, setCaption] = useState(initialCaption ?? emptyCaption());
@@ -57,8 +62,13 @@ describe("StructuredPromptBuilder", () => {
         onImageCaption={onImageCaption}
         referenceAssets={referenceAssets}
         projectId={projectId}
-        visionModelMissing={visionModelMissing}
-        onDownloadVisionModel={onDownloadVisionModel}
+        visionCaptionReady={visionCaptionReady}
+        visionCaptionOffers={visionCaptionOffers}
+        visionCaptionDownloadJobs={visionCaptionDownloadJobs}
+        onDownloadModel={onDownloadModel}
+        onOpenModels={onOpenModels}
+        onOpenQueue={onOpenQueue}
+        onCancelJob={onCancelJob}
         onReferenceImageLoaded={onReferenceImageLoaded}
       />
     );
@@ -291,26 +301,47 @@ describe("StructuredPromptBuilder", () => {
     expect(snap.mode).toBe("plain");
   });
 
-  it("offers a vision-model download when the captioner is missing (sc-8108)", async () => {
-    const onImageCaption = vi.fn(async () => {
-      throw new Error("snapshot is not cached");
-    });
-    const onDownloadVisionModel = vi.fn(async () => ({ id: "job1" }));
+  it("shows the gate download offer (not the button) when the captioner is missing (sc-8110)", async () => {
+    // sc-8110: when the vision captioner isn't installed the section is gated PROACTIVELY through the
+    // shared ModelAvailabilityGate — the reference picker + caption button never render, and a download
+    // offer is shown instead of a button that would only fail on click.
+    const onImageCaption = vi.fn(async () => ({}));
+    const onDownloadModel = vi.fn();
+    const offer = { id: "vision_caption_qwen3vl_8b", name: "Vision Captioner", downloadSizeLabel: "18 GB" };
     await mount({
       initialMode: "plain",
       onImageCaption,
       referenceAssets: [refAsset],
       projectId: "proj-1",
-      visionModelMissing: true,
-      onDownloadVisionModel,
+      visionCaptionReady: false,
+      visionCaptionOffers: [offer],
+      onDownloadModel,
     });
-    await selectReference();
-    await clickAndSettle(buttonByText("✨ Generate JSON from image"));
 
-    const download = buttonByText("Download vision captioner");
+    // The live-feature controls are hidden behind the gate.
+    expect(buttonByText("✨ Generate JSON from image")).toBeFalsy();
+    expect(buttonByText("Select reference image")).toBeFalsy();
+    // The gate renders its download offer for the captioner.
+    expect(container.querySelector(".model-availability-gate")).toBeTruthy();
+    const download = buttonByText("Download");
     expect(download).toBeTruthy();
     await clickAndSettle(download);
-    expect(onDownloadVisionModel).toHaveBeenCalled();
+    expect(onDownloadModel).toHaveBeenCalledWith(offer);
+  });
+
+  it("shows the live reference flow (no gate) when the captioner is present (sc-8110)", async () => {
+    const onImageCaption = vi.fn(async () => ({}));
+    await mount({
+      initialMode: "plain",
+      onImageCaption,
+      referenceAssets: [refAsset],
+      projectId: "proj-1",
+      visionCaptionReady: true,
+    });
+    // Ready → the live picker + button render, and the gate is NOT shown.
+    expect(container.querySelector(".model-availability-gate")).toBeFalsy();
+    expect(buttonByText("Select reference image")).toBeTruthy();
+    expect(buttonByText("✨ Generate JSON from image")).toBeTruthy();
   });
 
   it("hides the reference-image flow when no captioner is wired (gating, sc-8108)", async () => {

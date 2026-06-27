@@ -18,7 +18,7 @@ import {
   parseMagicPromptCaption,
   serializeCaption,
 } from "../ideogramCaption.js";
-import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { ImageStudio } from "./ImageStudio.jsx";
 
 const Z_IMAGE = {
@@ -843,6 +843,15 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
     file: { path: "uploads/ref.png", mimeType: "image/png" },
   };
 
+  // sc-8110: the reference-image flow goes live only when the vision captioner is installed (the
+  // ModelAvailabilityGate gates it). Supply the catalog entry so the live picker + button render.
+  const VISION_MODEL_INSTALLED = {
+    id: VISION_CAPTION_MODEL_ID,
+    type: "utility",
+    macOnly: true,
+    installState: "installed",
+  };
+
   // The vision model reply carries a grounded bbox; parseVisionCaption KEEPS bboxes (strips only
   // aspect_ratio), so the injected caption must still carry the box.
   const VISION_REPLY = JSON.stringify({
@@ -866,16 +875,34 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
   }
 
   it("shows the reference-image flow for Ideogram 4 in text-to-image mode", async () => {
-    await render(baseContext({ imageModels: [IDEOGRAM], imageCaption: vi.fn() }));
+    await render(
+      baseContext({ imageModels: [IDEOGRAM], models: [VISION_MODEL_INSTALLED], imageCaption: vi.fn() }),
+    );
     await openPlainTab();
     expect(buttonByText("✨ Generate JSON from image")).toBeTruthy();
     expect(container.querySelector(".structured-reference")).toBeTruthy();
   });
 
+  it("gates the reference flow behind a download offer when the captioner is missing (sc-8110)", async () => {
+    await render(
+      baseContext({
+        imageModels: [IDEOGRAM],
+        models: [{ ...VISION_MODEL_INSTALLED, installState: "missing", recommended: true, name: "Vision Captioner" }],
+        imageCaption: vi.fn(),
+      }),
+    );
+    await openPlainTab();
+    // The section is present (Ideogram 4 + t2i), but the live button is hidden behind the gate.
+    expect(container.querySelector(".structured-reference")).toBeTruthy();
+    expect(buttonByText("✨ Generate JSON from image")).toBeFalsy();
+    expect(container.querySelector(".model-availability-gate")).toBeTruthy();
+    expect(buttonByText("Download")).toBeTruthy();
+  });
+
   it("captions a reference image into the builder, keeping bboxes (sc-8108)", async () => {
     const imageCaption = vi.fn(async () => VISION_REPLY);
     await render(
-      baseContext({ imageModels: [IDEOGRAM], assets: [REF_ASSET], imageCaption }),
+      baseContext({ imageModels: [IDEOGRAM], models: [VISION_MODEL_INSTALLED], assets: [REF_ASSET], imageCaption }),
     );
     await openPlainTab();
 
