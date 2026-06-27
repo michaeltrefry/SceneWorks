@@ -1648,23 +1648,44 @@ impl ProjectStore {
         fs::create_dir_all(&dir)?;
         // Determine the format from the file CONTENT, not the staged path's extension: uploads
         // arrive as `upload-<uuid>.tmp` (the generic temp writer keeps no extension), so keying
-        // off the extension would mislabel every capture as PNG. Fall back to the extension, then
-        // PNG, when the magic bytes aren't recognized.
-        let (ext, mime) = sniff_image_format(&canonical_source)
-            .or_else(|| {
-                canonical_source
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .and_then(|value| match value.to_ascii_lowercase().as_str() {
-                        "jpg" | "jpeg" => Some(("jpg", "image/jpeg")),
-                        "webp" => Some(("webp", "image/webp")),
-                        "png" => Some(("png", "image/png")),
-                        _ => None,
-                    })
-            })
-            .unwrap_or(("png", "image/png"));
+        // off the extension would mislabel every capture as PNG. A valid-but-unsupported format
+        // (AVIF/HEIC/HEIF/TIFF/BMP/GIF) is transcoded to PNG so the retained source image is always
+        // decodable and never mislabeled (sc-6143) — without this an AVIF capture would be copied
+        // verbatim under a `.png` name. A sniffable supported format keeps its bytes; when the magic
+        // bytes aren't recognized at all (e.g. SVG) we fall back to the extension, then PNG.
+        let source_kind = crate::media_convert::sniff_image_kind_at(&canonical_source);
+        let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
+        let (ext, mime) = if needs_transcode {
+            ("png", "image/png")
+        } else {
+            sniff_image_format(&canonical_source)
+                .or_else(|| {
+                    canonical_source
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .and_then(|value| match value.to_ascii_lowercase().as_str() {
+                            "jpg" | "jpeg" => Some(("jpg", "image/jpeg")),
+                            "webp" => Some(("webp", "image/webp")),
+                            "png" => Some(("png", "image/png")),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(("png", "image/png"))
+        };
         let media_path = dir.join(format!("{asset_id}.{ext}"));
-        fs::copy(&canonical_source, &media_path)?;
+        if needs_transcode {
+            let kind = source_kind.expect("needs_transcode implies a sniffed kind");
+            crate::media_convert::transcode_to_png(&canonical_source, &media_path).map_err(
+                |error| {
+                    ProjectStoreError::BadRequest(format!(
+                        "Could not convert {} image to a supported format: {error}",
+                        kind.label()
+                    ))
+                },
+            )?;
+        } else {
+            fs::copy(&canonical_source, &media_path)?;
+        }
         let media_rel = relative_string(&project_path, &media_path)?;
 
         let source_asset_id = spec
@@ -4986,6 +5007,71 @@ mod tests {
             "expected .jpg, got {media_rel}"
         );
         assert_eq!(asset["file"]["mimeType"], "image/jpeg");
+    }
+
+    /// sc-6143: a keypoint capture in a valid-but-unsupported format (here BMP — the same decode gap
+    /// AVIF hits) is transcoded to a real PNG as it lands in the library, never copied verbatim under
+    /// a mislabeled `.png` name. macOS-only (relies on `sips`); the ffmpeg path off macOS is identical.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn create_keypoint_asset_transcodes_an_unsupported_capture_to_png() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let dir = data_dir.join("cache").join("keypoint-uploads");
+        std::fs::create_dir_all(&dir).expect("uploads dir");
+        // Staged with no real extension (`.tmp`), and the bytes are BMP — unsupported by the worker's
+        // image build, the exact case that previously slipped through mislabeled as PNG.
+        let upload = dir.join("upload-cafef00d.tmp");
+        std::fs::write(&upload, sniff_bmp_bytes()).expect("staged bmp");
+
+        let asset = store
+            .create_keypoint_asset(&json!({
+                "name": "From BMP",
+                "kps": front_kps(),
+                "sourceUploadPath": upload.to_string_lossy(),
+            }))
+            .expect("preset persists");
+
+        let media_rel = asset["file"]["path"].as_str().expect("media path");
+        assert!(
+            media_rel.ends_with(".png"),
+            "expected .png, got {media_rel}"
+        );
+        assert_eq!(asset["file"]["mimeType"], "image/png");
+        // The stored bytes are genuinely PNG (sniffed by content), not the original BMP renamed.
+        let project_path = store
+            .find_project_path(GLOBAL_KEYPOINTS_PROJECT_ID)
+            .expect("project");
+        let stored = std::fs::read(project_path.join(media_rel)).expect("read stored");
+        assert_eq!(
+            crate::media_convert::sniff_image_kind(&stored),
+            Some(crate::media_convert::ImageKind::Png)
+        );
+    }
+
+    /// A valid 1×1 24-bit BMP (no Rust image dep needed to build one).
+    #[cfg(target_os = "macos")]
+    fn sniff_bmp_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&58u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2835i32.to_le_bytes());
+        bytes.extend_from_slice(&2835i32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x20, 0x40, 0x80, 0x00]);
+        bytes
     }
 
     #[test]

@@ -16,8 +16,8 @@ imageproc = { version = "0.25", default-features = false }
 # Perceptual hashing for exact/near-duplicate detection (the epic's one sanctioned new dependency).
 # v3 resolves a single `image` 0.25 in the graph (verified) — no duplicate image crate.
 image_hasher = "3"
-
-[dev-dependencies]
+# Temp PNG holding ground for the transcode backstop (a valid-but-unsupported AVIF/HEIC/TIFF source
+# is converted to PNG before decode — see `decode_transcoding`).
 tempfile = "3.13"
 
 [lints]

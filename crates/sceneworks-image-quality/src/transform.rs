@@ -13,7 +13,18 @@ use sceneworks_core::dataset_quality::plan_smart_crop;
 /// so every decode in the pipeline currently ignores it. Reading the tag here and applying it makes
 /// the *pixels* upright — so a subsequent re-encode that drops the tag (PNG carries none) corrects the
 /// image rather than silently rotating it. A format with no orientation (PNG) yields a no-op.
+///
+/// A valid-but-unsupported source (AVIF/HEIC/HEIF/TIFF/BMP/GIF) is transcoded to a temp PNG first via
+/// [`crate::decode_transcoding`] — the transcoder (ImageIO `sips` / `ffmpeg`) bakes orientation, and
+/// PNG carries no tag, so the result is already upright (the subsequent `apply_orientation` is a
+/// no-op). This is what keeps the Dataset Doctor's smart-crop / EXIF-strip fixes from failing on an
+/// AVIF asset that skipped import normalization.
 pub fn load_oriented(path: &Path) -> image::ImageResult<DynamicImage> {
+    crate::decode_transcoding(path, load_oriented_native)
+}
+
+/// The native oriented decode — the fast path, and the closure re-run on the transcoded PNG.
+fn load_oriented_native(path: &Path) -> image::ImageResult<DynamicImage> {
     let mut decoder = ImageReader::open(path)?
         .with_guessed_format()?
         .into_decoder()?;
@@ -125,6 +136,63 @@ mod tests {
         let src = write_png(dir.path(), "plain.png", 70, 50);
         let img = load_oriented(&src).unwrap();
         assert_eq!((img.width(), img.height()), (70, 50));
+    }
+
+    /// The DataDoctor regression: a valid-but-unsupported source (here a BMP, which the crate's
+    /// `png`/`jpeg`/`webp` `image` build cannot decode — the same gap AVIF hits) no longer errors
+    /// in the transform path. It transcodes via `sips` and the smart-crop / EXIF-strip fixes run.
+    /// macOS-only because it relies on the always-present `sips`; the ffmpeg path is identical.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn transform_path_transcodes_an_unsupported_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("pixel.bmp");
+        std::fs::write(&src, one_pixel_bmp()).unwrap();
+
+        // Precondition: the crate's image build genuinely can't decode this directly.
+        assert!(load_oriented_native(&src).is_err());
+
+        // But the public path transcodes it, so both one-tap fixes succeed.
+        assert!(
+            load_oriented(&src).is_ok(),
+            "transcodes through load_oriented"
+        );
+
+        let stripped = dir.path().join("stripped.png");
+        write_metadata_stripped(&src, &stripped).unwrap();
+        assert_eq!(dims(&stripped), (1, 1));
+
+        let cropped = dir.path().join("cropped.png");
+        write_smart_cropped(&src, 0.25, None, &cropped).unwrap();
+        assert_eq!(
+            dims(&cropped),
+            (1, 1),
+            "1x1 is square — no crop, just re-encode"
+        );
+    }
+
+    /// A valid 1×1 24-bit BMP (no Rust image dep needed to build one).
+    #[cfg(target_os = "macos")]
+    fn one_pixel_bmp() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&58u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2835i32.to_le_bytes());
+        bytes.extend_from_slice(&2835i32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x20, 0x40, 0x80, 0x00]);
+        bytes
     }
 
     #[test]

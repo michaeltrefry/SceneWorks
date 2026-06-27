@@ -57,10 +57,50 @@ pub fn aesthetic_predictor() -> &'static AestheticPredictor {
     })
 }
 
+/// Decode an image, transcoding a valid-but-unsupported format (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to a
+/// temp PNG first (sc-6143). `decode` runs directly on `path` on the fast path; only when that fails
+/// *and* the bytes sniff as a recognized format the pure-Rust `image` build can't decode do we shell
+/// out to the shared [`sceneworks_core::media_convert`] transcoder and re-run `decode` on the PNG.
+///
+/// Import normalizes new uploads to PNG, but assets that predate that change — or reach this crate by
+/// a path that skips normalization — would otherwise fail here (`The image format Avif is not
+/// supported`). This mirrors the worker's `decode_image_any` backstop so the API's synchronous
+/// Dataset Doctor paths degrade to "transcode + run" instead of erroring.
+pub(crate) fn decode_transcoding<F>(path: &Path, decode: F) -> image::ImageResult<DynamicImage>
+where
+    F: Fn(&Path) -> image::ImageResult<DynamicImage>,
+{
+    use sceneworks_core::media_convert::{sniff_image_kind_at, transcode_to_png};
+
+    match decode(path) {
+        Ok(image) => Ok(image),
+        Err(decode_error) => {
+            // Only transcode a format we recognize as valid-but-unsupported; a natively-supported
+            // format (or unrecognized bytes) means a genuine decode failure — surface it unchanged.
+            match sniff_image_kind_at(path) {
+                Some(kind) if !kind.is_natively_supported() => {
+                    let dir = tempfile::tempdir().map_err(image::ImageError::IoError)?;
+                    let png = dir.path().join("decoded.png");
+                    if let Err(error) = transcode_to_png(path, &png) {
+                        return Err(image::ImageError::IoError(std::io::Error::other(
+                            error.to_string(),
+                        )));
+                    }
+                    decode(&png)
+                }
+                _ => Err(decode_error),
+            }
+        }
+    }
+}
+
 /// Decode the image at `path` and extract its Tier-0 scalars. `bucket_edge` is the trainer's
 /// target square resolution (the size blur + exposure are measured at).
 pub fn extract_tier0_scalars(path: &Path, bucket_edge: u32) -> image::ImageResult<Tier0Scalars> {
-    Ok(scalars_from_image(&image::open(path)?, bucket_edge))
+    Ok(scalars_from_image(
+        &decode_transcoding(path, |p: &Path| image::open(p))?,
+        bucket_edge,
+    ))
 }
 
 /// Extract Tier-0 scalars from an already-decoded image — the testable core, no IO.

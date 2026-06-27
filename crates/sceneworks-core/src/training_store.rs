@@ -545,18 +545,38 @@ impl TrainingDatasetStore {
                     "Invalid derived image path".to_owned(),
                 ));
             }
-            let extension = source
-                .extension()
-                .and_then(|value| value.to_str())
-                .filter(|value| !value.is_empty())
-                .map(|value| value.to_ascii_lowercase())
-                .unwrap_or_else(|| "png".to_owned());
+            // Normalize a valid-but-unsupported derived image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to PNG as
+            // it lands in the dataset (sc-6143). Worker-derived outputs are PNG today, but routing this
+            // copy through the same sniff-and-transcode chokepoint as every other ingestion path means
+            // a producer that ever emits another format cannot slip an undecodable image into `images/`.
+            let source_kind = crate::media_convert::sniff_image_kind_at(&source);
+            let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
+            let extension = if needs_transcode {
+                "png".to_owned()
+            } else {
+                source
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_ascii_lowercase())
+                    .unwrap_or_else(|| "png".to_owned())
+            };
             let relative_path = format!("images/{}.{extension}", repoint.item_id);
             let target = root.join(&relative_path);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&source, &target)?;
+            if needs_transcode {
+                let kind = source_kind.expect("needs_transcode implies a sniffed kind");
+                crate::media_convert::transcode_to_png(&source, &target).map_err(|error| {
+                    ProjectStoreError::BadRequest(format!(
+                        "Could not convert {} image to a supported format: {error}",
+                        kind.label()
+                    ))
+                })?;
+            } else {
+                fs::copy(&source, &target)?;
+            }
             // Drop the item's previous file if its extension (hence path) changed, to avoid orphans.
             let previous = root.join(&dataset.items[index].path);
             if previous != target && previous.exists() {
@@ -992,19 +1012,41 @@ fn materialize_item(
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
     let source = resolve_item_source(project_path, project_id, &input, modality)?;
-    let extension = source
-        .path
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .map(|value| format!(".{}", value.to_ascii_lowercase()))
-        .unwrap_or_else(|| ".bin".to_owned());
+    // sc-6143: normalize a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG
+    // as it lands in the dataset. Uploads are normalized at import, but a dataset built from a library
+    // asset or a project-relative path copies the bytes verbatim — so without this an AVIF reaches the
+    // dataset's `images/` and breaks BOTH actual training (the trainer reads dataset images straight
+    // through the engine, with no decode backstop) and the Dataset Doctor. Format is sniffed by content,
+    // never the extension; a file we cannot sniff (e.g. SVG) passes through with its original extension.
+    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
+    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
+    let extension = if needs_transcode {
+        ".png".to_owned()
+    } else {
+        source
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(".{}", value.to_ascii_lowercase()))
+            .unwrap_or_else(|| ".bin".to_owned())
+    };
     let relative_path = format!("images/{item_id}{extension}");
     let target_path = media_dir.join(format!("{item_id}{extension}"));
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::copy(&source.path, &target_path)?;
+    if needs_transcode {
+        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
+        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
+            ProjectStoreError::BadRequest(format!(
+                "Could not convert {} image to a supported format: {error}",
+                kind.label()
+            ))
+        })?;
+    } else {
+        fs::copy(&source.path, &target_path)?;
+    }
     let caption = input.caption.unwrap_or_default();
     // sc-6531 (Dataset Doctor): every item must carry real pixel dimensions + a content hash —
     // the foundation Tier-0 checks (min-resolution, crop-loss, exact-dup) rely on. Prefer
@@ -1629,6 +1671,87 @@ mod tests {
                 phash: vec![1, 2, 3, 4, 5, 6, 7, 8],
             },
         }
+    }
+
+    /// sc-6143: building a dataset from a path-based item normalizes a valid-but-unsupported source
+    /// (here BMP — the same decode gap AVIF hits) to PNG as it lands in `images/`, so neither the
+    /// trainer (which reads dataset images straight through the engine, no decode backstop) nor the
+    /// Dataset Doctor ever sees a format it can't decode. macOS-only (relies on `sips`); the ffmpeg
+    /// path off macOS is identical.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn create_dataset_transcodes_an_unsupported_item_source_to_png() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_path = dir.path();
+        ensure_training_dataset_table(project_path).expect("init dataset table");
+
+        // A path-based source: a real BMP placed inside the project (the verbatim-copy path that
+        // previously let an unsupported format into the dataset).
+        let src_rel = "uploads/pixel.bmp";
+        let src_abs = project_path.join(src_rel);
+        fs::create_dir_all(src_abs.parent().unwrap()).unwrap();
+        fs::write(&src_abs, one_pixel_bmp()).unwrap();
+
+        let store = TrainingDatasetStore::new(project_path.to_path_buf());
+        let dataset = store
+            .create_dataset(
+                "proj",
+                TrainingDatasetCreateInput {
+                    name: "ds".to_owned(),
+                    modality: Some(TrainingModality::Image),
+                    status: None,
+                    character_id: None,
+                    items: vec![TrainingDatasetItemInput {
+                        id: None,
+                        asset_id: None,
+                        path: Some(src_rel.to_owned()),
+                        display_name: None,
+                        caption: None,
+                        width: None,
+                        height: None,
+                    }],
+                },
+            )
+            .expect("create dataset");
+
+        let stored = &dataset.items[0];
+        assert!(
+            stored.path.ends_with(".png"),
+            "the BMP was normalized to PNG: {}",
+            stored.path
+        );
+        // The bytes on disk are genuinely PNG (sniffed by content), and dims were read from them.
+        let stored_abs = dataset_root(project_path, &dataset.id).join(&stored.path);
+        let bytes = fs::read(&stored_abs).expect("read stored image");
+        assert_eq!(
+            crate::media_convert::sniff_image_kind(&bytes),
+            Some(crate::media_convert::ImageKind::Png)
+        );
+        assert_eq!((stored.width, stored.height), (Some(1), Some(1)));
+    }
+
+    /// A valid 1×1 24-bit BMP (no Rust image dep needed to build one).
+    #[cfg(target_os = "macos")]
+    fn one_pixel_bmp() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&58u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2835i32.to_le_bytes());
+        bytes.extend_from_slice(&2835i32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x20, 0x40, 0x80, 0x00]);
+        bytes
     }
 
     #[test]
