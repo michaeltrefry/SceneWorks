@@ -157,6 +157,37 @@ fn crop_to_chw(
     (data, cw, ch)
 }
 
+/// Real-ESRGAN's x2 model begins with `pixel_unshuffle(x, 2)` (see the RRDBNet port in
+/// `scripts/spikes/sc3489_export_reference.py:88`), which reshapes the spatial dims
+/// `(H, W) -> (H/2, 2, W/2, 2)` and therefore **requires even input height and width**. A
+/// library/dataset image (or edge tile) with an odd dimension — e.g. 528×323 — otherwise blows
+/// up the onnx `Reshape` node (`input_shape % requested_shape != 0`). Pad the CHW crop up to
+/// even dims by **replicating** the last column/row, so no dark seam bleeds into the readable
+/// region through the conv receptive field. The extra `factor` output px on the padded edge fall
+/// outside the inner (unpadded) region the caller copies back, so they are simply discarded.
+/// Harmless for x4 (its RRDBNet has no `pixel_unshuffle`, so odd dims already work) — applied
+/// unconditionally to keep the call site simple.
+fn pad_chw_even(data: Vec<f32>, cw: usize, ch: usize) -> (Vec<f32>, usize, usize) {
+    let pw = cw + (cw & 1);
+    let ph = ch + (ch & 1);
+    if pw == cw && ph == ch {
+        return (data, cw, ch);
+    }
+    let mut out = vec![0.0f32; 3 * ph * pw];
+    for c in 0..3 {
+        let src_plane = c * ch * cw;
+        let dst_plane = c * ph * pw;
+        for yy in 0..ph {
+            let sy = yy.min(ch - 1);
+            for xx in 0..pw {
+                let sx = xx.min(cw - 1);
+                out[dst_plane + yy * pw + xx] = data[src_plane + sy * cw + sx];
+            }
+        }
+    }
+    (out, pw, ph)
+}
+
 fn validate_upscale_target_dimensions(width: u32, height: u32) -> WorkerResult<()> {
     let pixels = u64::from(width) * u64::from(height);
     if width > MAX_UPSCALE_TARGET_DIMENSION
@@ -261,6 +292,9 @@ impl Upscaler {
             let cx1 = (tl.x1 + TILE_PAD).min(w);
             let cy1 = (tl.y1 + TILE_PAD).min(h);
             let (data, cw, ch) = crop_to_chw(img, cx0, cy0, cx1, cy1);
+            // Pad to even dims for the x2 model's `pixel_unshuffle(2)` (odd W/H else fails the
+            // onnx Reshape, e.g. a 323px-wide image); padded edge px are discarded below.
+            let (data, cw, ch) = pad_chw_even(data, cw, ch);
 
             let tensor =
                 Tensor::from_array((vec![1i64, 3, ch as i64, cw as i64], data)).map_err(ort_err)?;
