@@ -354,6 +354,13 @@ const DERIVED_TOKENIZER_OVERLAYS: &[DerivedTokenizerOverlay] = &[
         base_repo: "Qwen/Qwen-Image",
         tokenizer_repo: "SceneWorks/qwen-image-tokenizer",
     },
+    // Qwen-Image-2512 (sc-8271): the Dec-2025 base refresh is architecturally identical to
+    // `Qwen/Qwen-Image` and reuses the same Qwen2 BPE tokenizer (unchanged across the line),
+    // so it points at the same hosted overlay repo.
+    DerivedTokenizerOverlay {
+        base_repo: "Qwen/Qwen-Image-2512",
+        tokenizer_repo: "SceneWorks/qwen-image-tokenizer",
+    },
 ];
 
 /// The hosted tokenizer repo + overlay dest for a just-downloaded `repo`, or `None` when `repo` is not

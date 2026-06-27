@@ -104,7 +104,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         // (epic 3401 / sc-3575).
         sceneworks_id: "qwen_image",
         engine_id: "qwen_image",
-        default_repo: "Qwen/Qwen-Image",
+        default_repo: "Qwen/Qwen-Image-2512",
         default_steps: 20,
         default_guidance: 4.0,
         adapter_label: "mlx_qwen",

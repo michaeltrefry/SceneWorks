@@ -159,13 +159,13 @@
       "downloads": [
         {
           "provider": "huggingface",
-          "repo": "Qwen/Qwen-Image",
+          "repo": "Qwen/Qwen-Image-2512",
           "files": [],
           "estimatedSizeBytes": 57704594653
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Qwen/Qwen-Image"
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2512"
       },
       "defaults": {
         "resolution": "1024x1024",
