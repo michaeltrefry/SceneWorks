@@ -4,6 +4,7 @@
 // exactly which models qualify. Predicates are capability + Mac-gating only (no install
 // state) — callers layer installState via the helpers at the bottom.
 import { macModelBlock, macModelFeatureBlock, macVideoModeBlock } from "./macGating.js";
+import { VISION_CAPTION_MODEL_ID } from "./constants.js";
 
 // Image generation modes a model can serve (ImageStudio mode tabs).
 const IMAGE_MODES = ["text_to_image", "edit_image", "character_image", "style_variations"];
@@ -75,6 +76,33 @@ export function documentModelUsable(model, caps) {
     Array.isArray(model?.capabilities) &&
     model.capabilities.includes("interleave")
   );
+}
+
+// Reference-image → JSON caption (epic 8102, sc-8110). The vision captioner is a single,
+// catalog-pinned utility model (`vision_caption_qwen3vl_8b`), so usability is "this IS the
+// captioner model AND it can run here", not a capability sweep. Two gates, mirroring the
+// magic-prompt model gate:
+//   * macModelBlock — the active-gating Rust/MLX oracle (a no-op off Mac / in observe mode).
+//   * macOnly — the captioner is macOS-first (catalog `macOnly: true`). The Rust/MLX engine for
+//     qwen3_vl ships on Apple Silicon first; the Windows/candle path is epic 8103. Until then the
+//     feature stays HIDDEN on Windows/Linux. `caps.platform` is the API host's OS (mac_capabilities
+//     in workers.rs); when it hasn't loaded yet (`""`) we don't block, matching the no-op-pre-load
+//     convention of the macGating helpers — and the reference flow is also gated to Ideogram 4
+//     (itself macOnly) by the parent, so a non-Mac client never reaches it anyway.
+export function visionCaptionModelUsable(model, caps) {
+  if (model?.id !== VISION_CAPTION_MODEL_ID) {
+    return false;
+  }
+  if (macModelBlock(model, caps)) {
+    return false;
+  }
+  if (model?.macOnly === true) {
+    const platform = caps?.platform ?? "";
+    if (platform && platform !== "macos") {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Character Studio — mirrors CharacterStudio.jsx angle/pose predicates.
