@@ -3764,7 +3764,14 @@ fn compose_feathered_no_boundary_vignette() {
     }
     let out = compose_feathered(&acc, &wsum, width, height);
     // Every pixel — corners and edges included — recovers the source value, not a ramp to black.
-    for (x, y) in [(0, 0), (0, height - 1), (width - 1, 0), (15, 0), (0, 15), (15, 15)] {
+    for (x, y) in [
+        (0, 0),
+        (0, height - 1),
+        (width - 1, 0),
+        (15, 0),
+        (0, 15),
+        (15, 15),
+    ] {
         let px = out.get_pixel(x, y).0;
         assert!(
             px.iter().all(|&c| c.abs_diff(SRC as u8) <= 1),
