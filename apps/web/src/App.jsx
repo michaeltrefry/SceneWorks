@@ -1766,6 +1766,26 @@ export function App() {
     [token],
   );
 
+  // Promote a character asset into the Main Asset Library (sc-8341): a true move —
+  // the backend flips origin + detaches the character, so refresh characters too.
+  const moveAssetToLibrary = useCallback(
+    async (asset) => {
+      try {
+        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-library`, token, {
+          method: "POST",
+        });
+        setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+        refreshCharactersRef.current?.(asset.projectId);
+        setError("");
+        return updated;
+      } catch (err) {
+        setError(err.message);
+        throw err;
+      }
+    },
+    [token],
+  );
+
   const deleteAsset = useCallback(
     async (asset) => {
       try {
@@ -1897,6 +1917,7 @@ export function App() {
     setSelectedAssetId,
     deleteAsset,
     purgeAsset,
+    moveAssetToLibrary,
     importAsset,
     updateAssetStatus,
     updateAssetTags,
@@ -2016,7 +2037,7 @@ export function App() {
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, importAsset,
+    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,

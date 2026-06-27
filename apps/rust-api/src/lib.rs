@@ -714,6 +714,10 @@ pub(crate) fn create_app_with_state(
             delete(purge_asset),
         )
         .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/move-to-library",
+            post(move_asset_to_library),
+        )
+        .route(
             "/api/v1/projects/:project_id/assets/:asset_id/status",
             patch(update_asset_status),
         )

@@ -2600,7 +2600,7 @@ describe("SceneWorks app shell", () => {
     );
     expect(section).toBeTruthy();
     // Both the still and the clip are listed; the clip renders as a <video>.
-    expect(section.querySelectorAll(".character-asset-thumb").length).toBe(2);
+    expect(section.querySelectorAll(".character-asset-card").length).toBe(2);
     expect(section.querySelector("video")).toBeTruthy();
     expect([...section.querySelectorAll("button")].some((button) => button.textContent.startsWith("Media (2)"))).toBe(true);
   });
@@ -2667,7 +2667,7 @@ describe("SceneWorks app shell", () => {
     );
     expect(section).toBeTruthy();
     expect(section.textContent).toContain("Generated for Mira (1)");
-    expect(section.querySelectorAll(".character-asset-thumb")).toHaveLength(1);
+    expect(section.querySelectorAll(".character-asset-card")).toHaveLength(1);
     expect([...section.querySelectorAll("button")].some((button) => button.textContent.startsWith("Media (1)"))).toBe(true);
   });
 
@@ -3270,6 +3270,162 @@ describe("SceneWorks app shell", () => {
     expect(container.querySelector('[title="p-img1"]')).not.toBeNull();
   });
 
+  it("bulk-discards selected media from the Character Assets toolbar", async () => {
+    const deleteAsset = vi.fn(async () => {});
+    const selectedCharacter = { id: "char-1", name: "Mira" };
+    const assets = [
+      {
+        id: "ca-1",
+        type: "image",
+        projectId: "project-1",
+        displayName: "Shot A",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        status: { trashed: false },
+      },
+      {
+        id: "ca-2",
+        type: "image",
+        projectId: "project-1",
+        displayName: "Shot B",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        status: { trashed: false },
+      },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets,
+            characters: [selectedCharacter],
+            deleteAsset,
+            addCharacterReference: vi.fn(),
+            purgeAsset: () => {},
+            updateAssetStatus: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            jobs: [],
+            imageModels: [],
+          },
+          <CharacterAssets
+            addCharacterReference={vi.fn()}
+            assets={assets}
+            deleteAsset={deleteAsset}
+            onPreview={vi.fn()}
+            projectId="project-1"
+            purgeAsset={() => {}}
+            selectedCharacter={selectedCharacter}
+            updateAssetStatus={() => {}}
+          />,
+        ),
+      );
+    });
+    await settle();
+
+    // Both character images render as full-size selectable cards (matching the Assets page).
+    expect(container.querySelectorAll(".character-asset-card")).toHaveLength(2);
+
+    await act(async () => {
+      container.querySelector('input[aria-label="Select Shot A"]').click();
+    });
+    await act(async () => {
+      container.querySelector('input[aria-label="Select Shot B"]').click();
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Discard").click();
+    });
+    await settle();
+
+    expect(deleteAsset).toHaveBeenCalledTimes(2);
+    expect(deleteAsset).toHaveBeenCalledWith(assets[0]);
+    expect(deleteAsset).toHaveBeenCalledWith(assets[1]);
+    expect(container.querySelector(".batch-selection-bar")).toBeNull();
+  });
+
+  it("bulk-moves selected character media to the Main Asset Library (sc-8341)", async () => {
+    const moveAssetToLibrary = vi.fn(async (asset) => asset);
+    const selectedCharacter = { id: "char-1", name: "Mira" };
+    const assets = [
+      {
+        id: "ca-1",
+        type: "image",
+        projectId: "project-1",
+        displayName: "Shot A",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        status: { trashed: false },
+      },
+      {
+        id: "ca-2",
+        type: "image",
+        projectId: "project-1",
+        displayName: "Shot B",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        status: { trashed: false },
+      },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets,
+            characters: [selectedCharacter],
+            deleteAsset: () => {},
+            addCharacterReference: vi.fn(),
+            moveAssetToLibrary,
+            purgeAsset: () => {},
+            updateAssetStatus: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            jobs: [],
+            imageModels: [],
+          },
+          <CharacterAssets
+            addCharacterReference={vi.fn()}
+            assets={assets}
+            deleteAsset={() => {}}
+            onPreview={vi.fn()}
+            projectId="project-1"
+            purgeAsset={() => {}}
+            selectedCharacter={selectedCharacter}
+            updateAssetStatus={() => {}}
+          />,
+        ),
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      container.querySelector('input[aria-label="Select Shot A"]').click();
+    });
+    await act(async () => {
+      container.querySelector('input[aria-label="Select Shot B"]').click();
+    });
+    await settle();
+
+    // Open the Move picker; "Assets Library" is offered as the first target.
+    await act(async () => {
+      [...container.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Move").click();
+    });
+    await settle();
+    const select = container.querySelector('select[aria-label="Move target"]');
+    expect([...select.options].map((option) => option.textContent)).toContain("Assets Library");
+    await changeField(select, "__sceneworks_library__");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent?.startsWith("Move 2 to library")).click();
+    });
+    await settle();
+
+    expect(moveAssetToLibrary).toHaveBeenCalledTimes(2);
+    expect(moveAssetToLibrary).toHaveBeenCalledWith(assets[0]);
+    expect(moveAssetToLibrary).toHaveBeenCalledWith(assets[1]);
+    expect(container.querySelector(".batch-selection-bar")).toBeNull();
+  });
+
   it("lists a character's associated datasets and opens one (sc-2022)", async () => {
     const onOpenDataset = vi.fn();
     const onCreateDataset = vi.fn();
@@ -3506,7 +3662,7 @@ describe("SceneWorks app shell", () => {
       );
     const section = findSection();
     expect(section).toBeTruthy();
-    expect(section.querySelectorAll(".character-asset-thumb").length).toBe(1);
+    expect(section.querySelectorAll(".character-asset-card").length).toBe(1);
     // Heading count reflects active images only.
     expect(section.querySelector("h2").textContent).toContain("(1)");
 
@@ -3519,7 +3675,7 @@ describe("SceneWorks app shell", () => {
       trashButton.click();
     });
     const trashSection = findSection();
-    expect(trashSection.querySelectorAll(".character-asset-thumb").length).toBe(1);
+    expect(trashSection.querySelectorAll(".character-asset-card").length).toBe(1);
     const restore = [...trashSection.querySelectorAll("button")].find((button) => button.textContent === "Restore");
     const purge = [...trashSection.querySelectorAll("button")].find((button) => button.textContent === "Purge");
     expect(restore).toBeTruthy();
@@ -9173,7 +9329,7 @@ describe("SceneWorks app shell", () => {
       [...container.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Move").click();
     });
     await settle();
-    await changeField(container.querySelector('select[aria-label="Move to character"]'), "char-2");
+    await changeField(container.querySelector('select[aria-label="Move target"]'), "char-2");
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent?.startsWith("Move 2 to assets")).click();
     });

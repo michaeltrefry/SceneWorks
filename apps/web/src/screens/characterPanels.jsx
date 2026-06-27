@@ -1,4 +1,5 @@
 import React from "react";
+import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch.jsx";
 import { AssetPickerField, CharacterImportDialog } from "../components/AssetPicker.jsx";
 import { AssetCard, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
@@ -806,6 +807,8 @@ export function CharacterAssets({
 }) {
   const [viewMode, setViewMode] = React.useState("active");
   const [importOpen, setImportOpen] = React.useState(false);
+  // Same multi-select + batch toolbar as the Assets page (Batch… / Discard / Move).
+  const batch = useAssetBatch();
   const characterId = selectedCharacter?.id;
   // sc-6042: attach project-selected or freshly-uploaded assets to this character.
   // addCharacterReference is the canonical asset↔character link (it writes both the
@@ -898,34 +901,51 @@ export function CharacterAssets({
           projectId={projectId}
         />
       ) : null}
+      {/* Hide Discard in the Trashcan view (already discarded); offer the Main Library as a
+          Move target so character media can be promoted back out (sc-8341). */}
+      <AssetSelectionBar batch={batch} showDiscard={!showingTrash} allowLibraryTarget />
       {visibleAssets.length ? (
-        <div className="reference-thumb-row">
+        <div className="asset-grid character-asset-grid">
           {visibleAssets.map((asset) => (
-            <div className="character-asset-thumb" key={asset.id}>
-              <button
-                aria-label={`Preview ${asset.displayName ?? asset.id}`}
-                className="reference-thumb"
-                onClick={() => onPreview?.(asset, visibleAssets)}
-                type="button"
-              >
-                <AssetMedia asset={asset} controls={false} />
-              </button>
-              <div className="character-asset-thumb-actions">
-                {showingTrash ? (
-                  <>
-                    <button onClick={() => updateAssetStatus?.(asset, { trashed: false })} type="button">
-                      Restore
+            <div
+              className={batch.selectedAssetIds.has(asset.id) ? "asset-tile-wrap selected" : "asset-tile-wrap"}
+              key={asset.id}
+            >
+              <label className="asset-tile-check">
+                <input
+                  aria-label={`Select ${asset.displayName ?? asset.id}`}
+                  checked={batch.selectedAssetIds.has(asset.id)}
+                  onChange={() => batch.toggleSelect(asset.id)}
+                  type="checkbox"
+                />
+              </label>
+              <article className="asset-tile character-asset-card">
+                <button
+                  aria-label={`Preview ${asset.displayName ?? asset.id}`}
+                  className="character-asset-media"
+                  onClick={() => onPreview?.(asset, visibleAssets)}
+                  type="button"
+                >
+                  <AssetMedia asset={asset} controls={false} />
+                </button>
+                <strong>{asset.displayName ?? asset.id}</strong>
+                <div className="character-asset-card-actions">
+                  {showingTrash ? (
+                    <>
+                      <button onClick={() => updateAssetStatus?.(asset, { trashed: false })} type="button">
+                        Restore
+                      </button>
+                      <button onClick={() => purgeAsset?.(asset)} type="button">
+                        Purge
+                      </button>
+                    </>
+                  ) : (
+                    <button onClick={() => deleteAsset?.(asset)} type="button">
+                      Discard
                     </button>
-                    <button onClick={() => purgeAsset?.(asset)} type="button">
-                      Purge
-                    </button>
-                  </>
-                ) : (
-                  <button onClick={() => deleteAsset?.(asset)} type="button">
-                    Discard
-                  </button>
-                )}
-              </div>
+                  )}
+                </div>
+              </article>
             </div>
           ))}
         </div>
@@ -936,6 +956,7 @@ export function CharacterAssets({
             : "No media yet. Angle sets, pose generations, character tests, and any character image or video render collect here automatically."}
         </p>
       )}
+      <AssetBatchModal batch={batch} />
     </section>
   );
 }

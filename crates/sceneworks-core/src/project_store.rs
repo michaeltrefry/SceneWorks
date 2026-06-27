@@ -2130,6 +2130,58 @@ impl ProjectStore {
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
 
+    /// Promote a character asset into the Main Asset Library (sc-8341). This is a
+    /// true *move*: the asset leaves every character and surfaces in the Library.
+    /// Because the Library excludes `origin == "character_studio"` and the Character
+    /// Assets grid keys off `recipe.normalizedSettings.characterId` +
+    /// `metadata.characterReferences`, all three must change: flip `origin` to a
+    /// library-visible studio value, drop the recipe's `characterId`, and strip the
+    /// asset's `characterReferences`, then unlink it from every character sidecar.
+    pub fn move_asset_to_library(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+    ) -> ProjectStoreResult<Value> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let mut asset = read_json(&sidecar_path)?;
+        {
+            let object = asset.as_object_mut().ok_or_else(|| {
+                ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+            })?;
+            // Promote to a library-visible origin by media type so the
+            // `character_studio` exclusion (LibraryScreen) no longer applies.
+            let asset_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let origin = match asset_type {
+                "video" => "video_studio",
+                "document" => "document_studio",
+                _ => "image_studio",
+            };
+            object.insert("origin".to_owned(), Value::String(origin.to_owned()));
+            // Detach the character association the grid filters on.
+            if let Some(settings) = object
+                .get_mut("recipe")
+                .and_then(Value::as_object_mut)
+                .and_then(|recipe| recipe.get_mut("normalizedSettings"))
+                .and_then(Value::as_object_mut)
+            {
+                settings.remove("characterId");
+            }
+            if let Some(metadata) = object.get_mut("metadata").and_then(Value::as_object_mut) {
+                metadata.remove("characterReferences");
+            }
+        }
+        write_json(&sidecar_path, &asset)?;
+        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        // Drop the asset from every character's references[] (character sidecars + index).
+        CharacterStore::new(&self.data_dir, project_path.clone())
+            .remove_asset_references(asset_id)?;
+        normalize_asset(project_id, &project_path, &sidecar_path)
+    }
+
     pub fn get_asset(&self, project_id: &str, asset_id: &str) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
@@ -4296,6 +4348,99 @@ mod tests {
                 "each asset embeds the shared generation set"
             );
         }
+    }
+
+    #[test]
+    fn move_asset_to_library_promotes_origin_and_detaches_character() {
+        use crate::store_util::{read_json, write_json};
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Gallery").expect("project creates");
+
+        // A Character Studio output: persisted, then marked up to look like a
+        // character-scoped asset (origin character_studio + recipe characterId +
+        // characterReferences) — the state the Library excludes and the Character
+        // Assets grid keys on.
+        let fact = json!({
+            "assetId": "char_shot",
+            "mediaPath": "assets/images/genset_char/char_shot.png",
+            "mimeType": "image/png",
+            "displayName": "Mira test #1",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "character_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "portrait",
+        });
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset_char", &fact)
+            .expect("asset persists");
+
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let sidecar = project_path.join("assets/images/genset_char/char_shot.sceneworks.json");
+        {
+            let mut asset = read_json(&sidecar).expect("read sidecar");
+            let object = asset.as_object_mut().expect("asset object");
+            object.insert("origin".to_owned(), json!("character_studio"));
+            let recipe = object
+                .entry("recipe")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("recipe object");
+            recipe
+                .entry("normalizedSettings")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("normalizedSettings object")
+                .insert("characterId".to_owned(), json!("char-1"));
+            object
+                .entry("metadata")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("metadata object")
+                .insert(
+                    "characterReferences".to_owned(),
+                    json!([{ "characterId": "char-1" }]),
+                );
+            write_json(&sidecar, &asset).expect("write sidecar");
+        }
+        store
+            .index_asset_sidecar(&project.id, &sidecar)
+            .expect("reindex");
+
+        // Precondition: excluded from the Library by origin.
+        let before = store
+            .get_asset(&project.id, "char_shot")
+            .expect("get before");
+        assert_eq!(before["origin"], json!("character_studio"));
+
+        let moved = store
+            .move_asset_to_library(&project.id, "char_shot")
+            .expect("move to library");
+
+        // Origin promoted (image media -> image_studio), so the Library no longer excludes it.
+        assert_eq!(moved["origin"], json!("image_studio"));
+        // Character association dropped on both vectors the grid filters on.
+        assert!(
+            moved["recipe"]["normalizedSettings"]
+                .get("characterId")
+                .is_none(),
+            "recipe characterId is cleared"
+        );
+        assert!(
+            moved
+                .get("metadata")
+                .and_then(|metadata| metadata.get("characterReferences"))
+                .map(Value::is_null)
+                .unwrap_or(true),
+            "characterReferences is cleared"
+        );
+
+        // Persisted: a fresh read reflects the move.
+        let after = store
+            .get_asset(&project.id, "char_shot")
+            .expect("get after");
+        assert_eq!(after["origin"], json!("image_studio"));
     }
 
     /// V-4: a pre-migration project surfaces an EMPTY `assets` table even though
