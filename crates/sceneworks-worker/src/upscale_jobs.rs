@@ -587,18 +587,41 @@ pub(crate) async fn upscale_image_in_memory(
     source: RgbImage,
     cancel: &CancelFlag,
 ) -> WorkerResult<RgbImage> {
+    // Both branches run their long compute under `run_upscale_with_heartbeat` so the worker keeps
+    // emitting `Busy` heartbeats (every 5-15s) during model load + diffusion. Without it, an inline
+    // SeedVR2 upscale (model load + one-step diffusion, easily > the API's 90s worker-timeout) goes
+    // silent and the stale-sweep marks the in-flight image-generate job `interrupted` mid-flight —
+    // then the worker's terminal post is rejected (409) and the job looks stuck (sc-8186). The
+    // standalone `image_upscale` job already wraps the same compute this way.
     match engine_id {
         "seedvr2" => {
             let dir =
                 ensure_seedvr2_checkpoint(api, settings, http_client, job, manifest_entry).await?;
-            run_seedvr2_upscale(dir, source, factor, softness, seed, cancel.clone()).await
+            let task_cancel = cancel.clone();
+            run_upscale_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                cancel.clone(),
+                tokio::spawn(async move {
+                    run_seedvr2_upscale(dir, source, factor, softness, seed, task_cancel).await
+                }),
+            )
+            .await
         }
         _ => {
             let onnx = ensure_onnx(api, settings, http_client, job, factor, manifest_entry).await?;
-            let cancel = cancel.clone();
-            tokio::task::spawn_blocking(move || upscale_blocking(onnx, factor, source, cancel))
-                .await
-                .map_err(|error| task_join_error("inline upscale", error))?
+            let task_cancel = cancel.clone();
+            run_upscale_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                cancel.clone(),
+                tokio::task::spawn_blocking(move || {
+                    upscale_blocking(onnx, factor, source, task_cancel)
+                }),
+            )
+            .await
         }
     }
 }

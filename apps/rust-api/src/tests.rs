@@ -8634,6 +8634,69 @@ async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
 }
 
 #[tokio::test]
+async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
+    // sc-8186: the heartbeat stale-sweep marks an in-flight job `interrupted` in the DB, but
+    // (unlike a worker-reported terminal status) emitted no per-job event — so a live client's
+    // job card, driven by `job.updated`, showed its last running state forever. The sweep must
+    // now broadcast `job.updated` for each job it interrupts.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    // Smallest timeout the store honors (clamped to >=1s); we sleep just past it to go stale.
+    settings.worker_timeout_seconds = 1;
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": null,
+            "capabilities": ["image_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+
+    // Let the worker's last_seen age past the (1s) timeout so the next sweep interrupts its job,
+    // then subscribe so we only observe the sweep's events. last_seen is stored at second
+    // granularity and the cutoff is `now - 1s`, so we sleep just over 2s to clear the boundary.
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    let mut events = state.events.subscribe();
+
+    // Any endpoint that runs `queue_summary_snapshot` triggers the sweep; GET /queue is the
+    // canonical one.
+    let (status, _) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sweep_events = drain_event_names(&mut events).await;
+    assert!(
+        sweep_events.iter().any(|name| name == "job.updated"),
+        "the stale-sweep must broadcast job.updated for the interrupted job: {sweep_events:?}"
+    );
+
+    let (status, job) = request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "interrupted");
+}
+
+#[tokio::test]
 async fn access_token_is_enforced_on_protected_routes() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let mut settings = test_settings(&temp_dir);

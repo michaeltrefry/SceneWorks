@@ -29,7 +29,7 @@ use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache
 use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
-    RetryJob, RouteDecision, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
+    RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
@@ -1265,11 +1265,24 @@ where
 }
 
 async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiError> {
-    store_call(state, |store, timeout| {
-        store.mark_stale_workers_interrupted(timeout)?;
-        store.queue_summary()
-    })
-    .await
+    let (sweep, summary): (StaleSweep, QueueSummary) =
+        store_call(state.clone(), |store, timeout| {
+            let sweep = store.mark_stale_workers_interrupted(timeout)?;
+            let summary = store.queue_summary()?;
+            Ok((sweep, summary))
+        })
+        .await?;
+    // The stale-sweep mutates jobs to `interrupted` in the DB but — unlike a worker-reported
+    // terminal status (`update_job_progress`) or the supervisor crash path (`worker_terminated`) —
+    // emits no per-job event. Broadcast `job.updated` for each swept job so a live client's job card
+    // flips to "Interrupted" instead of showing its last running state forever: the frontend's job
+    // list is driven by `job.updated`, while `queue.updated` only refreshes the summary/workers
+    // (sc-8186). The sweep returns each job exactly once (it also flips the owning worker offline, so
+    // a later sweep can't re-select it), so this neither spams nor double-fires.
+    for job in &sweep.jobs {
+        publish(&state, "job.updated", job);
+    }
+    Ok(summary)
 }
 
 async fn create_generation_job(
