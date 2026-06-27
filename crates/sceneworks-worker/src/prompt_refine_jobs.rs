@@ -958,6 +958,18 @@ mod tests {
             system.contains("KEEP these bboxes"),
             "system pins that grounded bboxes are kept"
         );
+        // sc-8194: the schema requires EXACTLY ONE of `style_description.photo` / `art_style`
+        // (both present OR neither present = validation error). The prompt must make that mandatory.
+        assert!(
+            system.contains("EXACTLY ONE"),
+            "system mandates exactly one style discriminator"
+        );
+        assert!(
+            system.contains("never both, never neither"),
+            "system forbids emitting both or neither discriminator key"
+        );
+        assert!(system.contains("photo"));
+        assert!(system.contains("art_style"));
         // Output is fenced so it survives markdown.
         assert!(system.contains("```json"));
         // The `[META]` thinking flag does not bleed into the system body.

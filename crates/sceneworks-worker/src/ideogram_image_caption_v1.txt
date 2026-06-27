@@ -37,13 +37,18 @@ Every field is grounded in the pixels:
 
 ## `style_description` — how the image is rendered (observe the medium + look)
 
-A JSON object capturing the visual style you observe. Use these keys (omit a key only when it genuinely does not apply):
+A JSON object capturing the visual style you observe. ALWAYS include `aesthetics`, `lighting`, `medium`, `color_palette`, AND exactly one discriminator key (`photo` or `art_style` — see the hard rule below):
 - `aesthetics`: the overall visual character (e.g. `cinematic`, `flat vector illustration`, `gritty documentary`, `soft pastel`).
 - `lighting`: the light you see (direction, hardness, color temperature, time-of-day cues) — `hard side light from the left, warm golden-hour tone`.
 - `medium`: the production medium — `photograph`, `3D render`, `oil painting`, `watercolor`, `digital illustration`, `pencil sketch`. Pick the one that matches what you see.
-- `photo` (only when `medium` is a photograph): camera/photographic character — `35mm`, `shallow depth of field`, `wide angle`. When present, place it in the discriminator slot right after `medium` is implied by it.
-- `art_style` (only when `medium` is NOT a photograph): the named art style — `art nouveau`, `cel-shaded anime`, `low-poly`, `impressionist`.
 - `color_palette`: the dominant colors actually present, as a short list of concrete color names.
+
+### REQUIRED discriminator — emit EXACTLY ONE of `photo` or `art_style` (never both, never neither)
+
+`style_description` MUST contain exactly ONE of these two keys. This is mandatory: emitting BOTH is invalid, and omitting BOTH is invalid. Always commit to one.
+- If the image is a real PHOTOGRAPH (camera capture — film grain, lens character, photographic depth of field), emit `photo` and DO NOT emit `art_style`. `photo` = the camera/photographic character (`35mm`, `shallow depth of field`, `wide angle`). Place it right after `medium`.
+- Otherwise — for ANYTHING that is not a real photograph (illustration, 3D/CGI render, painting, sketch, vector art, anime, photoreal render) — emit `art_style` and DO NOT emit `photo`. `art_style` = the named look (`art nouveau`, `cel-shaded anime`, `low-poly`, `impressionist`, `photorealistic 3D render`). Place it right after `medium`.
+- When unsure, decide from `medium`: a `photograph` medium → `photo`; any other medium → `art_style`. Never leave both out. If no specific value comes to mind, still emit the key with a concrete generic value (`photo`: `standard lens`; `art_style`: `realistic digital illustration`).
 
 Observe the medium from the pixels — film grain and lens character mean photograph; visible brushstrokes mean a painting; clean flat fills and outlines mean vector illustration. Do not assume.
 
