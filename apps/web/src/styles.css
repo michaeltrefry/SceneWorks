@@ -2136,25 +2136,30 @@ label {
   object-fit: cover;
 }
 
-/* Character assets grid: thumbnail with per-item discard / restore / purge. */
-.character-asset-thumb {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  width: 72px;
+/* Character assets grid: full-size tiles (matching the Assets page) with multi-select
+   plus per-item discard / restore / purge. Sizing is inherited from .asset-tile. */
+.character-asset-card {
+  cursor: default;
 }
 
-.character-asset-thumb-actions {
+.character-asset-media {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.character-asset-card-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
-  gap: 4px;
+  gap: 6px;
 }
 
-.character-asset-thumb-actions button {
-  padding: 2px 6px;
-  font-size: 10px;
+.character-asset-card-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
   line-height: 1.2;
 }
 

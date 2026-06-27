@@ -874,6 +874,20 @@ pub(crate) fn read_advanced_sampling_knobs(
     (name("sampler"), name("scheduler"), scheduler_shift)
 }
 
+/// Read the per-generation guidance method (epic 7434 P5, sc-7448) from a job's `advanced` block —
+/// the 4th sampling axis (`cfg` / `cfg_rescale` / `apg` / `cfg_pp`), alongside the sampler/scheduler
+/// knobs. Strips the `"default"` sentinel + blanks to `None` so the engine default (the N1 no-op) is
+/// the ABSENCE of a method. The result is then N3-guarded via [`normalize_sampling_knob`] against the
+/// model descriptor's `supported_guidance_methods` and threaded onto `GenerationRequest.guidance_method`.
+pub(crate) fn read_advanced_guidance_method(advanced: &JsonObject) -> Option<String> {
+    advanced
+        .get("guidanceMethod")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "default")
+        .map(str::to_owned)
+}
+
 /// The curated sampler/scheduler menu (epic 7114 decision 2) the **bespoke** conditioned image paths
 /// honor — the shared `gen_core` solver/scheduler vocabulary the unified-sampler engines gate on
 /// (`Solver::from_name` / the additive `denoise_curated` path; mlx #537/#538/#539, candle #130). The
@@ -944,6 +958,60 @@ mod sampling_knob_tests {
         assert_eq!(
             normalize_sampling_knob(None, &advertised, "scheduler", "m", "j", "mlx"),
             None
+        );
+    }
+
+    // sc-7448 — the guidance method rides the same `normalize_sampling_knob` N3 guard as sampler/scheduler.
+    #[test]
+    fn guidance_method_advertised_passes_through() {
+        let advertised = ["cfg", "cfg_pp"];
+        assert_eq!(
+            normalize_sampling_knob(
+                Some("cfg_pp".to_owned()),
+                &advertised,
+                "guidanceMethod",
+                "sdxl",
+                "job-1",
+                "mlx",
+            ),
+            Some("cfg_pp".to_owned())
+        );
+    }
+
+    #[test]
+    fn guidance_method_unadvertised_falls_back_to_default() {
+        // N3: cfg_pp requested on a model that doesn't advertise it (an engine that only does plain `cfg`,
+        // or a stale recipe) drops to the engine default — never a `validate_request` hard-fail.
+        let advertised = ["cfg"];
+        assert_eq!(
+            normalize_sampling_knob(
+                Some("cfg_pp".to_owned()),
+                &advertised,
+                "guidanceMethod",
+                "chroma",
+                "job-1",
+                "mlx",
+            ),
+            None
+        );
+    }
+
+    // N1: the read strips the `"default"` sentinel + blanks to `None` (the absence of a method = the
+    // engine default = the guaranteed no-op), exactly like the sampler/scheduler read.
+    #[test]
+    fn read_guidance_method_strips_default_and_blank() {
+        assert_eq!(read_advanced_guidance_method(&advanced(serde_json::json!({}))), None);
+        assert_eq!(
+            read_advanced_guidance_method(&advanced(serde_json::json!({"guidanceMethod": "default"}))),
+            None
+        );
+        assert_eq!(
+            read_advanced_guidance_method(&advanced(serde_json::json!({"guidanceMethod": "  "}))),
+            None
+        );
+        assert_eq!(
+            read_advanced_guidance_method(&advanced(serde_json::json!({"guidanceMethod": "cfg_pp"}))),
+            Some("cfg_pp".to_owned())
         );
     }
 
@@ -1061,6 +1129,9 @@ fn generate_one(
     sampler: Option<&str>,
     scheduler: Option<&str>,
     scheduler_shift: Option<f32>,
+    // The guidance method (epic 7434 P5, sc-7448): `None` is the engine default (N1 no-op); a value
+    // is already N3-normalized against the descriptor's `supported_guidance_methods` by the caller.
+    guidance_method: Option<&str>,
     // Per-generation PiD super-resolving decode (epic 7840, sc-7849). Must be `true` only when the
     // generator was loaded with `LoadSpec::with_pid` (the engine rejects a mismatch); the caller keeps
     // the two in lockstep. The candle path passes `false` (candle PiD is Phase 4, sc-7853).
@@ -1104,6 +1175,7 @@ fn generate_one(
         sampler: sampler.map(str::to_owned),
         scheduler: scheduler.map(str::to_owned),
         scheduler_shift,
+        guidance_method: guidance_method.map(str::to_owned),
         use_pid,
         conditioning,
         cancel: cancel.clone(),
@@ -1597,6 +1669,18 @@ async fn generate_stream(
         &job.id,
         backend,
     );
+    // Guidance method (epic 7434 P5, sc-7448): the 4th sampling axis. N3-guarded against the engine's
+    // `supported_guidance_methods` exactly like sampler/scheduler — an unadvertised method (a stale
+    // recipe, a per-backend gap, or a method gated to an incompatible sampler) drops to the engine
+    // default + a `sampling_knob_unsupported` event, never a `validate_request` hard-fail.
+    let guidance_method = normalize_sampling_knob(
+        read_advanced_guidance_method(&request.advanced),
+        &caps.supported_guidance_methods,
+        "guidanceMethod",
+        &request.model,
+        &job.id,
+        backend,
+    );
     // True-CFG families (Chroma) carry the CFG scale in `true_cfg`, not `guidance` (which their
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
@@ -1773,6 +1857,7 @@ async fn generate_stream(
                         sampler.as_deref(),
                         scheduler.as_deref(),
                         scheduler_shift,
+                        guidance_method.as_deref(),
                         use_pid,
                         &enhance,
                         &cancel,
@@ -2276,6 +2361,15 @@ async fn generate_candle_stream(
         &job.id,
         backend,
     );
+    // Guidance method (epic 7434 P5, sc-7448), N3-guarded against the candle descriptor's advertised set.
+    let guidance_method = normalize_sampling_knob(
+        read_advanced_guidance_method(&request.advanced),
+        &caps.supported_guidance_methods,
+        "guidanceMethod",
+        &request.model,
+        &job.id,
+        backend,
+    );
     // sc-6135 / sc-7458: caption upsampling is FLUX.2-dev-only. On candle (off-Mac) dev now runs here,
     // but the Mistral3/Pixtral caption-upsampler vision tower is NOT ported (deferred to epic 6564
     // story 4), so `enhance` degrades to **passthrough**: it is carried onto the `GenerationRequest`
@@ -2318,6 +2412,10 @@ async fn generate_candle_stream(
                         sampler.as_deref(),
                         scheduler.as_deref(),
                         scheduler_shift,
+                        // Guidance method, N3-guarded against this family's advertised surface above
+                        // (sc-7448). candle adopts cfg_pp/cfg_rescale/apg in P4; until then an unsupported
+                        // method was already dropped to `None` (the engine default) before reaching here.
+                        guidance_method.as_deref(),
                         // candle PiD is Phase 4 (sc-7853); the off-Mac lane never requests it.
                         false,
                         &enhance,

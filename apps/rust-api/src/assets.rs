@@ -269,6 +269,18 @@ pub(crate) async fn update_asset_tags(
     ))
 }
 
+pub(crate) async fn move_asset_to_library(
+    State(state): State<AppState>,
+    Path((project_id, asset_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.move_asset_to_library(&project_id, &asset_id)
+        })
+        .await?,
+    ))
+}
+
 pub(crate) async fn delete_asset(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
