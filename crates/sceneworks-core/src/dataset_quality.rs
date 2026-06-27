@@ -712,6 +712,14 @@ pub struct ItemReadiness {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<Severity>,
     pub flags: Vec<QualityFlag>,
+    /// Whether the item's stored file can still carry embedded metadata (EXIF/GPS/ICC) — i.e. it is
+    /// not yet a normalized metadata-free PNG (sc-6539). Drives whether the Dataset Doctor offers its
+    /// one-tap "Strip metadata" action for this image: the strip fix re-encodes to a clean PNG, so
+    /// this flips to `false` once an item has been stripped and the action stops re-appearing for
+    /// already-clean photos. Advisory only — kept out of the severity/gate machinery. Defaults
+    /// `false`; the extraction layer (which holds the file paths) sets it.
+    #[serde(default)]
+    pub metadata_strippable: bool,
 }
 
 /// Flag counts by severity across items + dataset — the readout's "2 blurry, 3 near-dup" line.
@@ -1048,6 +1056,9 @@ pub fn build_readiness_report(
             item_id: entry.item_id.clone(),
             severity,
             flags,
+            // Set by the extraction layer (`compute_readiness`), which holds the file paths; the pure
+            // core rollup has no path to judge format from, so it leaves the default.
+            metadata_strippable: false,
         });
     }
 

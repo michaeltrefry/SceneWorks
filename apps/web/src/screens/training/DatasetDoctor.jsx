@@ -14,6 +14,7 @@ import {
   gateMeta,
   itemBadge,
   lowResolutionFlaggedItemIds,
+  metadataStrippableItemIds,
   primaryReason,
   technicalPercent,
 } from "../../training/datasetReadiness.js";
@@ -221,9 +222,12 @@ export function DatasetDoctorReadout({
   // sc-6539: extreme-aspect images the one-tap smart-crop would trim toward a trainable aspect.
   const cropLossIds =
     typeof onSmartCrop === "function" ? cropLossFlaggedItemIds(report) : [];
-  // sc-6539: EXIF-strip is a blanket hygiene pass (not flag-gated), so its count is every item.
-  const stripExifCount =
-    typeof onStripExif === "function" ? (report.items ?? []).length : 0;
+  // sc-6539: EXIF-strip targets only items whose stored file can still carry metadata (not yet a
+  // normalized metadata-free PNG) — so once an item is stripped it drops out and the action stops
+  // re-appearing. Empty unless a consumer wired `onStripExif`.
+  const stripExifIds =
+    typeof onStripExif === "function" ? metadataStrippableItemIds(report) : [];
+  const stripExifCount = stripExifIds.length;
   // sc-6535: the CLIP analysis is the kind-agnostic analysis trigger — it embeds every photo to light
   // up the Variety / aesthetic / off-style-outlier / caption-alignment readout. An analysis prerequisite,
   // not a fix on flagged items, so it shows whenever wired (re-running is valid after a dataset edit).
@@ -341,7 +345,7 @@ export function DatasetDoctorReadout({
             </button>
           ) : null}
           {stripExifCount ? (
-            <button type="button" className="secondary-action" onClick={() => onStripExif()}>
+            <button type="button" className="secondary-action" onClick={() => onStripExif(stripExifIds)}>
               Strip metadata from {stripExifCount}{" "}
               {stripExifCount === 1 ? "image" : "images"}
             </button>

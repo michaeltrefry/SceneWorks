@@ -1310,9 +1310,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
-  // One-tap EXIF-strip (sc-6539): bake orientation + drop metadata from every item (no `itemIds`),
-  // then reload. Not flag-gated — a blanket privacy/orientation hygiene pass.
-  async function stripExifItems() {
+  // One-tap EXIF-strip (sc-6539): bake orientation + drop metadata, then reload. The Doctor passes
+  // the items whose stored file can still carry metadata (so the action clears once they are stripped
+  // to PNG); a `null`/omitted list falls back to every item.
+  async function stripExifItems(itemIds = null) {
     if (savingDataset || !activeDataset?.id) {
       return;
     }
@@ -1325,7 +1326,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
         setDatasetError("Save the dataset before stripping metadata.");
         return;
       }
-      const result = await stripExifTrainingDataset(saved.id, null);
+      const result = await stripExifTrainingDataset(saved.id, itemIds ?? null);
       await openDataset(saved.id);
       setDatasetMessage(`Stripped metadata from ${result?.applied ?? 0} image(s).`);
     } catch (err) {

@@ -365,6 +365,18 @@ export function cropLossFlaggedItemIds(report) {
     .map((item) => item.itemId);
 }
 
+// Item IDs whose stored file can still carry embedded metadata (EXIF/GPS/ICC) — i.e. it is not yet a
+// normalized metadata-free PNG (sc-6539). These are the only targets the one-tap "Strip metadata"
+// action would actually change (it re-encodes to a clean PNG). Once an item is stripped the server
+// reports `metadataStrippable: false`, so it drops out and the action stops re-appearing for
+// already-clean photos. The backend sets the flag from each item's format, so a missing field (older
+// payload) reads as not-strippable.
+export function metadataStrippableItemIds(report) {
+  return (report?.items ?? [])
+    .filter((item) => item.metadataStrippable)
+    .map((item) => item.itemId);
+}
+
 // --- Kind-aware recommendations (sc-6540) ---------------------------------------------------------
 // Concrete next-steps that change with the training kind (person/style/object) the user picked in
 // Teach. These are the MANUAL moves only — acquiring or replacing images — not the one-tap fixes that

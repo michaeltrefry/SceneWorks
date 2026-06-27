@@ -222,14 +222,16 @@ describe("DatasetDoctorReadout gating states", () => {
     expect(onSmartCrop).toHaveBeenCalledWith(["a", "c"]);
   });
 
-  it("surfaces a strip-metadata action for every item when wired (sc-6539)", () => {
+  it("surfaces a strip-metadata action only for items that still carry metadata (sc-6539)", () => {
     const onStripExif = vi.fn();
     mount(
       <DatasetDoctorReadout
         report={report({
           items: [
-            { itemId: "a", flags: [] },
-            { itemId: "b", flags: [] },
+            { itemId: "a", flags: [], metadataStrippable: true },
+            // Already a clean PNG (stripped) — must not be counted, so the action clears once done.
+            { itemId: "b", flags: [], metadataStrippable: false },
+            { itemId: "c", flags: [], metadataStrippable: true },
           ],
         })}
         onStripExif={onStripExif}
@@ -241,7 +243,26 @@ describe("DatasetDoctorReadout gating states", () => {
     expect(button).toBeTruthy();
     expect(button.textContent).toContain("Strip metadata from 2 images");
     act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    expect(onStripExif).toHaveBeenCalled();
+    expect(onStripExif).toHaveBeenCalledWith(["a", "c"]);
+  });
+
+  it("hides the strip-metadata action when every item is already a clean PNG (sc-6539)", () => {
+    const onStripExif = vi.fn();
+    mount(
+      <DatasetDoctorReadout
+        report={report({
+          items: [
+            { itemId: "a", flags: [], metadataStrippable: false },
+            { itemId: "b", flags: [], metadataStrippable: false },
+          ],
+        })}
+        onStripExif={onStripExif}
+      />,
+    );
+    const button = [...container.querySelectorAll(".dataset-doctor-actions button")].find((node) =>
+      node.textContent.includes("Strip metadata"),
+    );
+    expect(button).toBeFalsy();
   });
 
   it("surfaces a Check-faces action for a person dataset, even on a clean set (sc-6538)", () => {

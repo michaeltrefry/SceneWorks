@@ -134,6 +134,17 @@ pub struct ReadinessItem {
     pub acknowledged: Vec<QualityCheck>,
 }
 
+/// Whether a stored image path can still carry embedded metadata (sc-6539). The strip-metadata fix
+/// re-encodes to a metadata-free PNG, so anything already stored as PNG is treated as clean; every
+/// other accepted raster format (JPEG/HEIC/WebP/TIFF/…) can carry EXIF/GPS/ICC and is offered the
+/// one-tap strip. Path-string only (no decode), so it is free even for cached-scalar items.
+fn path_can_carry_metadata(path: &Path) -> bool {
+    !path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+}
+
 /// Compute the dataset readiness report (sc-6533), decoding Tier-0 scalars for any item without a
 /// reusable cached value. Returns the report plus the freshly-extracted `(item_id, scalars)` pairs
 /// so the caller can persist them as the content-hash + bucket-keyed cache. An item whose image
@@ -205,6 +216,22 @@ pub fn compute_readiness(
     let mut report = build_readiness_report(evaluation, tier1, alignment, aesthetic, identity);
     report.distributions = build_distributions(&inputs, thresholds);
     report.duplicate_removal = plan_dataset_duplicate_removal(&report, &inputs);
+    // Strip-metadata gating (sc-6539): the one-tap fix re-encodes to a metadata-free PNG, so the
+    // Doctor should only offer it where it would actually change something. An item already stored as
+    // PNG is clean; every other accepted raster format (JPEG/HEIC/WebP/TIFF/…) can still carry
+    // EXIF/GPS/ICC. Marking only those makes the action stop re-appearing once an item is stripped.
+    let strippable: std::collections::HashSet<&str> = items
+        .iter()
+        .filter(|item| {
+            item.image_path
+                .as_deref()
+                .is_some_and(path_can_carry_metadata)
+        })
+        .map(|item| item.item_id.as_str())
+        .collect();
+    for entry in &mut report.items {
+        entry.metadata_strippable = strippable.contains(entry.item_id.as_str());
+    }
     (report, extracted)
 }
 
@@ -605,6 +632,63 @@ mod tests {
             .find(|i| i.item_id == "flat")
             .expect("flat");
         assert!(flat.flags.iter().any(|f| f.check == QualityCheck::Blur));
+    }
+
+    #[test]
+    fn path_can_carry_metadata_is_true_for_everything_but_png() {
+        use std::path::Path;
+        assert!(path_can_carry_metadata(Path::new("a/b/photo.jpg")));
+        assert!(path_can_carry_metadata(Path::new("photo.JPEG")));
+        assert!(path_can_carry_metadata(Path::new("photo.heic")));
+        assert!(path_can_carry_metadata(Path::new("noext")));
+        assert!(!path_can_carry_metadata(Path::new("clean.png")));
+        assert!(!path_can_carry_metadata(Path::new("clean.PNG")));
+    }
+
+    #[test]
+    fn compute_readiness_marks_only_non_png_items_as_metadata_strippable() {
+        use sceneworks_core::dataset_quality::{DatasetKind, Tier0Thresholds};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bucket = 64;
+        let thresholds = Tier0Thresholds::for_kind(&DatasetKind::Person);
+
+        // A JPEG still carries EXIF/GPS/ICC; a PNG is the normalized, metadata-free result of a strip.
+        let jpg_path = dir.path().join("photo.jpg");
+        mid_checkerboard(64, 64).save(&jpg_path).expect("write jpg");
+        let png_path = dir.path().join("clean.png");
+        mid_checkerboard(64, 64).save(&png_path).expect("write png");
+
+        let items = vec![
+            ReadinessItem {
+                item_id: "jpg".to_owned(),
+                width: Some(64),
+                height: Some(64),
+                content_hash: Some("h_jpg".to_owned()),
+                image_path: Some(jpg_path),
+                cached_scalars: None,
+                acknowledged: Vec::new(),
+            },
+            ReadinessItem {
+                item_id: "png".to_owned(),
+                width: Some(64),
+                height: Some(64),
+                content_hash: Some("h_png".to_owned()),
+                image_path: Some(png_path),
+                cached_scalars: None,
+                acknowledged: Vec::new(),
+            },
+        ];
+
+        let (report, _) = compute_readiness(&items, bucket, 1, &thresholds, None, None, None, None);
+
+        let strippable: std::collections::HashMap<_, _> = report
+            .items
+            .iter()
+            .map(|i| (i.item_id.as_str(), i.metadata_strippable))
+            .collect();
+        assert_eq!(strippable.get("jpg"), Some(&true));
+        assert_eq!(strippable.get("png"), Some(&false));
     }
 
     #[test]
