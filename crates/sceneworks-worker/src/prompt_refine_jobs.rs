@@ -52,11 +52,13 @@ const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
 // headroom; a well-formed caption emits EOS far below the cap, so a higher ceiling only rescues the
 // truncating cases. Callers may still override via the `maxNewTokens` payload field.
 #[cfg(any(
+    test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
 #[cfg(any(
+    test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
@@ -64,6 +66,7 @@ const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 512;
 // Resolve the output token budget: an explicit positive `maxNewTokens` override wins; otherwise the
 // per-task default (caption tasks need the larger cap so the JSON closes).
 #[cfg(any(
+    test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
