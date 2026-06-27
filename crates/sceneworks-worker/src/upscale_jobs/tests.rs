@@ -146,6 +146,61 @@ fn crop_to_chw_subregion() {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
+fn pad_chw_even_replicates_to_even_dims_for_pixel_unshuffle() {
+    // odd width (the 323px-wide regression): 3x2 CHW → padded to 4x2, the new column replicates
+    // the last (no dark seam to bleed into the readable region via the x2 unshuffle conv).
+    let (data, cw, ch) = crop_chw_const_gradient(3, 2);
+    let (padded, pw, ph) = pad_chw_even(data.clone(), cw, ch);
+    assert_eq!((pw, ph), (4, 2));
+    assert_eq!(padded.len(), 3 * 4 * 2);
+    for c in 0..3 {
+        for y in 0..2 {
+            // the appended column (x=3) equals the original last column (x=2)
+            let last = data[c * ch * cw + y * cw + 2];
+            let appended = padded[c * ph * pw + y * pw + 3];
+            assert!((appended - last).abs() < 1e-6);
+            // existing columns are preserved
+            for x in 0..3 {
+                assert!(
+                    (padded[c * ph * pw + y * pw + x] - data[c * ch * cw + y * cw + x]).abs()
+                        < 1e-6
+                );
+            }
+        }
+    }
+
+    // odd height too → row replicated; even×even is returned untouched (no copy).
+    let (d2, _, _) = crop_chw_const_gradient(2, 3);
+    let (_, pw2, ph2) = pad_chw_even(d2, 2, 3);
+    assert_eq!((pw2, ph2), (2, 4));
+    let (d3, _, _) = crop_chw_const_gradient(4, 2);
+    let (out3, pw3, ph3) = pad_chw_even(d3.clone(), 4, 2);
+    assert_eq!((pw3, ph3), (4, 2));
+    assert_eq!(out3, d3, "already-even dims are returned unchanged");
+}
+
+/// Tiny deterministic CHW buffer (each channel a distinct gradient) for the padding test.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn crop_chw_const_gradient(cw: usize, ch: usize) -> (Vec<f32>, usize, usize) {
+    let mut data = vec![0.0f32; 3 * cw * ch];
+    for c in 0..3 {
+        for y in 0..ch {
+            for x in 0..cw {
+                data[c * ch * cw + y * cw + x] = (c * 100 + y * 10 + x) as f32 / 255.0;
+            }
+        }
+    }
+    (data, cw, ch)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
 fn onnx_filename_per_factor() {
     assert_eq!(onnx_file(2), "real_esrgan_x2.onnx");
     assert_eq!(onnx_file(4), "real_esrgan_x4.onnx");

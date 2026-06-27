@@ -495,24 +495,63 @@ pub(crate) fn build_image_describe_messages(style: DescribeStyle) -> (String, St
     (system, user)
 }
 
+/// Pixel-count ceiling for a vision reference image before it reaches the Qwen-VL tower. The ViT runs
+/// DENSE `n×n` self-attention over its `n = pixels / patch_size²` patches, so the attention-score
+/// tensor grows as `num_heads · n²`: at the provider's smart-resize ceiling (a 16.7-MP / 4096² pixel
+/// budget) a large reference image expands to ~65 536 patches and that single tensor is ~272 GB —
+/// far past the Metal max-buffer limit, which is exactly the allocation that crashed `image_describe`.
+/// 1 MP keeps `n ≈ 4096` (≈1 GB of attention scores) while staying well above the provider's 256²
+/// `min_pixels` floor (so it is not upscaled back), and is ample resolution for a VLM to caption or
+/// describe a scene (it matches the de-facto Qwen2-VL default budget). We shrink here, aspect-
+/// preserving, rather than lean on the provider's ceiling because that ceiling is both too high for
+/// dense attention AND hardcoded from `Qwen35ImageProcessor::default()` (provider.rs ignores the
+/// model's `preprocessor_config.json`) — fixing that upstream is tracked separately.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const VISION_REFERENCE_MAX_PIXELS: u64 = 1_048_576; // 1024² — safe for the dense ViT attention
+
+/// Shrink `image` (aspect-preserving) so its pixel count does not exceed `max_pixels`; an image already
+/// within budget is returned untouched. The target box is the source dimensions scaled by
+/// `sqrt(max_pixels / pixels)`, so the result is the largest same-ratio image inside the budget.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn downscale_to_pixel_budget(image: image::DynamicImage, max_pixels: u64) -> image::DynamicImage {
+    let (width, height) = (image.width(), image.height());
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels <= max_pixels || width == 0 || height == 0 {
+        return image;
+    }
+    let scale = (max_pixels as f64 / pixels as f64).sqrt();
+    let target_w = ((width as f64) * scale).floor().max(1.0) as u32;
+    let target_h = ((height as f64) * scale).floor().max(1.0) as u32;
+    image.resize(target_w, target_h, image::imageops::FilterType::Lanczos3)
+}
+
 /// Decode a reference image off disk into a `core_llm::ImageRef` (RGB8), mirroring the JoyCaption
 /// `load_caption_image` pattern (`decode_image_any` → `to_rgb8`) but producing the vision contract's
 /// tensor-free image type instead of the captioner's `gen_core::Image`. Used by the `image_caption`
-/// task to build the `Content::Image` block.
+/// and `image_describe` tasks to build the `Content::Image` block. The decoded image is capped to
+/// [`VISION_REFERENCE_MAX_PIXELS`] BEFORE conversion so a large reference image cannot OOM the dense
+/// ViT attention in the vision tower.
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core_llm::ImageRef> {
-    let decoded = crate::image_decode::decode_image_any(path)
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "image-caption reference image {}: {error}",
-                path.display()
-            ))
-        })?
-        .to_rgb8();
+    let decoded = crate::image_decode::decode_image_any(path).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "image-caption reference image {}: {error}",
+            path.display()
+        ))
+    })?;
+    let decoded = downscale_to_pixel_budget(decoded, VISION_REFERENCE_MAX_PIXELS).to_rgb8();
     let (width, height) = (decoded.width(), decoded.height());
     gen_core::core_llm::ImageRef::new(width, height, decoded.into_raw()).map_err(|error| {
         WorkerError::InvalidPayload(format!(
@@ -982,6 +1021,29 @@ fn refine_result(original_prompt: &str, refined_prompt: &str) -> JsonObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downscale_to_pixel_budget_caps_large_and_keeps_small() {
+        // A 4000×3000 (12 MP) reference is shrunk under the budget while holding the 4:3 aspect ratio
+        // (this is the case that produced the ~272 GB dense-attention allocation at full size).
+        let big = image::DynamicImage::new_rgb8(4000, 3000);
+        let capped = downscale_to_pixel_budget(big, VISION_REFERENCE_MAX_PIXELS);
+        let pixels = u64::from(capped.width()) * u64::from(capped.height());
+        assert!(
+            pixels <= VISION_REFERENCE_MAX_PIXELS,
+            "capped pixels {pixels} exceed budget {VISION_REFERENCE_MAX_PIXELS}"
+        );
+        let ratio = capped.width() as f64 / capped.height() as f64;
+        assert!(
+            (ratio - 4.0 / 3.0).abs() < 0.01,
+            "aspect ratio drifted: {ratio}"
+        );
+
+        // An already-small image passes through untouched (no upscaling).
+        let small = image::DynamicImage::new_rgb8(640, 480);
+        let kept = downscale_to_pixel_budget(small, VISION_REFERENCE_MAX_PIXELS);
+        assert_eq!((kept.width(), kept.height()), (640, 480));
+    }
 
     #[test]
     fn resolve_max_new_tokens_defaults_and_override() {

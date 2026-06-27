@@ -205,10 +205,24 @@ fn refine_tiled_detail(
             on_tile(done, total);
         }
     }
+    Ok((compose_feathered(&acc, &wsum, width, height), total))
+}
+
+/// Normalize the feather-weighted accumulator back to an RGB8 image.
+///
+/// Each pixel is the weighted mean `acc / wsum` of every tile that covered it. The divisor
+/// MUST be the true accumulated feather weight: a pixel on the IMAGE boundary is covered by a
+/// single edge tile whose raised-cosine feather ramps toward ~0 over the `overlap`-wide border
+/// (there is no neighboring tile to sum the partition-of-unity back to 1). A previous
+/// `.max(1.0)` guard divided those border pixels by 1.0 while `acc = src * f` (f→0), stamping a
+/// dark rounded-corner vignette — most of the frame in the common single-tile case. Guard only
+/// against a literal divide-by-zero; every pixel is covered by ≥1 tile because the tile origins
+/// are clamped to the boundary, so `wsum` is strictly positive in practice (sc-8229).
+fn compose_feathered(acc: &[f32], wsum: &[f32], width: u32, height: u32) -> image::RgbImage {
     let mut out = image::RgbImage::new(width, height);
     for gy in 0..height {
         for gx in 0..width {
-            let w = wsum[(gy * width + gx) as usize].max(1.0);
+            let w = wsum[(gy * width + gx) as usize].max(f32::EPSILON);
             let base = ((gy * width + gx) * 3) as usize;
             out.put_pixel(
                 gx,
@@ -221,7 +235,7 @@ fn refine_tiled_detail(
             );
         }
     }
-    Ok((out, total))
+    out
 }
 
 /// Build the detail child-asset fact (lineage to the source) + generation set, matching the
