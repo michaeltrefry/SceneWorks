@@ -833,6 +833,13 @@ pub(crate) fn validate_lora_specs_for_model(
         }
         let header = validate_lora_safetensors_header(lora_id, lora)?;
         if let Some(detected_family) = header.as_ref().and_then(detect_lora_family) {
+            // `model_families` are normalized (via `model_lora_families` →
+            // `normalize_lora_family`, `_`→`-`), but `detect_lora_family` returns the catalog/
+            // trainer-verbatim token (e.g. `krea_2`, underscore — chosen so import-time
+            // reconciliation matches the catalog string raw). Normalize the detected family to the
+            // same canonical form before the membership test, else a krea_2 LoRA is falsely
+            // rejected against a `krea-2`-normalized model surface (sc-8185).
+            let detected_family = normalize_lora_family(&detected_family);
             if !model_families
                 .iter()
                 .any(|model_family| model_family == &detected_family)
@@ -1234,5 +1241,41 @@ mod base_model_gating_tests {
         let lora = json!({ "id": "legacy", "families": ["wan-video"] });
         validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
             .expect("family-only LoRA must still pass");
+    }
+
+    /// Minimal valid safetensors with one krea-identifying tensor key (`text_fusion`), so
+    /// `detect_lora_family` returns the catalog/trainer-verbatim `krea_2` (underscore).
+    fn write_krea_lora(dir: &std::path::Path) {
+        use std::io::Write;
+        let header = r#"{"diffusion_model.text_fusion.projector.weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0u8; 4]);
+        std::fs::File::create(dir.join("krea.safetensors"))
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+
+    /// sc-8185: a Krea LoRA's header detects as `krea_2` (underscore — the verbatim catalog/
+    /// trainer token), but the model surface declares `krea_2` which `model_lora_families`
+    /// normalizes to `krea-2`. The detected family must be normalized before the membership test,
+    /// else the LoRA is falsely rejected as "appears to be a krea_2 LoRA ... not compatible".
+    #[test]
+    fn krea_lora_passes_detected_family_check_despite_underscore() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_krea_lora(tmp.path());
+        let models = vec![json!({
+            "id": "krea_2_turbo",
+            "loraCompatibility": { "families": ["krea_2"] }
+        })];
+        let lora = json!({
+            "id": "krea_2_mysticxxx",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["krea_2"],
+        });
+        validate_lora_specs_for_model(&models, &[], "krea_2_turbo", &[lora], true, "LoRA")
+            .expect("krea_2 detected family must pass against a krea_2 (→krea-2) model surface");
     }
 }
