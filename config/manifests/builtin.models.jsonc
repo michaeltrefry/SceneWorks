@@ -2792,6 +2792,12 @@
           "max": 1.0,
           "step": 0.05
         },
+        // Optional PiD decoder (epic 7840, sc-8371): Angles/Poses can decode through NVIDIA's PiD
+        // pixel-diffusion student instead of the SDXL VAE (decode + 4x super-resolve to 2K/4K). InstantID
+        // composes the SDXL VAE, so it shares the `pid_sdxl` checkpoint with the SDXL/RealVisXL t2i path.
+        // `checkpointId` gates the per-generation toggle (shown only once that download is installed) and
+        // the worker maps `instantid_realvisxl -> sdxl` in `pid_backbone_for`. Non-commercial output.
+        "pid": { "checkpointId": "pid_sdxl" },
         // Canonical head angles the adapter can render from a frontal reference
         // (sc-2009: the IdentityNet landmarks come from a built-in pack; identity
         // from the character reference). Selecting one rides advanced.viewAngle and

@@ -75,8 +75,12 @@ fn pid_backbone_for(model: &str) -> Option<&'static str> {
         | "lens_turbo"
         | "ideogram_4"
         | "ideogram_4_turbo" => Some("flux2"),
-        // sdxl (sc-7848): SDXL base, RealVisXL (+ Lightning), Kolors (reuses the SDXL VAE).
-        "sdxl" | "realvisxl" | "realvisxl_lightning" | "kolors" => Some("sdxl"),
+        // sdxl (sc-7848): SDXL base, RealVisXL (+ Lightning), Kolors (reuses the SDXL VAE). InstantID
+        // (sc-8370/8371) composes the SDXL VAE too, so its Angles/Poses latents decode through the same
+        // `sdxl` PiD student — the engine's `InstantId::with_pid` loads that one checkpoint.
+        "sdxl" | "realvisxl" | "realvisxl_lightning" | "kolors" | "instantid_realvisxl" => {
+            Some("sdxl")
+        }
         _ => None,
     }
 }
@@ -194,6 +198,8 @@ mod pid_tests {
         assert_eq!(pid_backbone_for("sdxl"), Some("sdxl"));
         assert_eq!(pid_backbone_for("realvisxl_lightning"), Some("sdxl"));
         assert_eq!(pid_backbone_for("kolors"), Some("sdxl"));
+        // InstantID (sc-8371): the Angles/Poses identity engine reuses the SDXL VAE latent space.
+        assert_eq!(pid_backbone_for("instantid_realvisxl"), Some("sdxl"));
         // No PiD backbone → silently ignored (SenseNova is autoregressive, no VAE latent).
         assert_eq!(pid_backbone_for("sensenova_u1_8b"), None);
         assert_eq!(pid_backbone_for("bernini_image"), None);
