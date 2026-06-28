@@ -5751,3 +5751,893 @@ fn threaded_source_drives_auto_canny_control_conditioning() {
         "canny builds a Control conditioning"
     );
 }
+
+// =====================================================================================================
+// sc-8247 — V: real-weight e2e validation matrix  (`real_weight_matrix_*`)
+// =====================================================================================================
+//
+// SINGLE ENTRY POINT for the {flux1_dev_control, flux2_dev_control, z_image_turbo_control,
+// z_image_control, qwen_image_control} × {pose, canny, depth} real-weight gate. Every smoke below is
+// `#[ignore]`d (needs real weights + a Metal device) and drives the FULL worker job seam —
+// `*_control_load` (the `*_control_spec` LoadSpec the live stream builds) → `preprocess_control_entry`
+// (skeleton / auto-canny / auto-depth) → `build_control_conditioning` → `*_control_generate_one`
+// (the registered native-MLX engine) → decode — then asserts the control measurably STEERS the render.
+//
+// Run the whole matrix in one shot (each smoke loads its own engine, so this is serial + heavy):
+//
+//   FLUX1_DEV_DIR / SCENEWORKS_FLUX1_DEV_DIR    gated FLUX.1-dev diffusers snapshot (else HF cache)
+//   SCENEWORKS_CONTROLNET_FLUX1                 Shakker FLUX.1-dev-ControlNet-Union-Pro-2.0 ckpt
+//   SCENEWORKS_FLUX2_DEV_DIR                    converted Q4 FLUX.2-dev dir (else app-support default)
+//   SCENEWORKS_DEPTH_ANYTHING_V2                Depth-Anything-V2-Small-hf dir (depth modes only)
+//   # the rest resolve from the HF cache by repo id:
+//   #   Tongyi-MAI/Z-Image-Turbo, Tongyi-MAI/Z-Image, Qwen/Qwen-Image,
+//   #   alibaba-pai/{Z-Image-Turbo,Z-Image,FLUX.2-dev,Qwen-Image-2512}-Fun-Controlnet-Union*
+//   cargo test -p sceneworks-worker --lib --release -- --ignored --nocapture real_weight_matrix
+//
+// Record the outcome in crates/sceneworks-worker/VALIDATION.md (the maintainer's on-device note). The
+// on-device run IS the gate — CI never builds these (no GPU / no weights).
+//
+// Coverage map (which test backs each cell):
+//   flux1_dev_control     pose=real_weight_matrix_flux1_pose_directed  canny=…_flux1_canny  depth=…_flux1_depth
+//   flux2_dev_control     pose=real_weight_matrix_flux2_pose_directed  canny=…_flux2_canny  depth=…_flux2_depth
+//   z_image_turbo_control pose=real_weight_matrix_zimage_turbo_pose_directed canny=…_zimage_turbo_canny depth=…_zimage_turbo_depth
+//   z_image_control       pose=real_weight_matrix_zimage_base_pose_directed  canny=…_zimage_base_canny  depth=…_zimage_base_depth
+//   qwen_image_control    pose=real_weight_matrix_qwen_pose_directed   canny=…_qwen_canny   depth=…_qwen_depth
+//
+// (The pre-existing `*_control_real_weights_*` smokes above remain as the per-backbone bring-up checks;
+// these `real_weight_matrix_*` smokes are the consolidated, steer-asserting completion of the gate —
+// every backbone × every mode, pose proven DIRECTED, canny/depth proven structural-steering.)
+
+/// Mean absolute per-byte difference between two same-shape decodes — the control-vs-control-free steer
+/// metric (0 = identical = the control did nothing). Panics on a shape mismatch (a bug, not a render).
+#[cfg(target_os = "macos")]
+fn matrix_mean_abs_delta(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len(), "decodes must share a length to diff");
+    if a.is_empty() {
+        return 0.0;
+    }
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as f64 - y as f64).abs())
+        .sum::<f64>()
+        / a.len() as f64
+}
+
+/// Mean per-byte std-dev — a cheap "is the decode non-degenerate (not all-black / flat / NaN)" floor.
+#[cfg(target_os = "macos")]
+fn matrix_std(pixels: &[u8]) -> f64 {
+    let n = pixels.len() as f64;
+    if n == 0.0 {
+        return 0.0;
+    }
+    let mean = pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
+    (pixels
+        .iter()
+        .map(|&p| (p as f64 - mean).powi(2))
+        .sum::<f64>()
+        / n)
+        .sqrt()
+}
+
+/// A standing DWPose skeleton leaning LEFT or RIGHT — the directed-pose probe. The torso/limb columns
+/// are shifted toward one side so a left-lean vs right-lean render must differ measurably IF the pose
+/// control is spatially DIRECTED (not merely on/off). `lean` is a signed horizontal offset in
+/// normalized units (negative = lean left, positive = lean right). Mirrors the standing keypoint layout
+/// the existing pose smokes use.
+#[cfg(target_os = "macos")]
+fn directed_pose_skeleton(side: u32, lean: f64) -> Image {
+    let dx = lean;
+    // 18-point body skeleton; shift every x by `dx`, clamped to the canvas.
+    let pt = |x: f64, y: f64| json!([(x + dx).clamp(0.02, 0.98), y]);
+    let kp = crate::openpose_skeleton::normalize_keypoints(&json!([
+        pt(0.50, 0.20),
+        pt(0.50, 0.35),
+        pt(0.42, 0.35),
+        pt(0.40, 0.50),
+        pt(0.40, 0.65),
+        pt(0.58, 0.35),
+        pt(0.60, 0.50),
+        pt(0.60, 0.65),
+        pt(0.45, 0.60),
+        pt(0.45, 0.80),
+        pt(0.45, 0.95),
+        pt(0.55, 0.60),
+        pt(0.55, 0.80),
+        pt(0.55, 0.95),
+        pt(0.48, 0.18),
+        pt(0.52, 0.18),
+        pt(0.46, 0.20),
+        pt(0.54, 0.20)
+    ]));
+    let skeleton = crate::openpose_skeleton::draw_wholebody(
+        side,
+        side,
+        &kp,
+        None,
+        None,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+    );
+    Image {
+        width: side,
+        height: side,
+        pixels: skeleton.into_raw(),
+    }
+}
+
+/// A non-flat synthetic source for the auto-canny / auto-depth modes: a centered bright square on a
+/// dark field, so the canny edge detector finds edges and the depth estimator finds a foreground/
+/// background split (a flat field gives a degenerate edge/depth map). 512² RGB.
+#[cfg(target_os = "macos")]
+fn matrix_structured_source(side: u32) -> Image {
+    let s = side as usize;
+    let mut pixels = vec![20u8; s * s * 3];
+    let (lo, hi) = (s / 4, 3 * s / 4);
+    for y in lo..hi {
+        for x in lo..hi {
+            let i = (y * s + x) * 3;
+            pixels[i] = 230;
+            pixels[i + 1] = 230;
+            pixels[i + 2] = 230;
+        }
+    }
+    Image {
+        width: side,
+        height: side,
+        pixels,
+    }
+}
+
+/// Resolve the Depth-Anything-V2-Small snapshot dir for the depth-mode smokes: `SCENEWORKS_DEPTH_ANYTHING_V2`
+/// override → the HF cache snapshot. Returns the dir that holds `model.safetensors`.
+#[cfg(target_os = "macos")]
+fn matrix_depth_weights_dir() -> std::path::PathBuf {
+    use crate::depth::DEPTH_ANYTHING_V2_FILE;
+    if let Ok(p) = std::env::var("SCENEWORKS_DEPTH_ANYTHING_V2") {
+        let p = std::path::PathBuf::from(p);
+        if p.join(DEPTH_ANYTHING_V2_FILE).is_file() {
+            return p;
+        }
+    }
+    let dir = hf_snapshot("models--depth-anything--Depth-Anything-V2-Small-hf");
+    assert!(
+        dir.join(DEPTH_ANYTHING_V2_FILE).is_file(),
+        "Depth-Anything-V2-Small weights missing in {} (set SCENEWORKS_DEPTH_ANYTHING_V2)",
+        dir.display()
+    );
+    dir
+}
+
+/// Assert one structural-control render (a) is non-degenerate and (b) steered the decode away from the
+/// matched control-free baseline. Shared by the canny/depth cells (and the per-lean pose checks).
+#[cfg(target_os = "macos")]
+fn assert_matrix_steer(label: &str, render: &[u8], baseline: &[u8], steer_floor: f64) {
+    let std = matrix_std(render);
+    let steer = matrix_mean_abs_delta(render, baseline);
+    println!("[matrix] {label}: std {std:.2}, steer(meanAbsΔ vs control-free) {steer:.2}");
+    assert!(std > 5.0, "{label} render looks degenerate (std {std:.2})");
+    assert!(
+        steer > steer_floor,
+        "{label} control did not steer the output away from the control-free baseline \
+         (meanAbsΔ {steer:.2} ≤ floor {steer_floor:.2}) — the structural hint was inert"
+    );
+}
+
+// ---- flux1_dev_control ------------------------------------------------------------------------------
+
+/// Resolve the FLUX.1-dev base + Shakker control checkpoint the same way the bring-up smoke does.
+#[cfg(target_os = "macos")]
+fn matrix_flux1_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = std::env::var("SCENEWORKS_FLUX1_DEV_DIR")
+        .or_else(|_| std::env::var("FLUX1_DEV_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::fs::read_dir(
+                dirs_home()
+                    .join(".cache/huggingface/hub/models--black-forest-labs--FLUX.1-dev/snapshots"),
+            )
+            .expect("FLUX.1-dev snapshots dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.join("model_index.json").is_file())
+            .expect("a FLUX.1-dev snapshot dir")
+        });
+    let control = std::env::var("SCENEWORKS_CONTROLNET_FLUX1")
+        .or_else(|_| std::env::var("FLUX1_CONTROL"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::fs::read_dir(dirs_home().join(
+                ".cache/huggingface/hub/models--Shakker-Labs--FLUX.1-dev-ControlNet-Union-Pro-2.0/snapshots",
+            ))
+            .expect("control snapshots dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .map(|dir| dir.join(FLUX1_CONTROL_FILE))
+            .filter(|path| path.exists())
+            .expect("control weights file")
+        });
+    (base, control)
+}
+
+#[cfg(target_os = "macos")]
+fn matrix_flux1_render(
+    generator: &dyn Generator,
+    side: u32,
+    conditioning: Vec<Conditioning>,
+) -> Vec<u8> {
+    let cancel = gen_core::CancelFlag::new();
+    let (_, _, pixels) = flux1_control_generate_one(
+        generator,
+        "a person standing in a meadow, photorealistic",
+        side,
+        side,
+        42,
+        28,
+        Some(3.5),
+        conditioning,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("flux1 control render");
+    pixels
+}
+
+/// POSE (directed) + pose regression re-proof for flux1_dev_control: a left-lean vs right-lean skeleton
+/// must each steer off the control-free baseline AND differ from each other (directed control survives
+/// the S1/S2 shared-driver consolidation).
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: FLUX.1-dev + Shakker Union-Pro-2.0 + Metal"]
+fn real_weight_matrix_flux1_pose_directed() {
+    let (base, control) = matrix_flux1_paths();
+    let generator =
+        flux1_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let baseline = matrix_flux1_render(&*generator, side, Vec::new());
+    let left = matrix_flux1_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, -0.18),
+            ControlKind::Pose,
+            0.7,
+            None,
+        ),
+    );
+    let right = matrix_flux1_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, 0.18),
+            ControlKind::Pose,
+            0.7,
+            None,
+        ),
+    );
+    assert_matrix_steer("flux1 pose(left)", &left, &baseline, 1.0);
+    assert_matrix_steer("flux1 pose(right)", &right, &baseline, 1.0);
+    let directed = matrix_mean_abs_delta(&left, &right);
+    println!("[matrix] flux1 pose directed(left vs right) meanAbsΔ {directed:.2}");
+    assert!(
+        directed > 1.0,
+        "flux1 pose is not DIRECTED: left-lean and right-lean renders barely differ (meanAbsΔ {directed:.2})"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: FLUX.1-dev + Shakker Union-Pro-2.0 + Metal"]
+fn real_weight_matrix_flux1_canny() {
+    let (base, control) = matrix_flux1_paths();
+    let generator =
+        flux1_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        None,
+    )
+    .expect("auto-canny");
+    let baseline = matrix_flux1_render(&*generator, side, Vec::new());
+    let render = matrix_flux1_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Canny, 0.7, None),
+    );
+    assert_matrix_steer("flux1 canny", &render, &baseline, 1.0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: FLUX.1-dev + Shakker Union-Pro-2.0 + Depth-Anything-V2 + Metal"]
+fn real_weight_matrix_flux1_depth() {
+    let (base, control) = matrix_flux1_paths();
+    let depth = matrix_depth_weights_dir();
+    let generator =
+        flux1_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Depth,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        Some(depth.as_path()),
+    )
+    .expect("auto-depth");
+    let baseline = matrix_flux1_render(&*generator, side, Vec::new());
+    let render = matrix_flux1_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Depth, 0.7, None),
+    );
+    assert_matrix_steer("flux1 depth", &render, &baseline, 1.0);
+}
+
+// ---- flux2_dev_control ------------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+fn matrix_flux2_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = std::env::var("SCENEWORKS_FLUX2_DEV_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_home().join("Library/Application Support/SceneWorks/data/models/mlx/flux2_dev")
+        });
+    let control = std::fs::read_dir(dirs_home().join(
+        ".cache/huggingface/hub/models--alibaba-pai--FLUX.2-dev-Fun-Controlnet-Union/snapshots",
+    ))
+    .expect("control snapshots dir")
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| path.is_dir())
+    .map(|dir| dir.join(FLUX2_CONTROL_FILE))
+    .filter(|path| path.exists())
+    .expect("control weights file");
+    (base, control)
+}
+
+#[cfg(target_os = "macos")]
+fn matrix_flux2_render(
+    generator: &dyn Generator,
+    side: u32,
+    conditioning: Vec<Conditioning>,
+) -> Vec<u8> {
+    let cancel = gen_core::CancelFlag::new();
+    let (_, _, pixels) = flux2_control_generate_one(
+        generator,
+        "a person standing in a meadow, photorealistic",
+        side,
+        side,
+        42,
+        8,
+        Some(4.0),
+        conditioning,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("flux2 control render");
+    pixels
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: converted FLUX.2-dev + FLUX.2-dev-Fun-Controlnet-Union + Metal"]
+fn real_weight_matrix_flux2_pose_directed() {
+    let (base, control) = matrix_flux2_paths();
+    let generator =
+        flux2_control_load(base, control, Some(gen_core::Quant::Q4), Vec::new()).unwrap();
+    let side = 512u32;
+    let baseline = matrix_flux2_render(&*generator, side, Vec::new());
+    let left = matrix_flux2_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, -0.18),
+            ControlKind::Pose,
+            0.75,
+            None,
+        ),
+    );
+    let right = matrix_flux2_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, 0.18),
+            ControlKind::Pose,
+            0.75,
+            None,
+        ),
+    );
+    assert_matrix_steer("flux2 pose(left)", &left, &baseline, 1.0);
+    assert_matrix_steer("flux2 pose(right)", &right, &baseline, 1.0);
+    let directed = matrix_mean_abs_delta(&left, &right);
+    println!("[matrix] flux2 pose directed(left vs right) meanAbsΔ {directed:.2}");
+    assert!(
+        directed > 1.0,
+        "flux2 pose is not DIRECTED: left/right renders barely differ (meanAbsΔ {directed:.2})"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: converted FLUX.2-dev + FLUX.2-dev-Fun-Controlnet-Union + Metal"]
+fn real_weight_matrix_flux2_canny() {
+    let (base, control) = matrix_flux2_paths();
+    let generator =
+        flux2_control_load(base, control, Some(gen_core::Quant::Q4), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        None,
+    )
+    .expect("auto-canny");
+    let baseline = matrix_flux2_render(&*generator, side, Vec::new());
+    let render = matrix_flux2_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Canny, 0.75, None),
+    );
+    assert_matrix_steer("flux2 canny", &render, &baseline, 1.0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: converted FLUX.2-dev + FLUX.2-dev-Fun-Controlnet-Union + Depth-Anything-V2 + Metal"]
+fn real_weight_matrix_flux2_depth() {
+    let (base, control) = matrix_flux2_paths();
+    let depth = matrix_depth_weights_dir();
+    let generator =
+        flux2_control_load(base, control, Some(gen_core::Quant::Q4), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Depth,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        Some(depth.as_path()),
+    )
+    .expect("auto-depth");
+    let baseline = matrix_flux2_render(&*generator, side, Vec::new());
+    let render = matrix_flux2_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Depth, 0.75, None),
+    );
+    assert_matrix_steer("flux2 depth", &render, &baseline, 1.0);
+}
+
+// ---- z_image_turbo_control --------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+fn matrix_zimage_turbo_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = hf_snapshot("models--Tongyi-MAI--Z-Image-Turbo");
+    let control = std::fs::read_dir(dirs_home().join(
+        ".cache/huggingface/hub/models--alibaba-pai--Z-Image-Turbo-Fun-Controlnet-Union-2.1/snapshots",
+    ))
+    .expect("control snapshots dir")
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| path.is_dir())
+    .map(|dir| dir.join(super::ZIMAGE_CONTROL_FILE))
+    .filter(|path| path.exists())
+    .expect("control weights file");
+    (base, control)
+}
+
+/// Z-Image-Turbo is guidance-distilled (no CFG / negative) — fixed 8 steps, like the bring-up smoke.
+#[cfg(target_os = "macos")]
+fn matrix_zimage_turbo_render(
+    generator: &dyn Generator,
+    side: u32,
+    conditioning: Vec<Conditioning>,
+) -> Vec<u8> {
+    let cancel = gen_core::CancelFlag::new();
+    let (_, _, pixels) = zimage_control_generate_one(
+        generator,
+        "a person standing in a meadow",
+        side,
+        side,
+        42,
+        8,
+        conditioning,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("z-image-turbo control render");
+    pixels
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: Z-Image-Turbo + Z-Image-Turbo-Fun-Controlnet-Union-2.1 + Metal"]
+fn real_weight_matrix_zimage_turbo_pose_directed() {
+    let (base, control) = matrix_zimage_turbo_paths();
+    let generator =
+        zimage_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let baseline = matrix_zimage_turbo_render(&*generator, side, Vec::new());
+    let left = matrix_zimage_turbo_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, -0.18),
+            ControlKind::Pose,
+            0.9,
+            None,
+        ),
+    );
+    let right = matrix_zimage_turbo_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, 0.18),
+            ControlKind::Pose,
+            0.9,
+            None,
+        ),
+    );
+    assert_matrix_steer("z-image-turbo pose(left)", &left, &baseline, 1.0);
+    assert_matrix_steer("z-image-turbo pose(right)", &right, &baseline, 1.0);
+    let directed = matrix_mean_abs_delta(&left, &right);
+    println!("[matrix] z-image-turbo pose directed(left vs right) meanAbsΔ {directed:.2}");
+    assert!(
+        directed > 1.0,
+        "z-image-turbo pose is not DIRECTED: left/right renders barely differ (meanAbsΔ {directed:.2})"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: Z-Image-Turbo + Z-Image-Turbo-Fun-Controlnet-Union-2.1 + Metal"]
+fn real_weight_matrix_zimage_turbo_canny() {
+    let (base, control) = matrix_zimage_turbo_paths();
+    let generator =
+        zimage_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        None,
+    )
+    .expect("auto-canny");
+    let baseline = matrix_zimage_turbo_render(&*generator, side, Vec::new());
+    let render = matrix_zimage_turbo_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Canny, 0.9, None),
+    );
+    assert_matrix_steer("z-image-turbo canny", &render, &baseline, 1.0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: Z-Image-Turbo + Z-Image-Turbo-Fun-Controlnet-Union-2.1 + Depth-Anything-V2 + Metal"]
+fn real_weight_matrix_zimage_turbo_depth() {
+    let (base, control) = matrix_zimage_turbo_paths();
+    let depth = matrix_depth_weights_dir();
+    let generator =
+        zimage_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Depth,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        Some(depth.as_path()),
+    )
+    .expect("auto-depth");
+    let baseline = matrix_zimage_turbo_render(&*generator, side, Vec::new());
+    let render = matrix_zimage_turbo_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Depth, 0.9, None),
+    );
+    assert_matrix_steer("z-image-turbo depth", &render, &baseline, 1.0);
+}
+
+// ---- z_image_control (base, full CFG) ---------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+fn matrix_zimage_base_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = hf_snapshot("models--Tongyi-MAI--Z-Image");
+    let control = std::fs::read_dir(dirs_home().join(
+        ".cache/huggingface/hub/models--alibaba-pai--Z-Image-Fun-Controlnet-Union-2.1/snapshots",
+    ))
+    .expect("base control snapshots dir")
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| path.is_dir())
+    .map(|dir| dir.join(super::ZIMAGE_BASE_CONTROL_FILE))
+    .filter(|path| path.exists())
+    .expect("base control weights file");
+    (base, control)
+}
+
+#[cfg(target_os = "macos")]
+fn matrix_zimage_base_render(
+    generator: &dyn Generator,
+    side: u32,
+    conditioning: Vec<Conditioning>,
+) -> Vec<u8> {
+    let cancel = gen_core::CancelFlag::new();
+    let (_, _, pixels) = zimage_base_control_generate_one(
+        generator,
+        "a person standing in a meadow",
+        None,
+        side,
+        side,
+        42,
+        50,
+        4.0,
+        conditioning,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("z-image base control render");
+    pixels
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: base Z-Image + Z-Image-Fun-Controlnet-Union-2.1 + Metal"]
+fn real_weight_matrix_zimage_base_pose_directed() {
+    let (base, control) = matrix_zimage_base_paths();
+    let generator =
+        zimage_base_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let baseline = matrix_zimage_base_render(&*generator, side, Vec::new());
+    let left = matrix_zimage_base_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, -0.18),
+            ControlKind::Pose,
+            0.9,
+            None,
+        ),
+    );
+    let right = matrix_zimage_base_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, 0.18),
+            ControlKind::Pose,
+            0.9,
+            None,
+        ),
+    );
+    assert_matrix_steer("z-image-base pose(left)", &left, &baseline, 1.0);
+    assert_matrix_steer("z-image-base pose(right)", &right, &baseline, 1.0);
+    let directed = matrix_mean_abs_delta(&left, &right);
+    println!("[matrix] z-image-base pose directed(left vs right) meanAbsΔ {directed:.2}");
+    assert!(
+        directed > 1.0,
+        "z-image-base pose is not DIRECTED: left/right renders barely differ (meanAbsΔ {directed:.2})"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: base Z-Image + Z-Image-Fun-Controlnet-Union-2.1 + Metal"]
+fn real_weight_matrix_zimage_base_canny() {
+    let (base, control) = matrix_zimage_base_paths();
+    let generator =
+        zimage_base_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        None,
+    )
+    .expect("auto-canny");
+    let baseline = matrix_zimage_base_render(&*generator, side, Vec::new());
+    let render = matrix_zimage_base_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Canny, 0.9, None),
+    );
+    assert_matrix_steer("z-image-base canny", &render, &baseline, 1.0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: base Z-Image + Z-Image-Fun-Controlnet-Union-2.1 + Depth-Anything-V2 + Metal"]
+fn real_weight_matrix_zimage_base_depth() {
+    let (base, control) = matrix_zimage_base_paths();
+    let depth = matrix_depth_weights_dir();
+    let generator =
+        zimage_base_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Depth,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        Some(depth.as_path()),
+    )
+    .expect("auto-depth");
+    let baseline = matrix_zimage_base_render(&*generator, side, Vec::new());
+    let render = matrix_zimage_base_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Depth, 0.9, None),
+    );
+    assert_matrix_steer("z-image-base depth", &render, &baseline, 1.0);
+}
+
+// ---- qwen_image_control -----------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+fn matrix_qwen_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = hf_snapshot("models--Qwen--Qwen-Image");
+    let control = hf_snapshot("models--alibaba-pai--Qwen-Image-2512-Fun-Controlnet-Union")
+        .join(super::QWEN_CONTROL_FILE);
+    assert!(
+        control.exists(),
+        "Qwen control weights missing: {control:?}"
+    );
+    (base, control)
+}
+
+#[cfg(target_os = "macos")]
+fn matrix_qwen_render(
+    generator: &dyn Generator,
+    side: u32,
+    conditioning: Vec<Conditioning>,
+) -> Vec<u8> {
+    let cancel = gen_core::CancelFlag::new();
+    let (_, _, pixels) = qwen_control_generate_one(
+        generator,
+        "a person standing in a meadow",
+        Some("blurry, low quality".to_owned()),
+        side,
+        side,
+        42,
+        4,
+        4.0,
+        conditioning,
+        false,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("qwen control render");
+    pixels
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: Qwen-Image + Qwen-Image-2512-Fun-Controlnet-Union + Metal"]
+fn real_weight_matrix_qwen_pose_directed() {
+    let (base, control) = matrix_qwen_paths();
+    let generator =
+        qwen_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let baseline = matrix_qwen_render(&*generator, side, Vec::new());
+    let left = matrix_qwen_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, -0.18),
+            ControlKind::Pose,
+            0.9,
+            None,
+        ),
+    );
+    let right = matrix_qwen_render(
+        &*generator,
+        side,
+        build_control_conditioning(
+            directed_pose_skeleton(side, 0.18),
+            ControlKind::Pose,
+            0.9,
+            None,
+        ),
+    );
+    assert_matrix_steer("qwen pose(left)", &left, &baseline, 1.0);
+    assert_matrix_steer("qwen pose(right)", &right, &baseline, 1.0);
+    let directed = matrix_mean_abs_delta(&left, &right);
+    println!("[matrix] qwen pose directed(left vs right) meanAbsΔ {directed:.2}");
+    assert!(
+        directed > 1.0,
+        "qwen pose is not DIRECTED: left/right renders barely differ (meanAbsΔ {directed:.2})"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: Qwen-Image + Qwen-Image-2512-Fun-Controlnet-Union + Metal"]
+fn real_weight_matrix_qwen_canny() {
+    let (base, control) = matrix_qwen_paths();
+    let generator =
+        qwen_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        None,
+    )
+    .expect("auto-canny");
+    let baseline = matrix_qwen_render(&*generator, side, Vec::new());
+    let render = matrix_qwen_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Canny, 0.9, None),
+    );
+    assert_matrix_steer("qwen canny", &render, &baseline, 1.0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight matrix: Qwen-Image + Qwen-Image-2512-Fun-Controlnet-Union + Depth-Anything-V2 + Metal"]
+fn real_weight_matrix_qwen_depth() {
+    let (base, control) = matrix_qwen_paths();
+    let depth = matrix_depth_weights_dir();
+    let generator =
+        qwen_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+    let side = 512u32;
+    let source = matrix_structured_source(side);
+    let map = preprocess_control_entry(
+        &ControlKind::Depth,
+        None,
+        None,
+        Some(&source),
+        side,
+        side,
+        crate::openpose_skeleton::body_stickwidth(side, side),
+        Some(depth.as_path()),
+    )
+    .expect("auto-depth");
+    let baseline = matrix_qwen_render(&*generator, side, Vec::new());
+    let render = matrix_qwen_render(
+        &*generator,
+        side,
+        build_control_conditioning(map, ControlKind::Depth, 0.9, None),
+    );
+    assert_matrix_steer("qwen depth", &render, &baseline, 1.0);
+}
