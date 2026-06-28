@@ -42,7 +42,8 @@ use serde_json::{json, Value};
 use crate::openpose_skeleton::{body_stickwidth, draw_wholebody, Keypoint};
 use crate::{
     heartbeat, normalize_app_managed_cache_path, optional_payload_string, progress_payload,
-    task_join_error, update_job, ApiClient, Settings, WorkerError, WorkerResult,
+    run_blocking_with_heartbeat, task_join_error, update_job, ApiClient, Settings, WorkerError,
+    WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -873,10 +874,18 @@ pub(crate) async fn run_pose_detect_job(
     )
     .await?;
     let image_paths: Vec<Option<PathBuf>> = resolved.iter().map(|s| s.path.clone()).collect();
-    let (raw, device) =
-        tokio::task::spawn_blocking(move || detect_batch(det_path, pose_path, image_paths))
-            .await
-            .map_err(|error| task_join_error("pose detection task", error))??;
+    // Keep the worker heartbeat alive across the blocking batch detect (cold RTMW/onnx load +
+    // multi-image inference can run long) so it never trips the API's 90s stale-sweep (sc-8390).
+    let (raw, device) = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "pose detection task",
+        tokio::task::spawn_blocking(move || detect_batch(det_path, pose_path, image_paths)),
+    )
+    .await?;
 
     let out_dir = settings
         .data_dir

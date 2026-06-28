@@ -29,9 +29,8 @@ use crate::person_segment_sam3::{
     ensure_segmenter_weights, segment_box_blocking, segment_points_blocking,
 };
 use crate::{
-    cancel_requested_peek, fresh_asset_id, heartbeat, mark_job_canceled, now_rfc3339,
-    progress_payload, progress_report_interval, task_join_error, update_job, ApiClient, Settings,
-    WorkerError, WorkerResult,
+    fresh_asset_id, heartbeat, now_rfc3339, progress_payload, run_blocking_with_heartbeat,
+    update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -137,43 +136,6 @@ fn parse_points(payload: &JsonObject) -> WorkerResult<Option<Vec<(f32, f32, i32)
         out.push((x, y, label));
     }
     Ok(Some(out))
-}
-
-/// Heartbeat + cancel poll while the blocking segmentation task runs (mirrors
-/// `upscale_jobs::run_upscale_with_heartbeat`): keeps the worker live during the model load +
-/// inference and propagates a user cancel.
-async fn run_with_heartbeat<R>(
-    api: &ApiClient,
-    settings: &Settings,
-    job_id: &str,
-    cancel: CancelFlag,
-    mut task: tokio::task::JoinHandle<WorkerResult<R>>,
-) -> WorkerResult<R>
-where
-    R: Send + 'static,
-{
-    let mut canceled = false;
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            result = &mut task => {
-                let value = result.map_err(|error| task_join_error("smart-select task", error))??;
-                if canceled {
-                    mark_job_canceled(api, job_id, CANCEL_MESSAGE).await?;
-                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-                }
-                return Ok(value);
-            }
-            _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
-                if !canceled && cancel_requested_peek(api, job_id).await {
-                    cancel.cancel();
-                    canceled = true;
-                }
-            }
-        }
-    }
 }
 
 pub(crate) async fn run_image_segment_job(
@@ -320,11 +282,13 @@ pub(crate) async fn run_image_segment_job(
     let cancel = CancelFlag::new();
     // Points → SAM3 tracker single-frame PVS (interactive clicks); box → SAM3 concept detector.
     let mask = if let Some(points) = points {
-        run_with_heartbeat(
+        run_blocking_with_heartbeat(
             api,
             settings,
             &job.id,
-            cancel.clone(),
+            Some(cancel.clone()),
+            CANCEL_MESSAGE,
+            "smart-select task",
             tokio::task::spawn_blocking(move || {
                 segment_points_blocking(model_path, source_image, points)
             }),
@@ -332,11 +296,13 @@ pub(crate) async fn run_image_segment_job(
         .await?
     } else {
         let box_xyxy = box_xyxy.expect("box prompt present when there are no points");
-        run_with_heartbeat(
+        run_blocking_with_heartbeat(
             api,
             settings,
             &job.id,
-            cancel.clone(),
+            Some(cancel.clone()),
+            CANCEL_MESSAGE,
+            "smart-select task",
             tokio::task::spawn_blocking(move || {
                 segment_box_blocking(
                     model_path,

@@ -40,8 +40,8 @@ use crate::image_jobs::ensure_face_stack_dir;
 use crate::image_jobs::ensure_scrfd_weights;
 use crate::image_jobs::load_reference_image;
 use crate::{
-    heartbeat, normalize_app_managed_cache_path, progress_payload, task_join_error, update_job,
-    ApiClient, Settings, WorkerError, WorkerResult,
+    heartbeat, normalize_app_managed_cache_path, progress_payload, run_blocking_with_heartbeat,
+    update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -337,18 +337,27 @@ pub(crate) async fn run_kps_extract_job(
     )
     .await?;
 
-    let extraction = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "macos")]
-        {
-            detect_largest_kps(&weights, &image)
-        }
-        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        {
-            detect_largest_kps_candle(&weights, &image)
-        }
-    })
-    .await
-    .map_err(|error| task_join_error("kps extraction task", error))??;
+    // Keep the worker heartbeat alive across the blocking SCRFD detect (cold weight load can run
+    // long) so a slow extraction never trips the API's 90s stale-sweep (sc-8390). Not cancelable.
+    let extraction = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "kps extraction task",
+        tokio::task::spawn_blocking(move || {
+            #[cfg(target_os = "macos")]
+            {
+                detect_largest_kps(&weights, &image)
+            }
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                detect_largest_kps_candle(&weights, &image)
+            }
+        }),
+    )
+    .await?;
 
     let message = if extraction.detected {
         "Face landmarks extracted."

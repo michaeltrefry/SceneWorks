@@ -182,31 +182,41 @@ pub(crate) async fn run_vqa_job(
 
     let job_id = job.id.clone();
     let question_for_vqa = question.clone();
-    let answer = tokio::task::spawn_blocking(move || -> WorkerResult<String> {
-        emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
-        let (model, tokenizer) = load_sensenova_model(&weights_dir)?;
-        emit_load_event(
-            "image_pipeline_load_complete",
-            &job_id,
-            "sensenova_u1_8b",
-            0,
-        );
-        // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the
-        // understanding pixel budget (default 768², `load_image_native` min 256²).
-        let pixel_values = image_to_chw01(&source, 256 * 256, max_image_pixels)?;
-        let answer = model
-            .vqa(
-                &tokenizer,
-                &question_for_vqa,
-                std::slice::from_ref(&pixel_values),
-                max_new_tokens,
-                Sampler::Greedy,
-            )
-            .map_err(|error| WorkerError::Engine(format!("SenseNova VQA failed: {error}")))?;
-        Ok(strip_reasoning(&answer))
-    })
-    .await
-    .map_err(|error| task_join_error("VQA task join", error))??;
+    // Keep the worker heartbeat alive across the blocking VLM load + generation (a cold
+    // SenseNova-U1 8B load + long answer easily exceeds the API's 90s stale-sweep) so the in-flight
+    // job is never falsely marked `interrupted` (sc-8390). Not cancelable mid-generation.
+    let answer = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "VQA task join",
+        tokio::task::spawn_blocking(move || -> WorkerResult<String> {
+            emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
+            let (model, tokenizer) = load_sensenova_model(&weights_dir)?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                "sensenova_u1_8b",
+                0,
+            );
+            // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the
+            // understanding pixel budget (default 768², `load_image_native` min 256²).
+            let pixel_values = image_to_chw01(&source, 256 * 256, max_image_pixels)?;
+            let answer = model
+                .vqa(
+                    &tokenizer,
+                    &question_for_vqa,
+                    std::slice::from_ref(&pixel_values),
+                    max_new_tokens,
+                    Sampler::Greedy,
+                )
+                .map_err(|error| WorkerError::Engine(format!("SenseNova VQA failed: {error}")))?;
+            Ok(strip_reasoning(&answer))
+        }),
+    )
+    .await?;
 
     let result = json!({
         "answer": answer,
@@ -334,32 +344,42 @@ pub(crate) async fn run_vqa_job(
 
     let job_id = job.id.clone();
     let question_for_vqa = question.clone();
-    let answer = tokio::task::spawn_blocking(move || -> WorkerResult<String> {
-        emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
-        let (model, tokenizer) = load_understanding(&weights_dir)
-            .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
-        emit_load_event(
-            "image_pipeline_load_complete",
-            &job_id,
-            "sensenova_u1_8b",
-            0,
-        );
-        // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the
-        // understanding pixel budget (default 768², min 256²).
-        let pixel_values = image_to_chw01_candle(&source, 256 * 256, max_image_pixels)?;
-        let answer = model
-            .vqa(
-                &tokenizer,
-                &question_for_vqa,
-                std::slice::from_ref(&pixel_values),
-                max_new_tokens,
-                Sampler::Greedy,
-            )
-            .map_err(|error| WorkerError::Engine(format!("SenseNova VQA failed: {error}")))?;
-        Ok(strip_reasoning(&answer))
-    })
-    .await
-    .map_err(|error| task_join_error("VQA task join", error))??;
+    // Keep the worker heartbeat alive across the blocking VLM load + generation (a cold
+    // SenseNova-U1 8B load + long answer easily exceeds the API's 90s stale-sweep) so the in-flight
+    // job is never falsely marked `interrupted` (sc-8390). Not cancelable mid-generation.
+    let answer = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "VQA task join",
+        tokio::task::spawn_blocking(move || -> WorkerResult<String> {
+            emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
+            let (model, tokenizer) = load_understanding(&weights_dir)
+                .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+            emit_load_event(
+                "image_pipeline_load_complete",
+                &job_id,
+                "sensenova_u1_8b",
+                0,
+            );
+            // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the
+            // understanding pixel budget (default 768², min 256²).
+            let pixel_values = image_to_chw01_candle(&source, 256 * 256, max_image_pixels)?;
+            let answer = model
+                .vqa(
+                    &tokenizer,
+                    &question_for_vqa,
+                    std::slice::from_ref(&pixel_values),
+                    max_new_tokens,
+                    Sampler::Greedy,
+                )
+                .map_err(|error| WorkerError::Engine(format!("SenseNova VQA failed: {error}")))?;
+            Ok(strip_reasoning(&answer))
+        }),
+    )
+    .await?;
 
     let result = json!({
         "answer": answer,
@@ -544,7 +564,7 @@ pub(crate) async fn run_interleave_job(
     // images come back as Send `Image`s for asset writing on the async side.
     let job_id = job.id.clone();
     let prompt_for_gen = prompt.clone();
-    let (generated_text, images) =
+    let interleave_task =
         tokio::task::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
             emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
             let (model, tokenizer) = load_sensenova_model(&weights_dir)?;
@@ -598,9 +618,20 @@ pub(crate) async fn run_interleave_job(
                 })?);
             }
             Ok((out.text, decoded))
-        })
-        .await
-        .map_err(|error| task_join_error("interleave task join", error))??;
+        });
+    // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
+    // load + multi-image generation easily exceeds the API's 90s stale-sweep) so the in-flight job
+    // is never falsely marked `interrupted` (sc-8390). Not cancelable mid-rollout.
+    let (generated_text, images) = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "interleave task join",
+        interleave_task,
+    )
+    .await?;
 
     update_job(
         api,
@@ -778,7 +809,7 @@ pub(crate) async fn run_interleave_job(
 
     let job_id = job.id.clone();
     let prompt_for_gen = prompt.clone();
-    let (generated_text, images) =
+    let interleave_task =
         tokio::task::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
             emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
             let (model, tokenizer) = load_understanding(&weights_dir)
@@ -836,9 +867,20 @@ pub(crate) async fn run_interleave_job(
                 })?);
             }
             Ok((out.text, decoded))
-        })
-        .await
-        .map_err(|error| task_join_error("interleave task join", error))??;
+        });
+    // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
+    // load + multi-image generation easily exceeds the API's 90s stale-sweep) so the in-flight job
+    // is never falsely marked `interrupted` (sc-8390). Not cancelable mid-rollout.
+    let (generated_text, images) = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "interleave task join",
+        interleave_task,
+    )
+    .await?;
 
     update_job(
         api,

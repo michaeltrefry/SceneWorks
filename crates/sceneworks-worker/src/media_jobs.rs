@@ -594,11 +594,21 @@ async fn run_yolo11_person_detect(
     };
     let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
     let conf = confidence as f32;
-    let result = tokio::task::spawn_blocking(move || {
-        crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
-    })
-    .await
-    .map_err(|error| task_join_error("person detect task", error))??;
+    // Keep the worker heartbeat alive across the blocking YOLO11 detect (cold weight load +
+    // inference) so a slow detection never trips the API's 90s stale-sweep (sc-8390). Not
+    // cancelable mid-inference.
+    let result = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "person detect task",
+        tokio::task::spawn_blocking(move || {
+            crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
+        }),
+    )
+    .await?;
     let boxes =
         crate::person_jobs::detections_to_json(&result.detections, result.width, result.height);
     Ok((boxes, result.device))

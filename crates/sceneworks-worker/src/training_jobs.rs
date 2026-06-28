@@ -790,7 +790,30 @@ async fn consume_training_events(
     let mut latest_step: u32 = 0;
     let mut latest_samples: Vec<Value> = Vec::new();
 
-    while let Some(event) = rx.recv().await {
+    let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
+    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let event = tokio::select! {
+            maybe_event = rx.recv() => match maybe_event {
+                Some(event) => event,
+                None => break,
+            },
+            _ = heartbeat_interval.tick() => {
+                // Keep the worker's heartbeat alive during long silent gaps between engine events
+                // — e.g. a slow checkpoint disk-write + preview-sampling pass for a large model
+                // (Krea2). Heartbeats otherwise ride only on incoming progress events (below), so a
+                // quiet stretch past the API's 90s worker-timeout lets the stale-sweep mark this
+                // still-running job `interrupted`, and the next progress post is then 409'd
+                // (sc-8390; same class as the inline-upscale sc-8200). Also poll cancel here so a
+                // cancel requested during such a gap is honored without awaiting the next event.
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                if !canceled && cancel_requested_peek(api, &job.id).await {
+                    begin_training_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
+                }
+                continue;
+            }
+        };
         if canceled {
             continue; // drain remaining events so the blocking sender never blocks.
         }

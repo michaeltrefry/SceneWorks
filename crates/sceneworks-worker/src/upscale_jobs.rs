@@ -675,6 +675,11 @@ pub(crate) async fn upscale_image_in_memory(
     }
 }
 
+/// Upscale-specific keepalive. The generic [`crate::run_blocking_with_heartbeat`] covers the same
+/// "heartbeat + cancel-poll while a blocking task runs" need for every other path (sc-8390); this
+/// one stays bespoke only because it ALSO posts an intermediate `Running`/"Canceling image upscale."
+/// update the instant a cancel is observed, so the UI acknowledges the cancel while the long
+/// diffusion finishes rather than appearing frozen until it flips terminal. Keep them in sync.
 async fn run_upscale_with_heartbeat<R>(
     api: &ApiClient,
     settings: &Settings,
