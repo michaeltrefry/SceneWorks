@@ -81,6 +81,7 @@ fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageRoute {
     ZImageControl,
+    ZImageBaseControl,
     QwenControl,
     KolorsControl,
     Flux1DevControl,
@@ -99,6 +100,11 @@ enum ImageRoute {
 fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
     if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
+    } else if zimage_base_control_available(request, settings) {
+        // Base (non-distilled, full-CFG) Z-Image strict control (advanced.poses on `z_image`) →
+        // base Fun-Controlnet-Union (`z_image_control`). The base mirror of the Turbo control arm
+        // above; keyed on the base model id so the Turbo path is untouched (sc-8251).
+        Some(ImageRoute::ZImageBaseControl)
     } else if qwen_control_available(request, settings) {
         Some(ImageRoute::QwenControl)
     } else if kolors_control_available(request, settings) {
@@ -142,6 +148,7 @@ impl ImageRoute {
     fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
         match self {
             ImageRoute::ZImageControl
+            | ImageRoute::ZImageBaseControl
             | ImageRoute::QwenControl
             | ImageRoute::KolorsControl
             | ImageRoute::Flux1DevControl
@@ -2596,7 +2603,21 @@ async fn consume_gen_events(
                 width,
                 height,
                 pixels,
+                face_likeness,
             } => {
+                // The identity-likeness post-pass (sc-4409) scores each image on the blocking thread
+                // and hands the pre-built `faceLikeness` block back through the event. Attach it to a
+                // PER-IMAGE clone of the shared raw settings under the sidecar key so each angle's
+                // asset carries its own honest score (an N/A `detected:false` block for profile/up/
+                // down views), while every non-scoring path leaves `face_likeness` `None` ⇒ the field
+                // is omitted entirely (the sc-4408 omit-when-absent contract).
+                let mut image_raw_settings = raw_settings.clone();
+                if let Some(block) = face_likeness {
+                    image_raw_settings.insert(
+                        crate::face_likeness::FACE_LIKENESS_FACT_KEY.to_owned(),
+                        Value::Object(block),
+                    );
+                }
                 let fact = write_image_asset(
                     plan,
                     index,
@@ -2605,7 +2626,7 @@ async fn consume_gen_events(
                     height,
                     pixels,
                     adapter_label,
-                    raw_settings.clone(),
+                    image_raw_settings,
                     project_path,
                 )?;
                 asset_writes.push(Value::Object(fact));

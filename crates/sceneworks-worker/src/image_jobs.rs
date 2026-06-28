@@ -414,6 +414,20 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::ZImageBaseControl => {
+                // Base (full-CFG) Z-Image strict control (advanced.poses on `z_image`) → base
+                // Fun-Controlnet-Union, one image per pose (sc-8251).
+                generate_zimage_base_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::QwenControl => {
                 // Qwen strict-pose (advanced.poses) → InstantX ControlNet-Union, one image per pose.
                 generate_qwen_control_stream(

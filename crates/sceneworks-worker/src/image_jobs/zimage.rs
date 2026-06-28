@@ -4,6 +4,14 @@ const ZIMAGE_CONTROL_ENGINE_ID: &str = "z_image_turbo_control";
 const ZIMAGE_CONTROL_REPO: &str = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1";
 const ZIMAGE_CONTROL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
 
+/// The engine registry id for the **base** (non-distilled, full-CFG) Z-Image Fun-Controlnet-Union
+/// variant (sc-8251). Same VACE Fun-Union control branch as the Turbo variant, but assembled from a
+/// base `Tongyi-MAI/Z-Image` snapshot + the base control checkpoint, and driven with REAL CFG.
+const ZIMAGE_BASE_CONTROL_ENGINE_ID: &str = "z_image_control";
+/// Default base Fun-Controlnet-Union control-weights repo + file (sc-8251).
+const ZIMAGE_BASE_CONTROL_REPO: &str = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
+const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-2.1.safetensors";
+
 // `pose_entries` / `parse_poses` / `PoseInput` moved to `base.rs` (shared by the candle InstantID
 // lane, sc-5491); still in scope here via the shared `image_jobs` module.
 
@@ -13,6 +21,16 @@ const ZIMAGE_CONTROL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps
 /// loudly instead of silently dropping the poses to the txt2img path.
 fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == "z_image_turbo"
+        && !pose_entries(request).is_empty()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+}
+
+/// True when this is a **base** Z-Image strict-control job (`z_image` + ≥1 pose) whose base weights
+/// resolve — routed to the base Fun-Controlnet-Union path (`z_image_control`) rather than plain
+/// txt2img (sc-8251). The base mirror of [`zimage_control_available`]; keyed on the base model id so
+/// the Turbo control path is untouched.
+fn zimage_base_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    request.model == "z_image"
         && !pose_entries(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
@@ -55,6 +73,18 @@ fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Optio
         settings,
         strict_control_default_repo(ZIMAGE_CONTROL_ENGINE_ID),
         ZIMAGE_CONTROL_FILE,
+    )
+}
+
+/// Resolve the **base** Z-Image Fun-Controlnet-Union checkpoint (sc-8251). The default repo comes from
+/// the shared strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`); the file
+/// default stays engine-specific.
+fn resolve_base_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+    resolve_control_weights_for(
+        request,
+        settings,
+        strict_control_default_repo(ZIMAGE_BASE_CONTROL_ENGINE_ID),
+        ZIMAGE_BASE_CONTROL_FILE,
     )
 }
 
@@ -103,6 +133,19 @@ fn zimage_control_load(
     let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
     gen_core::load(ZIMAGE_CONTROL_ENGINE_ID, &spec)
         .map_err(|error| WorkerError::Engine(format!("Z-Image control load failed: {error}")))
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn zimage_base_control_load(
+    weights_dir: PathBuf,
+    control_weights: PathBuf,
+    quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
+) -> WorkerResult<Box<dyn Generator>> {
+    // Shares the Turbo control's `LoadSpec` shape (base dir + control overlay); only the engine id differs.
+    let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
+    gen_core::load(ZIMAGE_BASE_CONTROL_ENGINE_ID, &spec)
+        .map_err(|error| WorkerError::Engine(format!("Z-Image base control load failed: {error}")))
 }
 
 /// Generate one strict-pose image: the pre-built `conditioning` (the required `Control` plus an optional
@@ -274,6 +317,219 @@ async fn generate_zimage_control_stream(
                     height,
                     seed,
                     steps,
+                    conditioning,
+                    &cancel,
+                    on_progress,
+                )?;
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        ZIMAGE_ADAPTER_LABEL,
+        &raw_settings,
+        count,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+/// Generate one **base** Z-Image strict-control image (sc-8251): like [`zimage_control_generate_one`]
+/// but the base is the non-distilled full-CFG foundation model, so it forwards a real CFG `guidance`
+/// scale + an optional negative prompt (the base `z_image_control` descriptor `supports_guidance` +
+/// `supports_negative_prompt`).
+#[allow(clippy::too_many_arguments)]
+fn zimage_base_control_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: f32,
+    conditioning: Vec<Conditioning>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance: Some(guidance),
+        conditioning,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = generator.generate(&request, on_progress).map_err(|error| {
+        WorkerError::Engine(format!("base Z-Image control generation failed: {error}"))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::Engine("base Z-Image control generator produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::Engine(
+            "base Z-Image control generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn zimage_base_control_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: f32,
+    control_scale: f32,
+    pose_count: usize,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    // The base is the full-CFG foundation model — record the real guidance scale.
+    raw.insert("guidanceScale".to_owned(), json!(guidance));
+    raw.insert(
+        "mlxQuantize".to_owned(),
+        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
+    );
+    raw.insert("controlScale".to_owned(), json!(control_scale));
+    raw.insert("poseCount".to_owned(), json!(pose_count));
+    raw.insert(
+        "controlEngine".to_owned(),
+        Value::String(ZIMAGE_BASE_CONTROL_ENGINE_ID.to_owned()),
+    );
+    raw
+}
+
+/// Real **base** Z-Image strict-control generation (sc-8251): one image per pose, each conditioned on
+/// a DWPose skeleton (or — when `advanced.controlMode` is canny/depth — an auto-derived control map
+/// over the threaded input image) + locked by the base Fun-Controlnet-Union branch. The base mirror of
+/// [`generate_zimage_control_stream`], differing only in the engine id (`z_image_control`), the base
+/// control checkpoint, and REAL CFG (`guidance` + negative prompt) — the base is undistilled. Pose
+/// rendering + source threading reuse the SAME shared strict-control driver, so the pose tier is
+/// byte-identical to the Turbo path.
+async fn generate_zimage_base_control_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    // Identity img2img-init (opt-in escape hatch, off by default) — same gate as the Turbo path
+    // (`advanced.referenceStrength > 0` AND a `referenceAssetId`). Shared across the whole pose set.
+    let identity_init = resolve_zimage_identity_init(request, settings, project_path)?;
+
+    let zimage = mlx_model("z_image")
+        .ok_or_else(|| WorkerError::InvalidPayload("z-image base model row missing".to_owned()))?;
+    let weights_dir = resolve_weights_dir(request, settings)?
+        .ok_or_else(|| WorkerError::InvalidPayload("Z-Image base weights not found".to_owned()))?;
+    let control_weights = resolve_base_control_weights(request, settings).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Z-Image base strict-control weights not found (download {ZIMAGE_BASE_CONTROL_REPO})."
+        ))
+    })?;
+    let (quant, quant_bits) = resolve_quant(request);
+    let steps = resolve_steps(request, &zimage);
+    let guidance = resolve_guidance(request, &zimage).unwrap_or(zimage.default_guidance());
+    let negative_prompt = resolve_negative_prompt(request, &zimage);
+    let control_scale = resolve_control_scale(request);
+    let adapters = resolve_adapters(request, settings)?;
+    let repo = model_repo(request, &zimage);
+    // Shared strict-control driver: validate the requested ControlKind against the engine's
+    // supported_kinds (z_image_control = {Pose, Canny, Depth}) + resolve an optional user-supplied
+    // control-map passthrough. A pose job sets no `controlMode`, so `kind == Pose` (byte-identical render).
+    let control_kind = requested_control_kind(request)?;
+    validate_control_kind(ZIMAGE_BASE_CONTROL_ENGINE_ID, &control_kind)?;
+    let user_control = resolve_user_control_map(request, settings, project_path)?;
+    // sc-8251 source threading: for canny/depth WITHOUT a user-supplied control map, the control map is
+    // auto-derived from the input image (canny edges / Depth-Anything-V2). The pose tier never needs a
+    // source (the skeleton is synthetic).
+    let control_source = resolve_control_source(request, settings, project_path)?;
+    let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
+        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+    } else {
+        None
+    };
+    let poses = parse_poses(request);
+    let count = poses.len();
+    let raw_settings = zimage_base_control_raw_settings(
+        request,
+        &repo,
+        steps,
+        quant_bits,
+        guidance,
+        control_scale,
+        count,
+    );
+    // Strict control shares one seed across the set so noise-derived attributes stay constant
+    // while only the per-pose skeleton changes (Python parity).
+    let seed = resolve_seed(request, 0);
+
+    let prompt = request.prompt.clone();
+    let (width, height) = (request.width, request.height);
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+    let adapter_count = adapters.len();
+    let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
+        job.id.clone(),
+        ZIMAGE_BASE_CONTROL_ENGINE_ID,
+        adapter_count,
+        spec,
+        "Z-Image base control load failed".to_owned(),
+        move |generator, tx, cancel| {
+            let identity_init = identity_init.as_ref();
+            let user_control = user_control.as_ref();
+            let control_source = control_source.as_ref();
+            let depth_weights_dir = depth_weights_dir.as_deref();
+            let negative_prompt = negative_prompt.clone();
+            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
+                let control = preprocess_control_entry(
+                    &control_kind,
+                    user_control,
+                    Some(&pose),
+                    control_source,
+                    width,
+                    height,
+                    stickwidth,
+                    depth_weights_dir,
+                )?;
+                let conditioning = build_control_conditioning(
+                    control,
+                    control_kind.clone(),
+                    control_scale,
+                    identity_init,
+                );
+                let (out_w, out_h, pixels) = zimage_base_control_generate_one(
+                    generator,
+                    &prompt,
+                    negative_prompt.clone(),
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
                     conditioning,
                     &cancel,
                     on_progress,

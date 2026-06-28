@@ -4149,6 +4149,74 @@ mod tests {
         assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
     }
 
+    /// sc-4408: a scored generation's `rawAdapterSettings.faceLikeness` block (attached worker-side by
+    /// `attach_face_likeness`) survives verbatim through `build_image_sidecar_parts` into
+    /// `recipe.rawAdapterSettings` — the persistence pathway the scoring surfaces (4409/4410/4411) rely
+    /// on. The omit-when-absent contract is covered too: no `faceLikeness` key in ⇒ none out.
+    #[test]
+    fn build_image_sidecar_carries_face_likeness_when_present_and_omits_when_absent() {
+        let base_fact = |raw: Value| {
+            json!({
+                "assetId": "asset_fl",
+                "mediaPath": "assets/images/genset_x/img_0001.png",
+                "mimeType": "image/png",
+                "width": 1024,
+                "height": 1024,
+                "mode": "character_image",
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "portrait",
+                "loras": [],
+                "rawAdapterSettings": raw,
+            })
+        };
+
+        // Present: the detected:true block (and a detected:false N/A block) passes through verbatim.
+        let scored = json!({
+            "faceLikeness": {
+                "score": 0.873,
+                "detected": true,
+                "method": "arcface_antelopev2",
+                "sourceAssetId": "asset_source_fixture",
+            }
+        });
+        let asset = build_generated_asset_sidecar(
+            "project-1",
+            "job-1",
+            "genset_x",
+            &base_fact(scored.clone()),
+        );
+        assert_eq!(asset["recipe"]["rawAdapterSettings"], scored);
+        assert_eq!(
+            asset["recipe"]["rawAdapterSettings"]["faceLikeness"]["detected"],
+            json!(true)
+        );
+
+        let na = json!({
+            "faceLikeness": {
+                "score": Value::Null,
+                "detected": false,
+                "method": "arcface_antelopev2",
+                "sourceAssetId": "asset_source_fixture",
+                "reason": "no_face",
+            }
+        });
+        let asset_na =
+            build_generated_asset_sidecar("project-1", "job-1", "genset_x", &base_fact(na.clone()));
+        assert_eq!(asset_na["recipe"]["rawAdapterSettings"], na);
+
+        // Absent: no faceLikeness key in rawAdapterSettings ⇒ none in the sidecar (clean, no crash).
+        let asset_absent =
+            build_generated_asset_sidecar("project-1", "job-1", "genset_x", &base_fact(json!({})));
+        assert_eq!(asset_absent["recipe"]["rawAdapterSettings"], json!({}));
+        assert!(
+            asset_absent["recipe"]["rawAdapterSettings"]
+                .get("faceLikeness")
+                .is_none(),
+            "absent score ⇒ faceLikeness omitted from sidecar"
+        );
+    }
+
     /// sc-5721 (CORE-002→F): `persist_generated_asset` joins the worker-supplied
     /// `mediaPath` into the project tree and `create_dir_all`/`write`s a sidecar there,
     /// so a traversal or absolute path must be rejected before any filesystem write —

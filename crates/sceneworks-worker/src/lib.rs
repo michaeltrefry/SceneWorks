@@ -111,6 +111,13 @@ mod dataset_analysis_jobs;
 use dataset_analysis_jobs::*;
 mod face_analysis_jobs;
 use face_analysis_jobs::*;
+// sc-4407 — the shared, generator-agnostic face-likeness scorer (epic 4406): the backbone identity-
+// likeness component the Angles (sc-4409) / Poses (sc-4410) / With-Character (sc-4411) surfaces call as
+// a post-pass over a finished generation. Its public seam (`FaceLikenessScorer`) has no production
+// caller YET — the consuming surfaces are separate stories — so allow the unused seam here; the pure
+// scoring core is exercised by the module's unit tests and the seam by the ignored real-weight test.
+#[allow(dead_code)]
+mod face_likeness;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 mod downloads;

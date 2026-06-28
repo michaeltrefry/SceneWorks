@@ -701,6 +701,7 @@ export function CharacterStudio() {
                 angleModels={angleModels}
                 approvedReferences={approvedReferences}
                 assets={assets}
+                catalog={models}
                 createImageJob={createImageJob}
                 imageLocalJobs={imageLocalJobs}
                 importAsset={importAsset}
@@ -740,6 +741,7 @@ export function CharacterStudio() {
                 addCharacterReference={addCharacterReference}
                 approvedReferences={approvedReferences}
                 assets={assets}
+                catalog={models}
                 createImageJob={createImageJob}
                 imageLocalJobs={imageLocalJobs}
                 importAsset={importAsset}

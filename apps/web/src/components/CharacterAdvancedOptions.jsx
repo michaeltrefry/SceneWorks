@@ -10,6 +10,7 @@ import {
   schedulerShiftDefaultFromModel,
   stepsDefaultFromModel,
 } from "../samplerOptions.js";
+import { pidToggleVisible } from "../pidEligibility.js";
 
 // Shared advanced-generation controls for Character Studio's Angle Set and Pose
 // Library panels (sc-3857). Mirrors the Image Studio advanced panel
@@ -32,7 +33,7 @@ import {
 
 export function useCharacterAdvancedOptions(
   model,
-  { defaultNegativePrompt = "", identityStructureMode = "single" } = {},
+  { defaultNegativePrompt = "", identityStructureMode = "single", catalog = [] } = {},
 ) {
   const ui = model?.ui ?? {};
   const referenceStrengthDefault =
@@ -65,6 +66,13 @@ export function useCharacterAdvancedOptions(
   const [schedulerShift, setSchedulerShift] = React.useState(schedulerShiftDefaultFromModel(model));
   const [seed, setSeed] = React.useState("");
   const [negativePrompt, setNegativePrompt] = React.useState(defaultNegativePrompt);
+  // PiD decoder toggle (epic 7840, sc-8372): off = the model's native VAE decode; on emits
+  // `advanced.usePid: true`, routing Angles/Poses decode through the optional PiD pixel-diffusion
+  // decoder (2K/4K super-resolve). Mirrors the Image Studio toggle. The toggle only renders + emits
+  // when the model is PiD-eligible AND its checkpoint is installed (showPidToggle), so a stale `true`
+  // on a non-eligible model is inert — same gating discipline as ImageStudio.
+  const [usePid, setUsePid] = React.useState(false);
+  const showPidToggle = pidToggleVisible(model, catalog);
 
   // Reset the model-derived tuning whenever the backbone changes so a value from a
   // different model never leaks (mirrors ImageStudio's reference-tuning reset).
@@ -104,6 +112,12 @@ export function useCharacterAdvancedOptions(
         advanced.schedulerShift = Number(schedulerShift);
       }
     }
+    // PiD decoder (sc-8372): emit usePid:true only when the toggle is shown (model PiD-eligible AND
+    // checkpoint installed) AND on. The worker swaps the native VAE for the PiD decode + 2K/4K
+    // super-resolve; mirrors Image Studio. A stale `true` on a hidden toggle stays inert.
+    if (showPidToggle && usePid) {
+      advanced.usePid = true;
+    }
     return advanced;
   }
 
@@ -128,6 +142,9 @@ export function useCharacterAdvancedOptions(
     setSeed,
     negativePrompt,
     setNegativePrompt,
+    usePid,
+    setUsePid,
+    showPidToggle,
     model,
     identityStructure,
     // Optional label/range override for the primary reference-strength slider (sc-8278: klein maps
@@ -165,6 +182,9 @@ export function CharacterAdvancedOptions({ state }) {
     setSeed,
     negativePrompt,
     setNegativePrompt,
+    usePid,
+    setUsePid,
+    showPidToggle,
     model,
     identityStructure,
     referenceStrength: referenceStrengthCfg,
@@ -290,6 +310,19 @@ export function CharacterAdvancedOptions({ state }) {
             Negative prompt
             <textarea onChange={(event) => setNegativePrompt(event.target.value)} rows={3} value={negativePrompt} />
           </label>
+          {showPidToggle ? (
+            <label
+              className="checkline pid-decoder-toggle"
+              title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass, so output comes out at 2K/4K (sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
+            >
+              <input
+                checked={usePid}
+                onChange={(event) => setUsePid(event.target.checked)}
+                type="checkbox"
+              />
+              PiD decoder · 2K/4K <span className="badge badge-nc">Non-Commercial</span>
+            </label>
+          ) : null}
         </div>
       ) : null}
     </div>

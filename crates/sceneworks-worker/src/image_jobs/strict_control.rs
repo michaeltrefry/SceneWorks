@@ -40,6 +40,7 @@ struct StrictControlEngine {
 /// - `flux1_dev_control` — `{Pose, Canny, Depth}` (Shakker Union-Pro-2.0; E2 sc-8239 / wiring sc-8244)
 /// - `flux2_dev_control` — `{Pose, Canny, Depth}`
 /// - `z_image_turbo_control` — `{Pose, Canny, Depth}`
+/// - `z_image_control` — `{Pose, Canny, Depth}` (base, full-CFG; alibaba-pai Z-Image-Fun-Union; sc-8251)
 /// - `qwen_image_control` — `{Pose, Canny, Depth}` (alibaba-pai 2512-Fun-Union; sc-8267 source swap / sc-8250 exposure)
 ///
 /// The SDXL tile detail-upscale path (`ControlKind::Other("tile")`, `image_jobs/detail.rs`) is OUTSIDE
@@ -58,6 +59,14 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
     StrictControlEngine {
         engine_id: "z_image_turbo_control",
         repo: "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1",
+        supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
+    },
+    StrictControlEngine {
+        // Base (non-distilled, full-CFG) Z-Image Fun-Controlnet-Union (sc-8251). Same VACE
+        // Fun-Union control branch as the Turbo variant, but assembled from a base
+        // `Tongyi-MAI/Z-Image` snapshot + the base control checkpoint.
+        engine_id: "z_image_control",
+        repo: "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
         supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
     },
     StrictControlEngine {

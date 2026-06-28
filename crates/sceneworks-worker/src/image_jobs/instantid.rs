@@ -599,6 +599,17 @@ async fn generate_instantid_stream(
         0.0..=2.0,
     );
     let face_restore = advanced::flag(&request.advanced, "faceRestore");
+    // PiD decoder overlay (epic 7840, sc-8371): decode Angles/Poses through the `sdxl` PiD
+    // super-resolving student (2K/4K) instead of the SDXL VAE when the request opted in
+    // (`advanced.usePid`) AND the checkpoint + Gemma snapshots are cached. `resolve_pid_weights`
+    // returns `None` for a non-eligible model / missing opt-in / absent snapshots → native VAE.
+    // InstantID composes the SDXL VAE, so it shares the one `sdxl` student via the engine's
+    // `with_pid`. The candle InstantID lane has no PiD decode yet (sc-8373), so this is macOS-only —
+    // `use_pid` never reaches the candle engine (whose `InstantIdRequest` has no such field).
+    #[cfg(target_os = "macos")]
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    #[cfg(target_os = "macos")]
+    let use_pid = pid_weights.is_some();
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
     let openpose = if pose_set {
@@ -623,6 +634,12 @@ async fn generate_instantid_stream(
     }
     if face_restore {
         raw_settings.insert("faceRestore".to_owned(), Value::Bool(true));
+    }
+    // Mark PiD output on the asset sidecar (epic 7840): the NSCLv1 non-commercial restriction flows
+    // to PiD-decoded output, distinct from the rest of the pipeline. Only set when PiD actually ran.
+    #[cfg(target_os = "macos")]
+    if use_pid {
+        raw_settings.insert("usePid".to_owned(), Value::Bool(true));
     }
     // Record how many user LoRAs were merged onto the SDXL UNet (sc-6038) so the asset sidecar shows
     // the adapters were applied (they previously rode the request but were silently dropped).
@@ -718,6 +735,18 @@ async fn generate_instantid_stream(
     );
 
     let negative_prompt = request.negative_prompt.clone();
+    // The reference asset id is the `sourceAssetId` recorded on each angle's `faceLikeness` block
+    // (sc-4408/sc-4409) so a consumer can attribute the score back to the source identity face.
+    // Captured as an owned String for the blocking closure. Only consumed on the angle-set scoring
+    // lane; allow it unused on the non-face-backend build.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )),
+        allow(unused_variables)
+    )]
+    let face_likeness_source_ref = reference_id.to_owned();
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "instantid",
@@ -780,6 +809,17 @@ async fn generate_instantid_stream(
                     WorkerError::Engine(format!("InstantID face stack: {error}"))
                 })?
             };
+            // Attach the optional PiD super-resolving decoder (epic 7840, sc-8371): the `sdxl` student
+            // InstantID reuses (it composes the SDXL VAE). `pid_weights` is `Some` only when this
+            // generation opted in AND the snapshots are cached, so this is a no-op for a native-VAE
+            // generation. macOS/mlx only — the candle lane lands in sc-8373.
+            #[cfg(target_os = "macos")]
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("InstantID PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             // Face-restore needs the reference identity embedding (imposed on the re-rendered crop).
             // Detect it once on the raw reference. The candle `largest_face` takes the neutral
             // `gen_core::Image`; the MLX engine takes raw RGB bytes + dims.
@@ -810,15 +850,40 @@ async fn generate_instantid_stream(
             } else {
                 None
             };
-            Ok((model, reference, restore_embedding))
+            // Identity-likeness scorer (epic 4406, sc-4409): for an angle set, embed the source
+            // identity face ONCE here and reuse it across every angle, through the SHARED
+            // generator-agnostic seam (the same `build_angle_set_scorer` the FLUX.2 / Qwen / SenseNova
+            // angle lanes call). It loads a SEPARATE SCRFD + ArcFace stack from the engine's
+            // `with_face`, but from the SAME staged antelopev2 bundle, so no extra weights.
+            // Construction is non-fatal (weights / no source face → `None` → scores omitted; the set
+            // still renders). Built only for the angle set; identity/pose modes don't score.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            let scorer: Option<crate::face_likeness::FaceLikenessScorer> = if angle_set {
+                let face_weights_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
+                crate::face_likeness::build_angle_set_scorer(face_weights_dir, &reference)
+            } else {
+                None
+            };
+            #[cfg(not(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            )))]
+            let scorer: Option<()> = None;
+            Ok((model, reference, restore_embedding, scorer))
         },
-        move |(model, reference, restore_embedding), tx, cancel| {
+        move |(model, reference, restore_embedding, scorer), tx, cancel| {
             // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
             // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX
             // engine's are `&self`. Bind `mut` for the candle lane and allow the unused-mut on macOS.
             #[allow(unused_mut)]
             let mut model = model;
-            drive_gen_items(
+            // The scorer + its source-ref are moved into the per-item closure below; they live for
+            // the whole set so the source identity is embedded exactly ONCE (at construction, above)
+            // and reused across every angle.
+            drive_gen_items_scored(
                 tx,
                 work,
                 move |_index, (seed, prompt, action), on_progress| {
@@ -842,6 +907,11 @@ async fn generate_instantid_stream(
                         controlnet_scale,
                         openpose_scale,
                         seed: seed as u64,
+                        // PiD opt-in (sc-8371): macOS/mlx-only field (the candle `InstantIdRequest`
+                        // has none); the engine errors if set without a `with_pid` load, so the two
+                        // stay in lockstep — `use_pid` is `pid_weights.is_some()`.
+                        #[cfg(target_os = "macos")]
+                        use_pid,
                         sampler: sampler.clone(),
                         scheduler: scheduler.clone(),
                         cancel: cancel.clone(),
@@ -882,6 +952,11 @@ async fn generate_instantid_stream(
                             controlnet_scale,
                             openpose_scale,
                             seed: seed as u64,
+                            // Face-restore re-render always decodes on the native VAE (sc-8371): the
+                            // engine forces this internally too (its paste-back assumes a side×side
+                            // crop a 4× PiD decode would corrupt), but be explicit at the seam.
+                            #[cfg(target_os = "macos")]
+                            use_pid: false,
                             sampler: sampler.clone(),
                             scheduler: scheduler.clone(),
                             cancel: cancel.clone(),
@@ -901,7 +976,38 @@ async fn generate_instantid_stream(
                             }
                         };
                     }
-                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                    // Identity-likeness post-pass (sc-4409): score this finished angle against the
+                    // per-job cached source embedding, on this blocking thread (the `!Send` face
+                    // stack lives here). `score_or_null` makes per-image scoring non-fatal (a backend
+                    // error → a logged `null`), and a profile / up / down view with no reliable
+                    // frontal face records an honest `detected:false` N/A — never a misleading low
+                    // number. `None` scorer (non-angle mode or a failed construction) ⇒ no block ⇒ the
+                    // field is omitted. The Image build + pixel clone is paid ONLY when a scorer exists
+                    // (an angle set) — identity/pose modes have no scorer, so this is a no-op, no clone.
+                    #[cfg(any(
+                        target_os = "macos",
+                        all(not(target_os = "macos"), feature = "backend-candle")
+                    ))]
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_angle_image(
+                            Some(scorer),
+                            &Image {
+                                width: out.width,
+                                height: out.height,
+                                pixels: out.pixels.clone(),
+                            },
+                            Some(face_likeness_source_ref.as_str()),
+                        )
+                    });
+                    #[cfg(not(any(
+                        target_os = "macos",
+                        all(not(target_os = "macos"), feature = "backend-candle")
+                    )))]
+                    let face_likeness: Option<JsonObject> = {
+                        let _ = (&scorer, &face_likeness_source_ref);
+                        None
+                    };
+                    Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
                 },
             )
         },

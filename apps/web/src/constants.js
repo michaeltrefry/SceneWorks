@@ -91,6 +91,28 @@ export const fallbackModels = [
     },
   },
   {
+    // Base (non-distilled) Z-Image (sc-8320): full real-CFG (~50 step) foundation target,
+    // distinct from Turbo's 4-step distill. Higher quality at a higher compute cost.
+    id: "z_image",
+    name: "Z-Image",
+    type: "image",
+    capabilities: ["text_to_image", "style_variations"],
+    ui: {
+      description: "Undistilled base Z-Image text-to-image (real CFG, ~50 steps).",
+      promptGuide: { title: "Z-Image Prompt Guide", path: "/prompt-guides/z-image-turbo.md" },
+      // Strict control tier (sc-8251): the worker conditions the base Z-Image
+      // Fun-Controlnet-Union branch (z_image_control) on a pose skeleton / auto-canny /
+      // auto-depth map. poseLibrary alone gates the pose picker (no character_image needed).
+      poseLibrary: true,
+      poseControlScale: true,
+      // Strict-control modes the base Z-Image Fun-Controlnet-Union branch admits (sc-8251): pose,
+      // canny, depth. Mirrors the manifest `controlModes` (single source of truth:
+      // STRICT_CONTROL_ENGINES z_image_control = {pose,canny,depth}).
+      controlModes: ["pose", "canny", "depth"],
+      controlScale: { label: "Control strength", default: 0.9, min: 0.0, max: 2.0, step: 0.05 },
+    },
+  },
+  {
     id: "qwen_image",
     name: "Qwen Image",
     type: "image",

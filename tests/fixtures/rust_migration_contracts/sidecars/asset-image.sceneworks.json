@@ -39,7 +39,14 @@
       "characterConditioningActive": false,
       "characterConditioningNote": "Character metadata is recorded, but adapter-level character conditioning is not active in this build."
     },
-    "rawAdapterSettings": {}
+    "rawAdapterSettings": {
+      "faceLikeness": {
+        "score": 0.873,
+        "detected": true,
+        "method": "arcface_antelopev2",
+        "sourceAssetId": "asset_source_fixture"
+      }
+    }
   },
   "lineage": {
     "parents": [],

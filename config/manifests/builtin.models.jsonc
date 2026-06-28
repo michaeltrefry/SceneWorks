@@ -106,6 +106,94 @@
       }
     },
     {
+      // Base (non-distilled) Z-Image (epic 8236, sc-8320). The undistilled foundation
+      // model from the `Tongyi-MAI/Z-Image` diffusers snapshot — the same architecture as
+      // Turbo, but full real CFG (guidance 3.0–5.0, default 4.0) + negative prompt and ~50
+      // steps (shift=6.0 schedule) vs Turbo's 4-step CFG-free distill. Higher quality at a
+      // higher step/compute cost; selectable as its own t2i target and routed to the base
+      // engine path (`z_image`), distinct from Turbo. The base ships its own fast
+      // tokenizer, so no derived-tokenizer overlay is needed.
+      "id": "z_image",
+      "name": "Z-Image",
+      "family": "z-image",
+      "type": "image",
+      "adapter": "z_image_diffusers",
+      "capabilities": ["text_to_image", "style_variations"],
+      "downloads": [
+        // Refresh estimatedSizeBytes from the Hugging Face recursive tree API:
+        // https://huggingface.co/api/models/<repo>/tree/main?recursive=true
+        {
+          "provider": "huggingface",
+          "repo": "Tongyi-MAI/Z-Image",
+          "files": [],
+          "estimatedSizeBytes": 20547479575
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Tongyi-MAI/Z-Image"
+      },
+      "defaults": {
+        "resolution": "1024x1024",
+        // Undistilled base — the card recommends 28–50 steps; 50 matches the reference
+        // `ZImagePipeline` example. Real CFG default 4.0 (the engine `supports_guidance`).
+        "steps": 50,
+        "guidanceScale": 4.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        "resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "count": [1, 2, 4],
+        // Flow-matching DiT — full diffusers flow menu (epic 1753), shared with Turbo.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        "families": ["z-image"],
+        "types": ["style", "enhance", "character"]
+      },
+      // macOS-only native-MLX backend (epic 3018). minMemoryGb runs above Turbo's: the base
+      // is the full undistilled transformer + the real-CFG (cond+uncond) forward, so peak
+      // residency is higher even at the same resolution. Q4 brings this within tighter Mac
+      // budgets via advanced.mlxQuantize.
+      "mlx": {
+        "minMemoryGb": 48,
+        "quantize": 8,
+        "limits": {
+          "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+          "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+        }
+      },
+      "ui": {
+        "label": "Z-Image",
+        "description": "Undistilled base Z-Image text-to-image (real CFG, ~50 steps); higher quality than Turbo at a higher compute cost.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_flux" },
+        "promptGuide": {
+          "title": "Z-Image Prompt Guide",
+          "path": "/prompt-guides/z-image-turbo.md",
+          "sources": [
+            { "label": "Z-Image model card", "url": "https://huggingface.co/Tongyi-MAI/Z-Image" },
+            { "label": "Z-Image-Turbo model card", "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo" }
+          ]
+        },
+        // Strict control tier (sc-8251): on the macOS MLX backend the worker conditions the
+        // base Z-Image Fun-Controlnet-Union branch (`z_image_control`) on a pose skeleton,
+        // auto-canny edge map, or auto-Depth-Anything-V2 map. poseLibrary alone gates the
+        // pose picker; the worker dispatches by model id.
+        "poseLibrary": true,
+        // Strict ControlNet → control-lock-strength slider (advanced.controlScale).
+        "poseControlScale": true,
+        // Strict-control modes the base Z-Image Fun-Controlnet-Union branch admits (sc-8251): pose
+        // (skeleton), canny (auto edge map from the input image), depth (auto Depth-Anything-V2 map).
+        // SINGLE SOURCE OF TRUTH for the worker is `STRICT_CONTROL_ENGINES` (z_image_control =
+        // {pose,canny,depth}); this advertises the same set so the picker offers a control-mode selector.
+        "controlModes": ["pose", "canny", "depth"],
+        "controlScale": { "label": "Control strength", "default": 0.9, "min": 0.0, "max": 2.0, "step": 0.05 }
+      }
+    },
+    {
       "id": "z_image_edit",
       "name": "Z-Image-Edit",
       "family": "z-image",
@@ -2792,6 +2880,12 @@
           "max": 1.0,
           "step": 0.05
         },
+        // Optional PiD decoder (epic 7840, sc-8371): Angles/Poses can decode through NVIDIA's PiD
+        // pixel-diffusion student instead of the SDXL VAE (decode + 4x super-resolve to 2K/4K). InstantID
+        // composes the SDXL VAE, so it shares the `pid_sdxl` checkpoint with the SDXL/RealVisXL t2i path.
+        // `checkpointId` gates the per-generation toggle (shown only once that download is installed) and
+        // the worker maps `instantid_realvisxl -> sdxl` in `pid_backbone_for`. Non-commercial output.
+        "pid": { "checkpointId": "pid_sdxl" },
         // Canonical head angles the adapter can render from a frontal reference
         // (sc-2009: the IdentityNet landmarks come from a built-in pack; identity
         // from the character reference). Selecting one rides advanced.viewAngle and

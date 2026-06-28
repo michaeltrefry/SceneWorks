@@ -2026,6 +2026,104 @@ fn qwen_threaded_source_drives_auto_canny_control_conditioning() {
     );
 }
 
+/// sc-8251 base Z-Image source-threading: the base `z_image_control` stream feeds the user input image
+/// into the SAME shared `preprocess_control_entry` driver (it passes `control_source`, not `None`). With
+/// `controlMode = canny` + a threaded source the driver derives a real edge-map control image — NOT the
+/// pose skeleton — and builds a `Control { kind: Canny }`. The base analogue of
+/// `threaded_source_drives_auto_canny_control_conditioning` (turbo). Also asserts the base engine row
+/// admits canny + depth. Real per-mode renders are the on-device `zimage_base_control_real_weights` smoke.
+#[cfg(target_os = "macos")]
+#[test]
+fn zimage_base_threaded_source_drives_auto_canny_control_conditioning() {
+    // The base Z-Image control engine row accepts canny + depth (sc-8251).
+    assert!(validate_control_kind("z_image_control", &ControlKind::Canny).is_ok());
+    assert!(validate_control_kind("z_image_control", &ControlKind::Depth).is_ok());
+
+    let (w, h) = (64u32, 48u32);
+    let pose = one_pose();
+    let stick = crate::openpose_skeleton::body_stickwidth(w, h);
+    let source = control_fixture(w, h, [128, 128, 128]);
+
+    // canny + a threaded source (no user passthrough, no depth weights) → an edge-map control image.
+    let control = preprocess_control_entry(
+        &ControlKind::Canny,
+        None,
+        Some(&pose),
+        Some(&source),
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("auto-canny over the threaded base z-image source");
+    assert_eq!((control.width, control.height), (w, h));
+
+    // It must NOT be the pose skeleton (proving the source — not the synthetic skeleton — drove it).
+    let skeleton = crate::openpose_skeleton::draw_wholebody(
+        w,
+        h,
+        &pose.keypoints,
+        pose.hands.as_deref(),
+        pose.face.as_deref(),
+        stick,
+    );
+    assert_ne!(
+        control.pixels,
+        skeleton.into_raw(),
+        "base z-image auto-canny must derive from the source image, not render the pose skeleton"
+    );
+
+    let cond = build_control_conditioning(control, ControlKind::Canny, 0.9, None);
+    assert_eq!(cond.len(), 1);
+    assert!(
+        matches!(
+            &cond[0],
+            Conditioning::Control {
+                kind: ControlKind::Canny,
+                ..
+            }
+        ),
+        "base z-image canny builds a Control conditioning"
+    );
+
+    // Pose byte-identity: the base stream renders the SAME shared `draw_wholebody` skeleton as every
+    // other strict-control engine (no `Reference` unless identity-init), so the pose tier is
+    // byte-identical to the Turbo path — the base only diverges in the engine id + CFG forward.
+    let pose_control = preprocess_control_entry(
+        &ControlKind::Pose,
+        None,
+        Some(&pose),
+        None,
+        w,
+        h,
+        stick,
+        None,
+    )
+    .expect("base z-image pose render");
+    let expected = crate::openpose_skeleton::draw_wholebody(
+        w,
+        h,
+        &pose.keypoints,
+        pose.hands.as_deref(),
+        pose.face.as_deref(),
+        stick,
+    );
+    assert_eq!(
+        pose_control.pixels,
+        expected.into_raw(),
+        "base z-image pose preprocessing is byte-identical to a direct draw_wholebody"
+    );
+    let pose_cond = build_control_conditioning(pose_control, ControlKind::Pose, 0.9, None);
+    assert_eq!(pose_cond.len(), 1);
+    assert!(matches!(
+        &pose_cond[0],
+        Conditioning::Control {
+            kind: ControlKind::Pose,
+            ..
+        }
+    ));
+}
+
 /// sc-3031 A/B dump (NOT a CI test): generate ONE image through the **real new-adapter
 /// path** — the production resolvers (`model_repo` / `resolve_steps` / `resolve_guidance` /
 /// `resolve_negative_prompt` / `resolve_quant` / `resolve_adapters` / `resolve_weights_dir` /
@@ -2339,6 +2437,72 @@ fn zimage_control_real_weights_generates_one_pose() {
     assert_eq!(pixels.len(), 512 * 512 * 3);
     assert!(steps_seen >= 1, "expected denoise step progress");
     assert!(pixels.windows(2).any(|w| w[0] != w[1]));
+}
+
+/// Real-weights smoke: BASE Z-Image strict-control (sc-8251). Loads the base `Tongyi-MAI/Z-Image`
+/// snapshot + the cached base Fun-Controlnet-Union checkpoint and generates one image per mode
+/// (pose skeleton / auto-canny / auto-depth) through `z_image_control` with REAL CFG. Needs both
+/// weights in the HF cache + a Metal device; run on demand:
+/// `cargo test -p sceneworks-worker --lib -- --ignored zimage_base_control_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs real base Z-Image + base Fun-Controlnet-Union weights + Metal device"]
+fn zimage_base_control_real_weights_generates_per_mode() {
+    let base = hf_snapshot("models--Tongyi-MAI--Z-Image");
+    let control = std::fs::read_dir(dirs_home().join(
+        ".cache/huggingface/hub/models--alibaba-pai--Z-Image-Fun-Controlnet-Union-2.1/snapshots",
+    ))
+    .expect("base control snapshots dir")
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| path.is_dir())
+    .map(|dir| dir.join(super::ZIMAGE_BASE_CONTROL_FILE))
+    .filter(|path| path.exists())
+    .expect("base control weights file");
+
+    let generator =
+        zimage_base_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
+
+    let (w, h) = (512u32, 512u32);
+    let stick = crate::openpose_skeleton::body_stickwidth(w, h);
+    // A flat source for the auto-canny / auto-depth modes.
+    let source = control_fixture(w, h, [120, 140, 160]);
+    let pose = one_pose();
+
+    // Drive each supported mode through the shared preprocessor → conditioning → generate-one.
+    for kind in [ControlKind::Pose, ControlKind::Canny] {
+        let control_map =
+            preprocess_control_entry(&kind, None, Some(&pose), Some(&source), w, h, stick, None)
+                .expect("preprocess base control entry");
+        let conditioning = build_control_conditioning(control_map, kind.clone(), 0.9, None);
+        let cancel = gen_core::CancelFlag::new();
+        let mut steps_seen = 0u32;
+        let (ow, oh, pixels) = zimage_base_control_generate_one(
+            generator.as_ref(),
+            "a person standing in a meadow",
+            None,
+            w,
+            h,
+            42,
+            50,
+            4.0,
+            conditioning,
+            &cancel,
+            &mut |p| {
+                if let gen_core::Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!((ow, oh), (w, h));
+        assert_eq!(pixels.len() as u32, w * h * 3);
+        assert!(
+            steps_seen >= 1,
+            "expected denoise step progress for {kind:?}"
+        );
+        assert!(pixels.windows(2).any(|px| px[0] != px[1]));
+    }
 }
 
 /// Real-weights smoke: Qwen-Image strict-pose control. Loads the base
@@ -3209,6 +3373,16 @@ fn image_route_count_follows_dispatch_order() {
     assert_eq!(route, ImageRoute::ZImageControl);
     assert_eq!(route.image_count(&zimage_pose, &settings), 2);
 
+    // Base (full-CFG) Z-Image strict control (sc-8251): `z_image` + ≥1 pose → the base
+    // Fun-Controlnet-Union path, one image per pose. Keyed on the base id, distinct from the Turbo arm.
+    let zimage_base_pose = request(json!({
+        "projectId": "p", "model": "z_image", "count": 7,
+        "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }, { "id": "b" }, { "id": "c" }] }
+    }));
+    let route = resolve_image_route(&zimage_base_pose, &settings).unwrap();
+    assert_eq!(route, ImageRoute::ZImageBaseControl);
+    assert_eq!(route.image_count(&zimage_base_pose, &settings), 3);
+
     let qwen_pose = request(json!({
         "projectId": "p", "model": "qwen_image", "mode": "character_image", "count": 5,
         "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }, { "id": "b" }, { "id": "c" }] }
@@ -3295,6 +3469,16 @@ fn image_route_count_follows_dispatch_order() {
     let route = resolve_image_route(&plain_mlx, &settings).unwrap();
     assert_eq!(route, ImageRoute::Mlx);
     assert_eq!(route.image_count(&plain_mlx, &settings), 6);
+
+    // sc-8320: plain base `z_image` t2i (no poses) → the generic MLX path (base engine), NOT a control
+    // arm — proving the base is selectable + routes to the base t2i path, distinct from Turbo control.
+    let zimage_base_t2i = request(json!({
+        "projectId": "p", "model": "z_image", "count": 4,
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    let route = resolve_image_route(&zimage_base_t2i, &settings).unwrap();
+    assert_eq!(route, ImageRoute::Mlx);
+    assert_eq!(route.image_count(&zimage_base_t2i, &settings), 4);
 }
 
 #[cfg(target_os = "macos")]
@@ -5094,6 +5278,20 @@ fn strict_control_table_is_the_authority() {
         &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth]
     );
 
+    // sc-8251: the base (non-distilled, full-CFG) Z-Image control engine — its OWN row, the base
+    // control repo (no `-Turbo-`), pose + canny + depth.
+    let zimage_base = strict_control_engine("z_image_control").expect("z-image base row");
+    assert_eq!(
+        zimage_base.repo,
+        "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1"
+    );
+    assert_eq!(
+        zimage_base.supported_kinds,
+        &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth]
+    );
+    // The base must NOT collapse onto the Turbo control repo.
+    assert_ne!(zimage_base.repo, zimage.repo);
+
     let qwen = strict_control_engine("qwen_image_control").expect("qwen row");
     // sc-8267 source swap: InstantX → alibaba-pai 2512-Fun-Controlnet-Union (input-agnostic VACE branch).
     assert_eq!(
@@ -5122,6 +5320,7 @@ fn validate_control_kind_accepts_and_rejects_per_table() {
         "flux1_dev_control",
         "flux2_dev_control",
         "z_image_turbo_control",
+        "z_image_control",
         "qwen_image_control",
     ] {
         assert!(validate_control_kind(engine, &ControlKind::Pose).is_ok());

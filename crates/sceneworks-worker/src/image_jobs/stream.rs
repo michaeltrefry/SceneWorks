@@ -13,10 +13,22 @@ enum GenEvent {
         width: u32,
         height: u32,
         pixels: Vec<u8>,
+        /// Pre-built `faceLikeness` sidecar block (epic 4406, sc-4409) for this image, or `None`
+        /// when the producing path did not score it. `consume_gen_events` inserts a `Some` block
+        /// verbatim into the per-image `rawAdapterSettings` under
+        /// [`face_likeness::FACE_LIKENESS_FACT_KEY`] — the omit-when-absent persistence seam, so a
+        /// path that doesn't score (every non-angle-set path) is untouched.
+        face_likeness: Option<JsonObject>,
     },
 }
 
 type GeneratedImage = (i64, u32, u32, Vec<u8>);
+
+/// A generated image plus its optional pre-built `faceLikeness` sidecar block (sc-4409). Returned by
+/// the per-item closure of [`drive_gen_items_scored`] so the identity-likeness post-pass (used by all
+/// four angle-set lanes — InstantID, FLUX.2 edit, Qwen-Edit, SenseNova-U1) can attach a per-image
+/// score without disturbing the shared [`GeneratedImage`] tuple every other generator returns.
+type ScoredGeneratedImage = (i64, u32, u32, Vec<u8>, Option<JsonObject>);
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     let event = match progress {
@@ -42,6 +54,25 @@ fn send_generated_image(
         width,
         height,
         pixels,
+        face_likeness: None,
+    })
+    .is_ok()
+}
+
+/// Like [`send_generated_image`] but carries the optional pre-built `faceLikeness` block (sc-4409).
+fn send_scored_generated_image(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+    image: ScoredGeneratedImage,
+) -> bool {
+    let (seed, width, height, pixels, face_likeness) = image;
+    tx.blocking_send(GenEvent::Image {
+        index,
+        seed,
+        width,
+        height,
+        pixels,
+        face_likeness,
     })
     .is_ok()
 }
@@ -69,6 +100,45 @@ where
         // ceiling — an OS memory-pressure SIGKILL (Jetsam) that the dense SenseNova-U1 8B
         // family hits first (sc-5567). Frees only freed/retained buffers; the cached
         // generator's live weight arrays are untouched.
+        release_gen_cache_between_items();
+    }
+    Ok(())
+}
+
+/// Like [`drive_gen_items`] but the per-item closure additionally returns an optional pre-built
+/// `faceLikeness` sidecar block (sc-4409), carried through to `consume_gen_events` for per-image
+/// persistence. Used by all four angle-set lanes — InstantID, FLUX.2 edit, Qwen-Edit, and
+/// SenseNova-U1 — each of which scores every finished view against the per-job cached source identity
+/// embedding on its generation thread (the `!Send` face stack lives there). Every non-scoring path
+/// keeps using [`drive_gen_items`].
+//
+// The scored producers are all face-backend paths; off-Mac they compile only with the candle backend
+// (the angle-set scorer's backend legs are cfg-gated the same way), so allow this dead when neither
+// face backend is present.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+fn drive_gen_items_scored<I, Item, F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    items: I,
+    mut generate: F,
+) -> WorkerResult<()>
+where
+    I: IntoIterator<Item = Item>,
+    F: FnMut(usize, Item, &mut dyn FnMut(Progress)) -> WorkerResult<Option<ScoredGeneratedImage>>,
+{
+    for (index, item) in items.into_iter().enumerate() {
+        let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
+        let Some(image) = generate(index, item, &mut on_progress)? else {
+            break;
+        };
+        if !send_scored_generated_image(&tx, index, image) {
+            break;
+        }
         release_gen_cache_between_items();
     }
     Ok(())

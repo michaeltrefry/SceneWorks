@@ -43,6 +43,21 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 0.0,
         adapter_label: "mlx_z_image",
     },
+    // Base (non-distilled) Z-Image (epic 8236, sc-8320). The undistilled foundation model from the
+    // `Tongyi-MAI/Z-Image` diffusers snapshot — the same `ZImageTransformer` as Turbo, but the
+    // `z_image` engine descriptor uses a shift=6.0 schedule, ~50 default steps, and REAL CFG
+    // (`supports_guidance` + negative prompt; the card recommends guidance 3.0–5.0, default 4.0) vs
+    // Turbo's 4-step guidance-distilled CFG-free path. Ships its own fast `tokenizer/tokenizer.json`,
+    // so it needs NO derived-tokenizer overlay. Routes to the base t2i path (not Turbo); strict-pose /
+    // canny / depth control routes to the `z_image_control` engine variant (sc-8251).
+    ModelRow {
+        sceneworks_id: "z_image",
+        engine_id: "z_image",
+        default_repo: "Tongyi-MAI/Z-Image",
+        default_steps: 50,
+        default_guidance: 4.0,
+        adapter_label: "mlx_z_image",
+    },
     // Ideogram 4 (epic 4725) — native MLX, gated. Structured JSON-caption text-to-image; the
     // turnkey ships packed q4/ (default) + q8/ subdirs (resolve_ideogram_model_dir picks one).
     // V4_QUALITY_48 preset default (48 steps); asymmetric-CFG guidance 7.0.
@@ -1164,6 +1179,37 @@ mod tests {
             !caps.contains(&Cap::ImageGenerate),
             "no enabled backend ⇒ no derived image_generate"
         );
+    }
+
+    // sc-8320: the base (non-distilled) `z_image` t2i row resolves to its OWN engine id (not Turbo's),
+    // points at the `Tongyi-MAI/Z-Image` base snapshot, and carries the undistilled defaults (real CFG
+    // guidance 4.0, ~50 steps) — proving it is selectable and routes to the base path distinct from
+    // `z_image_turbo` (which stays 8-step, CFG-free at `Tongyi-MAI/Z-Image-Turbo`).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn z_image_base_row_is_distinct_from_turbo() {
+        let base = MODEL_TABLE
+            .iter()
+            .find(|row| row.sceneworks_id == "z_image")
+            .expect("z_image base MODEL_TABLE row");
+        assert_eq!(base.engine_id, "z_image");
+        assert_eq!(base.default_repo, "Tongyi-MAI/Z-Image");
+        assert_eq!(base.default_steps, 50);
+        assert!((base.default_guidance - 4.0).abs() < f32::EPSILON);
+        assert_eq!(base.adapter_label, "mlx_z_image");
+
+        let turbo = MODEL_TABLE
+            .iter()
+            .find(|row| row.sceneworks_id == "z_image_turbo")
+            .expect("z_image_turbo MODEL_TABLE row");
+        // The base must NOT collapse onto the Turbo engine id / repo / step+CFG defaults.
+        assert_ne!(base.engine_id, turbo.engine_id);
+        assert_ne!(base.default_repo, turbo.default_repo);
+        assert_ne!(base.default_steps, turbo.default_steps);
+        assert_ne!(base.default_guidance, turbo.default_guidance);
     }
 
     #[test]
