@@ -1,7 +1,7 @@
 {
   "name": "sceneworks",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Local AI image and video generation studio runtime skeleton.",
   "license": "SEE LICENSE IN LICENSE",
   "scripts": {
