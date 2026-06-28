@@ -2596,7 +2596,21 @@ async fn consume_gen_events(
                 width,
                 height,
                 pixels,
+                face_likeness,
             } => {
+                // The identity-likeness post-pass (sc-4409) scores each image on the blocking thread
+                // and hands the pre-built `faceLikeness` block back through the event. Attach it to a
+                // PER-IMAGE clone of the shared raw settings under the sidecar key so each angle's
+                // asset carries its own honest score (an N/A `detected:false` block for profile/up/
+                // down views), while every non-scoring path leaves `face_likeness` `None` ⇒ the field
+                // is omitted entirely (the sc-4408 omit-when-absent contract).
+                let mut image_raw_settings = raw_settings.clone();
+                if let Some(block) = face_likeness {
+                    image_raw_settings.insert(
+                        crate::face_likeness::FACE_LIKENESS_FACT_KEY.to_owned(),
+                        Value::Object(block),
+                    );
+                }
                 let fact = write_image_asset(
                     plan,
                     index,
@@ -2605,7 +2619,7 @@ async fn consume_gen_events(
                     height,
                     pixels,
                     adapter_label,
-                    raw_settings.clone(),
+                    image_raw_settings,
                     project_path,
                 )?;
                 asset_writes.push(Value::Object(fact));
