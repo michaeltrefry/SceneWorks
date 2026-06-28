@@ -9544,6 +9544,119 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Character Test");
   });
 
+  it("Asset Library is a positive origin allow-list, not just a character exclusion (sc-8339)", async () => {
+    const mk = (id, origin, displayName) => ({
+      id,
+      projectId: "project-1",
+      type: "image",
+      displayName,
+      ...(origin === undefined ? {} : { origin }),
+      recipe: { prompt: displayName },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    });
+    const assets = [
+      mk("a-image", "image_studio", "Image Studio"),
+      mk("a-video", "video_studio", "Video Studio"),
+      mk("a-doc", "document_studio", "Doc Studio"),
+      mk("a-upload", "upload", "Uploaded"),
+      mk("a-legacy", undefined, "Legacy No Origin"),
+      mk("a-character", "character_studio", "Character Out"),
+      mk("a-pose", "pose_library", "Pose Out"),
+      mk("a-keypoint", "keypoint_library", "Keypoint Out"),
+      mk("a-future", "some_future_studio", "Future Out"),
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Scoped" },
+            assets,
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            selectedAsset: assets[0],
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    const tileText = [...container.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ");
+    // Allow-listed origins + legacy (no origin) appear.
+    for (const name of ["Image Studio", "Video Studio", "Doc Studio", "Uploaded", "Legacy No Origin"]) {
+      expect(tileText).toContain(name);
+    }
+    // Everything else stays out — character, pose/keypoint library, and unknown future origins.
+    for (const name of ["Character Out", "Pose Out", "Keypoint Out", "Future Out"]) {
+      expect(container.textContent).not.toContain(name);
+    }
+  });
+
+  it("Library detail sidebar falls back to a library asset, not the global (character) selection (sc-8339)", async () => {
+    const studioImage = {
+      id: "asset-studio",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Studio Render",
+      origin: "image_studio",
+      recipe: { prompt: "studio render" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    const characterImage = {
+      id: "asset-character",
+      projectId: "project-1",
+      type: "image",
+      displayName: "Character Test",
+      origin: "character_studio",
+      recipe: { prompt: "character test" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Scoped" },
+            assets: [characterImage, studioImage],
+            jobs: [],
+            imageModels: [],
+            createVqaJob: vi.fn(),
+            deleteAsset: () => {},
+            purgeAsset: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            sendAssetToImage: () => {},
+            sendAssetToVideo: () => {},
+            // The global selection is the most-recent (character) asset — the bug case.
+            selectedAsset: characterImage,
+            setSelectedAssetId: () => {},
+            setActiveView: () => {},
+            updateAssetStatus: () => {},
+          },
+          <LibraryScreen />,
+        ),
+      );
+    });
+    await settle();
+
+    // The detail panel shows the most-recent LIBRARY asset, never the character image.
+    const detail = container.querySelector(".asset-detail");
+    expect(detail).toBeTruthy();
+    expect(detail.querySelector("h3").textContent).toBe("Studio Render");
+    expect(container.textContent).not.toContain("Character Test");
+  });
+
   it("folds original and upscaled library variants into one representative tile", async () => {
     const setPreviewAsset = vi.fn();
     const original = {

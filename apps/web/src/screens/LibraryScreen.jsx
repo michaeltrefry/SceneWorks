@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch.jsx";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
-import { terminalStatuses } from "../constants.js";
+import { isLibraryAsset, terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
 
 export function LibraryScreen() {
@@ -38,29 +38,19 @@ export function LibraryScreen() {
     setActiveView("Editor");
   };
   const vqaEnabled = Boolean(createVqaJob) && imageModels.some((model) => (model.capabilities ?? []).includes("vqa"));
-  const assetVqaJobs = selectedAsset
-    ? jobs.filter((job) => job.type === "image_vqa" && job.payload?.sourceAssetId === selectedAsset.id)
-    : [];
-  const vqaEntries = assetVqaJobs
-    .filter((job) => job.status === "completed" && job.result?.answer)
-    .map((job) => ({
-      jobId: job.id,
-      question: job.result?.question ?? job.payload?.question ?? "",
-      answer: job.result.answer,
-    }));
-  const vqaPending = assetVqaJobs.some((job) => !terminalStatuses.has(job.status));
   const [typeFilter, setTypeFilter] = useState("all");
   const [tagFilter, setTagFilter] = useState("all");
   const [showRejected, setShowRejected] = useState(false);
   const [assetMode, setAssetMode] = useState("assets");
   const [isImporting, setIsImporting] = useState(false);
-  // Asset Library hygiene (sc-2024): show only studio-generated and uploaded
-  // media. Character Studio test outputs (origin "character_studio") live under
-  // the character, not here. The backend also exposes `?scope=library`; we filter
-  // on the authoritative `origin` field client-side to reuse the shared asset
-  // feed instead of loading a second scoped copy. Dataset images never reach the
-  // Library — they are stored outside the indexed asset folders.
-  const libraryAssets = assets.filter((asset) => asset.origin !== "character_studio");
+  // Asset Library hygiene (sc-2024 / sc-8339): show only studio-generated and uploaded
+  // media via a positive origin allow-list (isLibraryAsset). Character Studio outputs,
+  // Pose/Key Point library assets, and any future/foreign origin stay out by default —
+  // a single `!== "character_studio"` exclusion let everything else leak in. The backend
+  // also exposes `?scope=library`; we filter on the authoritative `origin` field
+  // client-side to reuse the shared asset feed instead of loading a second scoped copy.
+  // Dataset images never reach the Library — they are stored outside the indexed folders.
+  const libraryAssets = assets.filter(isLibraryAsset);
   const visibleAssets = foldUpscaledAssetVariants(libraryAssets.filter((asset) => {
     if (typeFilter !== "all" && asset.type !== typeFilter) {
       return false;
@@ -79,6 +69,25 @@ export function LibraryScreen() {
     }
     return true;
   }));
+  // Detail-sidebar selection, scoped to the Library (sc-8339). The global `selectedAsset`
+  // falls back to the most-recent asset across ALL studios, so without scoping the panel
+  // can show a freshly generated Character Studio image instead of a library asset. Keep
+  // the global selection only when it is itself a library asset (even if the current
+  // tag/type filter hides it); otherwise fall back to the most-recent visible asset —
+  // never a non-library (e.g. character) asset.
+  const librarySelectedAsset =
+    libraryAssets.find((asset) => asset.id === selectedAsset?.id) ?? visibleAssets[0] ?? null;
+  const assetVqaJobs = librarySelectedAsset
+    ? jobs.filter((job) => job.type === "image_vqa" && job.payload?.sourceAssetId === librarySelectedAsset.id)
+    : [];
+  const vqaEntries = assetVqaJobs
+    .filter((job) => job.status === "completed" && job.result?.answer)
+    .map((job) => ({
+      jobId: job.id,
+      question: job.result?.question ?? job.payload?.question ?? "",
+      answer: job.result.answer,
+    }));
+  const vqaPending = assetVqaJobs.some((job) => !terminalStatuses.has(job.status));
   // All discarded assets within the current type/tag filters — the exact scope
   // the "Empty Trash" button purges (unfolded, so folded variants go too).
   const trashedInView = libraryAssets.filter((asset) => {
@@ -199,13 +208,13 @@ export function LibraryScreen() {
         <AssetGrid
           assets={visibleAssets}
           onPreview={onPreview}
-          selectedAsset={selectedAsset}
+          selectedAsset={librarySelectedAsset}
           setSelectedAssetId={setSelectedAssetId}
           selectedIds={batch.selectedAssetIds}
           onToggleSelect={batch.toggleSelect}
         />
         <AssetDetail
-          asset={selectedAsset}
+          asset={librarySelectedAsset}
           deleteAsset={deleteAsset}
           purgeAsset={purgeAsset}
           onPreview={onPreview}

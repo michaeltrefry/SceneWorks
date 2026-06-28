@@ -3,6 +3,23 @@
 // unaffected.
 export { terminalStatuses, actionStatuses } from "./jobTypes.js";
 
+// Asset Library hygiene (sc-2024 / sc-8339): the Main Asset Library shows ONLY media
+// produced by the Image / Video / Document studios plus manual uploads. This is a
+// positive allow-list (not a single `!== "character_studio"` exclusion) so anything
+// else — Character Studio outputs (`character_studio`), Pose/Key Point library assets
+// (`pose_library` / `keypoint_library`), and any future origin — stays out by default.
+// Origins are assigned by the backend (`crates/sceneworks-core/src/asset_index.rs`).
+export const LIBRARY_ORIGINS = new Set(["image_studio", "video_studio", "document_studio", "upload"]);
+
+// True when an asset belongs in the Main Asset Library. A missing origin is treated as
+// eligible: the normalized API always stamps one, so only legacy/non-normalized records
+// lack it, and hiding them would be worse than showing them. A *recorded* origin must be
+// in the allow-list.
+export function isLibraryAsset(asset) {
+  const origin = asset?.origin;
+  return !origin || LIBRARY_ORIGINS.has(origin);
+}
+
 // SenseNova-U1 interleave resolution buckets (distinct from plain text-to-image).
 // Mirrors the worker's interleave_resolution_for / upstream examples/interleave.
 export const INTERLEAVE_RESOLUTION_OPTIONS = [

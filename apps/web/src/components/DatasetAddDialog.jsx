@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { isLibraryAsset } from "../constants.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "./assetMedia.jsx";
 import { Modal } from "./Modal.jsx";
 
@@ -83,14 +84,15 @@ export function DatasetAddDialog({
 
   const memberSet = useMemo(() => new Set(memberIds), [memberIds]);
 
-  // Library tab: studio + uploaded media only — never Character Studio test
-  // outputs (origin gating from sc-2024) — and nothing already in the dataset.
+  // Library tab: studio + uploaded media only via the shared library allow-list
+  // (sc-2024 / sc-8339) — never Character Studio test outputs, Pose/Key Point library
+  // assets, or unknown origins — and nothing already in the dataset.
   const libraryCandidates = useMemo(
     () =>
       assets.filter(
         (asset) =>
           assetCanRenderAsImage(asset) &&
-          asset.origin !== "character_studio" &&
+          isLibraryAsset(asset) &&
           !memberSet.has(asset.id) &&
           !asset.status?.trashed,
       ),
