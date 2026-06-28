@@ -2797,8 +2797,9 @@ fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
     );
 }
 
-// sc-8278: the klein/dev edit identity-strength → image-guidance mapping. Cross-platform (no MLX)
-// so the helper stays referenced on the candle/parity lane too, and documents the contract.
+// sc-8278: the klein/dev edit identity-strength → image-guidance mapping. macOS-gated like the
+// rest of flux2.rs (the whole `image_jobs/flux2.rs` include is `cfg(target_os = "macos")`).
+#[cfg(target_os = "macos")]
 #[test]
 fn flux2_edit_image_guidance_lever() {
     // Off outside character_image mode (a plain image edit), even with the knob set.
