@@ -238,6 +238,33 @@ async fn generate_candle_sdxl_ipadapter_stream(
     )?;
     let (ip_bundle, image_encoder) = ensure_sdxl_ipadapter_weights(api, settings, job).await?;
 
+    // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle SDXL IP-Adapter
+    // lane is the With-Character route for an SDXL-family model — score every output against the
+    // reference face through the SHARED generator-agnostic seam. Eligibility goes through
+    // `resolve_character_image_likeness_source` (the SAME gate the macOS lanes use), so the angle/pose/
+    // edit exclusion is explicit and self-contained here — NOT dependent on dispatch order (an angle/pose
+    // job is excluded by the helper even if it ever reached this lane, so it can never be double-scored).
+    // The helper's decode is ignored: the already-decoded `reference` (this lane's generation input, the
+    // current job's `referenceAssetId`) is the scorer source, so there is no second decode. Stage the
+    // antelopev2 SCRFD + ArcFace bundle (the scorer's candle leg loads it); the `!Send` scorer is built
+    // ONCE inside the load closure and reused across the N outputs (source embedded once — the caching
+    // AC). Staging is non-fatal (failure → no scorer → scores omitted, generation still renders).
+    let score_likeness =
+        resolve_character_image_likeness_source(request, settings, project_path).is_some();
+    let face_stack_dir = if score_likeness {
+        match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
+    let likeness_source_ref = reference_id.to_owned();
+
     let steps = sdxl_ipadapter_steps(request);
     let guidance = sdxl_ipadapter_guidance(request);
     let ip_scale = advanced::f32_clamped(
@@ -300,13 +327,22 @@ async fn generate_candle_sdxl_ipadapter_stream(
             let model = IpAdapterSdxl::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))
             })?;
-            Ok((model, reference))
+            // Per-job identity-likeness scorer built ONCE here (on the blocking thread where the `!Send`
+            // face stack is allowed); source embedded once, reused across every output (sc-4411 caching
+            // AC). `None` ⇒ non-fatal staging / construction failure ⇒ scores omitted.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some(source)) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            Ok((model, reference, scorer))
         },
-        move |(model, reference), tx, cancel| {
+        move |(model, reference, scorer), tx, cancel| {
             // `IpAdapterSdxl::generate` takes `&mut self` (it sets the IP image tokens on the UNet before
             // the denoise), so the per-item closure mutates `model`.
             let mut model = model;
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -332,7 +368,21 @@ async fn generate_candle_sdxl_ipadapter_stream(
                         )));
                     }
                 };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
+                // Score this finished image against the cached source embedding (sc-4411). Image build +
+                // pixel clone paid ONLY when a scorer exists; non-frontal → honest detected:false N/A;
+                // `None` scorer ⇒ field omitted.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out.width,
+                            height: out.height,
+                            pixels: out.pixels.clone(),
+                        },
+                        Some(likeness_source_ref.as_str()),
+                    )
+                });
+                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
             })
         },
     );

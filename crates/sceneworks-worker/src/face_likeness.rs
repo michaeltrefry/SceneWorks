@@ -1089,6 +1089,113 @@ mod tests {
                 "a full-body / turned pose persists detected:false + reason, not a low score"
             );
         }
+
+        // -- sc-4411: the SAME shared seam carries Image Studio "With Character" (plain) scoring -------
+        // The PLAIN With-Character generation (`character_image` + a `referenceAssetId`, no angle/pose)
+        // routes to its identity generator (Z-Image identity init, Flux IP-adapter, InstantID identity,
+        // PuLID, Kolors IP, SenseNova / FLUX.2 / Qwen plain edit) and scores each finished image through
+        // `build_face_likeness_scorer` + `score_generated_image` — the IDENTICAL seam the angle/pose
+        // lanes use, no fork. These assert the sc-4411 ACs over the weight-free stub (generator-
+        // agnostic): a block is attached vs the reference, the source is embedded once across N images,
+        // CHANGING the reference changes the scored source, and a non-frontal result is an honest N/A.
+
+        #[test]
+        fn with_character_attaches_block_and_embeds_source_once_across_n_images() {
+            // A With-Character generation produces N regular images "with" the character; each attaches a
+            // faceLikeness block vs the chosen reference, and across the N-image batch the SOURCE is
+            // embedded exactly once (the per-job scorer is built once from the reference, then reused).
+            let (scorer, calls) = stub_scorer(200);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "construction embedded the reference source once"
+            );
+            // Distinct per-image seeds ⇒ distinct generations, but all "with" the one character.
+            let generated = [200u8, 150, 120, 90, 80];
+            for px in generated {
+                let block = score_generated_image(Some(&scorer), &image(px), Some("char_ref_1"))
+                    .expect("a scorer present ⇒ a block built");
+                assert_eq!(block.get("detected"), Some(&Value::Bool(true)));
+                assert_eq!(
+                    block.get("sourceAssetId"),
+                    Some(&json!("char_ref_1")),
+                    "the block attributes the score to the chosen reference asset"
+                );
+                assert!(block.get("score").map(Value::is_number).unwrap_or(false));
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1 + generated.len(),
+                "1 source embed + 1 detect per image — the source is NEVER re-embedded across the batch"
+            );
+            assert_eq!(scorer.source_embed_count(), 1, "still one source embed");
+        }
+
+        #[test]
+        fn changing_the_reference_asset_changes_the_scored_source() {
+            // The explicit AC: changing the reference asset changes the source the score is computed
+            // against. Two scorers built from DIFFERENT reference faces (the per-job source is the
+            // current `referenceAssetId`, never cached across jobs) score the SAME generated image to
+            // different cosines — same-identity high, different-identity lower.
+            let generated = image(200); // a generation matching reference A's identity (pixel 200)
+            let (scorer_a, _) = FaceLikenessScorer::with_stub_source(&image(200)); // reference A
+            let (scorer_b, _) = FaceLikenessScorer::with_stub_source(&image(80)); // reference B (changed)
+
+            let a = scorer_a.score_or_null(&generated);
+            let b = scorer_b.score_or_null(&generated);
+            let (sa, sb) = (a.score.expect("A scored"), b.score.expect("B scored"));
+            assert!(
+                sa > sb,
+                "same reference (A) cosine {sa} exceeds the changed reference (B) cosine {sb} — \
+                 the source IS derived from the current reference asset"
+            );
+
+            // And the persisted block records WHICH reference each score was computed against.
+            let block_a =
+                score_generated_image(Some(&scorer_a), &generated, Some("ref_a")).expect("block A");
+            let block_b =
+                score_generated_image(Some(&scorer_b), &generated, Some("ref_b")).expect("block B");
+            assert_eq!(block_a.get("sourceAssetId"), Some(&json!("ref_a")));
+            assert_eq!(block_b.get("sourceAssetId"), Some(&json!("ref_b")));
+        }
+
+        #[test]
+        fn with_character_non_frontal_result_is_na_per_metric_honesty() {
+            // The AC's metric-honesty rule: a non-frontal / no-face With-Character result returns N/A
+            // (detected:false, score:null + reason) through the shared seam — never a misleading low
+            // number. (pixel 0 ⇒ the stub's no-face funnel.)
+            let (scorer, _calls) = stub_scorer(200);
+            let block = score_generated_image(Some(&scorer), &image(0), Some("char_ref_1"))
+                .expect("a scorer present ⇒ the N/A block built");
+            assert_eq!(
+                Value::Object(block),
+                json!({
+                    "score": Value::Null,
+                    "detected": false,
+                    "method": LIKENESS_METHOD,
+                    "sourceAssetId": "char_ref_1",
+                    "reason": "no_face",
+                }),
+                "a non-frontal With-Character result is an honest N/A, not a low score"
+            );
+        }
+
+        #[test]
+        fn with_character_non_fatal_when_reference_has_no_face() {
+            // Non-fatal construction surrogate (the sc-4407 contract carried to sc-4411): a reference
+            // image with no detectable face yields a scorer (NOT an error) whose every generated image
+            // is the NoSourceFace N/A — the With-Character generation still renders, scores just absent.
+            let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(0)); // no face in ref
+            assert!(!scorer.has_source_face(), "no detectable reference face");
+            let result = scorer.score_or_null(&image(200));
+            assert!(!result.detected, "no reference face ⇒ every image N/A");
+            assert_eq!(result.reason, Some(NoScoreReason::NoSourceFace));
+            // And the producer's `None`-scorer path (a hard construction failure) omits the field.
+            assert!(
+                score_generated_image(None, &image(200), Some("char_ref_1")).is_none(),
+                "a failed scorer construction ⇒ no block ⇒ field omitted (generation unaffected)"
+            );
+        }
     }
 
     /// Real-weight scorer integration (sc-4407): proves the worker binary links + loads the MLX

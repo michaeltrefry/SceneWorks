@@ -235,6 +235,32 @@ async fn generate_candle_kolors_ipadapter_stream(
     )?;
     let ip_adapter = ensure_kolors_ipadapter_weights(api, settings, job).await?;
 
+    // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle Kolors IP-Adapter
+    // lane is the With-Character route for a Kolors model — score every output against the reference face
+    // through the SHARED generator-agnostic seam. Eligibility goes through `resolve_character_image_
+    // likeness_source` (the SAME gate the macOS lanes use), so the angle/pose/edit exclusion is explicit
+    // and self-contained here — NOT dependent on dispatch order (an angle/pose job is excluded by the
+    // helper even if it ever reached this lane, so it can never be double-scored). The helper's decode is
+    // ignored: the already-decoded `reference` (this lane's generation input, the current job's
+    // `referenceAssetId`) is the scorer source, so there is no second decode. Stage the antelopev2 SCRFD +
+    // ArcFace bundle; the `!Send` scorer is built ONCE inside the load closure and reused across the N
+    // outputs (source embedded once). Staging is non-fatal (failure → scores omitted).
+    let score_likeness =
+        resolve_character_image_likeness_source(request, settings, project_path).is_some();
+    let face_stack_dir = if score_likeness {
+        match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
+    let likeness_source_ref = reference_id.to_owned();
+
     let steps = kolors_ipadapter_steps(request);
     let guidance = kolors_ipadapter_guidance(request);
     let ip_scale = advanced::f32_clamped(
@@ -294,13 +320,22 @@ async fn generate_candle_kolors_ipadapter_stream(
             let model = IpAdapterKolors::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("Kolors IP-Adapter load failed: {error}"))
             })?;
-            Ok((model, reference))
+            // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
+            // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
+            // staging / construction failure ⇒ scores omitted.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some(source)) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            Ok((model, reference, scorer))
         },
-        move |(model, reference), tx, cancel| {
+        move |(model, reference, scorer), tx, cancel| {
             // `IpAdapterKolors::generate` takes `&mut self` (it sets the IP image tokens on the UNet
             // before the denoise), so the per-item closure mutates `model`.
             let mut model = model;
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -326,7 +361,20 @@ async fn generate_candle_kolors_ipadapter_stream(
                         )));
                     }
                 };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
+                // Score this finished image against the cached source embedding (sc-4411). Clone paid
+                // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out.width,
+                            height: out.height,
+                            pixels: out.pixels.clone(),
+                        },
+                        Some(likeness_source_ref.as_str()),
+                    )
+                });
+                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
             })
         },
     );

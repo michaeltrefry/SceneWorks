@@ -403,6 +403,25 @@ async fn generate_pulid_flux_stream(
     let (width, height) = (request.width, request.height);
     let prompt = request.prompt.clone();
 
+    // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): PuLID-FLUX serves only the
+    // single-identity `character_image` path (one identity image per seed, no angle/pose grouping), so
+    // it is always a With-Character generation — score every output against the reference face through
+    // the SHARED generator-agnostic seam (the same `build_face_likeness_scorer` InstantID / FLUX.2 /
+    // Qwen / SenseNova use). Stage the antelopev2 face stack (shared bundle, no-op if cached); the
+    // `!Send` scorer is built ONCE inside the generator-worker closure and reused across the N outputs
+    // (source embedded once — the caching AC). The source is the CURRENT job's `referenceAssetId`, so
+    // changing the reference changes the scored source. Staging is non-fatal (failure → no scorer →
+    // scores omitted, generation still renders).
+    let face_stack_dir = match ensure_face_stack_dir(api, settings, job).await {
+        Ok(dir) => Some(dir),
+        Err(error) => {
+            tracing::warn!(error = %error, "PuLID-FLUX face-stack staging failed; likeness scores omitted");
+            None
+        }
+    };
+    let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
+    let likeness_source_ref = reference_id.to_owned();
+
     let spec = load_spec(flux_base, quant, Vec::new(), None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -411,7 +430,15 @@ async fn generate_pulid_flux_stream(
         spec,
         format!("{PULID_ENGINE_ID} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+            // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`
+            // face stack lives here); source embedded once, reused across every output (sc-4411).
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some(source)) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            drive_gen_items_scored(tx, seeds, move |_index, seed, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -452,7 +479,22 @@ async fn generate_pulid_flux_stream(
                         let image = images.pop().ok_or_else(|| {
                             WorkerError::Engine("PuLID-FLUX produced no image".to_owned())
                         })?;
-                        Ok(Some((seed, image.width, image.height, image.pixels)))
+                        // Score this finished image against the cached source embedding (sc-4411). The
+                        // Image build + pixel clone is paid ONLY when a scorer exists; a non-frontal /
+                        // no-face result records an honest detected:false N/A, `None` scorer ⇒ field
+                        // omitted.
+                        let face_likeness = scorer.as_ref().and_then(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: image.width,
+                                    height: image.height,
+                                    pixels: image.pixels.clone(),
+                                },
+                                Some(likeness_source_ref.as_str()),
+                            )
+                        });
+                        Ok(Some((seed, image.width, image.height, image.pixels, face_likeness)))
                     }
                     _ => Err(WorkerError::Engine(
                         "PuLID-FLUX returned non-image output".to_owned(),
