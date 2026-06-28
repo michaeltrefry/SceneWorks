@@ -1717,32 +1717,30 @@ pub(crate) async fn run_lora_import_job(
         }
     };
     let supplied_family = optional_payload_string(&job.payload, "family").map(str::to_owned);
-    let resolved_family = match (supplied_family, detected_family) {
-        (Some(supplied), Some(detected)) => {
-            if supplied != detected {
-                return fail_job(
-                    api,
-                    &job.id,
-                    "LoRA import failed.",
-                    Some(format!(
-                        "LoRA file appears to be a {detected} model, but family was declared as {supplied}. Re-import with family {detected} or pick a different file."
-                    )),
-                )
-                .await;
-            }
-            Some(supplied)
+    if let (Some(supplied), None) = (&supplied_family, &detected_family) {
+        tracing::info!(
+            event = "lora_import_architecture_inconclusive",
+            jobId = %job.id,
+            family = %supplied,
+            "LoRA import: architecture detection inconclusive; accepting supplied family"
+        );
+    }
+    // Shared reconcile policy + canonicalization (krea2/krea-2/krea_2 → krea_2),
+    // matching the API pre-flight so a manual family override agrees with detection.
+    let resolved_family = match reconcile_detected_family(supplied_family, detected_family) {
+        Ok(family) => family,
+        Err(mismatch) => {
+            return fail_job(
+                api,
+                &job.id,
+                "LoRA import failed.",
+                Some(format!(
+                    "LoRA file appears to be a {} model, but family was declared as {}. Re-import with family {} or pick a different file.",
+                    mismatch.detected, mismatch.supplied, mismatch.detected
+                )),
+            )
+            .await;
         }
-        (None, Some(detected)) => Some(detected),
-        (Some(supplied), None) => {
-            tracing::info!(
-                event = "lora_import_architecture_inconclusive",
-                jobId = %job.id,
-                family = %supplied,
-                "LoRA import: architecture detection inconclusive; accepting supplied family"
-            );
-            Some(supplied)
-        }
-        (None, None) => None,
     };
 
     write_lora_install_marker(&target_dir, &job.payload, &job.id).await?;

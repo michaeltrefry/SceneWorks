@@ -197,12 +197,20 @@ pub fn reconcile_detected_family(
     detected: Option<String>,
 ) -> Result<Option<String>, FamilyMismatch> {
     match (supplied, detected) {
-        (Some(supplied), Some(detected)) if supplied != detected => {
-            Err(FamilyMismatch { supplied, detected })
+        (Some(supplied), Some(detected)) => {
+            // Compare on the canonical family token, not the raw string, so spelling
+            // variants of one family agree: a user-supplied `krea-2` (the UI's hyphen
+            // form) against a detected `krea_2` (the catalog/trainer token), or
+            // ai-toolkit's separator-less `krea2`. Store the canonical token so the
+            // recorded family matches `loraCompatibility.families` exactly.
+            if canonical_lora_family(&supplied) == canonical_lora_family(&detected) {
+                Ok(Some(canonical_lora_family(&detected)))
+            } else {
+                Err(FamilyMismatch { supplied, detected })
+            }
         }
-        (Some(supplied), Some(_)) => Ok(Some(supplied)),
-        (None, Some(detected)) => Ok(Some(detected)),
-        (Some(supplied), None) => Ok(Some(supplied)),
+        (None, Some(detected)) => Ok(Some(canonical_lora_family(&detected))),
+        (Some(supplied), None) => Ok(Some(canonical_lora_family(&supplied))),
         (None, None) => Ok(None),
     }
 }
@@ -375,7 +383,32 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
 }
 
 fn normalize_model_family(family: &str) -> String {
-    family.trim().to_ascii_lowercase().replace('_', "-")
+    let normalized = family.trim().to_ascii_lowercase().replace('_', "-");
+    // Collapse spelling variants the `_`→`-` step alone can't unify. ostris
+    // ai-toolkit bakes Krea 2's base id into trained files as the separator-less
+    // `krea2` (`ss_base_model_version: "krea2"`), which is the same family as
+    // `krea-2` / `krea_2`. Kept an explicit alias, not a blind separator-strip —
+    // a blind strip could merge unrelated families.
+    match normalized.as_str() {
+        "krea2" => "krea-2".to_owned(),
+        _ => normalized,
+    }
+}
+
+/// The canonical *stored* LoRA-family token for any spelling of a family.
+///
+/// Detection, the catalog manifests, and the trainers agree on one token per
+/// family; only Krea 2 has variants in the wild — `krea2` (ai-toolkit's
+/// `ss_base_model_version`), `krea-2` (the UI's hyphen form), and `krea_2` (the
+/// catalog token) — all of which resolve to the catalog token `krea_2`. Every
+/// other family already stores its `normalize_model_family` form, so this returns
+/// that (lower-cased, `_`→`-`) unchanged for them.
+pub fn canonical_lora_family(family: &str) -> String {
+    let normalized = normalize_model_family(family);
+    match normalized.as_str() {
+        "krea-2" => "krea_2".to_owned(),
+        _ => normalized,
+    }
 }
 
 fn read_diffusers_model_index_family(dir: &Path) -> Option<String> {
@@ -2288,6 +2321,47 @@ mod tests {
                 supplied: "z-image".to_owned(),
                 detected: "qwen-image".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn canonical_lora_family_collapses_krea_spelling_variants() {
+        for variant in ["krea_2", "krea-2", "krea2", "KREA2", " Krea-2 "] {
+            assert_eq!(
+                canonical_lora_family(variant),
+                "krea_2",
+                "{variant:?} should canonicalize to krea_2"
+            );
+        }
+        // Unrelated families keep their normalized (hyphen) stored token.
+        assert_eq!(canonical_lora_family("z_image"), "z-image");
+        assert_eq!(canonical_lora_family("Wan-Video"), "wan-video");
+        assert_eq!(canonical_lora_family("flux2"), "flux2");
+    }
+
+    #[test]
+    fn reconcile_detected_family_unifies_krea_spelling_variants() {
+        // The reported bug: a UI-supplied `krea-2` (or ai-toolkit's `krea2`) against a
+        // detected `krea_2` must reconcile to the canonical `krea_2`, not be rejected.
+        for supplied in ["krea-2", "krea2", "KREA_2"] {
+            assert_eq!(
+                reconcile_detected_family(Some(supplied.to_owned()), Some("krea_2".to_owned()))
+                    .unwrap()
+                    .as_deref(),
+                Some("krea_2"),
+                "supplied {supplied:?} vs detected krea_2 should resolve to krea_2"
+            );
+        }
+        // A supplied-only krea variant (detection inconclusive) is canonicalized too.
+        assert_eq!(
+            reconcile_detected_family(Some("krea-2".to_owned()), None)
+                .unwrap()
+                .as_deref(),
+            Some("krea_2")
+        );
+        // A genuine cross-family conflict still errors, reporting the raw inputs.
+        assert!(
+            reconcile_detected_family(Some("flux".to_owned()), Some("krea_2".to_owned())).is_err()
         );
     }
 

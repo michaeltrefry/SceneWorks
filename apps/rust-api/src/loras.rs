@@ -6,6 +6,10 @@ pub(crate) async fn list_loras(
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let mut items = lora_catalog(&state, query.project_id.as_deref()).await?;
     if let Some(model_family) = query.model_family {
+        // `lora_families` returns canonical tokens, so canonicalize the raw query
+        // param too — otherwise a `?model_family=krea-2` filter would miss a stored
+        // `krea_2` LoRA.
+        let model_family = normalize_lora_family(&model_family);
         items.retain(|item| {
             lora_families(item)
                 .iter()
@@ -1068,28 +1072,25 @@ pub(crate) fn reconcile_lora_family(
     detected: Option<String>,
     context: &str,
 ) -> Result<Option<String>, ApiError> {
-    match (supplied, detected) {
-        (Some(supplied), Some(detected)) => {
-            if supplied == detected {
-                Ok(Some(supplied))
-            } else {
-                Err(ApiError::bad_request(format!(
-                    "LoRA file appears to be a {detected} model, but family was declared as {supplied}. Re-import with family {detected} or pick a different file."
-                )))
-            }
-        }
-        (None, Some(detected)) => Ok(Some(detected)),
-        (Some(supplied), None) => {
-            tracing::info!(
-                event = "lora_import_architecture_inconclusive",
-                context = %context,
-                family = %supplied,
-                "LoRA import: architecture detection inconclusive; accepting supplied family"
-            );
-            Ok(Some(supplied))
-        }
-        (None, None) => Ok(None),
+    // Log the inconclusive case (a supplied family with no confident detection)
+    // before delegating, so the operational signal is preserved.
+    if let (Some(supplied), None) = (&supplied, &detected) {
+        tracing::info!(
+            event = "lora_import_architecture_inconclusive",
+            context = %context,
+            family = %supplied,
+            "LoRA import: architecture detection inconclusive; accepting supplied family"
+        );
     }
+    // Shared policy + canonicalization: spelling variants of one family (Krea 2's
+    // `krea2`/`krea-2`/`krea_2`) reconcile instead of being rejected, and the result
+    // is the canonical stored token.
+    reconcile_detected_family(supplied, detected).map_err(|mismatch| {
+        ApiError::bad_request(format!(
+            "LoRA file appears to be a {} model, but family was declared as {}. Re-import with family {} or pick a different file.",
+            mismatch.detected, mismatch.supplied, mismatch.detected
+        ))
+    })
 }
 
 pub(crate) fn lora_is_installed(path: &FsPath) -> bool {
