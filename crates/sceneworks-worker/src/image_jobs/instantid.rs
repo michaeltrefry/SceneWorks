@@ -981,22 +981,24 @@ async fn generate_instantid_stream(
                     // stack lives here). `score_or_null` makes per-image scoring non-fatal (a backend
                     // error → a logged `null`), and a profile / up / down view with no reliable
                     // frontal face records an honest `detected:false` N/A — never a misleading low
-                    // number. Build the persisted block once; `None` scorer (non-angle mode or a
-                    // failed construction) ⇒ no block ⇒ the field is omitted from the sidecar. Only
-                    // the generated pixels are cloned, and only when actually scoring.
+                    // number. `None` scorer (non-angle mode or a failed construction) ⇒ no block ⇒ the
+                    // field is omitted. The Image build + pixel clone is paid ONLY when a scorer exists
+                    // (an angle set) — identity/pose modes have no scorer, so this is a no-op, no clone.
                     #[cfg(any(
                         target_os = "macos",
                         all(not(target_os = "macos"), feature = "backend-candle")
                     ))]
-                    let face_likeness = crate::face_likeness::score_angle_image(
-                        scorer.as_ref(),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        Some(face_likeness_source_ref.as_str()),
-                    );
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_angle_image(
+                            Some(scorer),
+                            &Image {
+                                width: out.width,
+                                height: out.height,
+                                pixels: out.pixels.clone(),
+                            },
+                            Some(face_likeness_source_ref.as_str()),
+                        )
+                    });
                     #[cfg(not(any(
                         target_os = "macos",
                         all(not(target_os = "macos"), feature = "backend-candle")

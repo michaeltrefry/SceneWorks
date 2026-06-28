@@ -25,9 +25,9 @@ enum GenEvent {
 type GeneratedImage = (i64, u32, u32, Vec<u8>);
 
 /// A generated image plus its optional pre-built `faceLikeness` sidecar block (sc-4409). Returned by
-/// the per-item closure of [`drive_gen_items_scored`] so the identity-likeness post-pass (currently
-/// the InstantID angle set) can attach a per-image score without disturbing the shared
-/// [`GeneratedImage`] tuple every other generator returns.
+/// the per-item closure of [`drive_gen_items_scored`] so the identity-likeness post-pass (used by all
+/// four angle-set lanes — InstantID, FLUX.2 edit, Qwen-Edit, SenseNova-U1) can attach a per-image
+/// score without disturbing the shared [`GeneratedImage`] tuple every other generator returns.
 type ScoredGeneratedImage = (i64, u32, u32, Vec<u8>, Option<JsonObject>);
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
@@ -107,13 +107,14 @@ where
 
 /// Like [`drive_gen_items`] but the per-item closure additionally returns an optional pre-built
 /// `faceLikeness` sidecar block (sc-4409), carried through to `consume_gen_events` for per-image
-/// persistence. Used by the InstantID angle-set path, which scores each finished view against the
-/// per-job cached source identity embedding on this same blocking thread (the `!Send` MLX face stack
-/// lives entirely here). Every non-scoring path keeps using [`drive_gen_items`].
+/// persistence. Used by all four angle-set lanes — InstantID, FLUX.2 edit, Qwen-Edit, and
+/// SenseNova-U1 — each of which scores every finished view against the per-job cached source identity
+/// embedding on its generation thread (the `!Send` face stack lives there). Every non-scoring path
+/// keeps using [`drive_gen_items`].
 //
-// The InstantID lane is the only scored producer today; off-Mac it compiles only with the candle
-// backend (the angle-set scorer's backend legs are cfg-gated the same way), so allow it dead when
-// neither face backend is present.
+// The scored producers are all face-backend paths; off-Mac they compile only with the candle backend
+// (the angle-set scorer's backend legs are cfg-gated the same way), so allow this dead when neither
+// face backend is present.
 #[cfg_attr(
     not(any(
         target_os = "macos",

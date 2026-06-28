@@ -772,17 +772,21 @@ async fn generate_qwen_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
-                    // Score this finished angle against the cached source embedding (sc-4409). `None`
-                    // scorer ⇒ field omitted. Profile/up/down → honest detected:false N/A.
-                    let face_likeness = crate::face_likeness::score_angle_image(
-                        scorer.as_ref(),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    );
+                    // Score this finished angle against the cached source embedding (sc-4409). The
+                    // Image build + pixel clone is paid ONLY when a scorer exists (an angle set) — the
+                    // common plain-edit path has no scorer, so this is a no-op with no clone. Profile/
+                    // up/down → honest detected:false N/A; `None` scorer ⇒ field omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_angle_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    });
                     Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
