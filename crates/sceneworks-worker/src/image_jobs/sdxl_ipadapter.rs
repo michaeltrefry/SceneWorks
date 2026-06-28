@@ -240,13 +240,17 @@ async fn generate_candle_sdxl_ipadapter_stream(
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle SDXL IP-Adapter
     // lane is the With-Character route for an SDXL-family model — score every output against the
-    // reference face through the SHARED generator-agnostic seam, but only for an Image Studio "With
-    // Character" (`character_image`) generation (a non-character reference job records no identity score).
-    // Stage the antelopev2 SCRFD + ArcFace bundle (the scorer's candle leg loads it); the `!Send` scorer
-    // is built ONCE inside the load closure and reused across the N outputs (source embedded once — the
-    // caching AC). The source is the CURRENT job's `referenceAssetId`. Staging is non-fatal (failure → no
-    // scorer → scores omitted, generation still renders).
-    let score_likeness = request.mode == "character_image";
+    // reference face through the SHARED generator-agnostic seam. Eligibility goes through
+    // `resolve_character_image_likeness_source` (the SAME gate the macOS lanes use), so the angle/pose/
+    // edit exclusion is explicit and self-contained here — NOT dependent on dispatch order (an angle/pose
+    // job is excluded by the helper even if it ever reached this lane, so it can never be double-scored).
+    // The helper's decode is ignored: the already-decoded `reference` (this lane's generation input, the
+    // current job's `referenceAssetId`) is the scorer source, so there is no second decode. Stage the
+    // antelopev2 SCRFD + ArcFace bundle (the scorer's candle leg loads it); the `!Send` scorer is built
+    // ONCE inside the load closure and reused across the N outputs (source embedded once — the caching
+    // AC). Staging is non-fatal (failure → no scorer → scores omitted, generation still renders).
+    let score_likeness =
+        resolve_character_image_likeness_source(request, settings, project_path).is_some();
     let face_stack_dir = if score_likeness {
         match ensure_face_stack_dir(api, settings, job).await {
             Ok(dir) => Some(dir),

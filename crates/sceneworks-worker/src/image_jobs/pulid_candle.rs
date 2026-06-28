@@ -274,19 +274,28 @@ async fn generate_candle_pulid_stream(
     let (adapter, eva, face_dir) = ensure_pulid_candle_weights(api, settings, job).await?;
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle PuLID-FLUX lane
-    // serves only the single-identity `character_image` path (one identity image per seed), so it is
-    // always a With-Character generation — score every output against the reference face through the
-    // SHARED generator-agnostic seam. Stage the antelopev2 SCRFD + ArcFace bundle (the same one the
-    // scorer's candle leg loads; distinct from PuLID's own BiSeNet `face_dir`); the `!Send` scorer is
-    // built ONCE inside the load closure and reused across the N outputs (source embedded once — the
-    // caching AC). The source is the CURRENT job's `referenceAssetId`. Staging is non-fatal (failure →
-    // no scorer → scores omitted, generation still renders).
-    let face_stack_dir = match ensure_face_stack_dir(api, settings, job).await {
-        Ok(dir) => Some(dir),
-        Err(error) => {
-            tracing::warn!(error = %error, "PuLID-FLUX face-stack staging failed; likeness scores omitted");
-            None
+    // serves the single-identity `character_image` path (one identity image per seed) and has no
+    // angle/pose tier — score every output against the reference face through the SHARED generator-
+    // agnostic seam. Eligibility goes through `resolve_character_image_likeness_source` (the SAME gate the
+    // macOS lanes use), so the angle/pose/edit exclusion is explicit and self-contained here — NOT
+    // dependent on dispatch order. The helper's decode is ignored: the already-decoded `reference` (this
+    // lane's generation input, the current job's `referenceAssetId`) is the scorer source, so there is no
+    // second decode. Stage the antelopev2 SCRFD + ArcFace bundle (the same one the scorer's candle leg
+    // loads; distinct from PuLID's own BiSeNet `face_dir`); the `!Send` scorer is built ONCE inside the
+    // load closure and reused across the N outputs (source embedded once — the caching AC). Staging is
+    // non-fatal (failure → no scorer → scores omitted, generation still renders).
+    let score_likeness =
+        resolve_character_image_likeness_source(request, settings, project_path).is_some();
+    let face_stack_dir = if score_likeness {
+        match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "PuLID-FLUX face-stack staging failed; likeness scores omitted");
+                None
+            }
         }
+    } else {
+        None
     };
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
