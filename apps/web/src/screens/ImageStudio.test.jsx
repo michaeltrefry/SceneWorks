@@ -286,6 +286,112 @@ describe("ImageStudio advanced model defaults", () => {
   });
 });
 
+describe("ImageStudio guidance method picker (epic 7434, sc-7449)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // SDXL-shaped fixture: advertises CFG++ on the base menu so the picker renders
+  // regardless of the test backend (the per-backend resolution is unit-tested in
+  // samplerOptions.test.js).
+  const SDXL = {
+    ...Z_IMAGE,
+    id: "sdxl",
+    name: "Stable Diffusion XL",
+    family: "sdxl",
+    defaults: { resolution: "1024x1024", guidanceScale: 7 },
+    limits: { resolutions: ["1024x1024"], guidanceMethods: ["cfg", "cfg_pp"] },
+  };
+
+  const openAdvanced = async () =>
+    click([...container.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
+  const generate = async () =>
+    click([...container.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+
+  it("hides the picker for a model that advertises no alternate methods", async () => {
+    await render(baseContext({ imageModels: [Z_IMAGE] }));
+    await openAdvanced();
+    expect(field(container, "Guidance method")).toBeUndefined();
+  });
+
+  it("shows CFG++, defaults to the cfg no-op, and omits it from the payload", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(baseContext({ createImageJob, imageModels: [SDXL] }));
+    await openAdvanced();
+    const picker = field(container, "Guidance method");
+    expect(picker).toBeTruthy();
+    expect([...picker.options].map((o) => o.value)).toEqual(["cfg", "cfg_pp"]);
+    expect(picker.value).toBe("cfg");
+    // The CFG++ low-cfg hint only appears once cfg_pp is selected.
+    expect(container.textContent).not.toContain("reparameterizes guidance");
+
+    await generate();
+    // cfg is the N1 no-op — never sent, so existing recipes stay byte-identical.
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("guidanceMethod");
+  });
+
+  it("emits the selected non-default method and surfaces the low-cfg hint", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(baseContext({ createImageJob, imageModels: [SDXL] }));
+    await openAdvanced();
+    await act(async () => setSelect(field(container, "Guidance method"), "cfg_pp"));
+    expect(container.textContent).toContain("reparameterizes guidance");
+
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.guidanceMethod).toBe("cfg_pp");
+  });
+
+  it("round-trips the guidance method from a recipe (restore → re-emit)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [SDXL],
+        studioLaunch: {
+          id: "launch-1",
+          view: "Image",
+          assetId: "asset-1",
+          recipe: {
+            model: "sdxl",
+            mode: "text_to_image",
+            prompt: "a fox",
+            rawAdapterSettings: { guidanceMethod: "cfg_pp" },
+          },
+        },
+      }),
+    );
+    await openAdvanced();
+    expect(field(container, "Guidance method").value).toBe("cfg_pp");
+
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.guidanceMethod).toBe("cfg_pp");
+  });
+});
+
 describe("ImageStudio edit source picker", () => {
   let container;
   let root;

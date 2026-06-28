@@ -110,9 +110,12 @@ import {
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import {
+  GUIDANCE_METHOD_LABELS,
   SAMPLER_LABELS,
   SCHEDULER_LABELS,
   guidanceDefaultFromModel,
+  guidanceMethodDefaultFromModel,
+  guidanceMethodOptionsFromModel,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -401,6 +404,10 @@ export function ImageStudio() {
   const [sampler, setSampler] = useState(saved.sampler ?? "default");
   const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
   const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
+  // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
+  // picker only surfaces alternatives a model advertises on the active backend
+  // (CFG++ on the SDXL family / MLX). Rides `advanced.guidanceMethod`.
+  const [guidanceMethod, setGuidanceMethod] = useState(saved.guidanceMethod ?? "cfg");
   // Steps / guidance: previously worker-only knobs surfaced via this same
   // advanced panel. "" represents "use the model default" so the user can
   // clear the override.
@@ -776,8 +783,13 @@ export function ImageStudio() {
     () => schedulerOptionsFromModel(selectedModel, activeBackend),
     [selectedModel, activeBackend],
   );
+  const guidanceMethodOptions = useMemo(
+    () => guidanceMethodOptionsFromModel(selectedModel, activeBackend),
+    [selectedModel, activeBackend],
+  );
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
+  const showGuidanceMethodPicker = guidanceMethodOptions.length > 1;
   const advancedDefaultsModel = useRef(model);
   const skipAdvancedDefaultsReset = useRef(false);
   useEffect(() => {
@@ -792,10 +804,20 @@ export function ImageStudio() {
     setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
     setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
     setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
+    setGuidanceMethod(
+      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
+    );
     setResolution(preferredResolution(selectedModel, resolutionOptions));
     setStepsOverride("");
     setGuidanceOverride("");
-  }, [model, resolutionOptions, samplerOptions, schedulerOptions, selectedModel]);
+  }, [
+    model,
+    resolutionOptions,
+    samplerOptions,
+    schedulerOptions,
+    guidanceMethodOptions,
+    selectedModel,
+  ]);
   // Snap the sampler / scheduler back to the model's declared default when the
   // current value is no longer in the menu (e.g. user switched to a sealed
   // model whose only option is "default"). Mirrors the resolution-snap effect.
@@ -811,6 +833,17 @@ export function ImageStudio() {
     }
     setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
   }, [schedulerOptions, scheduler, selectedModel]);
+  // Snap the guidance method back to "cfg" when the current choice isn't honored by
+  // the active backend for this model (e.g. switching off the SDXL family drops
+  // CFG++) — the N3 guard at the UI layer, so an unsupported method is never sent.
+  useEffect(() => {
+    if (guidanceMethodOptions.includes(guidanceMethod)) {
+      return;
+    }
+    setGuidanceMethod(
+      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
+    );
+  }, [guidanceMethodOptions, guidanceMethod, selectedModel]);
   // Keep the selected resolution valid for the current model's buckets. Switching
   // to a model whose options exclude the current value snaps to its default (or
   // 1024x1024, then the first option) rather than leaving a stale, unselectable value.
@@ -929,6 +962,7 @@ export function ImageStudio() {
     setSampler(rawSettings.sampler ?? "default");
     setScheduler(rawSettings.scheduler ?? "default");
     setSchedulerShift(rawSettings.schedulerShift ?? rawSettings.timestepShift ?? 3.0);
+    setGuidanceMethod(rawSettings.guidanceMethod ?? "cfg");
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
     setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
@@ -1061,6 +1095,7 @@ export function ImageStudio() {
     ["sampler", setSampler],
     ["scheduler", setScheduler],
     ["schedulerShift", setSchedulerShift],
+    ["guidanceMethod", setGuidanceMethod],
     ["ipAdapterScale", setIpAdapterScale],
     ["controlnetScale", setControlnetScale],
     ["trueCfgScale", setTrueCfgScale],
@@ -1128,6 +1163,7 @@ export function ImageStudio() {
     sampler,
     scheduler,
     schedulerShift,
+    guidanceMethod,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
     flashAttn,
@@ -1176,6 +1212,7 @@ export function ImageStudio() {
         sampler,
         scheduler,
         schedulerShift,
+        guidanceMethod,
         upscaleEnabled,
         upscaleFactor,
         upscaleEngine,
@@ -1341,6 +1378,11 @@ export function ImageStudio() {
           // values unconditionally is safe — invalid values are ignored.
           ...(sampler && sampler !== "default" ? { sampler } : {}),
           ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
+          // Guidance method (epic 7434). "cfg" is the engine-standard no-op, so it is
+          // omitted — keeping existing recipes byte-identical; only a non-default
+          // method (CFG++) rides the payload. The worker N3-falls an unadvertised
+          // method back to the default, so an invalid value is harmless.
+          ...(guidanceMethod && guidanceMethod !== "cfg" ? { guidanceMethod } : {}),
           // The schedule shift (time-shift mu) is only honored when a curated
           // (non-default) scheduler is active — it shapes that curated schedule;
           // the default scheduler keeps the engine's resolution-native shift, so
@@ -2003,6 +2045,27 @@ export function ImageStudio() {
                     value={guidanceOverride}
                   />
                 </label>
+                {showGuidanceMethodPicker ? (
+                  <label>
+                    Guidance method
+                    <select
+                      onChange={(event) => setGuidanceMethod(event.target.value)}
+                      value={guidanceMethod}
+                    >
+                      {guidanceMethodOptions.map((key) => (
+                        <option key={key} value={key}>
+                          {GUIDANCE_METHOD_LABELS[key] ?? key}
+                        </option>
+                      ))}
+                    </select>
+                    {guidanceMethod === "cfg_pp" ? (
+                      <span className="field-hint">
+                        CFG++ reparameterizes guidance — use a low CFG (~1.5–2.5); high
+                        values over-saturate.
+                      </span>
+                    ) : null}
+                  </label>
+                ) : null}
                 <label
                   className="checkline flash-attn-toggle"
                   title="Fused flash-attention on the candle (Windows/CUDA) SDXL backend — faster and lower VRAM. Ignored on other backends."

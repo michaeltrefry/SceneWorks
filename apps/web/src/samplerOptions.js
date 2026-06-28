@@ -29,6 +29,18 @@ export const SCHEDULER_LABELS = {
   ddim_uniform: "DDIM uniform",
 };
 
+// Classifier-free-guidance policy (the orthogonal guidance axis, epic 7434). Names
+// match gen-core's GuidanceMethod registry exactly. "cfg" is the engine's standard
+// guidance (the N1 no-op the studio defaults to); the rest are advertised per-model-
+// per-backend only where the linked engine honors them — CFG++ (cfg_pp) is MLX-only
+// today (sc-8256), so the picker only appears for the SDXL family on the MLX backend.
+export const GUIDANCE_METHOD_LABELS = {
+  cfg: "CFG (standard)",
+  cfg_rescale: "CFG rescale",
+  apg: "APG (adaptive)",
+  cfg_pp: "CFG++",
+};
+
 const SAMPLER_ORDER = [
   "default",
   "euler",
@@ -50,6 +62,7 @@ const SCHEDULER_ORDER = [
   "beta",
   "ddim_uniform",
 ];
+const GUIDANCE_METHOD_ORDER = ["cfg", "cfg_rescale", "apg", "cfg_pp"];
 
 function uniqueOrdered(values, order) {
   const seen = new Set();
@@ -94,6 +107,16 @@ export function schedulerOptionsFromModel(model, backend) {
   return uniqueOrdered(values, SCHEDULER_ORDER);
 }
 
+// The guidance-method menu the active backend honors for this model (epic 7434).
+// Falls back to the engine's standard ["cfg"] when the model advertises none — the
+// studio hides the picker when fewer than 2 methods are offered (length > 1 gate),
+// so only models that actually expose an alternative (CFG++ on SDXL/MLX) show it.
+export function guidanceMethodOptionsFromModel(model, backend) {
+  const limits = effectiveLimits(model, backend);
+  const values = Array.isArray(limits?.guidanceMethods) ? limits.guidanceMethods : ["cfg"];
+  return uniqueOrdered(values, GUIDANCE_METHOD_ORDER);
+}
+
 // Per-model defaults (UI initial values). The worker never reads these — they
 // only set the studio form's initial sampler/scheduler choice. Falls back to
 // "default" when the manifest doesn't pin one.
@@ -105,6 +128,14 @@ export function samplerDefaultFromModel(model) {
 export function schedulerDefaultFromModel(model) {
   const value = model?.defaults?.scheduler;
   return typeof value === "string" && value.length ? value : "default";
+}
+
+// The guidance method the studio selects initially. Defaults to "cfg" (the engine's
+// standard guidance, the N1 no-op) so existing recipes are unchanged; a model may
+// pin a different default via `defaults.guidanceMethod`.
+export function guidanceMethodDefaultFromModel(model) {
+  const value = model?.defaults?.guidanceMethod;
+  return typeof value === "string" && value.length ? value : "cfg";
 }
 
 export function schedulerShiftDefaultFromModel(model) {

@@ -5834,6 +5834,17 @@ details[open] > summary.lora-scope-group-heading::before,
   margin-top: 8px;
 }
 
+/* Generic inline helper text under a form control (e.g. the CFG++ low-cfg note,
+   sc-7449). The scoped `.control-scale-field .field-hint` above keeps its own
+   margins via higher specificity. */
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .control-scale-field .field-hint {
   margin: 6px 10px 0;
   color: var(--text-muted);

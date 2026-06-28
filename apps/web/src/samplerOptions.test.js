@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  GUIDANCE_METHOD_LABELS,
   SAMPLER_LABELS,
   SCHEDULER_LABELS,
   guidanceDefaultFromModel,
+  guidanceMethodDefaultFromModel,
+  guidanceMethodOptionsFromModel,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -83,6 +86,42 @@ describe("samplerOptions", () => {
     expect(schedulerShiftDefaultFromModel({ defaults: { schedulerShift: -1 } })).toBe(3.0);
     expect(stepsDefaultFromModel({ defaults: { steps: 0 } })).toBeNull();
     expect(guidanceDefaultFromModel({ defaults: { guidanceScale: "n/a" } })).toBeNull();
+  });
+
+  it("guidance methods fall back to cfg-only and order canonically (epic 7434)", () => {
+    // No advertisement → cfg-only, so the studio hides the picker (length 1).
+    expect(guidanceMethodOptionsFromModel(undefined)).toEqual(["cfg"]);
+    expect(guidanceMethodOptionsFromModel({})).toEqual(["cfg"]);
+    // Manifest ordering is normalized to the canonical guidance order.
+    const model = { limits: { guidanceMethods: ["cfg_pp", "cfg"] } };
+    expect(guidanceMethodOptionsFromModel(model)).toEqual(["cfg", "cfg_pp"]);
+  });
+
+  it("resolves guidance methods per-backend — CFG++ is MLX-only (sc-7447)", () => {
+    // SDXL-shaped: MLX advertises cfg_pp via the mlx override; candle (base) is cfg-only.
+    const sdxl = {
+      limits: { guidanceMethods: ["cfg"] },
+      mlx: { limits: { guidanceMethods: ["cfg", "cfg_pp"] } },
+    };
+    expect(guidanceMethodOptionsFromModel(sdxl, "mlx")).toEqual(["cfg", "cfg_pp"]);
+    expect(guidanceMethodOptionsFromModel(sdxl, "candle")).toEqual(["cfg"]);
+    // No / unknown backend falls back to the base (cfg-only) menu.
+    expect(guidanceMethodOptionsFromModel(sdxl)).toEqual(["cfg"]);
+  });
+
+  it("guidance default is cfg unless the model pins one", () => {
+    expect(guidanceMethodDefaultFromModel(undefined)).toBe("cfg");
+    expect(guidanceMethodDefaultFromModel({})).toBe("cfg");
+    expect(guidanceMethodDefaultFromModel({ defaults: { guidanceMethod: "" } })).toBe("cfg");
+    expect(guidanceMethodDefaultFromModel({ defaults: { guidanceMethod: "cfg_pp" } })).toBe(
+      "cfg_pp",
+    );
+  });
+
+  it("guidance labels cover the full vocabulary (epic 7434)", () => {
+    for (const key of ["cfg", "cfg_rescale", "apg", "cfg_pp"]) {
+      expect(GUIDANCE_METHOD_LABELS[key]).toBeTruthy();
+    }
   });
 
   it("labels cover the full curated menu (epic 7114)", () => {
