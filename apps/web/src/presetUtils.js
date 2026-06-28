@@ -94,7 +94,11 @@ export function modelLoraFamilies(model) {
 }
 
 export function normalizeLoraFamily(family) {
-  return String(family ?? "").trim().toLowerCase().replaceAll("_", "-");
+  const normalized = String(family ?? "").trim().toLowerCase().replaceAll("_", "-");
+  // Mirror the backend's canonical resolver: the separator-less `krea2` (ostris
+  // ai-toolkit's `ss_base_model_version`) means the same family as `krea-2`/`krea_2`,
+  // which the `_`->`-` step alone can't unify. Explicit alias, not a blind strip.
+  return normalized === "krea2" ? "krea-2" : normalized;
 }
 
 export function normalizeFamilies(values) {

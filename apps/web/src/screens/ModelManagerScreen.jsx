@@ -2,7 +2,13 @@ import React, { useEffect, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials, serverToken } from "../credentials.js";
-import { extractFamilies, modelLoraFamilies, presetLoraId, presetLoras } from "../presetUtils.js";
+import {
+  extractFamilies,
+  modelLoraFamilies,
+  normalizeLoraFamily,
+  presetLoraId,
+  presetLoras,
+} from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { apiFetch } from "../api.js";
@@ -519,8 +525,13 @@ export function ModelManagerScreen() {
       });
       const loraId = job?.payload?.loraId;
       const resolvedFamily = job?.payload?.manifestEntry?.family;
+      // Show the detected family in the same normalized vocabulary the dropdown
+      // uses (e.g. the backend's canonical `krea_2` displays as `krea-2`), so the
+      // note never names a token the manual selector doesn't list.
       const detectionNote =
-        !importForm.family && resolvedFamily ? ` Detected family: ${resolvedFamily}.` : "";
+        !importForm.family && resolvedFamily
+          ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`
+          : "";
       setImportForm((current) => ({ ...current, sourceUrl: "", file: null, secondaryFile: null, name: "" }));
       // Force a re-mount so choosing the same file again still emits a change event.
       setFileInputKey((current) => current + 1);
@@ -557,7 +568,9 @@ export function ModelManagerScreen() {
       const modelId = job?.payload?.modelId;
       const resolvedFamily = job?.payload?.manifestEntry?.family;
       const detectionNote =
-        !modelImportForm.family && resolvedFamily ? ` Detected family: ${resolvedFamily}.` : "";
+        !modelImportForm.family && resolvedFamily
+          ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`
+          : "";
       setModelImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
       setModelFileInputKey((current) => current + 1);
       setModelImportMessage({

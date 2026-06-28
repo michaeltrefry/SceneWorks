@@ -7,6 +7,7 @@ import {
   editModelForAsset,
   finiteNumberOrUndefined,
   loraWeight,
+  normalizeLoraFamily,
   presetMatchesModel,
   presetNameTaken,
   slugifyPresetId,
@@ -17,6 +18,20 @@ const ltx = { id: "ltx_2_3", family: "ltx-video" };
 const ltxEros = { id: "ltx_2_3_eros", family: "ltx-video" };
 const sdxl = { id: "sdxl", family: "sdxl" };
 const catalog = [ltx, ltxEros, sdxl];
+
+describe("normalizeLoraFamily", () => {
+  it("collapses every Krea 2 spelling variant to the UI's krea-2 token", () => {
+    for (const variant of ["krea_2", "krea-2", "krea2", "KREA2", " Krea_2 "]) {
+      expect(normalizeLoraFamily(variant)).toBe("krea-2");
+    }
+  });
+
+  it("lower-cases and hyphenates other families, leaving unrelated tokens intact", () => {
+    expect(normalizeLoraFamily("Z_Image")).toBe("z-image");
+    expect(normalizeLoraFamily("wan-video")).toBe("wan-video");
+    expect(normalizeLoraFamily("")).toBe("");
+  });
+});
 
 describe("presetMatchesModel", () => {
   it("matches when the preset pins no model", () => {

@@ -32,8 +32,9 @@ use sceneworks_core::jobs_store::{
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
 use sceneworks_core::lora_family::{
-    apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
-    read_safetensors_header, reconcile_detected_family, SafetensorsHeaderError,
+    apply_model_manifest_defaults, canonical_lora_family, detect_lora_family, detect_model_family,
+    first_safetensors_path, read_safetensors_header, reconcile_detected_family,
+    SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url, LoraUrlError};
 use sceneworks_core::project_store::{
@@ -1690,7 +1691,11 @@ fn validate_lora_family(models: &[Value], family: &str) -> Result<String, ApiErr
 }
 
 fn normalize_lora_family(family: &str) -> String {
-    family.trim().to_ascii_lowercase().replace('_', "-")
+    // Delegate to the shared canonical resolver so the API agrees with the worker
+    // and the catalog on one token per family (Krea 2's `krea2`/`krea-2`/`krea_2`
+    // all become `krea_2`). Applied symmetrically to every family string the API
+    // compares, so membership tests stay consistent (see `validate_lora_specs_for_model`).
+    canonical_lora_family(family)
 }
 
 fn known_lora_families(models: &[Value]) -> Vec<String> {
