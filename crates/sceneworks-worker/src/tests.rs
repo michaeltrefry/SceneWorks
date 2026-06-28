@@ -629,6 +629,9 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // gen-core registry for FaceEmbedder), so DatasetFaceAnalysis is advertised on Mac like
         // KpsExtract.
         WorkerCapability::DatasetFaceAnalysis,
+        // sc-4415: on-demand face-likeness compare — same hardcoded-in-mlx_gpu native face stack as
+        // DatasetFaceAnalysis (no gen-core registry for FaceEmbedder), advertised on Mac like KpsExtract.
+        WorkerCapability::FaceLikenessCompare,
         WorkerCapability::ImageUpscale,
         // sc-6539: Dataset Doctor one-tap upscale — reuses the Real-ESRGAN engine, advertised
         // wherever image_upscale is.

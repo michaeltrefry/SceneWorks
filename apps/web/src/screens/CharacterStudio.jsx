@@ -61,6 +61,7 @@ export function CharacterStudio() {
     updateCharacterLora,
     detachCharacterLora,
     createCharacterTestJob,
+    compareFaceLikeness,
     createImageJob,
     createModelDownloadJob,
     importAsset,
@@ -655,7 +656,9 @@ export function CharacterStudio() {
             >
               <CharacterAssets
                 addCharacterReference={addCharacterReference}
+                approvedReferences={approvedReferences}
                 assets={assets}
+                compareFaceLikeness={compareFaceLikeness}
                 deleteAsset={deleteAsset}
                 importAsset={importAsset}
                 onPreview={onPreview}

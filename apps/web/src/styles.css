@@ -2221,6 +2221,54 @@ label {
   line-height: 1.2;
 }
 
+/* On-demand "compare image to another" likeness control on each asset card (sc-4415). */
+.likeness-compare-toggle {
+  margin-top: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.likeness-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.likeness-compare-source {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.likeness-compare-source select {
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.likeness-compare-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.likeness-compare-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.likeness-compare-status {
+  font-size: 12px;
+  margin: 0;
+}
+
+.likeness-compare-result {
+  display: flex;
+}
+
 .character-section > .segmented-control {
   margin-bottom: 12px;
 }

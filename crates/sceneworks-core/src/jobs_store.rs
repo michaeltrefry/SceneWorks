@@ -1711,6 +1711,13 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Dataset Face Analysis — {subject}"))
         }
+        JobType::FaceLikenessCompare => {
+            // sc-4415: compare a candidate asset to a source identity reference. The candidate is the
+            // user-facing subject of the row; fall back to a plain label when the payload omits it.
+            let subject =
+                first_str(payload, &["candidateName", "candidateAssetId"]).unwrap_or("(image)");
+            Some(format!("Compare Likeness — {subject}"))
+        }
         JobType::ImageGenerate
         | JobType::ImageEdit
         | JobType::ImageVqa
@@ -2304,7 +2311,11 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // sc-6538: dataset_face_analysis runs the native SCRFD+ArcFace stack (mlx-gen-face) in the Rust
         // worker — not a Python-torch gap. Gated by the worker's capability advertisement, so it queues
         // rather than enforce-fails here.
-        | JobType::DatasetFaceAnalysis => Ok(()),
+        | JobType::DatasetFaceAnalysis
+        // sc-4415: face_likeness_compare runs the same native SCRFD+ArcFace stack to score two existing
+        // assets on demand — a native Rust/MLX job, not a Python-torch gap. Gated by the worker's
+        // capability advertisement, so it queues rather than enforce-fails here.
+        | JobType::FaceLikenessCompare => Ok(()),
 
         // Forward-compat: an unrecognized job type isn't a known Python-torch gap, so don't
         // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
@@ -2547,6 +2558,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::DatasetUpscale
         // sc-6538: dataset_face_analysis on the candle lane (candle-gen-face) routes by capability too.
         | JobType::DatasetFaceAnalysis
+        // sc-4415: face_likeness_compare on the candle lane (candle-gen-face) routes by capability too.
+        | JobType::FaceLikenessCompare
         | JobType::Unknown(_) => Ok(()),
     }
 }
@@ -5752,6 +5765,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::DatasetAnalysis
             | JobType::DatasetUpscale
             | JobType::DatasetFaceAnalysis
+            | JobType::FaceLikenessCompare
     )
 }
 

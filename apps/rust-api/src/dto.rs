@@ -47,6 +47,23 @@ pub(crate) struct PromptRefineRequest {
     pub(crate) caption_style: Option<String>,
 }
 
+/// On-demand "compare image to another" likeness request (epic 4406, sc-4415). Scores a CANDIDATE
+/// asset against a SOURCE identity reference asset (both project assets) through the shared
+/// SCRFD+ArcFace face-likeness scorer in the worker. The handler enqueues a `face_likeness_compare`
+/// job; the client reads the result (`{ score, detected, method, sourceRef, reason? }`) from the
+/// completed job.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FaceLikenessCompareRequest {
+    /// Project owning both assets (so the worker can resolve each asset's `file.path`).
+    pub(crate) project_id: String,
+    /// The SOURCE identity reference asset (an approved character Reference Asset). Its face is
+    /// embedded once and the candidate is scored against it.
+    pub(crate) source_asset_id: String,
+    /// The CANDIDATE asset (any image the user picked) whose face is compared to the source.
+    pub(crate) candidate_asset_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssetsQuery {

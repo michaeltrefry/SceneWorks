@@ -123,6 +123,16 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
             {
                 gpu.capabilities.push(WorkerCapability::DatasetFaceAnalysis);
             }
+            // On-demand face-likeness compare (sc-4415): the off-Mac sibling of the macOS face stack —
+            // the candle SCRFD/ArcFace stack scores a candidate asset against a source identity
+            // reference. A job-type capability (not a generation modality), so it isn't in
+            // `registry_capabilities`; advertise it explicitly, like dataset_face_analysis.
+            if !gpu
+                .capabilities
+                .contains(&WorkerCapability::FaceLikenessCompare)
+            {
+                gpu.capabilities.push(WorkerCapability::FaceLikenessCompare);
+            }
             // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
             // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
             // with the CUDA execution provider, serving `pose_detect` for the Pose Library "create from
@@ -591,6 +601,13 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // `FaceEmbedder` stack has no gen-core registry, so it isn't in `registry_capabilities`;
         // advertised here so a `dataset_face_analysis` job routes to the Mac worker by construction.
         WorkerCapability::DatasetFaceAnalysis,
+        // On-demand face-likeness compare (epic 4406, sc-4415): scores a CANDIDATE asset against a
+        // SOURCE identity reference through the same native SCRFD+ArcFace stack
+        // (`face_likeness_compare_jobs::run_face_likeness_compare_job`). Hardcoded like
+        // DatasetFaceAnalysis — the `FaceEmbedder` stack has no gen-core registry, so it isn't in
+        // `registry_capabilities`; advertised here so the Character Studio Assets compare tool routes
+        // to the Mac worker by construction.
+        WorkerCapability::FaceLikenessCompare,
         // Real-ESRGAN image upscaling (epic 3482, sc-3489): RRDBNet x2/x4 via
         // onnxruntime/CoreML, served in-process by `upscale_jobs::run_image_upscale_job`.
         // Replaces the Python torch Real-ESRGAN path so the Image Editor upscale tool

@@ -118,6 +118,11 @@ use face_analysis_jobs::*;
 // scoring core is exercised by the module's unit tests and the seam by the ignored real-weight test.
 #[allow(dead_code)]
 mod face_likeness;
+// sc-4415 — on-demand "compare image to another" likeness tool (epic 4406): scores a CANDIDATE asset
+// against a SOURCE identity reference asset through the shared `face_likeness` scorer. Lives in
+// Character Studio Assets; routed as the `face_likeness_compare` job type.
+mod face_likeness_compare_jobs;
+use face_likeness_compare_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 mod downloads;
@@ -734,6 +739,14 @@ async fn run_utility_job(
         JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, &job)
             .await
             .map_err(|error| ("Dataset face analysis failed.", error)),
+        // On-demand "compare image to another" likeness tool (sc-4415): scores a CANDIDATE asset
+        // against a SOURCE identity reference asset through the shared SCRFD+ArcFace scorer. MLX on Mac,
+        // candle off-Mac; off both the handler returns a precise unsupported error. Like the
+        // dataset-face pass, the job-type capability is gpu.rs-hardcoded (the face stack has no gen-core
+        // registry), so a job stays queued rather than mis-claimed where the stack isn't linked.
+        JobType::FaceLikenessCompare => run_face_likeness_compare_job(api, settings, &job)
+            .await
+            .map_err(|error| ("Face likeness compare failed.", error)),
         // Native candle prompt refinement (epic 5095, sc-5525; consolidated onto candle-llm in sc-7404):
         // routes `prompt_refine` to the candle `core_llm::TextLlm` provider (candle-llama, resolved
         // model-first). The candle worker advertises `prompt_refine` only when `backend_candle_enabled`

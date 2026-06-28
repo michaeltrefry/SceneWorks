@@ -105,6 +105,10 @@ mod preferences;
 use preferences::*;
 mod prompts;
 use prompts::*;
+// On-demand "compare image to another" likeness tool (epic 4406, sc-4415): enqueues a
+// `face_likeness_compare` job scoring a candidate asset against a source identity reference asset.
+mod face_likeness;
+use face_likeness::*;
 mod poses;
 use poses::*;
 mod keypoints;
@@ -898,6 +902,10 @@ pub(crate) fn create_app_with_state(
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
         .route("/api/v1/prompts/refine", post(create_prompt_refine_job))
+        .route(
+            "/api/v1/face-likeness/compare",
+            post(create_face_likeness_compare_job),
+        )
         .route("/api/v1/poses", post(create_poses))
         .route("/api/v1/poses/sources", post(create_pose_sources))
         .route(

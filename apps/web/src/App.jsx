@@ -1560,6 +1560,45 @@ export function App() {
     [token],
   );
 
+  // On-demand "compare image to another" likeness (epic 4406, sc-4415): score a CANDIDATE asset
+  // against a SOURCE identity reference asset through the shared SCRFD+ArcFace scorer in the worker.
+  // Same poll-to-completion contract as the refine/describe runners, but `/face-likeness/compare`
+  // enqueues the GPU-routed `face_likeness_compare` job and returns the full result object
+  // (`{ score, detected, method, sourceRef, reason? }`) so the caller can render the band + N/A framing
+  // via `classifyLikeness` / `LikenessBadge`. Non-fatal end to end: a no-face / non-frontal candidate
+  // is an honest detected:false result (NOT an error); only a hard failure throws.
+  const compareFaceLikeness = useCallback(
+    async ({ sourceAssetId, candidateAssetId, projectId, signal }) => {
+      const created = await apiFetch("/api/v1/face-likeness/compare", token, {
+        method: "POST",
+        signal,
+        body: JSON.stringify({ sourceAssetId, candidateAssetId, projectId }),
+      });
+      const jobId = created?.id;
+      if (!jobId) {
+        throw new Error("Could not start the likeness compare.");
+      }
+      const deadline = Date.now() + 180000;
+      while (Date.now() < deadline) {
+        await abortableDelay(1000, signal);
+        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
+        if (job.status === "completed") {
+          // A completed compare always carries a result block (a detected:false N/A is a valid,
+          // non-error outcome). Surface the whole block so the UI can band/N-A it.
+          if (!job.result) {
+            throw new Error("Likeness compare returned no result.");
+          }
+          return job.result;
+        }
+        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
+          throw new Error(job.message || job.error || "Likeness compare failed.");
+        }
+      }
+      throw new Error("Likeness compare timed out. Is the worker running?");
+    },
+    [token],
+  );
+
   const createVqaJob = useCallback(
     async (asset, question, maxNewTokens) => {
       if (!activeProject) {
@@ -1947,6 +1986,7 @@ export function App() {
     magicPrompt,
     imageCaption,
     imageDescribe,
+    compareFaceLikeness,
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
@@ -2045,7 +2085,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
-    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
     rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,

@@ -278,6 +278,13 @@ string_enum! {
         // embedding + its frame fraction → the face sidecar. GPU-routed like dataset_analysis (the
         // native SCRFD+ArcFace stack), served by the Rust/MLX worker.
         DatasetFaceAnalysis => "dataset_face_analysis",
+        // On-demand identity-likeness compare of two existing assets (epic 4406, sc-4415): a SOURCE
+        // identity reference asset + a CANDIDATE asset, scored through the shared SCRFD+ArcFace
+        // face-likeness scorer (face_likeness.rs) and returned as the standard
+        // `{ score, detected, method, sourceRef, reason? }` result. NOT a generation post-pass — it
+        // compares two already-existing images on demand. GPU-routed like dataset_face_analysis (the
+        // native SCRFD+ArcFace stack); served by the Rust/MLX worker (MLX on Mac, candle off-Mac).
+        FaceLikenessCompare => "face_likeness_compare",
         PromptRefine => "prompt_refine",
     }
 }
@@ -415,6 +422,12 @@ string_enum! {
         // like `kps_extract`, not registry-derived (the `FaceEmbedder` has no gen-core registry); a
         // `dataset_face_analysis` job stays queued rather than mis-claimed where the stack isn't linked.
         DatasetFaceAnalysis => "dataset_face_analysis",
+        // On-demand face-likeness compare (epic 4406, sc-4415). Advertised by a worker that links the
+        // native SCRFD+ArcFace face stack (`mlx-gen-face` on Mac / `candle-gen-face` on the candle
+        // lane) — gpu.rs-hardcoded like `dataset_face_analysis` (the `FaceEmbedder` has no gen-core
+        // registry, so it isn't in `registry_capabilities`); a `face_likeness_compare` job stays queued
+        // rather than mis-claimed where the stack isn't linked.
+        FaceLikenessCompare => "face_likeness_compare",
         // Real (non-dry-run) LoRA training execution. Advertised separately from
         // `LoraTrain` (dry-run plan validation, which needs no inference backend)
         // so a real run only routes to a worker that can actually train. See

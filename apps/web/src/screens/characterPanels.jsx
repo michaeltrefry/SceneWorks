@@ -815,12 +815,133 @@ export function CharacterAngleSet({ angleModel, angleModels, ...props }) {
 // character (recipe.normalizedSettings.characterId) or referencing it
 // (metadata.characterReferences). Reads the full project asset list, so character outputs
 // persist beyond the transient "recent generations" window (sc-2076).
+// On-demand "compare image to another" likeness control (epic 4406, sc-4415). Lives on each Character
+// Studio asset card: the user picks one of the character's APPROVED Reference Assets (the SOURCE
+// identity face) and compares the card's image (the CANDIDATE) against it, seeing the face-likeness
+// score with the SAME band + N/A framing as the rest of the epic (via `LikenessBadge`). Reuses the
+// shared worker scorer through `compareFaceLikeness` — no new scoring here. Non-fatal: a no-face /
+// non-frontal candidate is an honest N/A result (rendered by the badge), and a hard failure surfaces an
+// inline error, never crashing the panel.
+export function LikenessCompare({ candidateAsset, approvedReferences = [], projectId, compareFaceLikeness }) {
+  const [open, setOpen] = React.useState(false);
+  // Default the source to the first approved reference (the primary identity face).
+  const [sourceAssetId, setSourceAssetId] = React.useState(approvedReferences[0]?.assetId ?? "");
+  // "idle" | "running" | "done" | "error"
+  const [status, setStatus] = React.useState("idle");
+  const [result, setResult] = React.useState(null);
+  const [errorMessage, setErrorMessage] = React.useState("");
+
+  React.useEffect(() => {
+    // Keep a valid default selected as the approved set changes (or clear when none remain).
+    setSourceAssetId((current) => {
+      if (current && approvedReferences.some((reference) => reference.assetId === current)) {
+        return current;
+      }
+      return approvedReferences[0]?.assetId ?? "";
+    });
+  }, [approvedReferences]);
+
+  const sourceReference = approvedReferences.find((reference) => reference.assetId === sourceAssetId);
+  const sourceLabel = sourceReference?.asset?.displayName ?? sourceReference?.assetId ?? null;
+  const canCompare =
+    typeof compareFaceLikeness === "function" &&
+    !!projectId &&
+    !!candidateAsset?.id &&
+    !!sourceAssetId &&
+    status !== "running";
+
+  async function runCompare() {
+    if (!canCompare) {
+      return;
+    }
+    setStatus("running");
+    setResult(null);
+    setErrorMessage("");
+    try {
+      const block = await compareFaceLikeness({
+        sourceAssetId,
+        candidateAssetId: candidateAsset.id,
+        projectId,
+      });
+      setResult(block);
+      setStatus("done");
+    } catch (error) {
+      setErrorMessage(error?.message || "Likeness compare failed.");
+      setStatus("error");
+    }
+  }
+
+  if (!approvedReferences.length) {
+    // No approved Reference Asset to compare against — there is no source identity yet.
+    return null;
+  }
+
+  if (!open) {
+    return (
+      <button
+        className="likeness-compare-toggle"
+        onClick={() => setOpen(true)}
+        type="button"
+      >
+        Compare likeness
+      </button>
+    );
+  }
+
+  return (
+    <div className="likeness-compare">
+      <label className="likeness-compare-source">
+        <span>Compare to reference</span>
+        <select
+          aria-label="Reference asset to compare against"
+          disabled={status === "running"}
+          onChange={(event) => setSourceAssetId(event.target.value)}
+          value={sourceAssetId}
+        >
+          {approvedReferences.map((reference) => (
+            <option key={reference.assetId} value={reference.assetId}>
+              {reference.asset?.displayName ?? reference.assetId}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="likeness-compare-actions">
+        <button disabled={!canCompare} onClick={runCompare} type="button">
+          {status === "running" ? "Comparing…" : "Compare"}
+        </button>
+        <button className="secondary-action" onClick={() => setOpen(false)} type="button">
+          Close
+        </button>
+      </div>
+      {status === "running" ? (
+        <p className="likeness-compare-status muted" role="status">
+          Scoring face likeness…
+        </p>
+      ) : null}
+      {status === "error" ? (
+        <p className="likeness-compare-status inline-warning" role="alert">
+          {errorMessage}
+        </p>
+      ) : null}
+      {status === "done" && result ? (
+        <div className="likeness-compare-result">
+          {/* The compare result carries the SAME shape the badge bands (score/detected/reason); a
+              no-face / non-frontal candidate renders the honest N/A chip, not a low number. */}
+          <LikenessBadge faceLikeness={result} sourceLabel={sourceLabel} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function CharacterAssets({
   selectedCharacter,
   assets = [],
+  approvedReferences = [],
   projectId,
   importAsset,
   addCharacterReference,
+  compareFaceLikeness,
   onPreview,
   deleteAsset,
   purgeAsset,
@@ -967,6 +1088,16 @@ export function CharacterAssets({
                     </button>
                   )}
                 </div>
+                {/* sc-4415: compare this image (candidate) to an approved Reference Asset (source)
+                    identity face. Only meaningful for still images and outside the Trashcan view. */}
+                {!showingTrash && asset.type === "image" ? (
+                  <LikenessCompare
+                    approvedReferences={approvedReferences}
+                    candidateAsset={asset}
+                    compareFaceLikeness={compareFaceLikeness}
+                    projectId={projectId}
+                  />
+                ) : null}
               </article>
             </div>
           ))}

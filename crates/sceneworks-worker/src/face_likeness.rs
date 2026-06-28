@@ -524,6 +524,20 @@ impl FaceLikenessScorer {
         (scorer, calls)
     }
 
+    /// Platform-neutral load for the on-demand compare tool (sc-4415): the MLX stack on macOS, the
+    /// candle stack off-Mac, embedding + caching the SOURCE face once. Unlike
+    /// [`build_face_likeness_scorer`] (the generation post-pass seam, which swallows a construction
+    /// error into a `None` scorer so a gen never aborts), this surfaces a hard weights/backend error to
+    /// the caller so a standalone compare JOB fails loudly rather than silently returning N/A — while a
+    /// source image with NO detectable face still yields a scorer whose `score` is the honest
+    /// `NoSourceFace` N/A (not an error). The exact same shared scorer, no new algorithm.
+    pub(crate) fn load_for_compare(
+        weights_dir: &std::path::Path,
+        source: &Image,
+    ) -> WorkerResult<Self> {
+        Self::load_for_weights_dir(weights_dir, source)
+    }
+
     /// Platform-neutral load: the MLX stack on macOS, the candle stack off-Mac. Lets the shared
     /// angle-set seam ([`build_face_likeness_scorer`]) construct a scorer without each call site
     /// cfg-branching on the backend. Embeds the source face once (the caching contract).
