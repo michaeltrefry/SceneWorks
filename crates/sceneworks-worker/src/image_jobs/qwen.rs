@@ -675,6 +675,26 @@ async fn generate_qwen_edit_stream(
         );
     }
 
+    // Angle-set identity-likeness scoring (epic 4406, sc-4409): generator-agnostic — a Character-
+    // Studio angle set on Qwen-Edit is scored through the same shared seam as InstantID / FLUX.2.
+    // Stage the antelopev2 face stack (shared bundle, no-op if cached) and capture the source identity
+    // reference + asset id; the `!Send` scorer is built ONCE in the closure and reused across angles.
+    // Angle-set only; staging is non-fatal (failure → no scorer → scores omitted, set still renders).
+    let angle_set = matches!(grouping, Flux2Grouping::Angles);
+    let face_stack_dir = if angle_set {
+        match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "angle-set face-stack staging failed; likeness scores omitted");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let likeness_source = (angle_set && face_stack_dir.is_some()).then(|| references[0].clone());
+    let likeness_source_ref = reference_ids.first().cloned();
+
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
@@ -694,7 +714,15 @@ async fn generate_qwen_edit_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(
+            // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`
+            // face stack lives here); source embedded once, reused across every angle (sc-4409).
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some(source)) => {
+                    crate::face_likeness::build_angle_set_scorer(dir, source)
+                }
+                _ => None,
+            };
+            drive_gen_items_scored(
                 tx,
                 seeds.into_iter().zip(prompts),
                 move |index, (seed, prompt), on_progress| {
@@ -744,7 +772,18 @@ async fn generate_qwen_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
-                    Ok(Some((seed, out_w, out_h, pixels)))
+                    // Score this finished angle against the cached source embedding (sc-4409). `None`
+                    // scorer ⇒ field omitted. Profile/up/down → honest detected:false N/A.
+                    let face_likeness = crate::face_likeness::score_angle_image(
+                        scorer.as_ref(),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    );
+                    Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
         },

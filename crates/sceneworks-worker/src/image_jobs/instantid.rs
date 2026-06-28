@@ -851,38 +851,19 @@ async fn generate_instantid_stream(
                 None
             };
             // Identity-likeness scorer (epic 4406, sc-4409): for an angle set, embed the source
-            // identity face ONCE here and reuse it across every angle. This is a SEPARATE SCRFD +
-            // ArcFace stack from the engine's `with_face` (the scorer is generator-agnostic on
-            // purpose — it must serve InstantID / Z-Image / Flux identity sets through one path), but
-            // it loads the SAME staged antelopev2 bundle, so no extra weights. Construction can fail
-            // (weights / a source with no detectable face) — that MUST NOT abort the generation, so
-            // any error becomes `None` (scoring simply absent) and the angle set still renders. Built
-            // only for the angle set; identity/pose modes don't score.
+            // identity face ONCE here and reuse it across every angle, through the SHARED
+            // generator-agnostic seam (the same `build_angle_set_scorer` the FLUX.2 / Qwen / SenseNova
+            // angle lanes call). It loads a SEPARATE SCRFD + ArcFace stack from the engine's
+            // `with_face`, but from the SAME staged antelopev2 bundle, so no extra weights.
+            // Construction is non-fatal (weights / no source face → `None` → scores omitted; the set
+            // still renders). Built only for the angle set; identity/pose modes don't score.
             #[cfg(any(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
             let scorer: Option<crate::face_likeness::FaceLikenessScorer> = if angle_set {
                 let face_weights_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
-                #[cfg(target_os = "macos")]
-                let built =
-                    crate::face_likeness::FaceLikenessScorer::load_mlx(face_weights_dir, &reference);
-                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                let built = crate::face_likeness::FaceLikenessScorer::load_candle(
-                    face_weights_dir,
-                    &reference,
-                );
-                match built {
-                    Ok(scorer) => Some(scorer),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "InstantID angle-set face-likeness scorer construction failed; \
-                             scores will be omitted (generation continues)"
-                        );
-                        None
-                    }
-                }
+                crate::face_likeness::build_angle_set_scorer(face_weights_dir, &reference)
             } else {
                 None
             };
@@ -1007,18 +988,15 @@ async fn generate_instantid_stream(
                         target_os = "macos",
                         all(not(target_os = "macos"), feature = "backend-candle")
                     ))]
-                    let face_likeness = scorer.as_ref().map(|scorer| {
-                        let scored = Image {
+                    let face_likeness = crate::face_likeness::score_angle_image(
+                        scorer.as_ref(),
+                        &Image {
                             width: out.width,
                             height: out.height,
                             pixels: out.pixels.clone(),
-                        };
-                        let result = scorer.score_or_null(&scored);
-                        crate::face_likeness::face_likeness_fact(
-                            &result,
-                            Some(face_likeness_source_ref.as_str()),
-                        )
-                    });
+                        },
+                        Some(face_likeness_source_ref.as_str()),
+                    );
                     #[cfg(not(any(
                         target_os = "macos",
                         all(not(target_os = "macos"), feature = "backend-candle")
