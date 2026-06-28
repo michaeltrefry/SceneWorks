@@ -243,24 +243,34 @@ async fn generate_sensenova_edit_stream(
         raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
     }
 
-    // Angle-set identity-likeness scoring (epic 4406, sc-4409): generator-agnostic — a Character-
-    // Studio angle set on SenseNova-U1 is scored through the same shared seam as InstantID / FLUX.2 /
-    // Qwen. Stage the antelopev2 face stack (shared bundle, no-op if cached) and capture the source
-    // identity reference + asset id; the `!Send` scorer is built ONCE in the closure and reused across
-    // angles. Angle-set only; staging is non-fatal (failure → no scorer → scores omitted, set renders).
+    // Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4411 plain With-Character): generator-
+    // agnostic — a Character-Studio angle set OR a plain With-Character generation on SenseNova-U1 is
+    // scored through the same shared seam as InstantID / FLUX.2 / Qwen (SenseNova has no pose tier). The
+    // PLAIN case (sc-4411) is scored only when this is a `character_image` job with a character
+    // `referenceAssetId` (NOT an `edit_image` job, whose `Plain` grouping also lands here but carries
+    // `sourceAssetId`, not an identity reference). Stage the antelopev2 face stack (shared bundle, no-op
+    // if cached) and capture the source identity reference + asset id; the `!Send` scorer is built ONCE
+    // in the closure and reused across all outputs. Staging is non-fatal (failure → no scorer → scores
+    // omitted, generation still renders).
     let angle_set = matches!(grouping, Flux2Grouping::Angles);
-    let face_stack_dir = if angle_set {
+    // Plain With-Character (sc-4411): a `character_image` job (so NOT an `edit_image`) whose `Plain`
+    // grouping is the general subject-variation case. The scored reference is `references[0]` — for a
+    // character_image job that IS the `referenceAssetId` (first in `qwen_edit_reference_ids`).
+    let plain_with_character =
+        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
+    let score_likeness = angle_set || plain_with_character;
+    let face_stack_dir = if score_likeness {
         match ensure_face_stack_dir(api, settings, job).await {
             Ok(dir) => Some(dir),
             Err(error) => {
-                tracing::warn!(error = %error, "angle-set face-stack staging failed; likeness scores omitted");
+                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
                 None
             }
         }
     } else {
         None
     };
-    let likeness_source = (angle_set && face_stack_dir.is_some()).then(|| references[0].clone());
+    let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
     // No user adapters by design (sc-6038): SenseNova-U1 is an 8B MoT autoregressive model with no
@@ -302,10 +312,11 @@ async fn generate_sensenova_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
-                    // Score this finished angle against the cached source embedding (sc-4409). The
-                    // Image build + pixel clone is paid ONLY when a scorer exists (an angle set) — the
-                    // common plain-edit path has no scorer, so this is a no-op with no clone. Profile/
-                    // up/down → honest detected:false N/A; `None` scorer ⇒ field omitted.
+                    // Score this finished image against the cached source embedding (sc-4409 angles /
+                    // sc-4411 plain With-Character). The Image build + pixel clone is paid ONLY when a
+                    // scorer exists (a character_image generation) — a plain `edit_image` job has no
+                    // scorer, so this is a no-op with no clone. Profile / up / down → honest
+                    // detected:false N/A; `None` scorer ⇒ field omitted.
                     let face_likeness = scorer.as_ref().and_then(|scorer| {
                         crate::face_likeness::score_generated_image(
                             Some(scorer),

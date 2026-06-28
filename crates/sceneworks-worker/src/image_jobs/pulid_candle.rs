@@ -273,6 +273,24 @@ async fn generate_candle_pulid_stream(
     )?;
     let (adapter, eva, face_dir) = ensure_pulid_candle_weights(api, settings, job).await?;
 
+    // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle PuLID-FLUX lane
+    // serves only the single-identity `character_image` path (one identity image per seed), so it is
+    // always a With-Character generation — score every output against the reference face through the
+    // SHARED generator-agnostic seam. Stage the antelopev2 SCRFD + ArcFace bundle (the same one the
+    // scorer's candle leg loads; distinct from PuLID's own BiSeNet `face_dir`); the `!Send` scorer is
+    // built ONCE inside the load closure and reused across the N outputs (source embedded once — the
+    // caching AC). The source is the CURRENT job's `referenceAssetId`. Staging is non-fatal (failure →
+    // no scorer → scores omitted, generation still renders).
+    let face_stack_dir = match ensure_face_stack_dir(api, settings, job).await {
+        Ok(dir) => Some(dir),
+        Err(error) => {
+            tracing::warn!(error = %error, "PuLID-FLUX face-stack staging failed; likeness scores omitted");
+            None
+        }
+    };
+    let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
+    let likeness_source_ref = reference_id.to_owned();
+
     let steps = pulid_candle_steps(request);
     let guidance = pulid_candle_guidance(request);
     let id_weight = pulid_candle_id_weight(request);
@@ -329,10 +347,20 @@ async fn generate_candle_pulid_stream(
             let model = PulidFlux::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("PuLID-FLUX load failed: {error}"))
             })?;
-            Ok((model, reference))
+            // Build the per-job identity-likeness scorer ONCE here (on the blocking thread where the
+            // `!Send` face stack is allowed), embedding the source identity face a single time and
+            // reusing it across every output (sc-4411 caching AC). `None` ⇒ non-fatal staging /
+            // construction failure ⇒ scores omitted; the generation still renders.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some(source)) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            Ok((model, reference, scorer))
         },
-        move |(model, reference), tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+        move |(model, reference, scorer), tx, cancel| {
+            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -357,7 +385,21 @@ async fn generate_candle_pulid_stream(
                         )));
                     }
                 };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
+                // Score this finished image against the cached source embedding (sc-4411). The Image
+                // build + pixel clone is paid ONLY when a scorer exists; a non-frontal / no-face result
+                // records an honest detected:false N/A, `None` scorer ⇒ field omitted.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out.width,
+                            height: out.height,
+                            pixels: out.pixels.clone(),
+                        },
+                        Some(likeness_source_ref.as_str()),
+                    )
+                });
+                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
             })
         },
     );

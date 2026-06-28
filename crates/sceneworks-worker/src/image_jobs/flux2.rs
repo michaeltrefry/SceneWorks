@@ -436,28 +436,39 @@ async fn generate_flux2_edit_stream(
         Flux2Grouping::Plain => {}
     }
 
-    // Character-set identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses): the
-    // generator-agnostic post-pass applies to EVERY character set, not just InstantID-routed ones — a
-    // Character-Studio angle set OR a pose-library set on a FLUX.2 edit model is scored through the same
-    // shared seam. The FLUX.2 edit pose tier produces the FINAL image directly (no face-restore pass on
-    // this lane), so scoring the generated image scores what the user sees (sc-4410). Stage the
+    // Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain
+    // With-Character): the generator-agnostic post-pass applies to EVERY character_image generation, not
+    // just InstantID-routed ones — a Character-Studio angle set, a pose-library set, OR a plain
+    // With-Character generation on a FLUX.2 edit model is scored through the same shared seam. The FLUX.2
+    // edit path produces the FINAL image directly (no face-restore pass on this lane), so scoring the
+    // generated image scores what the user sees. The PLAIN case (sc-4411) is scored only when this is a
+    // `character_image` job with a character `referenceAssetId` (NOT an `edit_image` job, whose `Plain`
+    // grouping also lands here but carries the `sourceAssetId`, not an identity reference). The angle +
+    // pose sets keep their existing scoring; this just adds the plain `character_image` case so the
+    // common With-Character generation is scored too — `score_likeness` covers all three. Stage the
     // antelopev2 face stack (same bundle InstantID uses; a no-op if already cached) and capture the
     // source identity reference + its asset id; the `!Send` scorer is built ONCE inside the
-    // generator-worker closure below and reused across all angles / poses. On the angle + pose sets;
-    // staging is non-fatal (a failure → no scorer → scores omitted, the set still renders).
+    // generator-worker closure below and reused across all outputs. Staging is non-fatal (a failure → no
+    // scorer → scores omitted, the generation still renders).
     let character_set = matches!(grouping, Flux2Grouping::Angles | Flux2Grouping::Poses(_));
-    let face_stack_dir = if character_set {
+    // Plain With-Character: a `character_image` job (so NOT an `edit_image`) whose `Plain` grouping is the
+    // general subject-variation case (sc-4411). For this lane the scored reference is `references[0]` —
+    // for a character_image job that IS the `referenceAssetId` (it is first in `flux2_edit_reference_ids`).
+    let plain_with_character =
+        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
+    let score_likeness = character_set || plain_with_character;
+    let face_stack_dir = if score_likeness {
         match ensure_face_stack_dir(api, settings, job).await {
             Ok(dir) => Some(dir),
             Err(error) => {
-                tracing::warn!(error = %error, "character-set face-stack staging failed; likeness scores omitted");
+                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
                 None
             }
         }
     } else {
         None
     };
-    let likeness_source = (character_set && face_stack_dir.is_some()).then(|| references[0].clone());
+    let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
     let (width, height) = (request.width, request.height);
@@ -533,11 +544,11 @@ async fn generate_flux2_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
-                    // Score this finished angle / pose against the cached source embedding (sc-4409/
-                    // sc-4410). The Image build + pixel clone is paid ONLY when a scorer exists (an
-                    // angle or pose set) — the common plain-edit path has no scorer, so this is a no-op
-                    // with no clone. Profile / up / down / full-body → honest detected:false N/A; `None`
-                    // scorer ⇒ field omitted.
+                    // Score this finished image against the cached source embedding (sc-4409 angles /
+                    // sc-4410 poses / sc-4411 plain With-Character). The Image build + pixel clone is paid
+                    // ONLY when a scorer exists (a character_image generation) — a plain `edit_image` job
+                    // has no scorer, so this is a no-op with no clone. Profile / up / down / full-body →
+                    // honest detected:false N/A; `None` scorer ⇒ field omitted.
                     let face_likeness = scorer.as_ref().and_then(|scorer| {
                         crate::face_likeness::score_generated_image(
                             Some(scorer),

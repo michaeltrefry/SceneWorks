@@ -1306,6 +1306,48 @@ pub(crate) fn resolve_control_identity_source(
     }
 }
 
+/// The source identity reference (decoded image + its asset id) an Image Studio "With Character"
+/// (`character_image`) generation scores each finished image against (epic 4406, sc-4411), or `None`
+/// when the job is not a plain character image with a reference face.
+///
+/// This is the GENERAL With-Character case — a regular `character_image` generation against a
+/// `referenceAssetId` (the character reference shown in the Image Studio reference thumbnail), NOT an
+/// angle set (`advanced.angleSet`) and NOT a pose-library set (`advanced.poses`). Those two are ALSO
+/// `character_image` jobs but are already scored by sc-4409 (angles) / sc-4410 (poses) through the same
+/// shared seam; this resolver deliberately returns `None` for them so the plain case never
+/// double-attaches or conflicts on an angle/pose job. The gate is therefore:
+/// `mode == "character_image"` AND a non-empty `referenceAssetId` AND no angle/pose grouping.
+///
+/// The asset id returned is the CURRENT job's `referenceAssetId`, so changing the reference asset
+/// changes the source the score is computed against (an explicit sc-4411 acceptance criterion) — the
+/// source is never cached across jobs or hardcoded.
+///
+/// Decoding is non-fatal (the sc-4407 contract): a reference that fails to load logs and yields `None`
+/// (scores omitted, the generation still runs) — scoring NEVER aborts a generation. The source image is
+/// decoded here ONCE and handed to the per-job scorer, which embeds it ONCE (the caching AC).
+///
+/// Lives in `base.rs` (compiled under BOTH the macOS routes and the off-Mac candle-control lanes) so the
+/// candle siblings can resolve it identically.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn resolve_character_image_likeness_source(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> Option<(Image, String)> {
+    if request.mode != "character_image" {
+        return None;
+    }
+    // Angle / pose sets are already scored by sc-4409 / sc-4410 through the same shared seam; this is
+    // the PLAIN With-Character path only, so exclude both groupings to avoid double-attaching.
+    if !pose_entries(request).is_empty() || advanced::flag(&request.advanced, "angleSet") {
+        return None;
+    }
+    resolve_control_identity_source(request, settings, project_path)
+}
+
 /// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
 /// edit default and the engine's `DEFAULT_IMG2IMG_STRENGTH`. Shared by the macOS MLX edit path and the
 /// candle in-lane edit (sc-6598), so it compiles off-Mac under `backend-candle` too.
@@ -1885,6 +1927,30 @@ async fn generate_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+
+    // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the generic MLX lane serves
+    // the remaining With-Character identity generators — Z-Image identity-init (`referenceAssetId` ⇒
+    // img2img init), the FLUX.1 XLabs IP-Adapter, and the Kolors IP-Adapter-Plus reference — all of
+    // which carry a character `referenceAssetId`. Score every output against that reference face through
+    // the SHARED generator-agnostic seam, but ONLY for an Image Studio "With Character"
+    // (`character_image`) generation; a z-image / kolors `edit_image` job (its source is `sourceAssetId`,
+    // not an identity reference) is excluded by `resolve_character_image_likeness_source` (mode gate),
+    // which also resolves the CURRENT job's reference (so changing it changes the scored source) and is
+    // non-fatal. The `!Send` scorer is built ONCE inside the closure and reused across the N outputs.
+    let likeness_source = resolve_character_image_likeness_source(request, settings, project_path);
+    let face_stack_dir = match &likeness_source {
+        Some(_) => match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
+                None
+            }
+        },
+        None => None,
+    };
+    // Keep the source only if the face stack staged (otherwise no scorer can be built).
+    let likeness_source = face_stack_dir.as_ref().and(likeness_source);
+
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -1892,7 +1958,17 @@ async fn generate_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+            // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`
+            // face stack lives here); source embedded once, reused across every output (sc-4411). `None`
+            // ⇒ not a With-Character generation, or non-fatal staging/construction failure ⇒ omitted.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some((source, _))) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            drive_gen_items_scored(tx, seeds, move |_index, seed, on_progress| {
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one(
                         generator,
@@ -1950,7 +2026,22 @@ async fn generate_stream(
                         }
                     }
                 }
-                Ok(Some((final_seed, out_w, out_h, pixels)))
+                // Score this finished image against the cached source embedding (sc-4411). Image build +
+                // pixel clone is paid ONLY when a scorer exists (a With-Character generation) — a plain
+                // t2i / edit job has no scorer, so this is a no-op with no clone. Non-frontal → honest
+                // detected:false N/A; `None` scorer ⇒ field omitted.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    )
+                });
+                Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
             })
         },
     );

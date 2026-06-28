@@ -3533,6 +3533,75 @@ fn should_fit_edit_source_only_for_off_aspect_edit_image() {
     }))));
 }
 
+/// sc-4411: the With-Character likeness-source resolver gates scoring to a PLAIN `character_image`
+/// generation with a character `referenceAssetId`, and EXCLUDES angle sets / pose sets (already scored
+/// by sc-4409/4410 through the same seam) and non-character modes — the no-double-attach guard. Here the
+/// asset can't decode (empty temp data dir), so the positive plain case returns `None` via the non-fatal
+/// decode path; the assertions key on the gate (the decode-vs-gate distinction is exercised by the
+/// reference-presence cases). Decode of a real asset is covered by the sc-4410 control-source tests.
+#[cfg(target_os = "macos")]
+#[test]
+fn character_image_likeness_source_gates_to_plain_with_character() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+
+    // A non-character mode (text_to_image / edit_image) is NEVER a With-Character generation: excluded
+    // BEFORE any decode, even with a referenceAssetId present.
+    for mode in ["text_to_image", "edit_image"] {
+        let req = request(json!({
+            "projectId": "p", "model": "instantid_realvisxl", "mode": mode,
+            "referenceAssetId": "ref",
+        }));
+        assert!(
+            resolve_character_image_likeness_source(&req, &settings, project_path).is_none(),
+            "mode {mode} is not a With-Character generation ⇒ no likeness source",
+        );
+    }
+
+    // An angle set (sc-4409) and a pose set (sc-4410) are character_image jobs but are ALREADY scored
+    // through the same seam — the plain resolver must exclude them so the plain case never double-attaches.
+    let angle = request(json!({
+        "projectId": "p", "model": "instantid_realvisxl", "mode": "character_image",
+        "referenceAssetId": "ref", "advanced": { "angleSet": true }
+    }));
+    assert!(
+        resolve_character_image_likeness_source(&angle, &settings, project_path).is_none(),
+        "an angle set is scored by sc-4409 ⇒ the plain resolver excludes it (no double-attach)",
+    );
+    let pose = request(json!({
+        "projectId": "p", "model": "instantid_realvisxl", "mode": "character_image",
+        "referenceAssetId": "ref", "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert!(
+        resolve_character_image_likeness_source(&pose, &settings, project_path).is_none(),
+        "a pose set is scored by sc-4410 ⇒ the plain resolver excludes it (no double-attach)",
+    );
+
+    // A plain character_image with NO reference returns None at the reference filter (an honest no-source,
+    // not an error) — distinguishing the reference gate from the mode/grouping gates above.
+    let no_ref = request(json!({
+        "projectId": "p", "model": "instantid_realvisxl", "mode": "character_image",
+    }));
+    assert!(
+        resolve_character_image_likeness_source(&no_ref, &settings, project_path).is_none(),
+        "a character_image with no referenceAssetId has no identity source",
+    );
+
+    // The PLAIN With-Character case (character_image + reference, no angle/pose) passes the gate and
+    // reaches the (non-fatal) decode; the asset is absent here, so it resolves to None WITHOUT panicking
+    // — scoring never aborts a generation (the sc-4407 non-fatal contract).
+    let plain = request(json!({
+        "projectId": "p", "model": "instantid_realvisxl", "mode": "character_image",
+        "referenceAssetId": "missing-asset",
+    }));
+    assert!(
+        resolve_character_image_likeness_source(&plain, &settings, project_path).is_none(),
+        "a missing reference decodes to None (non-fatal), never a panic",
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn contain_box_centers_the_contained_rect() {

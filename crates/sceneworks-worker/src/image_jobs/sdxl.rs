@@ -385,6 +385,34 @@ async fn generate_sdxl_advanced_stream(
         .collect();
     let total = seeds.len();
 
+    // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the SDXL IP-Adapter sub-mode
+    // (`SdxlSubMode::Ip`) is the With-Character route for an SDXL-family model — score every output
+    // against the reference face through the SHARED generator-agnostic seam, but only for an Image Studio
+    // "With Character" (`character_image`) generation (an Edit/Inpaint/Outpaint job has no identity
+    // reference; a non-character reference job records no identity score). `resolve_character_image_
+    // likeness_source` resolves the CURRENT job's `referenceAssetId` (so changing the reference changes
+    // the scored source) and is non-fatal (a decode failure → `None` → scores omitted). Decoding the
+    // source here is independent of the conditioning Reference above, so the existing IP path is
+    // untouched. The `!Send` scorer is built ONCE inside the closure and reused across the N outputs.
+    let likeness =
+        matches!(sub_mode, SdxlSubMode::Ip).then(|| {
+            resolve_character_image_likeness_source(request, settings, project_path)
+        });
+    let face_stack_dir = match likeness {
+        Some(Some(_)) => match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
+                None
+            }
+        },
+        _ => None,
+    };
+    let likeness_source = match (&face_stack_dir, likeness.flatten()) {
+        (Some(_), Some((image, asset_id))) => Some((image, asset_id)),
+        _ => None,
+    };
+
     let prompt = request.prompt.clone();
     let negative_prompt = negative_prompt.clone();
     let adapter_count = adapters.len();
@@ -396,7 +424,17 @@ async fn generate_sdxl_advanced_stream(
         spec,
         "sdxl advanced load failed".to_owned(),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+            // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`
+            // face stack lives here); source embedded once, reused across every output (sc-4411). `None`
+            // ⇒ not an IP character_image job, or non-fatal staging/construction failure ⇒ scores omitted.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some((source, _))) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            drive_gen_items_scored(tx, seeds, move |_index, seed, on_progress| {
                 let (out_w, out_h, pixels) = sdxl_advanced_generate_one(
                     generator,
                     &prompt,
@@ -410,7 +448,21 @@ async fn generate_sdxl_advanced_stream(
                     &cancel,
                     on_progress,
                 )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
+                // Score this finished image against the cached source embedding (sc-4411). Clone paid
+                // ONLY when a scorer exists (an IP character_image job); non-frontal → honest
+                // detected:false N/A; `None` scorer ⇒ field omitted.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    )
+                });
+                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
     );

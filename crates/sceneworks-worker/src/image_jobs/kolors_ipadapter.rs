@@ -235,6 +235,27 @@ async fn generate_candle_kolors_ipadapter_stream(
     )?;
     let ip_adapter = ensure_kolors_ipadapter_weights(api, settings, job).await?;
 
+    // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle Kolors IP-Adapter
+    // lane is the With-Character route for a Kolors model — score every output against the reference face
+    // through the SHARED generator-agnostic seam, but only for an Image Studio "With Character"
+    // (`character_image`) generation. Stage the antelopev2 SCRFD + ArcFace bundle; the `!Send` scorer is
+    // built ONCE inside the load closure and reused across the N outputs (source embedded once). The
+    // source is the CURRENT job's `referenceAssetId`. Staging is non-fatal (failure → scores omitted).
+    let score_likeness = request.mode == "character_image";
+    let face_stack_dir = if score_likeness {
+        match ensure_face_stack_dir(api, settings, job).await {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
+    let likeness_source_ref = reference_id.to_owned();
+
     let steps = kolors_ipadapter_steps(request);
     let guidance = kolors_ipadapter_guidance(request);
     let ip_scale = advanced::f32_clamped(
@@ -294,13 +315,22 @@ async fn generate_candle_kolors_ipadapter_stream(
             let model = IpAdapterKolors::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("Kolors IP-Adapter load failed: {error}"))
             })?;
-            Ok((model, reference))
+            // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
+            // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
+            // staging / construction failure ⇒ scores omitted.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some(source)) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            Ok((model, reference, scorer))
         },
-        move |(model, reference), tx, cancel| {
+        move |(model, reference, scorer), tx, cancel| {
             // `IpAdapterKolors::generate` takes `&mut self` (it sets the IP image tokens on the UNet
             // before the denoise), so the per-item closure mutates `model`.
             let mut model = model;
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -326,7 +356,20 @@ async fn generate_candle_kolors_ipadapter_stream(
                         )));
                     }
                 };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
+                // Score this finished image against the cached source embedding (sc-4411). Clone paid
+                // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out.width,
+                            height: out.height,
+                            pixels: out.pixels.clone(),
+                        },
+                        Some(likeness_source_ref.as_str()),
+                    )
+                });
+                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
             })
         },
     );
