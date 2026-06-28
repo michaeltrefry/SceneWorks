@@ -2862,6 +2862,88 @@ describe("SceneWorks app shell", () => {
     expect(baseContext.rememberLocalGenerationJob).toHaveBeenCalledWith("image", { id: "job-angle" });
   });
 
+  it("seeds the angle-set Identity-structure lock from angleSetDefault (sc-8354)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-angle-cn" }));
+    const baseContext = {
+      activeProject: { id: "project-1", name: "Noir" },
+      addCharacterReference: () => {},
+      archiveCharacter: () => {},
+      assets: [],
+      attachCharacterLora: () => {},
+      characters: [
+        {
+          id: "char-1",
+          name: "Mira",
+          type: "person",
+          references: [],
+          approvedReferences: [{ assetId: "ref-1", role: "hero", asset: { id: "ref-1", type: "image", displayName: "Mira ref" } }],
+          looks: [],
+          loras: [],
+        },
+      ],
+      createCharacter: () => {},
+      createCharacterLook: () => {},
+      createCharacterTestJob: () => {},
+      createImageJob,
+      importAsset: vi.fn(),
+      imageLocalJobs: [],
+      rememberLocalGenerationJob: vi.fn(),
+      deleteAsset: () => {},
+      deleteCharacterLook: () => {},
+      detachCharacterLora: () => {},
+      imageModels: [
+        {
+          id: "instantid_realvisxl",
+          name: "InstantID (RealVisXL)",
+          type: "image",
+          ui: {
+            referenceStrengthDefault: 0.8,
+            identityStructure: { label: "Identity structure", default: 0.8, angleSetDefault: 0.65, min: 0.3, max: 1.0, step: 0.05 },
+            viewAngles: [{ id: "front", label: "Front" }, { id: "left_profile", label: "Left profile" }],
+          },
+        },
+      ],
+      latestImageAssets: [],
+      loras: [],
+      setPreviewAsset: () => {},
+      sendCharacterToImage: () => {},
+      sendCharacterToVideo: () => {},
+      purgeAsset: () => {},
+      removeCharacterReference: () => {},
+      updateAssetStatus: () => {},
+      updateCharacter: () => {},
+      updateCharacterLook: () => {},
+      updateCharacterLora: () => {},
+      updateCharacterReference: () => {},
+    };
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(baseContext, <CharacterStudio />));
+    });
+
+    // The Identity-structure slider seeds from angleSetDefault, not the 0.80 single-image default.
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced")?.click();
+    });
+    const lockSlider = [...container.querySelectorAll(".reference-strength")].find((label) =>
+      label.textContent.includes("Identity structure"),
+    );
+    expect(lockSlider?.querySelector("span")?.textContent).toBe("0.65");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate angle set")).click();
+    });
+
+    // The softer lock rides advanced.controlnetConditioningScale so the worker's angle-set default
+    // isn't pinned back to the single-image 0.80.
+    expect(createImageJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "character_image",
+        advanced: expect.objectContaining({ angleSet: true, controlnetConditioningScale: 0.65 }),
+      }),
+    );
+  });
+
   it("fires a pose-library batch job from the Character Studio pose picker", async () => {
     const poseKeypoints = Array.from({ length: 18 }, (_, i) => [0.5, i / 18]);
     global.fetch = vi.fn(async () => ({

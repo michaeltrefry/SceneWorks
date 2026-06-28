@@ -378,7 +378,18 @@ export const fallbackModels = [
       // Identity tuning: reference strength (ipAdapterScale) defaults higher for
       // InstantID; identityStructure adds the controlnetConditioningScale slider.
       referenceStrengthDefault: 0.8,
-      identityStructure: { label: "Identity structure", default: 0.8, min: 0.3, max: 1.0, step: 0.05 },
+      // `default` is the single-image (Image Studio) lock; `angleSetDefault` is the softer
+      // angle-set lock the worker also applies (sc-8354 — 0.65 clears the most off-axis views
+      // above the blur floor at a small identity cost). The Angle Set card seeds its slider from
+      // `angleSetDefault` so the surfaced value matches what the backbone runs.
+      identityStructure: {
+        label: "Identity structure",
+        default: 0.8,
+        angleSetDefault: 0.65,
+        min: 0.3,
+        max: 1.0,
+        step: 0.05,
+      },
       // Canonical head angles (advanced.viewAngle; built-in landmark pack drives pose).
       viewAngles: [
         { id: "three_quarter_left", label: "Three-quarter left" },

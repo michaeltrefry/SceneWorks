@@ -23,6 +23,13 @@ const INSTANTID_DEFAULT_STEPS: u32 = 30;
 const INSTANTID_DEFAULT_GUIDANCE: f32 = 3.0;
 const INSTANTID_IP_SCALE: f32 = 0.8;
 const INSTANTID_CONTROLNET_SCALE: f32 = 0.8;
+/// Angle-set default `controlnetConditioningScale` (sc-8354). The sc-8222 real-weight A/B (full
+/// 5-point cn sweep, paired on the built-in 11-angle set) found the landmark-ControlNet lock is the
+/// only viable lever that sharpens angle-set output: lowering it from 0.80 to 0.65 lifts median blur
+/// variance ~+11% and clears the most angles above the person blur floor (9/11) at a small identity
+/// cost (−0.012 mean ArcFace cosine, well inside the InstantID ~0.82 envelope). Identity / pose modes
+/// keep the 0.80 default — this softer lock is angle-set-only.
+const INSTANTID_ANGLE_CONTROLNET_SCALE: f32 = 0.65;
 /// xinsir OpenPose-SDXL ControlNet (the pose-mode second branch, sc-3117). Loads via the stock
 /// `load_controlnet` (no conversion) — `image_adapters.py:615-617` parity.
 const INSTANTID_OPENPOSE_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
@@ -557,10 +564,21 @@ async fn generate_instantid_stream(
         INSTANTID_IP_SCALE,
         0.0..=1.0,
     );
+    let mode = instantid_mode(request);
+    let angle_set = matches!(mode, InstantIdMode::AngleSet);
+    let pose_set = matches!(mode, InstantIdMode::PoseSet(_));
+    // The angle set runs a softer landmark lock by default (sc-8354) so the off-axis views clear the
+    // blur floor; identity/pose modes keep the standard 0.80. An explicit slider value (now surfaced
+    // on the Angle Set card) still wins via the same `controlnetConditioningScale` key.
+    let controlnet_default = if angle_set {
+        INSTANTID_ANGLE_CONTROLNET_SCALE
+    } else {
+        INSTANTID_CONTROLNET_SCALE
+    };
     let controlnet_scale = advanced::f32_clamped(
         &request.advanced,
         "controlnetConditioningScale",
-        INSTANTID_CONTROLNET_SCALE,
+        controlnet_default,
         0.0..=2.0,
     );
     let repo = request
@@ -571,9 +589,6 @@ async fn generate_instantid_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or(INSTANTID_SDXL_REPO)
         .to_owned();
-    let mode = instantid_mode(request);
-    let angle_set = matches!(mode, InstantIdMode::AngleSet);
-    let pose_set = matches!(mode, InstantIdMode::PoseSet(_));
     // The active Key Point Library collection drives the angle set (sc-4450): per-generation
     // override > user default > built-in 11. Resolved once (and only for angle jobs).
     let angle_collection = angle_set.then(|| active_angle_collection(request, settings));

@@ -30,13 +30,23 @@ import {
 // forward-compatible: it lights up the moment the manifest + worker land, with no
 // change here.
 
-export function useCharacterAdvancedOptions(model, { defaultNegativePrompt = "" } = {}) {
+export function useCharacterAdvancedOptions(
+  model,
+  { defaultNegativePrompt = "", identityStructureMode = "single" } = {},
+) {
   const ui = model?.ui ?? {};
   const referenceStrengthDefault =
     typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.8;
   const identityStructure = ui.identityStructure ?? null;
+  // The Identity-structure (controlnetConditioningScale) lock defaults lower for an angle set than
+  // for single-image generation (sc-8354): the softer lock sharpens the off-axis views. Track the
+  // backbone's `angleSetDefault` in that mode, falling back to the single-image `default`.
   const identityStructureDefault =
-    typeof identityStructure?.default === "number" ? identityStructure.default : 0.8;
+    identityStructureMode === "angleSet" && typeof identityStructure?.angleSetDefault === "number"
+      ? identityStructure.angleSetDefault
+      : typeof identityStructure?.default === "number"
+        ? identityStructure.default
+        : 0.8;
 
   const samplerOptions = samplerOptionsFromModel(model);
   const schedulerOptions = schedulerOptionsFromModel(model);
