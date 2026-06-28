@@ -2385,6 +2385,52 @@ fn zimage_identity_strength_gate_and_clamp() {
     );
 }
 
+/// The candle Z-Image identity-init engage gate + clamp (sc-8409): the off-Mac sibling of
+/// `zimage_identity_strength_gate_and_clamp`, exercising `zimage_identity_candle_strength` — the gate the
+/// candle "With Character" lane (`zimage_identity_candle_available`) keys on. Must agree with the macOS
+/// `zimage_identity_strength` semantics verbatim (engage iff `referenceStrength > 0` AND a non-empty
+/// `referenceAssetId`; strength forwarded with no inversion, clamped to [0.05, 1.0]) so candle runs the
+/// identity init precisely when the MLX generic lane does.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn zimage_identity_candle_strength_gate_and_clamp() {
+    let with = |adv: Value, asset: Value| {
+        let mut payload = json!({
+            "projectId": "p", "model": "z_image_turbo", "mode": "character_image", "prompt": "a knight"
+        });
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("advanced".to_owned(), adv);
+        if !asset.is_null() {
+            obj.insert("referenceAssetId".to_owned(), asset);
+        }
+        zimage_identity_candle_strength(&request(payload))
+    };
+
+    // Not engaged → None: no referenceStrength; == 0 (parity: requires > 0); > 0 but no/blank asset.
+    assert_eq!(with(json!({}), json!("ref_1")), None);
+    assert_eq!(with(json!({ "referenceStrength": 0.0 }), json!("ref_1")), None);
+    assert_eq!(with(json!({ "referenceStrength": 0.6 }), Value::Null), None);
+    assert_eq!(with(json!({ "referenceStrength": 0.6 }), json!("   ")), None);
+
+    // Engaged: strength forwarded verbatim (no inversion) and clamped to [0.05, 1.0].
+    assert_eq!(
+        with(json!({ "referenceStrength": 0.6 }), json!("ref_1")),
+        Some(0.6)
+    );
+    assert_eq!(
+        with(json!({ "referenceStrength": "0.45" }), json!("ref_1")),
+        Some(0.45)
+    );
+    assert_eq!(
+        with(json!({ "referenceStrength": 1.8 }), json!("ref_1")),
+        Some(1.0)
+    );
+    assert_eq!(
+        with(json!({ "referenceStrength": 0.01 }), json!("ref_1")),
+        Some(0.05)
+    );
+}
+
 /// Real-weights smoke: Z-Image strict-pose ControlNet. Loads the base
 /// `Tongyi-MAI/Z-Image-Turbo` snapshot + the cached Fun-Controlnet-Union checkpoint,
 /// renders a DWPose skeleton, and generates one pose image. Needs both in the HF

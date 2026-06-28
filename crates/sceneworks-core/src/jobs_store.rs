@@ -3981,6 +3981,17 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     {
         return true;
     }
+    // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406): a `z_image_turbo`
+    // `character_image` job with a `referenceAssetId` + `advanced.referenceStrength > 0` is the bespoke
+    // candle `ZImageEdit` identity-init lane (`generate_candle_zimage_identity_stream`), NOT txt2img — the
+    // `image_request_candle_eligible` gate below rejects any `referenceAssetId`, so without this the job
+    // falls back to torch/MLX (off-Mac: plain txt2img, dropping the reference — the pre-existing gap this
+    // story closes). Branch it out first; disjoint from the Z-Image edit lane above (`edit_image` +
+    // `sourceAssetId`) and the strict-pose control lane below (`advanced.poses`, which this gate excludes).
+    // Mirrors the worker's `zimage_identity_candle_available`.
+    if model == "z_image_turbo" && zimage_identity_candle_eligible(&job.payload) {
+        return true;
+    }
     // Ideogram 4 img2img / Remix + mask inpaint / outpaint edit (sc-6598, epic 6561): an ideogram-family
     // `edit_image` job with a source image runs the candle `candle-gen-ideogram` edit path. Unlike the
     // other families above, Ideogram has no bespoke edit stream — it's the SAME engine for T2I and edit,
@@ -4659,6 +4670,66 @@ fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bool {
         .and_then(|advanced| advanced.get("poses"))
         .and_then(Value::as_array)
         .is_some_and(|poses| !poses.is_empty())
+}
+
+/// Z-Image identity-init (Image Studio "With Character") candle-routing conditions (sc-8409, epic 4406).
+/// The candle `ZImageEdit` engine seeds the Turbo denoise from the chosen character `referenceAssetId`
+/// latents (identity img2img) for a `character_image` job with `advanced.referenceStrength > 0`, that is
+/// NOT an angle set (`advanced.angleSet`) and NOT a pose-library set (`advanced.poses`) — those are
+/// `character_image` too but route to (and score on) their own candle lanes (InstantID angle/pose, the
+/// Z-Image strict-control lane). The model gate (`z_image_turbo`) is applied at the call site. The
+/// `referenceStrength > 0` engage condition mirrors the macOS `zimage_identity_strength` gate (zimage.rs,
+/// sc-3146) EXACTLY, so candle routes the identity init precisely when the MLX generic lane runs it — a
+/// With-Character job without a positive `referenceStrength` stays plain txt2img on both backends. Mirrors
+/// the worker's `zimage_identity_candle_available` (minus the local weight-resolve check). Candle-only —
+/// macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`resolve_zimage_identity_init`).
+fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
+        return false;
+    }
+    // A non-empty referenceAssetId is the identity source.
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_reference {
+        return false;
+    }
+    // referenceStrength > 0 engages the identity init (parity with `zimage_identity_strength`); without a
+    // positive strength the With-Character job stays plain txt2img.
+    let reference_strength = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("referenceStrength"))
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()))
+        .unwrap_or(0.0);
+    if reference_strength <= 0.0 {
+        return false;
+    }
+    // Angle / pose sets are `character_image` too but route to their own lanes — exclude both so this
+    // plain With-Character gate never steals them (the worker sits this lane BEFORE the strict-control
+    // lane). Mirrors the worker's `resolve_character_image_likeness_source` exclusions.
+    let angle_set = match payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("angleSet"))
+    {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(number)) => number.as_f64().is_some_and(|value| value != 0.0),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(Value::Array(value)) => !value.is_empty(),
+        _ => false,
+    };
+    if angle_set {
+        return false;
+    }
+    let has_poses = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty());
+    !has_poses
 }
 
 /// FLUX.2-dev strict-pose Fun-Controlnet-Union candle-routing conditions (sc-7736, epic 6564). The candle
@@ -7554,6 +7625,59 @@ mod candle_routing_tests {
         // A z_image_turbo strict-pose job (advanced.poses, not edit_image) is the control lane, not edit.
         assert!(!zimage_edit_candle_eligible(&object(json!({
             "model": "z_image_turbo", "advanced": { "poses": [{}] }
+        }))));
+    }
+
+    #[test]
+    fn zimage_identity_with_character_jobs_route_to_candle() {
+        // Z-Image identity-init "With Character" jobs (sc-8409): a `z_image_turbo` `character_image` job
+        // with a `referenceAssetId` + `advanced.referenceStrength > 0` routes to the bespoke candle
+        // `ZImageEdit` identity lane via the new branch, NOT the txt2img `image_request_candle_eligible`
+        // gate (which rejects any `referenceAssetId`). Without this the off-Mac job fell through to plain
+        // txt2img, dropping the reference (no identity, no score).
+        let with_character = json!({
+            "model": "z_image_turbo",
+            "mode": "character_image",
+            "referenceAssetId": "asset_1",
+            "advanced": { "referenceStrength": 0.6 }
+        });
+        assert!(zimage_identity_candle_eligible(&object(with_character.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(
+            with_character
+        )));
+        // A numeric-string referenceStrength engages too (the web sends strings).
+        assert!(zimage_identity_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "character_image",
+            "referenceAssetId": "asset_1", "advanced": { "referenceStrength": "0.45" }
+        }))));
+
+        // No referenceStrength (or <= 0) → stays plain txt2img on both backends (parity), NOT this lane.
+        assert!(!zimage_identity_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "character_image", "referenceAssetId": "asset_1"
+        }))));
+        assert!(!zimage_identity_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "character_image",
+            "referenceAssetId": "asset_1", "advanced": { "referenceStrength": 0.0 }
+        }))));
+        // No reference face → no identity source → not this lane.
+        assert!(!zimage_identity_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "character_image",
+            "advanced": { "referenceStrength": 0.6 }
+        }))));
+        // Non-character mode → not this lane (an `edit_image` job is the edit lane, sc-6595).
+        assert!(!zimage_identity_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "edit_image",
+            "referenceAssetId": "asset_1", "advanced": { "referenceStrength": 0.6 }
+        }))));
+        // Angle set + pose set are `character_image` too but route to their own lanes — excluded here so
+        // this plain With-Character gate never steals them.
+        assert!(!zimage_identity_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "character_image", "referenceAssetId": "asset_1",
+            "advanced": { "referenceStrength": 0.6, "angleSet": true }
+        }))));
+        assert!(!zimage_identity_candle_eligible(&object(json!({
+            "model": "z_image_turbo", "mode": "character_image", "referenceAssetId": "asset_1",
+            "advanced": { "referenceStrength": 0.6, "poses": [{ "id": "a" }] }
         }))));
     }
 

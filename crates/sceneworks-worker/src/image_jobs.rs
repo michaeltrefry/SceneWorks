@@ -685,6 +685,29 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
         true
+    } else if settings.backend_candle_enabled && zimage_identity_candle_available(&request, settings)
+    {
+        // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406) — checked BEFORE
+        // `is_candle_engine` because `z_image_turbo` IS a candle txt2img id, so without this a
+        // `character_image` + `referenceAssetId` (+ `referenceStrength > 0`) job would be caught by the
+        // txt2img branch and silently drop the reference (carrying no identity, hence no score — the gap
+        // this story closes). The off-Mac sibling of the macOS generic lane's Z-Image identity img2img
+        // (`resolve_zimage_identity_init`); reuses the candle `ZImageEdit` engine with the identity
+        // `referenceAssetId` as the source-latent init + wires the sc-4411 face-likeness scorer. Disjoint
+        // from the Z-Image edit lane above (that one is `edit_image` + `sourceAssetId`) and the strict-pose
+        // control lane below (that one is `advanced.poses`, which this gate excludes). Mirrors the router's
+        // `zimage_identity_candle_eligible`.
+        generate_candle_zimage_identity_stream(
+            api,
+            settings,
+            job,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes,
+        )
+        .await?;
+        true
     } else if settings.backend_candle_enabled && sdxl_ipadapter_available(&request, settings) {
         // SDXL IP-Adapter-Plus reference conditioning (sc-5488) — checked BEFORE `is_candle_engine`
         // because `sdxl`/`realvisxl` ARE candle txt2img ids, so without this a reference job would be
@@ -1591,6 +1614,13 @@ include!("image_jobs/flux2_control_candle.rs");
 // is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/zimage_edit_candle.rs");
+// Z-Image identity-init for Image Studio "With Character" — the Windows/CUDA candle lane ONLY (sc-8409,
+// epic 4406). macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`generate_stream` ⇒
+// `resolve_zimage_identity_init`); off-Mac this bespoke lane reuses the candle `ZImageEdit` engine with
+// the identity `referenceAssetId` as the source-latent init + wires the sc-4411 face-likeness scorer.
+// Reuses the sibling `zimage_edit_candle.rs` base/steps helpers, so it is included right after it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/zimage_identity_candle.rs");
 // PuLID-FLUX face identity — the Windows/CUDA candle lane ONLY (sc-5492). macOS keeps the
 // inventory-registered `pulid_flux` MLX generator (image_jobs/pulid.rs); the candle `PulidFlux` is a
 // bespoke provider, so this file is candle-gated and distinct from the macOS route.
