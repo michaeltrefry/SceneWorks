@@ -615,6 +615,9 @@ export function ImageStudio() {
   // (controlnetConditioningScale); models without these keys (e.g. Kolors) keep the
   // single reference-strength slider at the global default.
   const identityStructure = selectedModel?.ui?.identityStructure;
+  // Optional label/range override for the primary reference-strength slider (sc-8278: klein maps it
+  // to image-guidance over 1.0–2.5). Absent ⇒ the legacy "Reference strength" 0–1 slider.
+  const referenceStrengthCfg = selectedModel?.ui?.referenceStrength;
   // Whether the edit model can outpaint (generate the padded border) — only models that
   // accept an inpaint mask (image_inpaint, SDXL family). Gates the Outpaint fit option.
   const editInpaintCapable = (selectedModel?.capabilities ?? []).includes("image_inpaint");
@@ -1725,12 +1728,13 @@ export function ImageStudio() {
                       </div>
                       {hideReferenceStrength ? null : (
                         <label className="reference-strength">
-                          {identityStructure ? "Identity strength" : "Reference strength"}
+                          {referenceStrengthCfg?.label ??
+                            (identityStructure ? "Identity strength" : "Reference strength")}
                           <input
-                            max="1"
-                            min="0"
+                            max={referenceStrengthCfg?.max ?? 1}
+                            min={referenceStrengthCfg?.min ?? 0}
                             onChange={(event) => setIpAdapterScale(Number(event.target.value))}
-                            step="0.05"
+                            step={referenceStrengthCfg?.step ?? 0.05}
                             type="range"
                             value={ipAdapterScale}
                           />

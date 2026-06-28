@@ -134,6 +134,45 @@ fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
     }
 }
 
+/// Realism-safe default image-guidance scale for the klein/dev edit identity lever (sc-8273 A/B:
+/// ≥2.0 over-smooths skin / "clay"; 1.5 holds identity with natural texture).
+const DEFAULT_EDIT_IMAGE_GUIDANCE: f32 = 1.5;
+
+/// Image-guidance scale (the "Identity strength" lever) for the FLUX.2 klein/dev EDIT path
+/// (sc-8278), threaded onto `GenerationRequest.image_guidance`. The engine extrapolates the
+/// reference condition (`v = v_img0 + s·(v_ref − v_img0)`) so a strong scene prompt no longer
+/// drowns the reference identity (sc-8234: ArcFace 0.60 → 0.38 without it). Reads the shared
+/// identity-strength slider value `advanced.ipAdapterScale` (the "Identity strength" knob the web
+/// already sends for character refs; klein's catalog entry sets its range to ~1.0–2.5 / default
+/// 1.5). `≤1.0` = off. Defaults to the realism-safe validated value 1.5 (sc-8273) when a character
+/// reference is present and the knob is unspecified; `None` outside `character_image` mode or with
+/// no reference (off = byte-identical render).
+fn flux2_edit_image_guidance(request: &ImageRequest) -> Option<f32> {
+    if request.mode != "character_image" {
+        return None;
+    }
+    let has_reference = request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        || !request.reference_asset_ids.is_empty();
+    if !has_reference {
+        return None;
+    }
+    let scale = request
+        .advanced
+        .get("ipAdapterScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(DEFAULT_EDIT_IMAGE_GUIDANCE)
+        .clamp(1.0, 2.5);
+    (scale > 1.0).then_some(scale)
+}
+
 /// Estimated peak unified-memory footprint (GB) of a FLUX.2-dev edit at `width`×`height` with
 /// `reference_count` reference images — the input to the multi-reference memory guard. The dev edit is
 /// activation-bound: the DiT attends over the target latent plus every reference latent, each
@@ -204,6 +243,7 @@ fn flux2_edit_generate_one(
     seed: i64,
     steps: u32,
     guidance: Option<f32>,
+    image_guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
     enhance: &PromptEnhance,
     cancel: &CancelFlag,
@@ -217,6 +257,7 @@ fn flux2_edit_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance,
+        image_guidance,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -286,6 +327,9 @@ async fn generate_flux2_edit_stream(
     let (quant, quant_bits) = resolve_quant(request);
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
+    // Identity strength (sc-8278): map the UI `referenceStrength` slider onto the engine's
+    // image-guidance CFG so a strong prompt doesn't drop the reference identity (sc-8234).
+    let image_guidance = flux2_edit_image_guidance(request);
     let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
@@ -449,6 +493,7 @@ async fn generate_flux2_edit_stream(
                         seed,
                         steps,
                         guidance,
+                        image_guidance,
                         conditioning,
                         &enhance,
                         &cancel,

@@ -2860,6 +2860,48 @@ fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
     );
 }
 
+// sc-8278: the klein/dev edit identity-strength → image-guidance mapping. macOS-gated like the
+// rest of flux2.rs (the whole `image_jobs/flux2.rs` include is `cfg(target_os = "macos")`).
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_edit_image_guidance_lever() {
+    // Off outside character_image mode (a plain image edit), even with the knob set.
+    assert_eq!(
+        flux2_edit_image_guidance(&request(serde_json::json!({
+            "mode": "edit_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 1.5 }
+        }))),
+        None
+    );
+    // Off when no character reference is attached.
+    assert_eq!(
+        flux2_edit_image_guidance(&request(serde_json::json!({
+            "mode": "character_image", "advanced": { "ipAdapterScale": 1.5 }
+        }))),
+        None
+    );
+    // Default 1.5 (realism-safe) when a reference is present and the knob is unspecified.
+    assert_eq!(
+        flux2_edit_image_guidance(&request(serde_json::json!({
+            "mode": "character_image", "referenceAssetId": "a"
+        }))),
+        Some(1.5)
+    );
+    // Slider value honored, clamped to the 2.5 ceiling.
+    assert_eq!(
+        flux2_edit_image_guidance(&request(serde_json::json!({
+            "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 3.0 }
+        }))),
+        Some(2.5)
+    );
+    // A slider value at/below 1.0 reads as OFF (the engine's ≤1 = off).
+    assert_eq!(
+        flux2_edit_image_guidance(&request(serde_json::json!({
+            "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 0.8 }
+        }))),
+        None
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn build_edit_conditioning_single_vs_multi() {
@@ -2962,6 +3004,7 @@ fn flux2_edit_real_weights_generates_one_image() {
         42,
         4,
         Some(1.0),
+        None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &PromptEnhance::default(),
         &cancel,
@@ -3669,6 +3712,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         42,
         4,
         Some(1.0),
+        None,
         conditioning,
         &PromptEnhance::default(),
         &cancel,
@@ -3799,6 +3843,7 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
                 seed,
                 4, // klein is a 4-step distill
                 Some(1.0),
+                None,
                 conditioning,
                 &PromptEnhance::default(),
                 &cancel,
