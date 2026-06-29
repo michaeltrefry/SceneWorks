@@ -244,6 +244,12 @@ pub(crate) fn resolve_weights_dir(
     if request.model == "krea_2_turbo" {
         return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
     }
+    // FLUX.2-dev (sc-8513, epic 8506) now ships as a SceneWorks pre-quantized turnkey with packed
+    // `q4/` (default) + `q8/` self-contained subdirs (replacing the install-time convert); point the
+    // engine at the chosen quant's subdir rather than the repo root.
+    if request.model == "flux2_dev" {
+        return Ok(snapshot.map(|root| flux2_dev_model_subdir(&root, request)));
+    }
     Ok(snapshot)
 }
 
@@ -261,6 +267,33 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
         dir.join("transformer/model.safetensors")
+            .is_file()
+            .then_some(dir)
+    };
+    if wants_q8 {
+        if let Some(dir) = present("q8") {
+            return dir;
+        }
+    }
+    present("q4")
+        .or_else(|| present("q8"))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// Pick the engine-complete packed subdir of a FLUX.2-dev SceneWorks turnkey `root`: `q8/` when the
+/// request opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`.
+/// Falls back to whichever subdir is present, then `root` (a partially-downloaded bundle surfaces as
+/// a load error rather than a silent half-load). FLUX.2-dev's packed transformer file is
+/// `diffusion_pytorch_model.safetensors` (vs Ideogram's `model.safetensors`). sc-8513 / epic 8506.
+fn flux2_dev_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    let wants_q8 = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .is_some_and(|bits| bits > 4);
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        dir.join("transformer/diffusion_pytorch_model.safetensors")
             .is_file()
             .then_some(dir)
     };

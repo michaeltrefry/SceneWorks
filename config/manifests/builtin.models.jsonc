@@ -1885,15 +1885,22 @@
       "macOnly": true,
       "downloads": [
         {
-          // Gated repo (FLUX [dev] Non-Commercial License v2.0). The repo ships BOTH
-          // the BFL single-file (flux2-dev.safetensors / ae.safetensors, ~60 GB) AND
-          // the diffusers tree; the native loader/converter reads ONLY the diffusers
-          // subdirs, so include just those (+ model_index.json) and skip the redundant
-          // ~60 GB single-file. ~113 GiB downloaded.
+          // SceneWorks pre-quantized MLX turnkey (sc-8513, epic 8506): a public/ungated re-host of
+          // black-forest-labs/FLUX.2-dev under the FLUX Non-Commercial License (LICENSE.md travels
+          // with the weights — no BFL token or license-click needed). Per-tier subdirs: q4/ (default)
+          // and q8/ (opt-in). Replaces the old 112 GB gated dense download + install-time Q4 convert:
+          // the worker now loads the chosen tier's packed subdir directly (`flux2_dev_model_subdir`).
+          // bf16 tier added separately. q8/ is a second entry (tier selection: epic 8506 sc-8508/8509).
           "provider": "huggingface",
-          "repo": "black-forest-labs/FLUX.2-dev",
-          "files": ["model_index.json", "transformer/*", "text_encoder/*", "vae/*", "tokenizer/*"],
-          "estimatedSizeBytes": 112823015150
+          "repo": "SceneWorks/flux2-dev-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 33600000000
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux2-dev-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 55000000000
         }
       ],
       "defaults": {
@@ -1931,17 +1938,13 @@
       // unified memory) with an actionable message instead of a silent OOM.
       "mlx": {
         "minMemoryGb": 96,
-        "quantize": 4,
-        "requiresConversion": true,
-        "converter": "flux2_dev_quant",
-        "convertSourceRepo": "black-forest-labs/FLUX.2-dev"
+        "quantize": 4
       },
-      "gated": true,
-      "credentialHost": "huggingface.co",
-      "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-dev",
+      "gated": false,
+      "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.2 [dev]",
-        "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image + reference-editing model, ported natively to MLX (Apple Silicon only). A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Supports reference editing — drop in a source or character image and the model conditions on it (single + multi-image), the same surface as FLUX.2 [klein]. Pre-quantized to Q4 at install (the dense weights are too large to quantize in memory) and needs a 128 GB Mac (~74 GB peak at 1024²; reference editing adds the reference tokens on top, so expect higher peaks and slower renders than klein). Distributed under the FLUX [dev] Non-Commercial License (gated): accept the license at huggingface.co/black-forest-labs/FLUX.2-dev and add a Hugging Face token under Settings → Service credentials before downloading. LoRAs are coming separately.",
+        "description": "Black Forest Labs FLUX.2 [dev] — the 32B guidance-distilled flagship text-to-image + reference-editing model, ported natively to MLX (Apple Silicon only). A larger, higher-fidelity sibling of FLUX.2 [klein] with a Mistral-3 text encoder and a 48-layer flow transformer; runs ~28 steps at guidance 4.0. Supports reference editing — drop in a source or character image and the model conditions on it (single + multi-image), the same surface as FLUX.2 [klein]. Pre-quantized and hosted by SceneWorks (Q4 ~31 GB default; Q8 available) — downloads ready-to-run with no install-time conversion or 112 GB gated download. Needs a 128 GB Mac (~74 GB peak at 1024²; reference editing adds the reference tokens on top, so expect higher peaks and slower renders than klein). Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. LoRAs are coming separately.",
         "recommendedFor": ["text_to_image", "character_image", "style_variations"],
         "pid": { "checkpointId": "pid_flux2" },
         // Embedded-guidance edit knob: maps to the dev guidance scale (default 4.0,
