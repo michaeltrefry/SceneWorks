@@ -210,7 +210,7 @@ export function PresetManagerScreen() {
     }
     setForm((current) => {
       const hasLora = current.loras.some((lora) => lora.id === id);
-      if (hasLora || current.loras.length >= 3) {
+      if (hasLora || current.loras.length >= 5) {
         return current;
       }
       const source = loras.find((lora) => lora.id === id);
@@ -749,7 +749,7 @@ export function PresetManagerScreen() {
             {renderSection({
               step: "6",
               title: "Style stack",
-              help: `Up to 3 LoRAs layered with this preset. Compatible with ${selectedModel?.name ?? "the chosen model"}.`,
+              help: `Up to 5 LoRAs layered with this preset. Compatible with ${selectedModel?.name ?? "the chosen model"}.`,
               optional: true,
               children: (
                 <section aria-label="Preset LoRAs">
@@ -806,7 +806,7 @@ export function PresetManagerScreen() {
                       </div>
                     ) : null}
 
-                    {form.loras.length < 3 ? (
+                    {form.loras.length < 5 ? (
                       showLoraPicker ? (
                         <div className="lora-picker-panel">
                           <strong>Pick a LoRA</strong>

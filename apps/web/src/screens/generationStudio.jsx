@@ -256,7 +256,7 @@ export function useGenerationStudio({
       }
       const selected = ids.map((id) => compatibleLoras.find((item) => item.id === id)).filter(Boolean);
       const userCount = selected.filter((item) => item.scope !== "builtin").length;
-      if (lora.scope !== "builtin" && userCount >= 2) {
+      if (lora.scope !== "builtin" && userCount >= 4) {
         return ids;
       }
       return [...ids, lora.id];
@@ -337,7 +337,7 @@ export function LoraPickerSection({
         <div className="lora-choice-list">
           {compatibleLoras.map((lora) => {
             const checked = selectedLoraIds.includes(lora.id);
-            const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 2;
+            const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 4;
             const weight = effectiveLoraWeight(lora);
             return (
               <div className="lora-choice-item" key={lora.id}>

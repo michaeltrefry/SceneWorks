@@ -294,7 +294,7 @@ const CANDLE_ADAPTER: &str = "candle_sdxl";
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-const MAX_JOB_LORAS: usize = 3;
+const MAX_JOB_LORAS: usize = 5;
 
 // The engine dispatch table + its `ModelRow`/`mlx_model` join moved to the all-targets
 // `engines` module (sc-3723); the two descriptor-duplicating flags it used to carry

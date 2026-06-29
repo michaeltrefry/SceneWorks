@@ -3,7 +3,7 @@ import { loraMatchesModel, loraWeight, serializeLora } from "../presetUtils.js";
 
 // Keep in sync with the worker guard (lora_adapters.MAX_JOB_LORAS) and the Rust
 // recipe-preset normalizer — generation rejects more than this many LoRAs per job.
-const MAX_JOB_LORAS = 3;
+const MAX_JOB_LORAS = 5;
 
 // Family-filtered LoRA selection shared by the Character Studio Angle Set + Pose
 // Library panels (sc-2223). Mirrors the Image/Video Studio behaviour without

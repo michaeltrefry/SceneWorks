@@ -7498,7 +7498,9 @@ async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
                 { "id": "style_one" },
                 { "id": "style_two" },
                 { "id": "style_three" },
-                { "id": "style_four" }
+                { "id": "style_four" },
+                { "id": "style_five" },
+                { "id": "style_six" }
             ]
         }),
     )
@@ -7506,7 +7508,7 @@ async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
     assert_eq!(bad_status, StatusCode::BAD_REQUEST);
     assert_eq!(
         bad_error["detail"],
-        "Recipe presets can include at most 3 LoRAs"
+        "Recipe presets can include at most 5 LoRAs"
     );
 
     let (bad_status, bad_error) = request(

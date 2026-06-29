@@ -1610,9 +1610,9 @@ pub(crate) async fn run_video_upscale_job(
 #[cfg(target_os = "macos")]
 const WAN_ADAPTER: &str = "mlx_wan";
 
-/// At most 3 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`).
+/// At most 5 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`).
 #[cfg(target_os = "macos")]
-const MAX_JOB_LORAS: usize = 3;
+const MAX_JOB_LORAS: usize = 5;
 
 /// Raw-settings recorded on a real MLX Wan asset: the request's `advanced` knobs plus
 /// the real-inference markers (mirrors the image `mlx_raw_settings`). Also records the
@@ -3310,7 +3310,7 @@ fn candle_scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value 
 
 /// Max LoRAs per candle SCAIL-2 job (matches the macOS `MAX_JOB_LORAS`).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_SCAIL2_MAX_LORAS: usize = 3;
+const CANDLE_SCAIL2_MAX_LORAS: usize = 5;
 
 /// The lightx2v lightning step-distill recipe (sc-6838, the candle sibling of the MLX sc-5684/5700
 /// recipe): 8 steps, CFG off, scheduler shift 1.

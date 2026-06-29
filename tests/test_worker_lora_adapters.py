@@ -506,8 +506,8 @@ def test_lora_specs_fail_before_inference_for_missing_or_excess_loras(tmp_path):
     with pytest.raises(RuntimeError, match=r"LoRA empty has no \.safetensors file"):
         normalize_lora_specs([{"id": "empty", "installedPath": str(empty_dir)}])
 
-    many = [{"id": f"lora_{index}", "installedPath": str(missing)} for index in range(4)]
-    with pytest.raises(RuntimeError, match="at most 3 LoRAs"):
+    many = [{"id": f"lora_{index}", "installedPath": str(missing)} for index in range(6)]
+    with pytest.raises(RuntimeError, match="at most 5 LoRAs"):
         normalize_lora_specs(many)
 
 

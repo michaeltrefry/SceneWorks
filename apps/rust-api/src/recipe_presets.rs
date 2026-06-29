@@ -882,9 +882,9 @@ pub(crate) fn normalize_recipe_preset_loras(object: &mut JsonObject) -> Result<(
     let items = loras
         .as_array_mut()
         .ok_or_else(|| ApiError::bad_request("Recipe preset loras must be an array"))?;
-    if items.len() > 3 {
+    if items.len() > 5 {
         return Err(ApiError::bad_request(
-            "Recipe presets can include at most 3 LoRAs",
+            "Recipe presets can include at most 5 LoRAs",
         ));
     }
     for item in items {

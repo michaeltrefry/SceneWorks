@@ -14,7 +14,7 @@ from .hf_cache import huggingface_cache_roots, huggingface_repo_cache_path
 
 # Keep in sync with packages/schemas/recipe-preset.schema.json and the Rust
 # normalize_recipe_preset_loras API guard.
-MAX_JOB_LORAS = 3
+MAX_JOB_LORAS = 5
 
 
 @dataclass(frozen=True)
