@@ -757,14 +757,15 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
 }
 
 /// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
-/// correctly at the catalog layer — `macOnly: true` (picker hidden off-Mac), `capabilities ==
-/// ["text_to_image"]` only (edit/reference rejected), the family `sd3`, the gated stabilityai/* download
-/// with `gated: true` + `credentialHost: huggingface.co`, and the per-tier `mlx.minMemoryGb`
-/// (Large/Turbo 64, Medium 16) that drives the memory-eligibility gate. Parses the embedded builtin
-/// manifest (the exact bytes shipped) so manifest drift on any of these eligibility levers fails CI
-/// without a real download. (The descriptor-derived guidance/negative/backend surface is covered by
-/// `model_table_rows_resolve_and_flags_match_descriptor`; the credential-host derivation by the
-/// rust-api `gated_credential_tests`; this is the catalog-eligibility counterpart.)
+/// correctly at the catalog layer — `macOnly: false` (cross-platform now that the candle off-Mac lane
+/// is wired, sc-7880/epic 7982; availability is driven by the routing tables, not this flag),
+/// `capabilities == ["text_to_image"]` only (edit/reference rejected), the family `sd3`, the gated
+/// stabilityai/* download with `gated: true` + `credentialHost: huggingface.co`, and the per-tier
+/// `mlx.minMemoryGb` (Large/Turbo 64, Medium 56) that drives the memory-eligibility gate. Parses the
+/// embedded builtin manifest (the exact bytes shipped) so manifest drift on any of these eligibility
+/// levers fails CI without a real download. (The descriptor-derived guidance/negative/backend surface
+/// is covered by `model_table_rows_resolve_and_flags_match_descriptor`; the credential-host derivation
+/// by the rust-api `gated_credential_tests`; this is the catalog-eligibility counterpart.)
 #[test]
 fn sd3_5_manifest_entries_gate_correctly() {
     use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
@@ -800,11 +801,12 @@ fn sd3_5_manifest_entries_gate_correctly() {
             Some("sd3"),
             "{id} family"
         );
-        // Mac-only: the native MLX SD3.5 port has no off-Mac/candle lane (epic 7982), so the picker is
-        // hidden off-Mac.
+        // Cross-platform: the candle off-Mac lane is now wired (sc-7880, epic 7982), so `macOnly` is a
+        // no-op label flipped to false (mirroring krea/flux2_dev) — availability is driven by the
+        // routing tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag.
         assert_eq!(
             entry.get("macOnly").and_then(Value::as_bool),
-            Some(true),
+            Some(false),
             "{id} macOnly"
         );
         // Capability gate: text_to_image ONLY — edit/reference are rejected (no img2img/inpaint path).
