@@ -1,14 +1,20 @@
 name: Release (desktop)
 
 # Builds, signs, notarizes, staples, and publishes a DRAFT GitHub Release of the
-# macOS desktop app when a `v*` tag is pushed (or via manual dispatch). Mirrors the
-# local release flow (`npm run release:mac`): `tauri build` signs + notarizes the
-# .app via the APPLE_* env (from repo secrets), then staple-dmg.mjs staples the DMG.
+# desktop app when a `v*` tag is pushed (or via manual dispatch). Two jobs attach to
+# the SAME draft release:
+#   macos   — signs + notarizes the .app via the APPLE_* env (from repo secrets),
+#             then staple-dmg.mjs staples the DMG; CREATES the draft release.
+#   windows — builds the candle/CUDA NSIS + MSI installers and UPLOADS them to the
+#             release the macos job created (needs: macos). Mirrors the build steps in
+#             desktop-windows.yml; keep the two in sync when either changes.
+# Mirrors the local mac flow (`npm run release:mac`): `tauri build` signs + notarizes
+# the .app, then staple-dmg.mjs staples the DMG.
 #
-# Runs on the self-hosted `nax` runner — GitHub-hosted images can't build at the
-# macOS 26.2 deployment target (see macos-mlx.yml). The Developer ID cert lives in
-# that runner's login keychain, so `codesign` uses it directly and no base64
-# APPLE_CERTIFICATE import is needed. Required repo secrets:
+# The macos job runs on the self-hosted `nax` runner — GitHub-hosted images can't
+# build at the macOS 26.2 deployment target (see macos-mlx.yml). The Developer ID
+# cert lives in that runner's login keychain, so `codesign` uses it directly and no
+# base64 APPLE_CERTIFICATE import is needed. Required repo secrets:
 #   APPLE_SIGNING_IDENTITY  "Developer ID Application: … (TEAMID)"
 #   APPLE_API_ISSUER        App Store Connect API issuer UUID
 #   APPLE_API_KEY           App Store Connect API key id
@@ -88,7 +94,82 @@ jobs:
             echo "No DMG produced under target/release/bundle/dmg/" >&2
             exit 1
           fi
-          args=(--draft --generate-notes --title "SceneWorks $TAG"
-                --notes "Signed & notarized macOS build (Apple Silicon, macOS 26.2+). Open the DMG and drag SceneWorks to Applications.")
+          notes=$(printf '%s\n' \
+            '## macOS (Apple Silicon, macOS 26.2+)' \
+            'Signed & notarized build. Open the DMG and drag SceneWorks to Applications.' \
+            '' \
+            '## Windows (CUDA GPU)' \
+            'Run the .msi installer. Requires an NVIDIA GPU; the CUDA/cuDNN runtime is downloaded on first launch.')
+          args=(--draft --generate-notes --title "SceneWorks $TAG" --notes "$notes")
           case "$TAG" in *-*) args+=(--prerelease) ;; esac
           gh release create "$TAG" "${args[@]}" "${dmgs[0]}"
+
+  windows:
+    # Attach the Windows installers to the draft release the macos job created.
+    # needs: macos so the release exists before we upload (upload --clobber is
+    # idempotent on re-runs). Build steps mirror desktop-windows.yml's
+    # build-windows job — keep them in sync. This is the heavy candle CUDA release
+    # build (the SHIPPED artifacts), so it needs the CUDA Toolkit + MSVC toolset.
+    needs: macos
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' }}
+    runs-on: windows-2022
+    env:
+      # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
+      # Ampere->Blackwell (sc-3676); build-sidecar.mjs defaults this too.
+      CUDA_COMPUTE_CAP: "80"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      # Put the VS2022 MSVC toolchain (cl.exe) on PATH so nvcc finds the host
+      # compiler when candle-kernels' build script compiles the CUDA kernels.
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+      # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
+      # the candle `cuda` feature links against. Sets CUDA_PATH for the build +
+      # the redist staging in build-sidecar.mjs. (Pin kept in lockstep with
+      # desktop-windows.yml / server-candle-linux.yml.)
+      - name: Install CUDA Toolkit 12.9
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.9.1"
+          method: "network"
+      # The candle-gen single-rev invariant the default skew gate is blind to: with
+      # `--features backend-candle` a candle-gen pin resolving a different gen-core
+      # rev would split the inventory registry => runtime "engine not found"
+      # (sc-4482). Guard before the expensive build.
+      - name: Guard against gen-core version skew (candle)
+        shell: bash
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
+          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+      - name: Install web dependencies
+        run: npm ci --prefix apps/web
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      # `tauri build` runs build-sidecar.mjs, which on Windows builds the candle
+      # sidecar by default (nvcc compiles every provider's CUDA kernels) and stages
+      # the ffmpeg resource, then packages both installers. The ~2.7 GB CUDA/cuDNN/
+      # onnxruntime runtime is downloaded on first run (cuda_provision.rs), so the
+      # installers stay small.
+      - name: Build Windows candle installers (NSIS + MSI)
+        run: npm --prefix apps/desktop run build -- --bundles nsis,msi
+      # Upload to the draft release the macos job created. The user ships the MSI
+      # (per desktop-windows.yml); the NSIS .exe is attached too as an alternative.
+      # --clobber so re-running the job replaces rather than 409s.
+      - name: Attach Windows installers to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          installers=(target/release/bundle/msi/*.msi target/release/bundle/nsis/*.exe)
+          if [ ${#installers[@]} -eq 0 ]; then
+            echo "No installers produced under target/release/bundle/{msi,nsis}/" >&2
+            exit 1
+          fi
+          gh release upload "$TAG" --clobber "${installers[@]}"
