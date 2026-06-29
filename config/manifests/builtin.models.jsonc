@@ -2635,13 +2635,13 @@
           // SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated as a separate
           // catalog dependency). Un-gated (the mirror carries the NVIDIA non-commercial NOTICE).
           // Dense bf16 (no quant subdir — the 2-bit SANA quant is intentionally NOT ported).
-          // estimatedSizeBytes is a PLACEHOLDER (the 1.6B DiT + ~2.6B gemma TE + DC-AE) refined once
-          // the real pull is measured.
+          // estimatedSizeBytes is the measured mirror total (transformer F16 3.21GB + DC-AE F32
+          // 1.25GB + merged gemma-2-2b-it TE BF16 5.23GB + license/notice), sc-8604.
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
           "files": ["transformer/*", "vae/*", "text_encoder/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 9500000000
+          "estimatedSizeBytes": 9704269924
         }
       ],
       "paths": {
@@ -2732,13 +2732,13 @@
           // caption encoder — `gemma-2-2b-it.safetensors` + `tokenizer.json`, sourced from the
           // SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated as a separate catalog
           // dependency). Un-gated (the mirror carries the NVIDIA non-commercial NOTICE). Dense bf16 (no
-          // quant subdir). estimatedSizeBytes is a PLACEHOLDER (the 1.6B DiT + ~2.6B gemma TE + DC-AE)
-          // refined once the real pull is measured.
+          // quant subdir). estimatedSizeBytes is the measured mirror total (transformer BF16 3.22GB +
+          // DC-AE F32 1.25GB + merged gemma-2-2b-it TE BF16 5.23GB + license/notice), sc-8607.
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
           "files": ["transformer/*", "vae/*", "text_encoder/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 9500000000
+          "estimatedSizeBytes": 9715830101
         }
       ],
       "paths": {
