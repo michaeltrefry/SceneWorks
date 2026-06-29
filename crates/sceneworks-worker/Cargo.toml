@@ -430,8 +430,8 @@ sceneworks-core = { path = "../sceneworks-core" }
 # unchanged and the DEFAULT skew gate stays single-rev/green at bdf3233. The candle pin below moves
 # `8962199` -> `0da70db` IN LOCKSTEP (candle-gen sc-8490 PR #187: re-pins candle-gen's own gen-core
 # 875cf7f -> bdf3233, byte-identical — candle links no sana crate and compiles UNCHANGED) so
-# `--features backend-candle --target all` resolves the SINGLE gen-core rev bdf3233. (Pins to the
-# candle-gen PR-branch head for now; flip to the squash-merged candle-gen main SHA once #187 lands.)
+# `--features backend-candle --target all` resolves the SINGLE gen-core rev bdf3233. (Candle-gen is
+# pinned to the squash-merged candle-gen main SHA 0da70db from PR #187.)
 sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "bdf3233c92a7198086def67d271d45d7f5c1bccf" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
