@@ -2640,6 +2640,102 @@
       }
     },
     {
+      "id": "sana_sprint_1600m",
+      // SANA-Sprint 1.6B 1024px (epic 8485 / sc-8490) — NVIDIA's few-step distillation of SANA, ported
+      // natively to mlx-gen (engine id `sana_sprint_1600m`). SAME 1.6B Linear-DiT trunk (ReLU linear
+      // attention + Mix-FFN + NoPE) + gemma-2-2b-it Complex-Human-Instruction (CHI) caption encoder
+      // (SceneWorks/gemma-2-2b-it, reused — NOT duplicated) + 32× DC-AE (f32) decoder as base SANA. The
+      // distillation is CFG-FREE: a guidance scalar is folded into the trunk via a guidance-embedding
+      // (no negative-prompt second pass) and sampled by the SCM (continuous-time consistency / trigflow)
+      // sampler, so it runs in ~2 steps. Native MLX only (mlx-gen-sana, no torch/candle backend) →
+      // macOnly. `adapter` is the asset stamp (mirrors mlx_<family>). Worker routing through
+      // engines::MODEL_TABLE / the gen_core registry + the MLX_ROUTED_MODELS gate (jobs_store.rs) lands in
+      // this story (sc-8490 Phase B).
+      //
+      // NVIDIA non-commercial: SANA-Sprint is distributed under the NVIDIA Open Model License / NSCLv1
+      // (research & evaluation, non-commercial). The re-hosted `SceneWorks/Sana_Sprint_1.6B_1024px_mlx`
+      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host precedent —
+      // OK to ship gated-with-notice). SceneWorks's overall non-commercial posture covers this;
+      // generations are for non-commercial use only.
+      "autoDownload": false,
+      "name": "SANA-Sprint 1.6B",
+      "family": "sana",
+      "type": "image",
+      "adapter": "mlx_sana",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Pre-converted MLX snapshot on the SceneWorks HF org (sc-8490): ONE
+          // `SanaPipeline::new_sprint`-loadable root — `transformer/` (the Linear-DiT trunk, Sprint
+          // weights), `vae/` (the 32× DC-AE f32 decoder), and `text_encoder/` (the gemma-2-2b-it CHI
+          // caption encoder — `gemma-2-2b-it.safetensors` + `tokenizer.json`, sourced from the
+          // SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated as a separate catalog
+          // dependency). Un-gated (the mirror carries the NVIDIA non-commercial NOTICE). Dense bf16 (no
+          // quant subdir). estimatedSizeBytes is a PLACEHOLDER (the 1.6B DiT + ~2.6B gemma TE + DC-AE)
+          // refined once the real pull is measured.
+          "provider": "huggingface",
+          "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+          "files": ["transformer/*", "vae/*", "text_encoder/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 9500000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/Sana_Sprint_1.6B_1024px_mlx"
+      },
+      "defaults": {
+        // SANA-Sprint reference defaults: the SCM few-step loop (continuous-time consistency), 2 steps,
+        // CFG-free (the guidance scalar is a trunk embedding, not a true-CFG second pass — so no negative
+        // prompt). The flow-match time-shift carries over as the orthogonal schedulerShift knob (epic
+        // 7114).
+        "resolution": "1024x1024",
+        "steps": 2,
+        "guidanceScale": 4.5,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        // 32× DC-AE divisor → W×H must be multiples of 32 (descriptor RES_MULTIPLE). Native 1024².
+        // Sprint's native loop is the SCM few-step sampler ("default"); the curated flow menu still
+        // resolves the unified-framework knobs (epic 7114). The engines.rs drift guard checks this list
+        // is a subset of the descriptor's curated_sampler_names()/curated_scheduler_names().
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        // No SANA LoRA wired yet (the engine descriptor reports supports_lora: false). Family reserved
+        // for when/if adapters are added.
+        "families": ["sana"],
+        "types": []
+      },
+      "mlx": {
+        // Dense bf16 snapshot (no runtime quant — the 2-bit SANA quant is NOT ported). minMemoryGb 24:
+        // the 1.6B Linear-DiT trunk + the ~2.6B gemma TE + DC-AE decode, a comfortably small footprint.
+        "minMemoryGb": 24,
+        "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx"
+      },
+      "licenseUrl": "https://huggingface.co/Efficient-Large-Model/Sana_Sprint_1.6B_1024px",
+      "ui": {
+        "label": "SANA-Sprint 1.6B",
+        "description": "NVIDIA SANA-Sprint 1.6B — the few-step distillation of SANA, ported natively to MLX (Apple Silicon only). The same 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) as base SANA, distilled for ~2-step CFG-free generation via a continuous-time consistency (SCM) sampler and a guidance-embedding trunk — so it generates a 1024×1024 image in a couple of steps with no negative prompt. Dense bf16 (no quantization). Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "SANA Prompt Guide",
+          "path": "/prompt-guides/sana.md",
+          "sources": [
+            { "label": "SANA-Sprint model card (NVIDIA)", "url": "https://huggingface.co/Efficient-Large-Model/Sana_Sprint_1.6B_1024px" },
+            { "label": "SANA project page", "url": "https://nvlabs.github.io/Sana/" },
+            { "label": "SANA-Sprint paper (few-step distillation)", "url": "https://arxiv.org/abs/2503.09641" }
+          ]
+        }
+      }
+    },
+    {
       "id": "sdxl",
       "recommended": true,
       "name": "Stable Diffusion XL",

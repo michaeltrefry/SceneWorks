@@ -492,6 +492,24 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 4.5,
         adapter_label: "mlx_sana",
     },
+    // SANA-Sprint 1.6B 1024px (epic 8485 / sc-8490) — the few-step distillation of SANA over the SAME
+    // Linear-DiT trunk + gemma-2-2b-it CHI encoder + 32× DC-AE decoder, ported natively to mlx-gen (engine
+    // id `sana_sprint_1600m`, registered by `SanaPipeline::new_sprint` via the shared force-link). Sprint
+    // is CFG-FREE: a guidance scalar is folded into the trunk via a guidance-embedding (no negative-prompt
+    // second pass) and sampled by the SCM (continuous-time consistency / trigflow) sampler — so it runs in
+    // ~2 steps (the `sana_sprint_1600m` descriptor advertises NO supports_true_cfg / supports_negative).
+    // Loads the un-gated `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` MLX snapshot (same transformer/ vae/
+    // text_encoder/ layout as base SANA; the text_encoder/ bundles the SceneWorks/gemma-2-2b-it TE so it is
+    // NOT duplicated). Dense bf16 (no quant). 32× DC-AE divisor → width/height multiples of 32. NVIDIA
+    // non-commercial (NSCLv1) — the re-host carries the upstream LICENSE + NOTICE.
+    ModelRow {
+        sceneworks_id: "sana_sprint_1600m",
+        engine_id: "sana_sprint_1600m",
+        default_repo: "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+        default_steps: 2,
+        default_guidance: 4.5,
+        adapter_label: "mlx_sana",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids

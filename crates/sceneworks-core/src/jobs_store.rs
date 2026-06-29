@@ -3640,6 +3640,11 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     // (no torch backend). True-CFG text-to-image only (20 steps / guidance 4.5); `edit_image` has no
     // source/reference path, so it's rejected (mirrors Krea/SD3.5/Lens).
     "sana_1600m",
+    // SANA-Sprint 1.6B (epic 8485 / sc-8490): the CFG-free few-step (default 2-step, SCM sampler +
+    // guidance-embed trunk) SANA distillation — same `mlx-gen-sana` engine (adapter `mlx_sana`) over the
+    // un-gated `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` MLX snapshot. macOS-only (no torch backend).
+    // Text-to-image only; `edit_image` has no source/reference path, so it's rejected (mirrors base SANA).
+    "sana_sprint_1600m",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -3704,7 +3709,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => boogu_mlx_eligible(payload),
         "krea_2_turbo" => krea_mlx_eligible(payload),
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
-        "sana_1600m" => sana_mlx_eligible(payload),
+        "sana_1600m" | "sana_sprint_1600m" => sana_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -5081,8 +5086,9 @@ fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
-/// SANA 1600M (epic 8485 / sc-8489) MLX-eligibility. The native `mlx-gen-sana` engine serves the
-/// **text-to-image** surface only (true-CFG, 20 steps / guidance 4.5); the base SANA checkpoint has no
+/// SANA 1600M (epic 8485 / sc-8489) + SANA-Sprint (sc-8490) MLX-eligibility. The native `mlx-gen-sana`
+/// engine serves the **text-to-image** surface only — base SANA (true-CFG, 20 steps / guidance 4.5) and
+/// the CFG-free few-step Sprint distillation (default 2 steps) share this gate; neither checkpoint has
 /// img2img/control conditioning, so an `edit_image` request is rejected (the same defensive shape
 /// Krea / SD3.5 / Lens reject). This keeps `model_mac_support`'s `features.edit` false (it probes with
 /// `mode: edit_image`). macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so
