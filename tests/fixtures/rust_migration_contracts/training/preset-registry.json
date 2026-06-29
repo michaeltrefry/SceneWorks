@@ -702,7 +702,6 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "backend": "mlx",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
@@ -755,7 +754,6 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "backend": "mlx",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
@@ -807,7 +805,6 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "backend": "mlx",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,

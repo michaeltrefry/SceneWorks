@@ -3689,12 +3689,15 @@ fn candle_training_caps() -> Vec<WorkerCapability> {
 
 #[test]
 fn candle_worker_claims_candle_native_training_kernels() {
-    // The four families with a candle trainer (sdxl / z_image / lens / Wan A14B T2V) route to the
-    // candle worker off-Mac. Each in its own store so the claim is unambiguous.
+    // The five families with a candle trainer (sdxl / z_image / lens / Krea 2 Raw / Wan A14B T2V)
+    // route to the candle worker off-Mac. `krea_lora` is no-torch-fallback (MLX_ONLY) yet candle
+    // claims it (sc-8614) — the gate exempts a candle-eligible job from the mlx-only refusal. Each in
+    // its own store so the claim is unambiguous.
     let cases: &[(&str, &str, &str)] = &[
         ("sdxl_lora", "sdxl", "lora"),
         ("z_image_lora", "z_image_turbo", "lokr"),
         ("lens_lora", "lens", "lora"),
+        ("krea_lora", "krea_2_raw", "lokr"),
         ("wan_moe_lora", "wan_2_2_t2v_14b", "lora"),
     ];
     for (kernel, base_model, network_type) in cases {
@@ -3815,11 +3818,41 @@ fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
 }
 
 #[test]
-fn krea_training_is_mlx_worker_only_with_no_torch_fallback() {
-    let store = store("mlx-training-krea-only");
-    // Krea 2 (epic 7565 P3, sc-7578) trains on the native `mlx-gen-krea` trainer and has no
-    // torch path, so — like LTX — a torch worker must NOT claim a `krea_lora` job; it stays
-    // queued for the mlx worker (the candle Krea trainer is the separate P4 path).
+fn krea_training_has_no_torch_fallback_but_runs_on_either_rust_backend() {
+    let store = store("training-krea-no-torch");
+    // Krea 2 (epic 7565) trains on a native Rust trainer and has NO torch path, so — like LTX — a
+    // torch worker must NOT claim a `krea_lora` job. UNLIKE LTX it is Rust-only on BOTH backends:
+    // the mlx worker (Mac) and, since sc-8614, the candle worker (off-Mac) each run it.
+    register_gpu_worker(&store, "worker-torch", "mps", training_caps());
+    let job = store
+        .create_job(mlx_training_job(
+            "krea_lora",
+            "krea_2_raw",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+
+    // Torch defers (no Krea torch trainer).
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+
+    // The candle worker claims it off-Mac (sc-8614): no-torch-fallback no longer means mlx-only.
+    register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+    let claimed = store
+        .claim_next_job("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims the Krea training job");
+    assert_eq!(claimed.id, job.id);
+}
+
+#[test]
+fn krea_training_runs_on_the_mlx_worker() {
+    let store = store("mlx-training-krea");
+    // On Mac the mlx worker is Krea's home (the off-Mac candle path is covered separately).
     register_gpu_worker(&store, "worker-torch", "mps", training_caps());
     let job = store
         .create_job(mlx_training_job(
@@ -3836,7 +3869,6 @@ fn krea_training_is_mlx_worker_only_with_no_torch_fallback() {
         .expect("torch claim ok")
         .is_none());
 
-    // The mlx worker is the only home for it.
     register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
     let claimed = store
         .claim_next_job("worker-mlx")

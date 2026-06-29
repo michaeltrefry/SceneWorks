@@ -18,10 +18,11 @@
 //! sc-7884 (engine trainer sc-7883/7885), native-MLX/Apple-Silicon only. The dry-run validator is
 //! cross-platform. The real run executes in-process on the macOS
 //! MLX engine OR — the off-Mac cutover (sc-7817, epic 5164) — on the candle Windows/CUDA + Linux
-//! engine, for the four families with a candle trainer (`sdxl`/`z_image_turbo`/`lens`/the Wan A14B
-//! **T2V** `wan2_2_t2v_14b`). The Python torch trainer stays the fallback for everything off-Mac
-//! with no candle trainer (Kolors, LTX, the dense Wan 5B, the Wan I2V A14B) and the cross-platform
-//! default until candle is the default off-Mac worker.
+//! engine, for the five families with a candle trainer (`sdxl`/`z_image_turbo`/`lens`/the Krea 2 Raw
+//! 12B DiT `krea_2_raw` (sc-8614)/the Wan A14B **T2V** `wan2_2_t2v_14b`). The Python torch trainer
+//! has no Krea path at all (Krea is Rust-only — mlx or candle); it stays the fallback for everything
+//! else off-Mac with no candle trainer (Kolors, LTX, the dense Wan 5B, the Wan I2V A14B) and the
+//! cross-platform default until candle is the default off-Mac worker.
 
 use super::*;
 use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
@@ -63,12 +64,15 @@ use mlx_gen_z_image as _;
 // training cutover (sc-7817, epic 5164). Each self-registers a `backend = "candle"` `Trainer` into
 // the SAME gen_core registry the mlx crates use, so `gen_core::load_trainer(id, …)` resolves the
 // candle trainer by id with no candle-specific dispatch (exactly like the inference path). These
-// four crates are already linked for inference under `backend-candle`; the trainer `inventory::
+// crates are already linked for inference under `backend-candle`; the trainer `inventory::
 // submit!` is NOT behind a separate feature, so re-stating the dependency here is purely explicit.
-// Only the four families with a candle trainer are anchored: `sdxl`, `z_image_turbo`, `lens`, and
-// the Wan **A14B T2V** MoE (`wan2_2_t2v_14b`). The dense Wan 5B + the I2V A14B have no candle
-// trainer yet (sc-5167 follow-ups) and Kolors/LTX none at all — those kernels stay on the Python
-// torch worker off-Mac (`jobs_store::training_job_is_candle_eligible` keeps them from routing here).
+// Only the five families with a candle trainer are anchored: `sdxl`, `z_image_turbo`, `lens`, the
+// Krea 2 Raw 12B DiT (`krea_2_raw`, epic 7565 P4 — sc-8614), and the Wan **A14B T2V** MoE
+// (`wan2_2_t2v_14b`). The dense Wan 5B + the I2V A14B have no candle trainer yet (sc-5167
+// follow-ups) and Kolors/LTX none at all — those kernels stay on the Python torch worker off-Mac
+// (`jobs_store::training_job_is_candle_eligible` keeps them from routing here).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_krea as _;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_lens as _;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -511,13 +515,17 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
 /// got checkpointing in sc-5246, and the Wan A14B trainer needs it too). Scoped to exactly the
 /// candle-trainable big-DiT families: Z-Image and the Wan A14B **T2V** MoE — the same set
 /// `jobs_store::training_job_is_candle_eligible` gates the MoE to (only `wan_2_2_t2v_14b` has a candle
-/// trainer; the I2V A14B / dense 5B stay on torch). SDXL's smaller U-Net fits a dense backward (the
-/// `candle_sdxl_real_weights` smoke trains it with checkpointing off) and Lens is small, so neither is
-/// forced — both honor the plan's value.
+/// trainer; the I2V A14B / dense 5B stay on torch). Krea 2 Raw is a 12B DiT (epic 7565 P4, sc-8614) —
+/// the same dense-backward OOM class, so it is forced too (the sc-7900 big-DiT backstop). SDXL's
+/// smaller U-Net fits a dense backward (the `candle_sdxl_real_weights` smoke trains it with
+/// checkpointing off) and Lens is small, so neither is forced — both honor the plan's value.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
     match plan.target.kernel.as_str() {
         "z_image_lora" => true,
+        // Krea 2 Raw is a 12B DiT — a dense backward materializes ~another model of frozen-weight
+        // grads on candle and OOMs, so force checkpointing on (sc-8614 / sc-7900 backstop).
+        "krea_lora" => true,
         "wan_moe_lora" => plan.target.base_model == "wan_2_2_t2v_14b",
         _ => false,
     }
@@ -529,7 +537,7 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
 /// cross-platform "Gradient Checkpointing" UI box ON, but the user can turn it OFF — harmless on the
 /// macOS MLX path (bf16 alone fits) yet a guaranteed OOM on candle for these families — and a thin /
 /// legacy submit that omits the key leaves the worker's `map_training_config` default (`false`) in
-/// force. Forcing it here makes a real off-Mac Z-Image / Wan A14B-T2V run impossible to configure
+/// force. Forcing it here makes a real off-Mac Z-Image / Krea Raw / Wan A14B-T2V run impossible to configure
 /// into a dense-backward OOM. On macOS this is the identity (the MLX path tolerates a dense bf16
 /// backward), so the mapped config passes through unchanged.
 #[cfg(target_os = "macos")]
@@ -2297,7 +2305,7 @@ mod tests {
     ///
     /// `gradient_checkpointing` matters per-family on candle: UNLIKE MLX/torch, candle's matmul
     /// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
-    /// multi-billion-param DiT (Z-Image, Wan) OOMs even at 512² on a 96 GB card — checkpointing
+    /// multi-billion-param DiT (Z-Image, Krea Raw 12B, Wan) OOMs even at 512² on a 96 GB card — checkpointing
     /// (sc-5246) recomputes activations and avoids retaining those frozen-weight grads. SDXL's smaller
     /// U-Net fits dense; Z-Image needs checkpointing on. (A real training job carries this from its
     /// preset; the smoke sets it explicitly per family.)
@@ -2473,5 +2481,28 @@ mod tests {
     fn candle_lens_real_weights_trains_a_lora_step() {
         let snapshot = candle_hf_snapshot("models--microsoft--Lens", "transformer");
         candle_real_weights_smoke("lens", &snapshot, 64, true, "candle_lens_smoke.safetensors");
+    }
+
+    /// sc-8614 — the candle Krea 2 training smoke. Loads `load_trainer("krea_2_raw", …)` from the
+    /// installed `krea/Krea-2-Raw` diffusers snapshot (`transformer/ text_encoder/ vae/`) and trains
+    /// two LoRA micro-steps at 256² with **gradient checkpointing ON** — REQUIRED on candle: the Raw
+    /// 12B DiT's dense backward OOMs because candle materializes a grad for the frozen base weight too
+    /// (the Z-Image/Wan-14B finding). The adapter records `family: krea_2` and applies at Krea 2 Turbo
+    /// inference (family match, no base-model gating). Needs the `krea/Krea-2-Raw` base model
+    /// installed (the sibling catalog story sc-8613 ships the off-Mac download). Run on demand on the
+    /// RTX box (one smoke per GPU):
+    /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored candle_krea_real_weights --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs real krea/Krea-2-Raw weights + a CUDA device; run one smoke per GPU (12B DiT)"]
+    fn candle_krea_real_weights_trains_a_lora_step() {
+        let snapshot = candle_hf_snapshot("models--krea--Krea-2-Raw", "transformer");
+        candle_real_weights_smoke(
+            "krea_2_raw",
+            &snapshot,
+            256,
+            true,
+            "candle_krea_smoke.safetensors",
+        );
     }
 }

@@ -419,7 +419,6 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "backend": "mlx",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
@@ -449,7 +448,6 @@
           1,
           128
         ],
-        "appleSiliconOnly": true,
         "batchSize": [
           1,
           4
@@ -483,7 +481,6 @@
           4,
           128
         ],
-        "requiresBackend": "mlx",
         "resolutions": [
           768,
           1024,
@@ -495,10 +492,8 @@
         ]
       },
       "ui": {
-        "appleSiliconOnly": true,
-        "backend": "mlx",
         "datasetModality": "image",
-        "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon only (native MLX).",
+        "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
         "label": "Krea 2 LoRA",
         "recommendedFor": [
           "character",

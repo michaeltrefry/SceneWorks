@@ -1569,9 +1569,11 @@
       // Cataloging it lets Model Manager install the base into the HF cache the trainer reads via
       // `training_base_model_installed` (apps/rust-api training.rs) — closing the "Base model
       // 'krea_2_raw' is not installed. Install it from the model catalog" dead-end (the bare repo was
-      // never catalogued, unlike every other trainable family's base). macOS-gated for now: `krea_lora`
-      // is MLX-only today (CANDLE_ROUTED_TRAINING_KERNELS excludes it; MLX_ONLY_TRAINING_KERNELS includes
-      // it), so the windows/linux `krea/Krea-2-Raw` download + candle trainer routing land with sc-8614.
+      // never catalogued, unlike every other trainable family's base). Cross-platform as of sc-8614:
+      // `krea_lora` now also routes to the candle (Windows/Linux CUDA) trainer
+      // (CANDLE_ROUTED_TRAINING_KERNELS includes it; MLX_ONLY_TRAINING_KERNELS keeps it off torch), and
+      // BOTH the MLX and candle trainers read the same `krea/Krea-2-Raw` diffusers tree — so a single
+      // whole-repo download serves every platform (no MLX-turnkey vs candle split like Krea 2 Turbo).
       // Ungated public diffusers tree, Krea 2 Community License (non-commercial).
       "autoDownload": false,
       "name": "Krea 2 Raw (LoRA training base)",
@@ -1584,7 +1586,7 @@
           "provider": "huggingface",
           "repo": "krea/Krea-2-Raw",
           "files": [],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 40000000000
         }
       ],
@@ -1603,7 +1605,7 @@
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
         "label": "Krea 2 Raw (training base)",
-        "description": "Undistilled Krea 2 12B DiT — the LoRA training base for Krea 2 (epic 7565). Train a LoRA here and it applies at Krea 2 Turbo inference; this is not a generation model itself. Native MLX (Apple Silicon) training only today (~40 GB download). Krea 2 Community License (non-commercial).",
+        "description": "Undistilled Krea 2 12B DiT — the LoRA training base for Krea 2 (epic 7565). Train a LoRA here and it applies at Krea 2 Turbo inference; this is not a generation model itself. Trains on Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA) (~40 GB download). Krea 2 Community License (non-commercial).",
         "recommendedFor": [],
         "promptGuide": {
           "title": "Krea 2 Prompt Guide",

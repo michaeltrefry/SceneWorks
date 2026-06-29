@@ -1214,11 +1214,13 @@ fn lens_turbo_lora_target() -> TrainingTarget {
 /// time by **family match, no base-model gating** (`lora_family.rs` gates only `wan-video`). The
 /// Turbo manifest declares `loraCompatibility.families: [krea_2]`.
 ///
-/// Native MLX, **Apple-Silicon only**: the `krea_lora` kernel runs the in-process `mlx-gen-krea`
-/// Rust trainer (a functional-autograd flow-match velocity loop on the single-stream DiT). There is
-/// no torch Krea trainer, so — like the LTX MLX video target — the job has no non-Rust fallback
-/// (`MLX_ONLY_TRAINING_KERNELS` keeps it queued for the mlx worker) and the target is Mac-gated in
-/// the UI via `MacTrainingSupport::supported_kernels`.
+/// Rust-native, **no torch trainer** — but NOT Apple-Silicon-only (sc-8614): the `krea_lora` kernel
+/// runs the in-process `mlx-gen-krea` trainer on Apple Silicon AND the `candle-gen-krea` trainer on
+/// Windows/Linux NVIDIA (a functional-autograd flow-match velocity loop on the single-stream DiT).
+/// There is no torch path, so `MLX_ONLY_TRAINING_KERNELS` keeps it off the torch worker while
+/// `CANDLE_ROUTED_TRAINING_KERNELS` admits it on candle. The `appleSiliconOnly`/`requiresBackend`
+/// mlx-only markers are therefore omitted (matching the candle-capable z-image/lens targets);
+/// `MacTrainingSupport::supported_kernels` already lists `krea_lora` and is inert off-Mac.
 ///
 /// `base_model_repo` points the plan's `baseModelPath` at the ungated public `krea/Krea-2-Raw`
 /// diffusers tree (Krea 2 Community License), independent of the served `krea_2_turbo` model. The
@@ -1278,9 +1280,7 @@ fn krea_raw_lora_target() -> TrainingTarget {
                 "sampleGuidanceScale": 3.5,
                 "qualityPreset": "balanced",
                 "outputScope": "project",
-                "requestedGpu": "auto",
-                // Native MLX trainer (surfaced for the UI; Apple-Silicon only).
-                "backend": "mlx"
+                "requestedGpu": "auto"
             })),
             extra: ExtraFields::new(),
         },
@@ -1296,17 +1296,14 @@ fn krea_raw_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "qualityPresets": ["speed", "balanced", "quality"],
-            "outputScopes": ["project", "global"],
-            // Native MLX trainer — no torch Krea path (mirrors the LTX MLX target).
-            "requiresBackend": "mlx",
-            "appleSiliconOnly": true
+            "outputScopes": ["project", "global"]
+            // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
+            // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614), no torch path.
         })),
         ui: object(json!({
             "label": "Krea 2 LoRA",
-            "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon only (native MLX).",
+            "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
             "recommendedFor": ["character", "style"],
-            "appleSiliconOnly": true,
-            "backend": "mlx",
             "datasetModality": "image"
         })),
         extra: ExtraFields::new(),

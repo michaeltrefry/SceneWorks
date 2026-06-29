@@ -5305,12 +5305,15 @@ fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
 /// (sc-7817, epic 5164) — the off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`]. The candle registry
-/// holds trainers for `sdxl`, `z_image_turbo`, `lens`, and the Wan **A14B T2V** MoE
-/// (`wan2_2_t2v_14b`); the first three map straight from kernel, while `wan_moe_lora` is base-model
-/// gated (handled in [`training_job_is_candle_eligible`]). The dense Wan 5B + the I2V A14B have no
-/// candle trainer yet (sc-5167 follow-ups) and Kolors/LTX none at all — those kernels stay on the
-/// Python torch worker off-Mac.
-const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &["z_image_lora", "sdxl_lora", "lens_lora"];
+/// holds trainers for `sdxl`, `z_image_turbo`, `lens`, `krea_2_raw` (the Krea 2 Raw 12B DiT, epic
+/// 7565 P4 — sc-8614 wires it here), and the Wan **A14B T2V** MoE (`wan2_2_t2v_14b`); the first four
+/// map straight from kernel, while `wan_moe_lora` is base-model gated (handled in
+/// [`training_job_is_candle_eligible`]). UNLIKE the torch families (z-image/sdxl/lens/wan), Krea has
+/// NO torch trainer — it is in BOTH this set and [`MLX_ONLY_TRAINING_KERNELS`] (Rust-only: mlx OR
+/// candle, never torch). The dense Wan 5B + the I2V A14B have no candle trainer yet (sc-5167
+/// follow-ups) and Kolors/LTX none at all — those kernels stay on the Python torch worker off-Mac.
+const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
+    &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
 
 /// Epic 5164 / sc-7817 routing — does this `lora_train` job belong on the candle (Windows/CUDA +
 /// Linux/NVIDIA) worker (vs the Python torch worker)? The training sibling of
@@ -5436,16 +5439,18 @@ fn video_upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     video_upscale_job_is_mlx_eligible(job)
 }
 
-/// Training kernels with NO non-Rust fallback — only the in-process Rust mlx worker
-/// can run them. `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049)
-/// retired that Python trainer, leaving the native Rust LTX trainer as the sole path,
-/// so a non-mlx worker must refuse the job (leaving it queued for the mlx worker)
-/// rather than claim it and fail with "no training kernel". The torch families
-/// (z-image/sdxl/wan) keep their Python trainer as the Windows path + Mac fallback, so
-/// they are deliberately NOT listed here. `krea_lora` (epic 7565 P3) is MLX-native with
-/// no torch trainer — like LTX — so it is listed here (the candle Krea trainer is sc P4).
-/// `sd3_lora` (epic 7841 T3 sc-7884) is likewise MLX-native with no torch trainer — the
-/// off-Mac/candle SD3.5 trainer is epic 7982 — so it is listed here too.
+/// Training kernels with NO **torch** fallback — only a Rust worker can run them, so a torch worker
+/// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
+/// training kernel". `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049) retired
+/// that Python trainer, leaving the native Rust LTX trainer as the sole path. The torch families
+/// (z-image/sdxl/wan) keep their Python trainer as the Windows path + Mac fallback, so they are
+/// deliberately NOT listed here. `krea_lora` (epic 7565) is Rust-native with no torch trainer — but
+/// UNLIKE LTX/SD3 it now ALSO has a candle trainer (sc-8614, P4), so it is the one member that runs
+/// on EITHER Rust backend (mlx in-process on Mac, candle off-Mac); the [`worker_supports_job`] gate
+/// exempts a candle worker for a `krea_lora` job it is candle-eligible for (it is also in
+/// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while torch is still refused. `sd3_lora` (epic 7841 T3
+/// sc-7884) is MLX-native with no torch trainer and no candle trainer yet (the off-Mac/candle SD3.5
+/// trainer is epic 7982), so — like LTX — only an mlx worker runs it today.
 const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
 
 /// Whether this `lora_train` job targets a kernel with no non-Rust fallback (see
@@ -5482,9 +5487,15 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         return false;
     }
     // Epic 3039 (sc-3049): a training kernel with no torch fallback (the retired Python
-    // MLX LTX trainer) runs only on the mlx worker — a non-mlx worker must refuse it
-    // (leaving it queued for the mlx worker) instead of claiming it and failing.
-    if !worker.gpu_id.eq_ignore_ascii_case("mlx") && training_kernel_is_mlx_only(job) {
+    // MLX LTX trainer) runs only on a Rust worker — a non-mlx worker must refuse it
+    // (leaving it queued for the mlx worker) instead of claiming it and failing. The
+    // exception (sc-8614): `krea_lora` is no-torch-fallback AND has a candle trainer, so a
+    // candle worker it is candle-eligible for must NOT be refused here (the candle training
+    // gate below admits it); only torch (and any non-candle non-mlx worker) still defers.
+    if !worker.gpu_id.eq_ignore_ascii_case("mlx")
+        && training_kernel_is_mlx_only(job)
+        && !(worker_is_candle(worker) && training_job_is_candle_eligible(job))
+    {
         return false;
     }
     // Epic 3018/3041 + sc-3036: the in-process MLX worker (gpu_id "mlx") serves a fixed

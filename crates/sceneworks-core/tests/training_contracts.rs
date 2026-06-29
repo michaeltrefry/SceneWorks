@@ -299,9 +299,10 @@ fn builtin_registry_exposes_kolors_target() {
 
 #[test]
 fn builtin_registry_exposes_krea_target() {
-    // Krea 2 (epic 7565 P3) trains on the undistilled `krea/Krea-2-Raw` 12B single-stream
-    // DiT via the native `mlx-gen-krea` `krea_lora` kernel and applies at Krea 2 Turbo
-    // inference (family `krea_2`, no base-model gating). Native MLX, Apple-Silicon only.
+    // Krea 2 (epic 7565) trains on the undistilled `krea/Krea-2-Raw` 12B single-stream
+    // DiT via the `krea_lora` kernel and applies at Krea 2 Turbo inference (family `krea_2`,
+    // no base-model gating). Rust-native on BOTH backends — mlx (Apple Silicon) + candle
+    // (Windows/Linux NVIDIA, sc-8614) — no torch path.
     let registry = builtin_training_targets();
     let target = registry
         .targets
@@ -327,11 +328,11 @@ fn builtin_registry_exposes_krea_target() {
         target.limits.get("networkTypes"),
         Some(&serde_json::json!(["lora", "lokr"]))
     );
-    // No torch Krea trainer — Apple-Silicon/MLX-only, like the LTX video target.
-    assert_eq!(
-        target.limits.get("appleSiliconOnly"),
-        Some(&serde_json::Value::Bool(true))
-    );
+    // No torch Krea trainer, but Rust-native on BOTH backends (mlx + candle, sc-8614) — so it is
+    // NOT Apple-Silicon-only: the `appleSiliconOnly`/`requiresBackend` mlx-only markers are gone
+    // (matching the candle-capable z-image/lens targets; routing is enforced by the worker tables).
+    assert_eq!(target.limits.get("appleSiliconOnly"), None);
+    assert_eq!(target.limits.get("requiresBackend"), None);
 }
 
 #[test]
