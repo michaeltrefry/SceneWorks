@@ -66,6 +66,12 @@ use mlx_gen_krea as _;
 // generator registered". All three reach the generic MODEL_TABLE / `generate_stream` path.
 #[cfg(target_os = "macos")]
 use mlx_gen_sd3 as _;
+// SANA 1600M (epic 8485 / sc-8489) — force-link so `register_generators!` registers `sana_1600m`
+// (Image/t2i, true-CFG, 32× DC-AE divisor, mac_only) into the gen-core inventory; else linker GC drops
+// its `ModelRegistration` and `gen_core::load("sana_1600m")` returns "no generator registered". Reaches
+// the generic MODEL_TABLE / `generate_stream` path like the other registry families.
+#[cfg(target_os = "macos")]
+use mlx_gen_sana as _;
 // Lens / Lens-Turbo (epic 3164 engine / sc-5105) — an inventory-registered `Generator` under the ids
 // `lens` + `lens_turbo`, reached through the generic MODEL_TABLE / `generate_stream` path. Force-link
 // or the linker GCs its `ModelRegistration` and `gen_core::load("lens_turbo")` returns "no generator

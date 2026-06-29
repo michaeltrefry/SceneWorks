@@ -1728,7 +1728,17 @@ async fn generate_stream(
     } else {
         model.backend()
     };
-    let (quant, quant_bits) = resolve_quant(request);
+    // Descriptor-gated quant (mirrors the candle lane below): the generic MLX families all advertise
+    // Q4/Q8 (`supported_quants`) and tolerate the Q8 default (a real quant on a dense convert, a no-op on
+    // an already-packed turnkey). SANA (sc-8489) is the lone exception — its descriptor advertises
+    // `supported_quants: &[]` and its `load` REJECTS any `spec.quantize`, so resolve no quant for it and
+    // let it load dense bf16. Every pre-existing family keeps `supports_quant() == true`, so their
+    // resolved quant is byte-identical.
+    let (quant, quant_bits) = if model.supports_quant() {
+        resolve_quant(request)
+    } else {
+        (None, None)
+    };
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
     let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);

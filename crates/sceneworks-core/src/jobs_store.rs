@@ -3635,6 +3635,11 @@ const MLX_ROUTED_MODELS: &[&str] = &[
     "sd3_5_large",
     "sd3_5_large_turbo",
     "sd3_5_medium",
+    // SANA 1600M (epic 8485 / sc-8489): native `mlx-gen-sana` text-to-image engine (adapter
+    // `mlx_sana`) over the un-gated `SceneWorks/Sana_1600M_1024px_mlx` MLX snapshot. macOS-only
+    // (no torch backend). True-CFG text-to-image only (20 steps / guidance 4.5); `edit_image` has no
+    // source/reference path, so it's rejected (mirrors Krea/SD3.5/Lens).
+    "sana_1600m",
 ];
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -3699,6 +3704,7 @@ fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => boogu_mlx_eligible(payload),
         "krea_2_turbo" => krea_mlx_eligible(payload),
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
+        "sana_1600m" => sana_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
         _ => false,
     }
@@ -5072,6 +5078,16 @@ fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// `model_mac_support`'s `features.edit` false for all three (it probes with `mode: edit_image`).
 /// macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so nothing defers.
 fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
+/// SANA 1600M (epic 8485 / sc-8489) MLX-eligibility. The native `mlx-gen-sana` engine serves the
+/// **text-to-image** surface only (true-CFG, 20 steps / guidance 4.5); the base SANA checkpoint has no
+/// img2img/control conditioning, so an `edit_image` request is rejected (the same defensive shape
+/// Krea / SD3.5 / Lens reject). This keeps `model_mac_support`'s `features.edit` false (it probes with
+/// `mode: edit_image`). macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so
+/// nothing defers.
+fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 

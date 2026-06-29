@@ -2544,6 +2544,102 @@
       }
     },
     {
+      "id": "sana_1600m",
+      // SANA 1600M 1024px (epic 8485 / sc-8489) — NVIDIA's efficient Linear-DiT text-to-image model,
+      // ported natively to mlx-gen (engine id `sana_1600m`). A 1.6B Linear-DiT trunk (ReLU linear
+      // attention + Mix-FFN + NoPE) conditioned by a gemma-2-2b-it Complex-Human-Instruction (CHI)
+      // caption encoder (reused from the PiD epic 7840 — SceneWorks/gemma-2-2b-it) + the deeply-
+      // compressed 32× DC-AE (f32) decoder. Native MLX only (mlx-gen-sana, no torch/candle backend) →
+      // macOnly. True-CFG text-to-image (20 steps / guidance 4.5). `adapter` is the asset stamp
+      // (mirrors mlx_<family>). Worker routing through engines::MODEL_TABLE / the gen_core registry +
+      // the MLX_ROUTED_MODELS gate (jobs_store.rs) lands in this same story (sc-8489 Phase B2).
+      //
+      // NVIDIA non-commercial: SANA-1.6B is distributed under the NVIDIA Open Model License /
+      // NSCLv1 (research & evaluation, non-commercial). The re-hosted `SceneWorks/Sana_1600M_1024px_mlx`
+      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host
+      // precedent — OK to ship gated-with-notice). SceneWorks's overall non-commercial posture covers
+      // this; generations are for non-commercial use only.
+      "autoDownload": false,
+      "name": "SANA 1600M",
+      "family": "sana",
+      "type": "image",
+      "adapter": "mlx_sana",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "downloads": [
+        {
+          // Pre-converted MLX snapshot on the SceneWorks HF org (sc-8489): ONE
+          // `SanaPipeline::from_snapshot`-loadable root — `transformer/` (the Linear-DiT trunk),
+          // `vae/` (the 32× DC-AE f32 decoder), and `text_encoder/` (the gemma-2-2b-it CHI caption
+          // encoder — `gemma-2-2b-it.safetensors` + `tokenizer.json`, sourced from the
+          // SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated as a separate
+          // catalog dependency). Un-gated (the mirror carries the NVIDIA non-commercial NOTICE).
+          // Dense bf16 (no quant subdir — the 2-bit SANA quant is intentionally NOT ported).
+          // estimatedSizeBytes is a PLACEHOLDER (the 1.6B DiT + ~2.6B gemma TE + DC-AE) refined once
+          // the real pull is measured.
+          "provider": "huggingface",
+          "repo": "SceneWorks/Sana_1600M_1024px_mlx",
+          "files": ["transformer/*", "vae/*", "text_encoder/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 9500000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/Sana_1600M_1024px_mlx"
+      },
+      "defaults": {
+        // diffusers `SanaPipeline` reference defaults: flow-match Euler with a static time-shift of
+        // 3.0, 20 steps, true CFG 4.5 (negative-prompt capable). The shift is the orthogonal
+        // schedulerShift knob (epic 7114) rather than a scheduler choice.
+        "resolution": "1024x1024",
+        "steps": 20,
+        "guidanceScale": 4.5,
+        "count": 1,
+        "sampler": "euler",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        // 32× DC-AE divisor → W×H must be multiples of 32 (descriptor RES_MULTIPLE). Native 1024².
+        // SANA routes the per-generation sampler/scheduler knobs through the unified flow framework
+        // (epic 7114), so it advertises the full curated flow menu. "default" is the native
+        // flow-match Euler loop. The `sana_1600m` descriptor advertises curated_sampler_names()/
+        // curated_scheduler_names(); the engines.rs drift guard checks this list is a subset.
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        // No SANA LoRA wired yet (the engine descriptor reports supports_lora: false). Family
+        // reserved for when/if adapters are added.
+        "families": ["sana"],
+        "types": []
+      },
+      "mlx": {
+        // Dense bf16 snapshot (no runtime quant — the 2-bit SANA quant is NOT ported; the load path
+        // rejects a quantize override). minMemoryGb 24: the 1.6B Linear-DiT trunk + the ~2.6B gemma
+        // TE + DC-AE decode, a comfortably small footprint relative to the SD3.5 / Boogu flagships.
+        "minMemoryGb": 24,
+        "repo": "SceneWorks/Sana_1600M_1024px_mlx"
+      },
+      "licenseUrl": "https://huggingface.co/Efficient-Large-Model/Sana_1600M_1024px",
+      "ui": {
+        "label": "SANA 1600M",
+        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT text-to-image model, ported natively to MLX (Apple Silicon only). A 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) for fast 1024×1024 generation with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Dense bf16 (no quantization). Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "SANA Prompt Guide",
+          "path": "/prompt-guides/sana.md",
+          "sources": [
+            { "label": "SANA model card (NVIDIA)", "url": "https://huggingface.co/Efficient-Large-Model/Sana_1600M_1024px" },
+            { "label": "SANA project page", "url": "https://nvlabs.github.io/Sana/" },
+            { "label": "SANA paper (Linear DiT + DC-AE)", "url": "https://arxiv.org/abs/2410.10629" }
+          ]
+        }
+      }
+    },
+    {
       "id": "sdxl",
       "recommended": true,
       "name": "Stable Diffusion XL",

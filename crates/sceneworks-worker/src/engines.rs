@@ -474,6 +474,24 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 5.0,
         adapter_label: "mlx_sd3",
     },
+    // SANA 1600M 1024px (epic 8485 / sc-8489) — native MLX, NVIDIA non-commercial. NVIDIA's efficient
+    // Linear-DiT (ReLU linear-attn + Mix-FFN + NoPE) 1.6B trunk + a gemma-2-2b-it CHI caption encoder +
+    // the 32× DC-AE (f32) decoder. True-CFG text-to-image: 20 steps / guidance 4.5 + negative prompt
+    // (the `sana_1600m` descriptor advertises supports_guidance + supports_negative + supports_true_cfg).
+    // Loads the un-gated `SceneWorks/Sana_1600M_1024px_mlx` MLX snapshot (transformer/ vae/ text_encoder/,
+    // the latter bundling the SceneWorks/gemma-2-2b-it TE so the load path resolves one snapshot dir —
+    // SanaTextEncoder::from_snapshot reads `<dir>/text_encoder/gemma-2-2b-it.safetensors` + tokenizer.json).
+    // Generator self-registers via the shared force-link (`use mlx_gen_sana as _;` in image_jobs.rs);
+    // reaches the generic MODEL_TABLE / `generate_stream` path. No runtime quant (the 2-bit quant is NOT
+    // ported); ships dense bf16. 32× DC-AE divisor → width/height must be multiples of 32.
+    ModelRow {
+        sceneworks_id: "sana_1600m",
+        engine_id: "sana_1600m",
+        default_repo: "SceneWorks/Sana_1600M_1024px_mlx",
+        default_steps: 20,
+        default_guidance: 4.5,
+        adapter_label: "mlx_sana",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids
@@ -573,9 +591,14 @@ impl ResolvedModel {
     }
     /// Whether the engine advertises any on-the-fly Q4/Q8 quantization (descriptor-derived). The
     /// candle SDXL / sc-5096 families advertise none (dense only); Lens advertises Q4/Q8 (sc-5126).
-    /// Candle-lane-only: the MLX path always resolves quant unconditionally, so this gate is unused
-    /// on macOS.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    /// Used on BOTH lanes: the candle lane has always gated quant on this; the MLX lane gates on it
+    /// too as of sc-8489 so SANA (the lone generic-MLX family with `supported_quants: &[]`, whose
+    /// `load` rejects any quant) loads dense, while every pre-existing family (all Q4/Q8) is
+    /// unaffected.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     pub fn supports_quant(&self) -> bool {
         !self.descriptor.capabilities.supported_quants.is_empty()
     }
