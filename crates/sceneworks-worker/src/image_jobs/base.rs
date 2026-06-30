@@ -244,13 +244,69 @@ pub(crate) fn resolve_weights_dir(
     if request.model == "krea_2_turbo" {
         return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
     }
-    // FLUX.2-dev (sc-8513, epic 8506) now ships as a SceneWorks pre-quantized turnkey with packed
-    // `q4/` (default) + `q8/` self-contained subdirs (replacing the install-time convert); point the
-    // engine at the chosen quant's subdir rather than the repo root.
-    if request.model == "flux2_dev" {
-        return Ok(snapshot.map(|root| flux2_dev_model_subdir(&root, request)));
+    // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
+    // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
+    // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
+    // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`].
+    if STANDARD_TIER_MODELS.contains(&request.model.as_str()) {
+        return Ok(snapshot.map(|root| standard_tier_subdir(&root, request)));
     }
     Ok(snapshot)
+}
+
+/// Models that ship the standard SceneWorks quant-matrix turnkey layout: self-contained `q4/`
+/// (manifest default) + `q8/` + `bf16/` subdirs, each a complete `from_snapshot`-loadable tree
+/// (packed or dense `transformer/` + the dense text encoder(s)/VAE/tokenizer). Registering a model
+/// here routes it through [`standard_tier_subdir`] (sc-8513, epic 8506) — the generalization of the
+/// FLUX.2-dev pilot's bespoke resolver. Legacy turnkeys with non-standard defaults/variants
+/// (Ideogram q4-only, Krea q8-default, Boogu per-variant + on-demand bf16) keep their own resolvers
+/// above.
+const STANDARD_TIER_MODELS: &[&str] = &[
+    "flux2_dev",
+    "sd3_5_large",
+    "sd3_5_large_turbo",
+    "sd3_5_medium",
+];
+
+/// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:
+/// `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0` / "none"), `q8/`
+/// when it opts into Q8 (`> 4`), else the default `q4/`. Falls back through q4 → q8 → bf16 → `root`
+/// so a partially-downloaded turnkey surfaces as a load error rather than a silent half-load.
+///
+/// Tier presence is filename-agnostic: a tier is "present" when its `transformer/` holds any
+/// `*.safetensors` (packed single-file OR a `*-00001-of-*.safetensors` shard) or a `*.index.json`
+/// (dense sharded). This covers every backbone regardless of its packed filename
+/// (`diffusion_pytorch_model.safetensors`, `model.safetensors`, …), so a new model needs only a
+/// [`STANDARD_TIER_MODELS`] entry, no bespoke resolver.
+fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        let transformer = dir.join("transformer");
+        let Ok(entries) = std::fs::read_dir(&transformer) else {
+            return None;
+        };
+        let has_weights = entries.flatten().any(|entry| {
+            let file = entry.file_name();
+            let name = file.to_string_lossy();
+            name.ends_with(".safetensors") || name.ends_with(".index.json")
+        });
+        has_weights.then_some(dir)
+    };
+    // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
+    let preferred = match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        _ => "q4",
+    };
+    present(preferred)
+        .or_else(|| present("q4"))
+        .or_else(|| present("q8"))
+        .or_else(|| present("bf16"))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`: `q8/` when the request
@@ -277,39 +333,6 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     }
     present("q4")
         .or_else(|| present("q8"))
-        .unwrap_or_else(|| root.to_path_buf())
-}
-
-/// Pick the engine-complete packed subdir of a FLUX.2-dev SceneWorks turnkey `root`: `q8/` when the
-/// request opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`.
-/// Falls back to whichever subdir is present, then `root` (a partially-downloaded bundle surfaces as
-/// a load error rather than a silent half-load). FLUX.2-dev's packed transformer file is
-/// `diffusion_pytorch_model.safetensors` (vs Ideogram's `model.safetensors`). sc-8513 / epic 8506.
-fn flux2_dev_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
-    // Tier presence: q4/q8 ship a single packed transformer file; bf16 is the dense diffusers tree
-    // (SHARDED → no single file, only the `.index.json`). Accept either shape.
-    let present = |name: &str| -> Option<PathBuf> {
-        let dir = root.join(name);
-        let packed = dir.join("transformer/diffusion_pytorch_model.safetensors").is_file();
-        let sharded = dir
-            .join("transformer/diffusion_pytorch_model.safetensors.index.json")
-            .is_file();
-        (packed || sharded).then_some(dir)
-    };
-    // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
-    let preferred = match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        _ => "q4",
-    };
-    present(preferred)
-        .or_else(|| present("q4"))
-        .or_else(|| present("q8"))
-        .or_else(|| present("bf16"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -3029,5 +3052,75 @@ mod candle_label_tests {
         ] {
             assert!(!is_candle_engine(model), "{model} must not be a candle engine");
         }
+    }
+}
+
+#[cfg(test)]
+mod standard_tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(advanced: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({ "model": "sd3_5_large", "advanced": advanced })
+                .as_object()
+                .unwrap(),
+        )
+    }
+
+    /// Write a minimal present `<tier>/transformer/<file>` so [`standard_tier_subdir`]'s
+    /// filename-agnostic probe sees the tier as downloaded.
+    fn seed_tier(root: &Path, tier: &str, file: &str) {
+        let dir = root.join(tier).join("transformer");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(file), b"x").unwrap();
+    }
+
+    #[test]
+    fn defaults_to_q4_and_honors_quantize_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Packed q4/q8 single-file + dense sharded bf16 (only the index.json shape).
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // No selection → q4 default.
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({}))),
+            root.join("q4")
+        );
+        // mlxQuantize 8 → q8; 0/"none" → bf16; numeric-string accepted.
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+            root.join("q8")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 0 }))),
+            root.join("bf16")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": "8" }))),
+            root.join("q8")
+        );
+    }
+
+    #[test]
+    fn falls_back_when_preferred_tier_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Only q4 downloaded: a q8/bf16 request still resolves to the present q4 rather than a
+        // half-empty subdir, so a partial turnkey surfaces as a load error, not a silent half-load.
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+            root.join("q4")
+        );
+        // Nothing present → the repo root (engine surfaces the missing-weights error).
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            standard_tier_subdir(empty.path(), &request(json!({}))),
+            empty.path().to_path_buf()
+        );
     }
 }

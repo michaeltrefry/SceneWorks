@@ -2341,32 +2341,36 @@
       "macOnly": false,
       "downloads": [
         {
-          // Gated repo (Stability AI Community License — non-commercial / <$1M-rev commercial OK;
-          // requires HF license acknowledgement + token). The repo ships the diffusers tree
-          // (transformer/ + the three text encoders + VAE + tokenizers) AND single-file checkpoints;
-          // the native converter reads ONLY the diffusers subdirs, so include just those (+
-          // model_index.json). estimatedSizeBytes is a PLACEHOLDER (the diffusers subset of the
-          // gated repo) — refine in E7/S3 once the real pull is measured.
+          // SceneWorks pre-built MLX quant-matrix turnkey (sc-8513, epic 8506): a public/ungated
+          // re-host of stabilityai/stable-diffusion-3.5-large under the Stability AI Community
+          // License (LICENSE.md + "Powered by Stability AI" NOTICE travel with the weights — no HF
+          // token or license-click needed). Per-tier subdirs, each a complete from_snapshot tree
+          // (packed/dense transformer/ + the dense triple text encoder + tokenizers + 16-ch VAE):
+          // q4/ (default), q8/, bf16/. Replaces the old gated diffusers download + install-time Q8
+          // convert: the worker loads the chosen tier's subdir directly (standard_tier_subdir).
+          // Only the MMDiT transformer is quantized; the text encoders + VAE are reused dense in
+          // every tier (so the tiers differ only in transformer precision). q8/ + bf16/ are
+          // separate entries (tier selection: sc-8508/8509). Sizes are the measured on-disk totals.
           "provider": "huggingface",
-          "repo": "stabilityai/stable-diffusion-3.5-large",
-          "files": [
-            "model_index.json",
-            "transformer/*",
-            "text_encoder/*",
-            "text_encoder_2/*",
-            "text_encoder_3/*",
-            "tokenizer/*",
-            "tokenizer_2/*",
-            "tokenizer_3/*",
-            "vae/*",
-            "scheduler/*"
-          ],
-          "estimatedSizeBytes": 20500000000
+          "repo": "SceneWorks/sd3.5-large-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 27212570624
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sd3.5-large-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 31248461824
+        },
+        {
+          // bf16/ — the dense diffusers tree (sharded transformer), the max-fidelity tier.
+          // Selectable via per-variant tracking (sc-8508/8509).
+          "provider": "huggingface",
+          "repo": "SceneWorks/sd3.5-large-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 38789746688
         }
       ],
-      "paths": {
-        "model": "${HF_CACHE}/stabilityai/stable-diffusion-3.5-large"
-      },
       "defaults": {
         // SD3.5 Large reference defaults: flow-match Euler with a time-shift of 3.0, ~28 steps,
         // true classifier-free guidance 3.5 (negative-prompt capable). The shift is the orthogonal
@@ -2398,23 +2402,20 @@
         "types": ["style", "enhance", "character"]
       },
       "mlx": {
-        // 8B MMDiT + triple text encoder (CLIP-L + CLIP-G + ~4.7B T5-XXL) + 16-ch VAE. Converted to
-        // a packed MLX dir at install (mlx.requiresConversion + the `sd3_5_large_quant` converter,
-        // REGISTERED IN S2/S3 — this entry only declares it). minMemoryGb 64 — E7 profiled the real
-        // OS peak memory footprint at ~59 GB Q8 (MLX Metal-wired memory, not RSS, dominated by the
-        // T5-XXL TE + activations); 64 leaves headroom over that measured peak.
+        // 8B MMDiT + triple text encoder (CLIP-L + CLIP-G + ~4.7B T5-XXL) + 16-ch VAE. Now ships as
+        // a SceneWorks pre-built turnkey (sc-8513) — no install-time convert. q4/ is the default
+        // tier (`quantize: 4`); q8/ + bf16/ are hosted and selectable (sc-8508/8509). Only the MMDiT
+        // is quantized; the dense T5-XXL TE + VAE dominate the footprint in every tier, so minMemoryGb
+        // stays 64 (E7 profiled the real OS peak at ~59 GB; the q4 transformer trims a few GB but the
+        // dense-TE floor is unchanged).
         "minMemoryGb": 64,
-        "quantize": 8,
-        "requiresConversion": true,
-        "converter": "sd3_5_large_quant",
-        "convertSourceRepo": "stabilityai/stable-diffusion-3.5-large"
+        "quantize": 4
       },
-      "gated": true,
-      "credentialHost": "huggingface.co",
-      "licenseUrl": "https://huggingface.co/stabilityai/stable-diffusion-3.5-large",
+      "gated": false,
+      "licenseUrl": "https://huggingface.co/SceneWorks/sd3.5-large-mlx/blob/main/LICENSE.md",
       "ui": {
         "label": "Stable Diffusion 3.5 Large",
-        "description": "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship, ported natively to MLX (Apple Silicon only). Triple text encoder (CLIP-L + CLIP-G + T5-XXL) for strong prompt adherence and in-image text; true classifier-free guidance with negative prompts. Runs ~28 steps at guidance 3.5 (flow-match Euler, shift 3.0); native 1024×1024. Distributed under the Stability AI Community License (gated): accept the license at huggingface.co/stabilityai/stable-diffusion-3.5-large and add a Hugging Face token under Settings → Service credentials before downloading. Pre-quantized to Q8 at install.",
+        "description": "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship, ported natively to MLX (Apple Silicon only). Triple text encoder (CLIP-L + CLIP-G + T5-XXL) for strong prompt adherence and in-image text; true classifier-free guidance with negative prompts. Runs ~28 steps at guidance 3.5 (flow-match Euler, shift 3.0); native 1024×1024. Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
         "recommendedFor": ["text_to_image", "style_variations"],
         "promptGuide": {
           "title": "Stable Diffusion 3.5 Prompt Guide",

@@ -2364,3 +2364,153 @@ mod hardlink_tests {
         );
     }
 }
+
+/// Offline quant-matrix tier builder (sc-8513, epic 8506) — the generalization of the FLUX.2-dev
+/// pilot's one-off builder into a per-converter dispatch over the SAME production `ConvertPlan`
+/// converters, so each hosted tier is byte-equivalent to the install-time output.
+///
+/// Produces ONE complete, HF-uploadable turnkey subdir (`q4/`, `q8/`, or `bf16/`) from a cached
+/// dense diffusers source:
+/// - `q4`/`q8`: run the production converter (packs `transformer/`, symlinks the dense TE/VAE/
+///   tokenizer through), then dereference those symlinks into real files (HF upload does not follow
+///   cache blob symlinks across a move).
+/// - `bf16`: mirror the dense diffusers tree as-is (no quantize) — the dense backbone IS the bf16
+///   tier.
+///
+/// `#[ignore]`: needs the cached dense source snapshot + Metal. Run ONE tier at a time (bounds the
+/// transformer quantize disk peak), e.g.:
+/// ```text
+/// SC8513_CONVERTER=sd3_5_large_quant SC8513_BITS=4 \
+///   SC8513_SRC="$HOME/.cache/huggingface/hub/models--stabilityai--stable-diffusion-3.5-large/snapshots/<rev>" \
+///   SC8513_OUT="$HOME/sc8513/sd3.5-large-mlx" \
+///   cargo test -p sceneworks-worker --release tier_builder::build_tier -- --ignored --nocapture
+/// ```
+/// `SC8513_BITS<=0` builds the bf16 tier. New architectures: add a `SC8513_CONVERTER` arm mapping to
+/// the model's production converter + its dense-reuse subdir list.
+#[cfg(all(test, target_os = "macos"))]
+mod tier_builder {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn env_path(key: &str) -> PathBuf {
+        PathBuf::from(std::env::var(key).unwrap_or_else(|_| panic!("set {key}")))
+    }
+
+    /// Recursively copy `src` → `dst`, resolving any symlink (incl. HF-cache blob symlinks) to its
+    /// real bytes so the output is a self-contained tree of real files.
+    fn copy_tree_deref(src: &Path, dst: &Path) {
+        if src.is_dir() {
+            std::fs::create_dir_all(dst).unwrap();
+            for entry in std::fs::read_dir(src).unwrap() {
+                let entry = entry.unwrap();
+                copy_tree_deref(&entry.path(), &dst.join(entry.file_name()));
+            }
+        } else {
+            let real = std::fs::canonicalize(src).unwrap();
+            std::fs::copy(&real, dst).unwrap();
+        }
+    }
+
+    /// Replace every symlink under `dir` (the dense TE/VAE/tokenizer the converter borrowed from the
+    /// source) with a real copy of its canonical target, in place.
+    fn deref_symlinks(dir: &Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let ty = std::fs::symlink_metadata(&path).unwrap().file_type();
+            if ty.is_symlink() {
+                let real = std::fs::canonicalize(&path).unwrap();
+                std::fs::remove_file(&path).unwrap();
+                if real.is_dir() {
+                    copy_tree_deref(&real, &path);
+                } else {
+                    std::fs::copy(&real, &path).unwrap();
+                }
+            } else if ty.is_dir() {
+                deref_symlinks(&path);
+            }
+        }
+    }
+
+    /// The diffusers subdirs a converter reuses DENSE (also the extra bf16-mirror set beyond
+    /// `transformer/`). `scheduler` is optional metadata and skipped when absent.
+    fn dense_subs(converter: &str) -> &'static [&'static str] {
+        match converter {
+            "sd3_5_large_quant" | "sd3_5_large_turbo_quant" | "sd3_5_medium_quant" => &[
+                "text_encoder",
+                "text_encoder_2",
+                "text_encoder_3",
+                "tokenizer",
+                "tokenizer_2",
+                "tokenizer_3",
+                "vae",
+                "scheduler",
+                "model_index.json",
+            ],
+            "flux2_dev_quant" => &["text_encoder", "vae", "tokenizer", "model_index.json"],
+            other => panic!("unknown SC8513_CONVERTER {other}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "real-weight: cached dense source snapshot + Metal"]
+    fn build_tier() {
+        let converter = std::env::var("SC8513_CONVERTER").expect("set SC8513_CONVERTER");
+        let bits: i32 = std::env::var("SC8513_BITS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4);
+        let group_size: i32 = std::env::var("SC8513_GROUP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(64);
+        let src = env_path("SC8513_SRC");
+        let out_root = env_path("SC8513_OUT");
+        let tier = if bits <= 0 {
+            "bf16".to_owned()
+        } else {
+            format!("q{bits}")
+        };
+        let out = out_root.join(&tier);
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        eprintln!(
+            "[sc-8513] {converter} {tier} (bits {bits}, group {group_size}) {} -> {}",
+            src.display(),
+            out.display()
+        );
+
+        if bits <= 0 {
+            // bf16: the dense backbone IS the tier — mirror transformer + the dense-reuse subdirs.
+            copy_tree_deref(&src.join("transformer"), &out.join("transformer"));
+            eprintln!("[sc-8513]   bf16 transformer mirrored");
+            for sub in dense_subs(&converter) {
+                let s = src.join(sub);
+                if !s.exists() {
+                    assert_eq!(*sub, "scheduler", "bf16 source missing required `{sub}`");
+                    continue;
+                }
+                copy_tree_deref(&s, &out.join(sub));
+                eprintln!("[sc-8513]   bf16 {sub} mirrored");
+            }
+        } else {
+            // q4/q8: production converter packs transformer/ + symlinks dense parts; then realize.
+            let result = match converter.as_str() {
+                "sd3_5_large_quant" => {
+                    convert_sd3_prequant(&src, &out, Sd3Variant::Large, bits, group_size)
+                }
+                "sd3_5_large_turbo_quant" => {
+                    convert_sd3_prequant(&src, &out, Sd3Variant::LargeTurbo, bits, group_size)
+                }
+                "sd3_5_medium_quant" => {
+                    convert_sd3_prequant(&src, &out, Sd3Variant::Medium, bits, group_size)
+                }
+                "flux2_dev_quant" => convert_flux2_dev_prequant(&src, &out, bits, group_size),
+                other => panic!("unknown SC8513_CONVERTER {other}"),
+            };
+            result.unwrap_or_else(|error| panic!("production convert failed: {error}"));
+            eprintln!("[sc-8513]   transformer packed; dereferencing dense symlinks");
+            deref_symlinks(&out);
+        }
+        eprintln!("[sc-8513] DONE {tier} at {}", out.display());
+    }
+}

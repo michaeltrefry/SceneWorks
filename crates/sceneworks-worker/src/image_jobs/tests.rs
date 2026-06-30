@@ -1351,6 +1351,67 @@ fn flux2_dev_bf16_real_weights_loads_and_generates() {
     );
 }
 
+/// On-device verify of a hosted SceneWorks SD3.5 quant-matrix tier (sc-8513, epic 8506): load the
+/// DOWNLOADED tier subdir through the real worker `load_engine` seam and render a non-degenerate
+/// frame — proving the hosted artifact (download → load → generate) works end to end. Point
+/// `SCENEWORKS_SD3_DIR` at the downloaded tier subdir (e.g. the `q4/` of
+/// `SceneWorks/sd3.5-large-mlx`); `SCENEWORKS_SD3_ENGINE` selects the variant engine
+/// (`sd3_5_large` default / `sd3_5_large_turbo` / `sd3_5_medium`); `SCENEWORKS_SD3_QUANT`
+/// (`q4` default / `q8` / `bf16`) sets the load hint (a no-op on the already-packed q4/q8 weights;
+/// `bf16` loads dense via `Quant::None`). Small size/steps by default to fit a 128 GB box; the dense
+/// T5-XXL TE dominates the footprint. Run on demand:
+/// `SCENEWORKS_SD3_DIR=… cargo test -p sceneworks-worker --release --lib -- --ignored sd3_5_hosted_tier_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs a downloaded SceneWorks SD3.5 tier dir + a high-memory Metal device"]
+fn sd3_5_hosted_tier_real_weights_generates_one_image() {
+    let dir = std::path::PathBuf::from(
+        std::env::var("SCENEWORKS_SD3_DIR").expect("set SCENEWORKS_SD3_DIR to a downloaded tier dir"),
+    );
+    let engine = std::env::var("SCENEWORKS_SD3_ENGINE").unwrap_or_else(|_| "sd3_5_large".to_owned());
+    let quant = match std::env::var("SCENEWORKS_SD3_QUANT").as_deref() {
+        Ok("bf16") => None,
+        Ok("q8") => Some(gen_core::Quant::Q8),
+        _ => Some(gen_core::Quant::Q4),
+    };
+    let size: u32 = std::env::var("SCENEWORKS_SD3_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    let steps: u32 = std::env::var("SCENEWORKS_SD3_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    eprintln!("[sd3-verify] loading {engine} from {} ({quant:?})…", dir.display());
+    let generator = load_engine(&engine, dir, quant, Vec::new(), None).unwrap();
+    eprintln!("[sd3-verify] LOADED — generating {size}²/{steps}…");
+    let request = GenerationRequest {
+        prompt: "a serene mountain lake at dawn".into(),
+        width: size,
+        height: size,
+        count: 1,
+        seed: Some(42),
+        steps: Some(steps),
+        guidance: Some(3.5),
+        ..Default::default()
+    };
+    let img = match generator.generate(&request, &mut |_| {}).unwrap() {
+        GenerationOutput::Images(mut v) => v.remove(0),
+        other => panic!("expected Images, got {other:?}"),
+    };
+    eprintln!("[sd3-verify] GENERATED {}x{}", img.width, img.height);
+    assert_eq!((img.width, img.height), (size, size), "output dimensions");
+    assert_eq!(
+        img.pixels.len(),
+        (size * size * 3) as usize,
+        "RGB8 pixel count"
+    );
+    assert!(
+        img.pixels.windows(2).any(|w| w[0] != w[1]),
+        "render is flat (degenerate)"
+    );
+}
+
 /// Real-weights smoke (sc-5923): FLUX.2-dev EDIT through the worker `flux2_dev_edit` engine path
 /// (the `flux2_edit_engine_id("flux2_dev")` variant, sc-5919/5922). Loads the SAME converted Q4 dev
 /// snapshot, then renders with a single `Conditioning::Reference` AND with a 2-image
