@@ -9135,8 +9135,50 @@ async fn parent_death_resolves_when_watched_parent_exits() {
     .expect("watchdog did not resolve after the parent exited");
 }
 
+/// The Windows analogue: the parent-death watchdog is no longer unix-only (the
+/// candle `auto` supervisor's per-GPU children orphaned on every quit because
+/// `run_worker`/`shutdown_signal` never raced it off-unix). Spawn a dummy parent,
+/// confirm `pid_alive` (a `tasklist` probe) tracks it, kill it, and assert the
+/// watchdog then resolves.
+#[cfg(windows)]
+#[tokio::test]
+async fn parent_death_resolves_when_watched_parent_exits_windows() {
+    // `ping -n 30` lives ~30s and spawns no children to orphan; its stdout is
+    // discarded so it doesn't bleed into the test output.
+    let mut parent = std::process::Command::new("ping")
+        .args(["-n", "30", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn dummy parent");
+    let pid = parent.id() as i32;
+
+    assert!(
+        super::pid_alive(pid),
+        "freshly spawned parent reads as dead"
+    );
+    // Still alive -> the watchdog must not resolve within a poll cycle.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), super::parent_death(Some(pid)))
+            .await
+            .is_err(),
+        "watchdog resolved while the parent was still alive"
+    );
+
+    parent.kill().expect("kill dummy parent");
+    parent.wait().expect("reap dummy parent");
+    assert!(!super::pid_alive(pid), "reaped parent still reads as alive");
+
+    // Now gone -> the watchdog resolves on its next check.
+    tokio::time::timeout(
+        super::PARENT_POLL_INTERVAL + Duration::from_secs(5),
+        super::parent_death(Some(pid)),
+    )
+    .await
+    .expect("watchdog did not resolve after the parent exited");
+}
+
 /// No configured parent (server/Docker) -> the watchdog future never resolves.
-#[cfg(unix)]
+/// Cross-platform: the watchdog is now wired on Windows too.
 #[tokio::test]
 async fn parent_death_never_fires_without_a_parent_pid() {
     assert!(
@@ -9147,8 +9189,8 @@ async fn parent_death_never_fires_without_a_parent_pid() {
     );
 }
 
-/// PIDs of 0 or 1 (and unset/garbage) yield no parent to watch.
-#[cfg(unix)]
+/// PIDs of 0 or 1 (and unset/garbage) yield no parent to watch. Cross-platform:
+/// the parser backs the watchdog on every OS now.
 #[test]
 fn parent_pid_to_watch_rejects_init_and_invalid_values() {
     use std::env;
