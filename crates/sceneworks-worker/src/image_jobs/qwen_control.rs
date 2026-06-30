@@ -1,21 +1,29 @@
-// Candle (Windows/CUDA) Qwen-Image ControlNet (strict pose) route (sc-5489, epic 5480) — `qwen_image`
-// + `advanced.poses` off-Mac via `candle_gen_qwen_image::QwenControl`. The candle sibling of the MLX
-// Qwen strict-pose path (qwen.rs `generate_qwen_control_stream`): one image per pose, each conditioned
-// on a full DWPose skeleton (rendered cross-platform by `openpose_skeleton::draw_wholebody`) fed to the
-// InstantX Qwen-Image-ControlNet-Union branch.
+// Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
+// sc-8350 repoint, epic 8236) — `qwen_image` + `advanced.poses` off-Mac via
+// `candle_gen_qwen_image::QwenFunControl`. The candle sibling of the MLX Qwen 2512-Fun strict-control path
+// (qwen.rs `generate_qwen_control_stream`): one image per pose (or, with `advanced.controlMode =
+// canny|depth` + a source, an auto-derived canny / Depth-Anything-V2 map), each fed to the VACE-style
+// `alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union` branch overlaid on the Qwen-Image-2512 base.
 //
-// **Candle-only.** macOS keeps the MLX `qwen_image_control` registry generator; the candle `QwenControl`
+// **sc-8350 source swap.** This lane previously loaded the InstantX `Qwen-Image-ControlNet-Union`
+// checkpoint (`QwenControl`, a residual-ControlNet on the `Qwen/Qwen-Image` base). It now rides the
+// 2512-Fun-Union VACE engine (`QwenFunControl`) on the `Qwen/Qwen-Image-2512` base — input-agnostic
+// (pose/canny/depth, no mode index), matching the `STRICT_CONTROL_ENGINES` `qwen_image_control` row. The
+// candle-gen InstantX `control.rs` engine (`QwenControl`) stays in the crate but is no longer used by the
+// worker.
+//
+// **Candle-only.** macOS keeps the MLX `qwen_image_control` registry generator; the candle `QwenFunControl`
 // is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build (the `include!` in
 // image_jobs.rs carries the cfg). It is `include!`d into the `image_jobs` module, so it shares that
 // module's imports (`parse_poses`/`Settings`/`WorkerResult`/`huggingface_snapshot_dir`/
 // `ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 
-/// Default InstantX Qwen-Image-ControlNet-Union weights (Apache-2.0, DWPose-trained) — same repo/file
-/// the MLX path uses (`qwen.rs` `QWEN_CONTROL_REPO`/`QWEN_CONTROL_FILE`).
-const QWEN_CONTROL_REPO: &str = "InstantX/Qwen-Image-ControlNet-Union";
+/// Default 2512-Fun-Controlnet-Union weights (Apache-2.0, input-agnostic VACE control) — same repo/file
+/// the MLX path uses (`qwen.rs` 2512-Fun constants); the candle lane keeps its own constant (sc-8350).
+const QWEN_CONTROL_REPO: &str = "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union";
 const QWEN_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
-/// The Qwen-Image base diffusers repo when the manifest omits `repo`.
-const QWEN_CONTROL_DEFAULT_REPO: &str = "Qwen/Qwen-Image";
+/// The Qwen-Image-2512 base diffusers repo when the manifest omits `repo` (the 2512-Fun base, sc-8350).
+const QWEN_CONTROL_DEFAULT_REPO: &str = "Qwen/Qwen-Image-2512";
 /// ControlNet conditioning-scale default (the strict-pose tier).
 const QWEN_CONTROL_DEFAULT_SCALE: f32 = 1.0;
 /// Denoise-steps default (Qwen-Image production).
@@ -26,9 +34,9 @@ const QWEN_CONTROL_DEFAULT_GUIDANCE: f32 = 4.0;
 /// `candle_qwen` lane).
 const QWEN_CONTROL_ENGINE: &str = "candle_qwen_control";
 /// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
-/// (the `qwen_image_control` row — `{Pose, Canny, Depth}`). NOTE the candle lane still loads the InstantX
-/// `Qwen-Image-ControlNet-Union` checkpoint (its own default-repo constants above), not the table's
-/// 2512-Fun row — that source swap is the separate sc-8350. Only `supported_kinds` is shared here.
+/// (the `qwen_image_control` row — `{Pose, Canny, Depth}`). As of sc-8350 the candle lane loads the
+/// 2512-Fun-Controlnet-Union checkpoint on the Qwen-Image-2512 base (`QwenFunControl`), matching the
+/// table's `qwen_image_control` repo (`alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union`) exactly.
 const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
 
 /// Model ids the candle Qwen ControlNet route accepts.
@@ -36,9 +44,9 @@ fn is_qwen_control_model(model: &str) -> bool {
     model == "qwen_image"
 }
 
-/// Resolve the Qwen-Image base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) →
-/// the HF cache snapshot for the manifest `repo` (default `Qwen/Qwen-Image`). `None` ⇒ not present
-/// locally (the job is not candle-runnable, falls through to torch). Mirrors
+/// Resolve the Qwen-Image-2512 base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) →
+/// the HF cache snapshot for the manifest `repo` (default `Qwen/Qwen-Image-2512`, sc-8350). `None` ⇒ not
+/// present locally (the job is not candle-runnable, falls through to torch). Mirrors
 /// `resolve_kolors_ipadapter_base`.
 fn resolve_qwen_control_base(
     request: &ImageRequest,
@@ -129,9 +137,9 @@ fn qwen_control_repo_file(request: &ImageRequest) -> (String, String) {
     )
 }
 
-/// Resolve the InstantX ControlNet weight **file** the `QwenControl` provider loads, downloading on
-/// first use. Order: an env-pinned file (`SCENEWORKS_CONTROLNET_QWEN`) → a whole-repo HF cache snapshot
-/// → download into the app cache.
+/// Resolve the 2512-Fun-Controlnet-Union weight **file** the `QwenFunControl` provider loads (sc-8350),
+/// downloading on first use. Order: an env-pinned file (`SCENEWORKS_CONTROLNET_QWEN`) → a whole-repo HF
+/// cache snapshot → download into the app cache.
 async fn ensure_qwen_control_weights(
     api: &ApiClient,
     settings: &Settings,
@@ -192,9 +200,10 @@ fn qwen_control_raw_settings(
     raw
 }
 
-/// The per-lane half of the candle Qwen strict-control [`CandleStrictControl`] driver (sc-8304): the
-/// resolved base + InstantX control weight paths + the request numerics. Qwen runs true CFG, so it carries
-/// a negative prompt + guidance. Moved onto the blocking thread, loaded once, drives every pose.
+/// The per-lane half of the candle Qwen 2512-Fun strict-control [`CandleStrictControl`] driver (sc-8304 /
+/// sc-8350): the resolved base + 2512-Fun-Union control weight paths + the request numerics. Qwen runs
+/// true CFG, so it carries a negative prompt + guidance. Moved onto the blocking thread, loaded once,
+/// drives every pose.
 struct QwenStrictControl {
     qwen_base: PathBuf,
     controlnet: PathBuf,
@@ -208,7 +217,7 @@ struct QwenStrictControl {
 }
 
 impl CandleStrictControl for QwenStrictControl {
-    type Model = QwenControl;
+    type Model = QwenFunControl;
 
     fn engine_id(&self) -> &'static str {
         QWEN_CONTROL_ENGINE_ID
@@ -223,12 +232,12 @@ impl CandleStrictControl for QwenStrictControl {
     }
 
     fn load(&self) -> WorkerResult<Self::Model> {
-        let paths = QwenControlPaths {
+        let paths = QwenFunControlPaths {
             qwen_base: self.qwen_base.clone(),
             controlnet: self.controlnet.clone(),
         };
-        QwenControl::load(&paths).map_err(|error| {
-            WorkerError::Engine(format!("Qwen strict-pose control load failed: {error}"))
+        QwenFunControl::load(&paths).map_err(|error| {
+            WorkerError::Engine(format!("Qwen 2512-Fun strict-control load failed: {error}"))
         })
     }
 
@@ -240,7 +249,7 @@ impl CandleStrictControl for QwenStrictControl {
         cancel: &CancelFlag,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
-        let req = QwenControlRequest {
+        let req = QwenFunControlRequest {
             prompt: self.prompt.clone(),
             negative: self.negative.clone(),
             width: self.width,
@@ -252,7 +261,7 @@ impl CandleStrictControl for QwenStrictControl {
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!("Qwen strict-pose generation failed: {error}"))
+            WorkerError::Engine(format!("Qwen 2512-Fun strict-control generation failed: {error}"))
         })
     }
 }

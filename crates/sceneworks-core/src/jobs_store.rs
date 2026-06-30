@@ -3821,6 +3821,14 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     // conditioning-incompatible).
     "realvisxl_lightning",
     "z_image_turbo",
+    // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379): same candle `z_image_diffusers` family
+    // as Turbo. On candle it is currently routed ONLY for the strict-control lane (`z_image` +
+    // `advanced.poses` → `generate_candle_zimage_control_stream`, the base Fun-Controlnet-Union branch);
+    // its plain-txt2img candle path is not wired yet, so a non-pose `z_image` job still defers to torch
+    // via `image_request_candle_eligible` (which has no base-z-image txt2img provider). Membership here is
+    // required so the strict-control branch + the pose-reject exclusion in `image_job_is_candle_eligible`
+    // see it as a candle-routed model.
+    "z_image",
     "flux_schnell",
     "flux_dev",
     "flux2_klein_9b",
@@ -4093,6 +4101,25 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "z_image_turbo" && zimage_control_candle_eligible(&job.payload) {
         return true;
     }
+    // Base (non-distilled, full-CFG) Z-Image strict-control (sc-8379, epic 8236): `z_image` +
+    // `advanced.poses` is the SAME bespoke candle `ZImageControl` lane as Turbo
+    // (`generate_candle_zimage_control_stream`, base Fun-Controlnet-Union branch), NOT txt2img — branch it
+    // out before the txt2img gate (which would defer the pose job to torch and has no base-z-image txt2img
+    // provider anyway). Same payload shape as the Turbo gate. Mirrors the worker's `zimage_control_\
+    // available` (which accepts both `z_image_turbo` and `z_image`).
+    if model == "z_image" && zimage_control_candle_eligible(&job.payload) {
+        return true;
+    }
+    // FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412, epic 8236): `flux_dev` + `advanced.poses` is
+    // the bespoke candle `Flux1DevControl` lane (`generate_candle_flux1_control_stream`), NOT txt2img — the
+    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the
+    // pose-reject would otherwise claim-to-reject it (it now HAS a candle pose lane). Branch it out first (the
+    // qwen/kolors/z_image/flux2-control reasoning, for the FLUX.1-dev family). A `flux_dev` reference job (a
+    // `referenceAssetId`) is the FLUX XLabs IP-Adapter branch above; a pure-pose job reaches here. Mirrors
+    // the worker's `flux1_control_candle_available`.
+    if model == "flux_dev" && flux1_control_candle_eligible(&job.payload) {
+        return true;
+    }
     // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564): `flux2_dev` + `advanced.poses` is
     // the bespoke candle `Flux2Control` lane (`generate_candle_flux2_control_stream`), NOT txt2img — the
     // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the pose-
@@ -4119,6 +4146,15 @@ fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
 /// routing tests can probe it with synthetic payloads (parity with `image_request_mlx_eligible`).
 fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if !CANDLE_ROUTED_MODELS.contains(&model) {
+        return false;
+    }
+    // Base (non-distilled) Z-Image is candle-routed ONLY for its strict-control lane (sc-8379); the candle
+    // `is_candle_engine` set has no base-z-image txt2img provider, so a plain (non-pose) `z_image` job must
+    // NOT be claimed for the candle txt2img path here — it falls through to MLX/torch. (The pose job is
+    // branched out by `zimage_control_candle_eligible` in `image_job_is_candle_eligible` before reaching
+    // this gate.) Without this guard a plain `z_image` job would be claimed but the worker's
+    // `is_candle_engine` would not match it, silently dropping it to the unhandled tail.
+    if model == "z_image" {
         return false;
     }
     // img2img / inpaint / outpaint all arrive as `mode == "edit_image"` (+ a source); reject the
@@ -4686,12 +4722,13 @@ fn kolors_control_candle_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|poses| !poses.is_empty())
 }
 
-/// Z-Image strict-pose Fun-ControlNet candle-routing conditions (sc-5489, epic 5480). The candle
-/// `ZImageControl` provider serves `z_image_turbo` + a non-empty `advanced.poses` (one image per pose,
-/// each conditioned on a DWPose skeleton via the VACE-style `Z-Image-Turbo-Fun-Controlnet-Union-2.1`
-/// branch), NOT an `edit_image`. Same shape as the qwen/kolors gates — the model gate (`z_image_turbo`)
-/// is applied at the call site. Mirrors the worker's `zimage_control_available`. Candle-only — the macOS
-/// path is the MLX `z_image_turbo_control` registry generator.
+/// Z-Image strict-control Fun-ControlNet candle-routing conditions (sc-5489 origin / sc-8379 base, epic
+/// 8236). The candle `ZImageControl` provider serves `z_image_turbo` OR the base `z_image` + a non-empty
+/// `advanced.poses` (one image per pose, each conditioned on a DWPose skeleton via the VACE-style
+/// Fun-Controlnet-Union branch — the Turbo or base checkpoint), NOT an `edit_image`. Same shape as the
+/// qwen/kolors gates — the model gate (`z_image_turbo` / `z_image`) is applied at the call site (both call
+/// this). Mirrors the worker's `zimage_control_available`. Candle-only — the macOS path is the MLX
+/// `z_image_turbo_control` / `z_image_control` registry generators.
 fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
@@ -4768,6 +4805,25 @@ fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> bool {
     !has_poses
 }
 
+/// FLUX.1-dev strict-control Shakker Union-Pro-2.0 candle-routing conditions (sc-8412, epic 8236). The
+/// candle `Flux1DevControl` provider serves `flux_dev` + a non-empty `advanced.poses` (one image per pose,
+/// each conditioned on a DWPose skeleton via the Shakker `FLUX.1-dev-ControlNet-Union-Pro-2.0` residual
+/// branch on the dense bf16 dev base), NOT an `edit_image`. Same shape as the qwen/kolors/zimage/flux2
+/// control gates — the model gate (`flux_dev`) is applied at the call site. Mirrors the worker's
+/// `flux1_control_candle_available`. Candle-only — the macOS path is the MLX `flux1_dev_control` registry
+/// generator (sc-8244).
+fn flux1_control_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+}
+
 /// FLUX.2-dev strict-pose Fun-Controlnet-Union candle-routing conditions (sc-7736, epic 6564). The candle
 /// `Flux2Control` provider serves `flux2_dev` + a non-empty `advanced.poses` (one image per pose, each
 /// conditioned on a DWPose skeleton via the VACE-style `FLUX.2-dev-Fun-Controlnet-Union` branch overlaid
@@ -4786,13 +4842,13 @@ fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|poses| !poses.is_empty())
 }
 
-/// Candle-routed image models that HAVE a candle strict-pose lane (sc-5489; flux2_dev sc-7736). A
-/// `advanced.poses` job on any OTHER candle-routed model has no pose path on candle (plain-SDXL pose ships
-/// via InstantID, `instantid_realvisxl`, not `sdxl`).
+/// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
+/// z_image + flux_dev sc-8379 / sc-8412). A `advanced.poses` job on any OTHER candle-routed model has no
+/// pose path on candle (plain-SDXL pose ships via InstantID, `instantid_realvisxl`, not `sdxl`).
 fn model_has_candle_pose_lane(model: &str) -> bool {
     matches!(
         model,
-        "qwen_image" | "kolors" | "z_image_turbo" | "flux2_dev"
+        "qwen_image" | "kolors" | "z_image_turbo" | "z_image" | "flux2_dev" | "flux_dev"
     )
 }
 
@@ -6127,7 +6183,19 @@ mod candle_routing_tests {
     #[test]
     fn candle_routed_models_plain_txt2img_are_eligible() {
         // SDXL/RealVisXL (sc-3678) + the four image families wired in sc-5096 — every base txt2img id.
+        // EXCEPT base `z_image` (sc-8379): it is candle-routed ONLY for its strict-control lane (no candle
+        // txt2img provider), so a plain txt2img `z_image` job correctly defers to MLX/torch.
         for model in CANDLE_ROUTED_MODELS {
+            if *model == "z_image" {
+                assert!(
+                    !image_request_candle_eligible(
+                        model,
+                        &object(json!({ "prompt": "a red fox" }))
+                    ),
+                    "base z_image plain txt2img must NOT be candle-eligible (control-only lane)"
+                );
+                continue;
+            }
             assert!(
                 image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
                 "{model} plain txt2img should be candle-eligible"
@@ -8000,6 +8068,51 @@ mod candle_routing_tests {
         assert!(!zimage_control_candle_eligible(&object(json!({
             "model": "z_image_turbo", "mode": "edit_image", "advanced": { "poses": [{}] }
         }))));
+    }
+
+    #[test]
+    fn zimage_base_control_pose_jobs_route_to_candle() {
+        // sc-8379: the BASE z_image model + advanced.poses routes to the same candle strict-control lane
+        // as Turbo (the base Fun-Controlnet-Union branch) via the bespoke branch, NOT the txt2img gate.
+        let payload = json!({ "model": "z_image", "advanced": { "poses": [{ "keypoints": [] }] } });
+        assert!(zimage_control_candle_eligible(&object(payload.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        // A base z_image with no poses is plain txt2img — NOT a candle lane (no base-z-image txt2img
+        // provider on candle), so it defers to torch via the txt2img gate.
+        assert!(!image_job_is_candle_eligible(&image_generate_job(
+            json!({ "model": "z_image", "prompt": "a misty fjord" })
+        )));
+        // Both Turbo and base have a candle pose lane (so neither is pose-rejected).
+        assert!(model_has_candle_pose_lane("z_image"));
+        assert!(model_has_candle_pose_lane("z_image_turbo"));
+    }
+
+    #[test]
+    fn flux1_dev_control_pose_jobs_route_to_candle() {
+        // sc-8412: flux_dev + advanced.poses routes to the candle Shakker Union-Pro-2.0 strict-control
+        // lane via the bespoke branch, NOT the txt2img gate (which DEFERS any advanced.poses to torch).
+        let payload =
+            json!({ "model": "flux_dev", "advanced": { "poses": [{ "keypoints": [] }] } });
+        assert!(flux1_control_candle_eligible(&object(payload.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
+        // No poses → plain txt2img routes via the txt2img gate instead.
+        assert!(!flux1_control_candle_eligible(&object(
+            json!({ "model": "flux_dev" })
+        )));
+        assert!(!flux1_control_candle_eligible(&object(json!({
+            "model": "flux_dev", "advanced": { "poses": [] }
+        }))));
+        // edit_image with poses is NOT this lane.
+        assert!(!flux1_control_candle_eligible(&object(json!({
+            "model": "flux_dev", "mode": "edit_image", "advanced": { "poses": [{}] }
+        }))));
+        // A flux_dev reference job (no poses) routes via the FLUX XLabs IP-Adapter branch, not this one.
+        assert!(!flux1_control_candle_eligible(&object(json!({
+            "model": "flux_dev", "referenceAssetId": "asset_1"
+        }))));
+        // flux_dev now HAS a candle pose lane (so it is not pose-rejected); schnell does not.
+        assert!(model_has_candle_pose_lane("flux_dev"));
+        assert!(!model_has_candle_pose_lane("flux_schnell"));
     }
 }
 

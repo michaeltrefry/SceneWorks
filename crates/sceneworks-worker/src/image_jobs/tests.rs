@@ -6891,7 +6891,9 @@ fn candle_structured_source(side: u32) -> Image {
 fn candle_strict_control_engine_ids_match_the_catalog() {
     for id in [
         ZIMAGE_CTRL_ENGINE_ID,
+        ZIMAGE_CTRL_BASE_ENGINE_ID,
         FLUX2_CONTROL_CANDLE_ENGINE_ID,
+        FLUX1_CONTROL_CANDLE_ENGINE_ID,
         QWEN_CONTROL_ENGINE_ID,
     ] {
         let row = strict_control_engine(id).unwrap_or_else(|| panic!("no catalog row for {id}"));
@@ -6903,9 +6905,12 @@ fn candle_strict_control_engine_ids_match_the_catalog() {
             assert!(validate_control_kind(id, &kind).is_ok(), "{id} {kind:?}");
         }
     }
-    // The candle engine ids are the Turbo / dev / qwen rows (NOT base-z-image / flux1 — those are B3).
+    // The candle engine ids now cover the Turbo + base z-image / dev / flux1 / qwen rows (epic 8236 B3:
+    // sc-8412 flux1, sc-8350 qwen 2512-Fun, sc-8379 base z-image).
     assert_eq!(ZIMAGE_CTRL_ENGINE_ID, "z_image_turbo_control");
+    assert_eq!(ZIMAGE_CTRL_BASE_ENGINE_ID, "z_image_control");
     assert_eq!(FLUX2_CONTROL_CANDLE_ENGINE_ID, "flux2_dev_control");
+    assert_eq!(FLUX1_CONTROL_CANDLE_ENGINE_ID, "flux1_dev_control");
     assert_eq!(QWEN_CONTROL_ENGINE_ID, "qwen_image_control");
 }
 
@@ -6917,7 +6922,9 @@ fn candle_strict_control_rejects_unsupported_kind_and_unknown_engine() {
     let unsupported = ControlKind::Other("scribble".to_owned());
     for id in [
         ZIMAGE_CTRL_ENGINE_ID,
+        ZIMAGE_CTRL_BASE_ENGINE_ID,
         FLUX2_CONTROL_CANDLE_ENGINE_ID,
+        FLUX1_CONTROL_CANDLE_ENGINE_ID,
         QWEN_CONTROL_ENGINE_ID,
     ] {
         let err = validate_control_kind(id, &unsupported)
@@ -6936,11 +6943,71 @@ fn candle_strict_control_rejects_unsupported_kind_and_unknown_engine() {
 fn candle_strict_control_labels_and_scale_defaults_are_byte_preserved() {
     assert_eq!(ZIMAGE_CTRL_ENGINE, "candle_zimage_control");
     assert_eq!(FLUX2_CONTROL_CANDLE_ENGINE, "candle_flux2_control");
+    assert_eq!(FLUX1_CONTROL_CANDLE_ENGINE, "candle_flux1_control");
     assert_eq!(QWEN_CONTROL_ENGINE, "candle_qwen_control");
     // The pose-tier control-scale defaults (the value each lane clamps `advanced.controlScale` toward).
     assert_eq!(ZIMAGE_CTRL_DEFAULT_SCALE, 1.0);
     assert_eq!(FLUX2_CONTROL_CANDLE_DEFAULT_SCALE, 0.75);
+    assert_eq!(FLUX1_CONTROL_CANDLE_DEFAULT_SCALE, 0.7);
     assert_eq!(QWEN_CONTROL_DEFAULT_SCALE, 1.0);
+}
+
+/// sc-8412 / sc-8350 / sc-8379 (epic 8236): the three new/changed candle control providers resolve the
+/// RIGHT model ids + default repos. FLUX.1-dev rides the Shakker Union-Pro-2.0 row; the qwen lane now
+/// defaults to the 2512-Fun-Union checkpoint on the Qwen-Image-2512 base (NOT the retired InstantX repo);
+/// the z-image lane recognizes both Turbo and the base model with their respective repos + step defaults.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_control_providers_resolve_models_and_repos() {
+    // sc-8412 — FLUX.1-dev control: `flux_dev` only (schnell rejected), Shakker Union-Pro-2.0 default repo.
+    assert!(is_flux1_control_model("flux_dev"));
+    assert!(!is_flux1_control_model("flux_schnell"));
+    assert!(!is_flux1_control_model("flux2_dev"));
+    let flux1 = request(json!({ "projectId": "p", "model": "flux_dev" }));
+    let (f1_repo, f1_file) = flux1_control_candle_repo_file(&flux1);
+    assert_eq!(f1_repo, "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0");
+    assert_eq!(f1_file, "diffusion_pytorch_model.safetensors");
+    assert_eq!(
+        FLUX1_CONTROL_CANDLE_BASE_REPO,
+        "black-forest-labs/FLUX.1-dev"
+    );
+
+    // sc-8350 — qwen InstantX → 2512-Fun: the default control repo + base repo are the 2512-Fun row, NOT
+    // the retired InstantX `Qwen-Image-ControlNet-Union`.
+    let qwen = request(json!({ "projectId": "p", "model": "qwen_image" }));
+    let (q_repo, _q_file) = qwen_control_repo_file(&qwen);
+    assert_eq!(q_repo, "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union");
+    assert_eq!(QWEN_CONTROL_DEFAULT_REPO, "Qwen/Qwen-Image-2512");
+    assert_ne!(q_repo, "InstantX/Qwen-Image-ControlNet-Union");
+
+    // sc-8379 — z-image base: both Turbo and base are recognized; the base selects the base repos + the
+    // ~50-step default + the `z_image_control` engine-id row.
+    assert!(is_zimage_control_model("z_image_turbo"));
+    assert!(is_zimage_control_model("z_image"));
+    assert!(!is_zimage_base_model("z_image_turbo"));
+    assert!(is_zimage_base_model("z_image"));
+    let turbo = request(json!({ "projectId": "p", "model": "z_image_turbo" }));
+    let base = request(json!({ "projectId": "p", "model": "z_image" }));
+    assert_eq!(
+        zimage_control_base_default_repo(&turbo.model),
+        "Tongyi-MAI/Z-Image-Turbo"
+    );
+    assert_eq!(
+        zimage_control_base_default_repo(&base.model),
+        "Tongyi-MAI/Z-Image"
+    );
+    let (turbo_ctrl_repo, _) = zimage_control_repo_file(&turbo);
+    let (base_ctrl_repo, _) = zimage_control_repo_file(&base);
+    assert_eq!(
+        turbo_ctrl_repo,
+        "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1"
+    );
+    assert_eq!(
+        base_ctrl_repo,
+        "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1"
+    );
+    assert_eq!(zimage_control_steps(&turbo), ZIMAGE_CTRL_DEFAULT_STEPS);
+    assert_eq!(zimage_control_steps(&base), ZIMAGE_CTRL_BASE_DEFAULT_STEPS);
 }
 
 /// The trait routes each provider: each lane's `CandleStrictControl` impl reports the right engine id
@@ -6960,10 +7027,41 @@ fn candle_strict_control_trait_routes_each_provider() {
         height: 512,
         steps: 8,
         control_scale: 1.0,
+        engine_id: ZIMAGE_CTRL_ENGINE_ID,
     };
     assert_eq!(zimage.engine_id(), ZIMAGE_CTRL_ENGINE_ID);
     assert_eq!(zimage.engine_label(), ZIMAGE_CTRL_ENGINE);
     assert_eq!(zimage.stream_tag(), "zimage_control");
+
+    // Base z_image (sc-8379) routes the SAME provider with the `z_image_control` engine-id row.
+    let zimage_base = ZImageStrictControl {
+        base: dummy.clone(),
+        controlnet: dummy.clone(),
+        prompt: "p".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 50,
+        control_scale: 1.0,
+        engine_id: ZIMAGE_CTRL_BASE_ENGINE_ID,
+    };
+    assert_eq!(zimage_base.engine_id(), ZIMAGE_CTRL_BASE_ENGINE_ID);
+    assert_eq!(zimage_base.engine_label(), ZIMAGE_CTRL_ENGINE);
+
+    // FLUX.1-dev control (sc-8412) routes via the `Flux1StrictControl` provider.
+    let flux1 = Flux1StrictControl {
+        base: dummy.clone(),
+        control: dummy.clone(),
+        prompt: "p".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 25,
+        guidance: 3.5,
+        control_scale: 0.7,
+        control_kind: "pose".to_owned(),
+    };
+    assert_eq!(flux1.engine_id(), FLUX1_CONTROL_CANDLE_ENGINE_ID);
+    assert_eq!(flux1.engine_label(), FLUX1_CONTROL_CANDLE_ENGINE);
+    assert_eq!(flux1.stream_tag(), "flux1_control");
 
     let flux2 = Flux2StrictControl {
         base: dummy.clone(),

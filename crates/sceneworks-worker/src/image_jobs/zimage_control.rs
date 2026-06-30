@@ -11,32 +11,69 @@
 // module, so it shares that module's imports (`parse_poses`/`pose_entries`/`Settings`/`WorkerResult`/
 // `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 
-/// Default Fun-Controlnet-Union weights — the **8-step** variant the MLX path uses (zimage.rs
+/// Default Turbo Fun-Controlnet-Union weights — the **8-step** variant the MLX path uses (zimage.rs
 /// `ZIMAGE_CONTROL_FILE`); the candle `ZImageControl::generate` runs the matching 8-step schedule.
 const ZIMAGE_CTRL_REPO: &str = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1";
 const ZIMAGE_CTRL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
-/// The Z-Image base diffusers repo when the manifest omits `repo`.
+/// The Z-Image-Turbo base diffusers repo when the manifest omits `repo`.
 const ZIMAGE_CTRL_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
+/// Base (non-distilled, real-CFG) Z-Image Fun-Controlnet-Union weights (sc-8379) — the same VACE
+/// Fun-Union control branch as the Turbo variant, assembled from a base `Tongyi-MAI/Z-Image` snapshot +
+/// the base control checkpoint. The base + Turbo Fun-Union safetensors are byte-structurally identical
+/// (same key layout), so the candle `ZImageControl` loader handles both; the diffusers checkpoint ships a
+/// single `.safetensors`. Mirrors the MLX `z_image_control` engine repo (`STRICT_CONTROL_ENGINES`).
+const ZIMAGE_CTRL_BASE_REPO: &str = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
+const ZIMAGE_CTRL_BASE_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// The base Z-Image diffusers repo when the manifest omits `repo` (sc-8379).
+const ZIMAGE_CTRL_BASE_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image";
 /// ControlNet conditioning-scale default (the strict-pose tier).
 const ZIMAGE_CTRL_DEFAULT_SCALE: f32 = 1.0;
-/// Denoise-steps default — the 8-step Fun-ControlNet variant (vs the 4-step distilled txt2img).
+/// Denoise-steps default — the 8-step Turbo Fun-ControlNet variant (vs the 4-step distilled txt2img).
 const ZIMAGE_CTRL_DEFAULT_STEPS: u32 = 8;
+/// Denoise-steps default for the base (non-distilled) model — the undistilled foundation runs the full
+/// ~50-step schedule (the base manifest `defaults.steps`). The candle `ZImageControl` engine takes a
+/// `steps` count directly (it is guidance-distilled in shape but the schedule length is request-driven),
+/// so the worker just feeds the higher default; an `advanced.steps` override still wins.
+const ZIMAGE_CTRL_BASE_DEFAULT_STEPS: u32 = 50;
 /// The adapter/engine id recorded on candle Z-Image control assets (distinct from the txt2img
 /// `candle_z_image`/`candle_zimage` lane).
 const ZIMAGE_CTRL_ENGINE: &str = "candle_zimage_control";
-/// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
-/// (the Turbo Fun-Controlnet-Union row — `{Pose, Canny, Depth}`). Mirrors the MLX
+/// The [`STRICT_CONTROL_ENGINES`] catalog id the Turbo candle lane validates `advanced.controlMode`
+/// against (the Turbo Fun-Controlnet-Union row — `{Pose, Canny, Depth}`). Mirrors the MLX
 /// `z_image_turbo_control` registry engine's `supported_kinds` (sc-8304).
 const ZIMAGE_CTRL_ENGINE_ID: &str = "z_image_turbo_control";
+/// The [`STRICT_CONTROL_ENGINES`] catalog id the BASE candle lane validates against (the base Z-Image
+/// Fun-Controlnet-Union row — `{Pose, Canny, Depth}`, sc-8379). Mirrors the MLX `z_image_control` engine.
+const ZIMAGE_CTRL_BASE_ENGINE_ID: &str = "z_image_control";
 
-/// Model ids the candle Z-Image ControlNet route accepts.
+/// Model ids the candle Z-Image ControlNet route accepts: the distilled `z_image_turbo` (8-step) and the
+/// base `z_image` (full-CFG, ~50-step; sc-8379). Both ride the same candle `ZImageControl` engine — the
+/// base + Turbo Fun-Union safetensors are byte-structurally identical — differing only in the
+/// base/control repos + step count.
 fn is_zimage_control_model(model: &str) -> bool {
-    model == "z_image_turbo"
+    matches!(model, "z_image_turbo" | "z_image")
+}
+
+/// True when this is the base (non-distilled) Z-Image control model (sc-8379) — selects the base repos,
+/// the base step default, and the `z_image_control` engine-id validation row.
+fn is_zimage_base_model(model: &str) -> bool {
+    model == "z_image"
+}
+
+/// The default base diffusers repo for this control job's model — Turbo (`Tongyi-MAI/Z-Image-Turbo`) or
+/// the base undistilled `Tongyi-MAI/Z-Image` (sc-8379), selected by the request model id.
+fn zimage_control_base_default_repo(model: &str) -> &'static str {
+    if is_zimage_base_model(model) {
+        ZIMAGE_CTRL_BASE_DEFAULT_REPO
+    } else {
+        ZIMAGE_CTRL_DEFAULT_REPO
+    }
 }
 
 /// Resolve the Z-Image base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) → the
-/// HF cache snapshot for the manifest `repo` (default `Tongyi-MAI/Z-Image-Turbo`). `None` ⇒ not present
-/// locally (the job is not candle-runnable, falls through to torch). Mirrors `resolve_kolors_control_base`.
+/// HF cache snapshot for the manifest `repo` (default `Tongyi-MAI/Z-Image-Turbo`, or `Tongyi-MAI/Z-Image`
+/// for the base model, sc-8379). `None` ⇒ not present locally (the job is not candle-runnable, falls
+/// through to torch). Mirrors `resolve_kolors_control_base`.
 fn resolve_zimage_control_base(
     request: &ImageRequest,
     settings: &Settings,
@@ -58,12 +95,12 @@ fn resolve_zimage_control_base(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(ZIMAGE_CTRL_DEFAULT_REPO);
+        .unwrap_or_else(|| zimage_control_base_default_repo(&request.model));
     Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
 }
 
-/// True when this is a candle-eligible Z-Image strict-pose job: `z_image_turbo` with a non-empty
-/// `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
+/// True when this is a candle-eligible Z-Image strict-control job: `z_image_turbo` or the base `z_image`
+/// (sc-8379) with a non-empty `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::zimage_control_candle_eligible` so the worker and router agree.
 fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_zimage_control_model(&request.model)
@@ -72,12 +109,18 @@ fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool
         && matches!(resolve_zimage_control_base(request, settings), Ok(Some(_)))
 }
 
-/// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (8).
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → model default (Turbo 8,
+/// base 50; sc-8379). The base undistilled model runs the longer schedule for its real-CFG quality.
 fn zimage_control_steps(request: &ImageRequest) -> u32 {
     let parse = |value: &Value| {
         value
             .as_u64()
             .or_else(|| value.as_str()?.trim().parse().ok())
+    };
+    let default = if is_zimage_base_model(&request.model) {
+        ZIMAGE_CTRL_BASE_DEFAULT_STEPS
+    } else {
+        ZIMAGE_CTRL_DEFAULT_STEPS
     };
     request
         .advanced
@@ -85,12 +128,18 @@ fn zimage_control_steps(request: &ImageRequest) -> u32 {
         .and_then(parse)
         .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
         .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(ZIMAGE_CTRL_DEFAULT_STEPS)
+        .unwrap_or(default)
 }
 
 /// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
-/// else the Fun-Controlnet-Union 8-step default (parity with the MLX `resolve_control_weights`).
+/// else the model's Fun-Controlnet-Union default: the Turbo 8-step variant, or the base
+/// (full-CFG) variant for the base `z_image` model (sc-8379). Parity with the MLX `resolve_control_weights`.
 fn zimage_control_repo_file(request: &ImageRequest) -> (String, String) {
+    let (default_repo, default_file) = if is_zimage_base_model(&request.model) {
+        (ZIMAGE_CTRL_BASE_REPO, ZIMAGE_CTRL_BASE_FILE)
+    } else {
+        (ZIMAGE_CTRL_REPO, ZIMAGE_CTRL_FILE)
+    };
     let cw = request.advanced.get("controlWeights").and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
@@ -101,8 +150,8 @@ fn zimage_control_repo_file(request: &ImageRequest) -> (String, String) {
             .to_owned()
     };
     (
-        pick("repo", ZIMAGE_CTRL_REPO),
-        pick("filename", ZIMAGE_CTRL_FILE),
+        pick("repo", default_repo),
+        pick("filename", default_file),
     )
 }
 
@@ -179,13 +228,16 @@ struct ZImageStrictControl {
     height: u32,
     steps: u32,
     control_scale: f32,
+    /// The [`STRICT_CONTROL_ENGINES`] catalog id for this job's model — `z_image_turbo_control` (Turbo) or
+    /// `z_image_control` (base, sc-8379) — the `advanced.controlMode` validation key.
+    engine_id: &'static str,
 }
 
 impl CandleStrictControl for ZImageStrictControl {
     type Model = ZImageControl;
 
     fn engine_id(&self) -> &'static str {
-        ZIMAGE_CTRL_ENGINE_ID
+        self.engine_id
     }
 
     fn engine_label(&self) -> &'static str {
@@ -229,12 +281,14 @@ impl CandleStrictControl for ZImageStrictControl {
     }
 }
 
-/// Real candle Z-Image strict-pose generation: one image per pose, each conditioned on a full DWPose
-/// skeleton (`controlMode` unset) or a canny/depth control map. Resolves the base + control weights, then
-/// hands a [`ZImageStrictControl`] to the shared [`run_candle_strict_control`] driver, which validates the
-/// requested kind against `z_image_turbo_control`'s `supported_kinds`, preprocesses each pose's control
-/// map, runs the per-pose loop, and scores against any identity reference. Z-Image-Turbo is distilled (no
-/// CFG / negative prompt), so the request carries no guidance. The pose path is byte-preserved.
+/// Real candle Z-Image strict-control generation: one image per pose, each conditioned on a full DWPose
+/// skeleton (`controlMode` unset) or a canny/depth control map. Serves both `z_image_turbo` (8-step
+/// distilled) and the base `z_image` (full-CFG, ~50-step; sc-8379) — same candle `ZImageControl` engine,
+/// model-selected base/control repos + step default + engine-id validation row. Resolves the base +
+/// control weights, then hands a [`ZImageStrictControl`] to the shared [`run_candle_strict_control`]
+/// driver, which validates the requested kind against the model's `supported_kinds`, preprocesses each
+/// pose's control map, runs the per-pose loop, and scores against any identity reference. The pose path is
+/// byte-preserved.
 async fn generate_candle_zimage_control_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -245,8 +299,10 @@ async fn generate_candle_zimage_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let is_base = is_zimage_base_model(&request.model);
     let base = resolve_zimage_control_base(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload("Z-Image base (Z-Image-Turbo) weights not found".to_owned())
+        let label = if is_base { "Z-Image" } else { "Z-Image-Turbo" };
+        WorkerError::InvalidPayload(format!("Z-Image base ({label}) weights not found"))
     })?;
     let controlnet = ensure_zimage_control_weights(api, settings, job, request).await?;
 
@@ -263,8 +319,13 @@ async fn generate_candle_zimage_control_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(ZIMAGE_CTRL_DEFAULT_REPO)
+        .unwrap_or_else(|| zimage_control_base_default_repo(&request.model))
         .to_owned();
+    let engine_id = if is_base {
+        ZIMAGE_CTRL_BASE_ENGINE_ID
+    } else {
+        ZIMAGE_CTRL_ENGINE_ID
+    };
 
     let pose_count = pose_entries(request).len();
     let raw_settings = zimage_control_raw_settings(request, &repo, steps, control_scale, pose_count);
@@ -277,6 +338,7 @@ async fn generate_candle_zimage_control_stream(
         height: request.height,
         steps,
         control_scale,
+        engine_id,
     };
 
     run_candle_strict_control(

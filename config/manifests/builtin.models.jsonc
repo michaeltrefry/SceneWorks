@@ -942,7 +942,8 @@
         // Shakker `FLUX.1-dev-ControlNet-Union-Pro-2.0` branch on it (true structural lock, one image per
         // pose) via the `flux1_dev_control` registry generator. The control checkpoint (~3.5 GB) is
         // fetched on the first control job. Surfaces flux_dev in the Character Studio pose picker
-        // (character_image not required — poseLibrary gates it). MLX-only (no candle control lane yet).
+        // (character_image not required — poseLibrary gates it). Served on both macOS (MLX
+        // `flux1_dev_control`) and off-Mac (the candle `Flux1DevControl` strict-control lane, sc-8412).
         "poseLibrary": true,
         // Strict ControlNet → expose the control-lock-strength slider (advanced.controlScale; the Shakker
         // Union-Pro-2.0 README recommends ~0.7, worker default 0.7).
