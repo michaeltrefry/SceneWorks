@@ -491,6 +491,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-depth"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=725190c5a0dcf55f6657ca4becbb242b3f606fe0#725190c5a0dcf55f6657ca4becbb242b3f606fe0"
+dependencies = [
+ "candle-core",
+ "candle-gen",
+ "candle-nn",
+]
+
+[[package]]
 name = "candle-gen-face"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/candle-gen?rev=725190c5a0dcf55f6657ca4becbb242b3f606fe0#725190c5a0dcf55f6657ca4becbb242b3f606fe0"
@@ -5578,6 +5588,7 @@ dependencies = [
  "candle-gen-boogu",
  "candle-gen-chroma",
  "candle-gen-clip",
+ "candle-gen-depth",
  "candle-gen-face",
  "candle-gen-flux",
  "candle-gen-flux2",

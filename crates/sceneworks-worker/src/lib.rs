@@ -182,12 +182,14 @@ mod openpose_skeleton;
 // off-Mac candle lane has no registry strict-control path, so it stays unused there.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod canny;
-// Native-MLX depth-map preprocessor for the Fun-Controlnet-Union depth head (epic 8236,
-// sc-8242): arbitrary image → `ControlKind::Depth` control image via the Depth Anything V2
-// port (`mlx-gen-depth`). Sibling of `canny` / `openpose_skeleton`, but — unlike those pure
-// raster preprocessors — depth needs neural inference, so it is macOS-gated (MLX). Consumed
-// by the shared strict-control driver (sc-8243); the off-Mac candle lane has no registry
-// strict-control path, so it stays unused there.
+// Depth-map preprocessor for the Fun-Controlnet-Union depth head (epic 8236): arbitrary image →
+// `ControlKind::Depth` control image via a Depth Anything V2 port. Sibling of `canny` /
+// `openpose_skeleton`, but — unlike those pure raster preprocessors — depth needs neural
+// inference, so it is backend-gated: macOS = `mlx-gen-depth` (sc-8242), off-Mac + `backend-candle`
+// = `candle-gen-depth` (sc-8413, the Windows/CUDA sibling). Consumed by the shared strict-control
+// driver (sc-8243 mac); the off-Mac candle strict-control routing that calls the candle estimator
+// is the separate sc-8304, so `depth_control_image` stays unused on the candle lane until then
+// (hence the `allow(dead_code)` below).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod depth;
 // DWPose pose detection via onnxruntime (epic 3482, sc-3487). On Mac the CoreML EP +
