@@ -1904,9 +1904,9 @@
         },
         {
           // bf16/ — the dense diffusers tree (sharded), the max-fidelity tier for high-memory Macs
-          // (192/256/512 GB). Selectable via per-variant tracking (sc-8508/8509). NOTE: MLX load of
-          // the dense sharded tier is not yet on-device-verified (the MLX path historically loaded the
-          // packed dir); the candle lane already loads dense FLUX.2-dev.
+          // (192/256/512 GB). Selectable via per-variant tracking (sc-8508/8509). MLX load of the
+          // dense sharded tier is on-device-verified (sc-8513: loads all shards via Quant::None +
+          // generates; 256² fits a 128 GB box, production 1024² wants >128 GB).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
           "files": ["bf16/*"],

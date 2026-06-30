@@ -1289,6 +1289,68 @@ fn flux2_dev_real_weights_generates_one_image() {
     dev_worker_generate("flux2_dev", flux2_dev_dir(), Vec::new());
 }
 
+/// The dense (bf16) FLUX.2-dev diffusers snapshot — the bf16 tier source, byte-identical to
+/// SceneWorks/flux2-dev-mlx/bf16/. `SCENEWORKS_FLUX2_DEV_BF16_DIR` overrides; default = the cached
+/// black-forest-labs/FLUX.2-dev snapshot.
+#[cfg(target_os = "macos")]
+fn flux2_dev_bf16_dir() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("SCENEWORKS_FLUX2_DEV_BF16_DIR") {
+        return std::path::PathBuf::from(p);
+    }
+    let snaps =
+        dirs_home().join(".cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots");
+    std::fs::read_dir(&snaps)
+        .expect("FLUX.2-dev snapshots dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .expect("a FLUX.2-dev snapshot dir")
+}
+
+/// bf16 tier verify (sc-8513, epic 8506): load the DENSE SHARDED FLUX.2-dev tier (`Quant::None`, the
+/// 7-shard transformer + 10-shard Mistral TE) through the worker engine path and render. Proves MLX
+/// reads the dense sharded dir — the one tier never exercised on MLX (the path always loaded packed).
+/// ~105 GB dense weights: production sizes need a >128 GB Mac; defaults here are 256²/1-step to probe
+/// load+gen on a 128 GB box. The eprintln markers localize a SIGKILL to load-vs-gen. Run:
+/// `cargo test -p sceneworks-worker --release --lib -- --ignored flux2_dev_bf16_real_weights`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs the dense FLUX.2-dev snapshot + (for production sizes) a >128 GB Metal device"]
+fn flux2_dev_bf16_real_weights_loads_and_generates() {
+    let size: u32 = std::env::var("SCENEWORKS_FLUX2_DEV_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
+    let steps: u32 = std::env::var("SCENEWORKS_FLUX2_DEV_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    eprintln!("[bf16-verify] loading dense sharded FLUX.2-dev (Quant::None)…");
+    let generator = load_engine("flux2_dev", flux2_dev_bf16_dir(), None, Vec::new(), None).unwrap();
+    eprintln!("[bf16-verify] LOADED — dense sharded dir read OK; generating {size}²/{steps}…");
+    let request = GenerationRequest {
+        prompt: "a serene mountain lake at dawn".into(),
+        width: size,
+        height: size,
+        count: 1,
+        seed: Some(42),
+        steps: Some(steps),
+        guidance: Some(4.0),
+        ..Default::default()
+    };
+    let out = generator.generate(&request, &mut |_| {}).unwrap();
+    let img = match out {
+        GenerationOutput::Images(mut v) => v.remove(0),
+        other => panic!("expected Images, got {other:?}"),
+    };
+    eprintln!("[bf16-verify] GENERATED {}x{}", img.width, img.height);
+    assert_eq!((img.width, img.height), (size, size));
+    assert!(
+        img.pixels.windows(2).any(|w| w[0] != w[1]),
+        "render is flat (degenerate)"
+    );
+}
+
 /// Real-weights smoke (sc-5923): FLUX.2-dev EDIT through the worker `flux2_dev_edit` engine path
 /// (the `flux2_edit_engine_id("flux2_dev")` variant, sc-5919/5922). Loads the SAME converted Q4 dev
 /// snapshot, then renders with a single `Conditioning::Reference` AND with a 2-image
