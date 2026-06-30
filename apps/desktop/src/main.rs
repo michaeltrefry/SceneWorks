@@ -14,6 +14,9 @@ mod cuda_provision;
 mod net;
 mod settings;
 mod setup;
+// In-app cross-platform auto-updater (sc-1355): startup check against the GitHub
+// "latest release" pointer, user-prompted download + install + restart.
+mod update;
 
 use tauri::RunEvent;
 
@@ -30,6 +33,13 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            // Kick off the auto-update check once the app is initialized (no-op in
+            // debug builds). Fail-soft: never blocks launch (sc-1355).
+            update::spawn_startup_check(app.handle());
+            Ok(())
+        })
         .manage(setup::Managed::default())
         .invoke_handler(tauri::generate_handler![
             setup::start_setup,

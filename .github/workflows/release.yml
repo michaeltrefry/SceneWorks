@@ -48,6 +48,12 @@ jobs:
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+      # Minisign keypair for the in-app auto-updater (sc-1355): signs the
+      # `.app.tar.gz` updater payload so the shipped app can verify it against
+      # plugins.updater.pubkey. Only needed when createUpdaterArtifacts is on (set
+      # via --config below), so other CI lanes / local builds don't require it.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -67,9 +73,12 @@ jobs:
       # `tauri build` runs the beforeBuildCommand (sidecar + web/api + the nested
       # binary pre-signing from #715) and, because the APPLE_* env is set, signs +
       # notarizes + staples the .app. This is the heavy MLX-from-source build; the
-      # nax runner keeps it warm.
+      # nax runner keeps it warm. `--config createUpdaterArtifacts:true` additionally
+      # emits the `.app.tar.gz` updater payload + `.sig` for the in-app updater
+      # (sc-1355). It's enabled HERE only — kept out of the committed tauri.conf.json
+      # so non-release builds don't require the signing key.
       - name: Build, sign & notarize the desktop bundle
-        run: npm run build --prefix apps/desktop
+        run: npm --prefix apps/desktop run build -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
       # Tauri staples the .app but not the wrapping .dmg — staple the DMG so the
       # downloaded artifact verifies offline (shared script; same as `release:mac`).
@@ -82,7 +91,7 @@ jobs:
       # release). Tags with a pre-release suffix (e.g. v1.2.3-rc.1) are marked
       # prerelease. The tag name goes through an env var, not inline `${{ }}`, to
       # avoid script-injection from the ref.
-      - name: Draft GitHub Release with the stapled DMG
+      - name: Draft GitHub Release with the stapled DMG + updater payload
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -94,6 +103,14 @@ jobs:
             echo "No DMG produced under target/release/bundle/dmg/" >&2
             exit 1
           fi
+          # The auto-updater payload (createUpdaterArtifacts): the .app.tar.gz the
+          # app downloads + the .sig whose contents go into latest.json (sc-1355).
+          tarballs=(target/release/bundle/macos/*.app.tar.gz)
+          sigs=(target/release/bundle/macos/*.app.tar.gz.sig)
+          if [ ${#tarballs[@]} -eq 0 ] || [ ${#sigs[@]} -eq 0 ]; then
+            echo "No macOS updater artifacts under target/release/bundle/macos/ (*.app.tar.gz[.sig])" >&2
+            exit 1
+          fi
           notes=$(printf '%s\n' \
             '## macOS (Apple Silicon, macOS 26.2+)' \
             'Signed & notarized build. Open the DMG and drag SceneWorks to Applications.' \
@@ -102,7 +119,21 @@ jobs:
             'Run the .msi installer. Requires an NVIDIA GPU; the CUDA/cuDNN runtime is downloaded on first launch.')
           args=(--draft --generate-notes --title "SceneWorks $TAG" --notes "$notes")
           case "$TAG" in *-*) args+=(--prerelease) ;; esac
-          gh release create "$TAG" "${args[@]}" "${dmgs[0]}"
+          # Attach the DMG (fresh install) + the updater tarball (in-app update payload).
+          gh release create "$TAG" "${args[@]}" "${dmgs[0]}" "${tarballs[0]}"
+
+          # Seed latest.json with the darwin-aarch64 entry. The URL is the canonical
+          # tag asset URL (valid once the draft is published); the signature is the
+          # .sig contents. The Windows job merges its entry in afterward.
+          tarball_name="$(basename "${tarballs[0]}")"
+          node apps/desktop/scripts/build-update-manifest.mjs \
+            --target darwin-aarch64 \
+            --version "${TAG#v}" \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${tarball_name}" \
+            --sig "${sigs[0]}" \
+            --notes "SceneWorks $TAG" \
+            --out latest.json
+          gh release upload "$TAG" --clobber latest.json
 
   windows:
     # Attach the Windows installers to the draft release the macos job created.
@@ -117,6 +148,10 @@ jobs:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
       # Ampere->Blackwell (sc-3676); build-sidecar.mjs defaults this too.
       CUDA_COMPUTE_CAP: "80"
+      # Same minisign keypair as the macos job — signs the NSIS updater payload so
+      # the shipped app verifies it against plugins.updater.pubkey (sc-1355).
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -154,13 +189,18 @@ jobs:
       # sidecar by default (nvcc compiles every provider's CUDA kernels) and stages
       # the ffmpeg resource, then packages both installers. The ~2.7 GB CUDA/cuDNN/
       # onnxruntime runtime is downloaded on first run (cuda_provision.rs), so the
-      # installers stay small.
+      # installers stay small. `--config createUpdaterArtifacts:true` also signs the
+      # NSIS `-setup.exe` updater payload (+ `.sig`) for the in-app updater (sc-1355).
       - name: Build Windows candle installers (NSIS + MSI)
-        run: npm --prefix apps/desktop run build -- --bundles nsis,msi
+        run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config '{"bundle":{"createUpdaterArtifacts":true}}'
       # Upload to the draft release the macos job created. The user ships the MSI
       # (per desktop-windows.yml); the NSIS .exe is attached too as an alternative.
-      # --clobber so re-running the job replaces rather than 409s.
-      - name: Attach Windows installers to the release
+      # --clobber so re-running the job replaces rather than 409s. Then merge the
+      # windows-x86_64 entry into the latest.json the macos job seeded (sc-1355): the
+      # NSIS `-setup.exe` is the updater payload; its `.sig` contents go in the
+      # manifest. The artifact the `.sig` signs is derived from the .sig path, so this
+      # stays correct whether Tauri emits a `-setup.exe` or a `.nsis.zip`.
+      - name: Attach Windows installers + merge updater manifest
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -172,4 +212,27 @@ jobs:
             echo "No installers produced under target/release/bundle/{msi,nsis}/" >&2
             exit 1
           fi
-          gh release upload "$TAG" --clobber "${installers[@]}"
+          sigs=(target/release/bundle/nsis/*.sig)
+          if [ ${#sigs[@]} -eq 0 ]; then
+            echo "No NSIS updater signature under target/release/bundle/nsis/*.sig" >&2
+            exit 1
+          fi
+          sig="${sigs[0]}"
+          payload="${sig%.sig}"          # the artifact the .sig signs (the update payload)
+          payload_name="$(basename "$payload")"
+
+          # Upload installers + the updater payload (the payload is normally the
+          # NSIS .exe already in `installers`; upload it explicitly so a .nsis.zip
+          # payload is also covered).
+          gh release upload "$TAG" --clobber "${installers[@]}" "$payload"
+
+          # Merge the windows-x86_64 entry into the macos-seeded manifest.
+          gh release download "$TAG" -p latest.json --clobber
+          node apps/desktop/scripts/build-update-manifest.mjs \
+            --target windows-x86_64 \
+            --version "${TAG#v}" \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${payload_name}" \
+            --sig "$sig" \
+            --in latest.json \
+            --out latest.json
+          gh release upload "$TAG" --clobber latest.json
