@@ -41,6 +41,7 @@ import {
   defaultPresetForTarget,
   lrSchedulerOptions,
   presetsForTarget,
+  promptListToLines,
   rangeOptions,
   samplePromptsFromTrigger,
   trainingAdapterVersionOptions,
@@ -377,6 +378,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [configMessage, setConfigMessage] = useState("");
   const [configError, setConfigError] = useState("");
   const [configTriggerFollowsCaptions, setConfigTriggerFollowsCaptions] = useState(true);
+  // Sample prompts default to the trigger-derived set and track the trigger phrase
+  // until the user edits them (sc-8671), mirroring configTriggerFollowsCaptions.
+  const [configPromptsFollowTrigger, setConfigPromptsFollowTrigger] = useState(true);
   const [submittingJob, setSubmittingJob] = useState(false);
   // Dry run validates the Rust-resolved plan without training; a real run hands
   // the plan to the worker's Z-Image LoRA kernel. Default to the safe dry run.
@@ -691,6 +695,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setConfigMessage("");
     setConfigError("");
     setConfigTriggerFollowsCaptions(true);
+    setConfigPromptsFollowTrigger(true);
     configBasisRef.current = "";
   }, [activeProject?.id]);
 
@@ -747,6 +752,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setConfigMessage("");
     setConfigError("");
     setConfigTriggerFollowsCaptions(true);
+    setConfigPromptsFollowTrigger(true);
   }, [activeDataset?.id, selectedTarget?.id, trainingPresets]);
 
   useEffect(() => {
@@ -762,6 +768,22 @@ export function TrainingStudio({ mode = "training" } = {}) {
     });
     setConfigSnapshot(null);
   }, [captionTriggerWords, configTriggerFollowsCaptions, selectedTarget?.id]);
+
+  // Keep the sample-prompts draft in sync with the trigger phrase until the user
+  // edits the prompts (sc-8671). Once they type their own, configPromptsFollowTrigger
+  // flips off and we leave their pool alone.
+  useEffect(() => {
+    if (!configPromptsFollowTrigger) {
+      return;
+    }
+    setConfigDraft((current) => {
+      const nextPrompts = promptListToLines(samplePromptsFromTrigger(current.triggerWord));
+      if ((current.samplePrompts ?? "") === nextPrompts) {
+        return current;
+      }
+      return { ...current, samplePrompts: nextPrompts };
+    });
+  }, [configDraft.triggerWord, configPromptsFollowTrigger]);
 
   useEffect(() => {
     setConfigDraft((current) => {
@@ -866,6 +888,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
     if (field === "triggerWord") {
       setConfigTriggerFollowsCaptions(false);
     }
+    if (field === "samplePrompts") {
+      setConfigPromptsFollowTrigger(false);
+    }
     if (field === "optimizer" && customizedConfigFields.size === 0) {
       const matchingPreset = targetPresets.find((preset) => preset.optimizer === value);
       if (matchingPreset && matchingPreset.id !== selectedPreset?.id) {
@@ -894,6 +919,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
       ),
     );
     setConfigTriggerFollowsCaptions(false);
+    // Presets don't carry sample prompts today, so keep prompts tracking the
+    // (now-frozen) trigger phrase rather than leaving a stale custom pool.
+    setConfigPromptsFollowTrigger(true);
     setConfigSnapshot(null);
     setConfigMessage(message);
     setConfigError("");
@@ -931,6 +959,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setCustomizedConfigFields(new Set());
     setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(captionTriggerWords), defaultPreset));
     setConfigTriggerFollowsCaptions(true);
+    setConfigPromptsFollowTrigger(true);
     setConfigSnapshot(null);
     setConfigMessage("Defaults restored");
     setConfigError("");

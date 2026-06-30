@@ -202,7 +202,29 @@ export function ConfigureJobPanel({
                 value={configDraft.sampleGuidanceScale ?? ""}
               />
             </label>
+            <label>
+              Sample count
+              <input
+                min="0"
+                onChange={(event) => updateConfigDraft("sampleCount", event.target.value)}
+                type="number"
+                value={configDraft.sampleCount ?? ""}
+              />
+            </label>
           </div>
+
+          <label className="training-sample-prompts">
+            Sample prompts
+            <textarea
+              onChange={(event) => updateConfigDraft("samplePrompts", event.target.value)}
+              placeholder="One prompt per line. Leave blank to use the trigger-phrase defaults."
+              rows={4}
+              value={configDraft.samplePrompts ?? ""}
+            />
+            <span className="training-field-hint">
+              One prompt per line. Previews cycle through this list up to the sample count.
+            </span>
+          </label>
 
           {selectedPreset ? (
             <div className="training-preset-summary" aria-label="Preset values">

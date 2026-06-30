@@ -453,7 +453,16 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
     sample_every = int(config.get("sample_every") or 0)
     sample_steps = int(config.get("sample_steps") or 4)
     sample_guidance = float(config.get("sample_guidance_scale") or 1.0)
-    sample_prompts = [str(p) for p in (spec.get("samplePrompts") or config.get("sample_prompts") or []) if str(p).strip()]
+    sample_prompt_pool = [str(p) for p in (spec.get("samplePrompts") or config.get("sample_prompts") or []) if str(p).strip()]
+    # sc-8671: cycle/truncate the pool to the requested preview count (default 4,
+    # matching the historical fixed cap). Mirrors training_adapters.resolve_sample_prompts;
+    # duplicated here because this runner is a standalone sidecar process.
+    sample_count = int(config.get("sample_count") or spec.get("sampleCount") or 4)
+    sample_prompts = (
+        [sample_prompt_pool[i % len(sample_prompt_pool)] for i in range(max(0, sample_count))]
+        if sample_prompt_pool
+        else []
+    )
     ts_type = str(advanced.get("timestepType") or config.get("timestep_type") or "sigmoid")
     ts_bias = str(advanced.get("timestepBias") or config.get("timestep_bias") or "balanced")
     loss_type = str(advanced.get("lossType") or config.get("loss_type") or "mse")
@@ -697,7 +706,7 @@ def _render_samples(
     rendered: list[dict[str, Any]] = []
     try:
         with torch.no_grad():
-            for index, prompt in enumerate(prompts[:4]):
+            for index, prompt in enumerate(prompts):
                 generator = torch.Generator("cpu").manual_seed(seed + step + index)
                 output = pipe(
                     prompt=prompt,

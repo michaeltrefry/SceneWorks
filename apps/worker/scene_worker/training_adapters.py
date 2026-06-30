@@ -185,6 +185,7 @@ class TrainingRunConfig:
     sample_steps: int
     sample_guidance_scale: float
     sample_prompts: list[str]
+    sample_count: int
     training_adapter_repo: str | None = None
     training_adapter_version: str | None = None
     weight_noise_sigma: float = 0.0
@@ -241,8 +242,12 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
     if not target_modules:
         target_modules = list(DEFAULT_LORA_TARGET_MODULES)
     sample_prompts = advanced.get("samplePrompts")
-    if not isinstance(sample_prompts, list):
+    if not isinstance(sample_prompts, list) or not sample_prompts:
         sample_prompts = default_sample_prompts(trigger_words(plan))
+    # sc-8671: number of preview images per sample step (default 4 preserves the
+    # historical fixed count). The prompt pool above is cycled/truncated to this
+    # many entries so the count is independent of how many prompts were supplied.
+    sample_count = _as_int(advanced.get("sampleCount"), DEFAULT_SAMPLE_COUNT, minimum=0)
     return TrainingRunConfig(
         rank=_as_int(config.get("rank"), 16, minimum=1),
         alpha=_as_int(config.get("alpha"), 16, minimum=1),
@@ -269,7 +274,8 @@ def read_run_config(plan: dict[str, Any]) -> TrainingRunConfig:
             advanced.get("sampleGuidanceScale"),
             default_sample_guidance_scale(plan),
         ),
-        sample_prompts=[str(prompt).strip() for prompt in sample_prompts if str(prompt).strip()][:4],
+        sample_prompts=resolve_sample_prompts(sample_prompts, sample_count),
+        sample_count=sample_count,
         training_adapter_repo=_as_optional_str(advanced.get("trainingAdapterRepo")),
         training_adapter_version=_as_optional_str(advanced.get("trainingAdapterVersion")),
         weight_noise_sigma=max(0.0, _as_float(advanced.get("weightNoiseSigma"), 0.0)),
@@ -292,6 +298,12 @@ def trigger_words(plan: dict[str, Any]) -> list[str]:
     return [str(word) for word in words if str(word).strip()]
 
 
+# Number of preview images rendered per sample step when the plan doesn't set
+# ``advanced.sampleCount``. Matches the four default prompts below, so legacy
+# payloads behave exactly as before this knob existed (sc-8671).
+DEFAULT_SAMPLE_COUNT = 4
+
+
 def default_sample_prompts(words: list[str]) -> list[str]:
     trigger = ", ".join(words).strip() or "the trained subject"
     return [
@@ -300,6 +312,19 @@ def default_sample_prompts(words: list[str]) -> list[str]:
         f"{trigger}, cinematic outdoor portrait, golden hour",
         f"{trigger}, close-up character portrait, dramatic rim light",
     ]
+
+
+def resolve_sample_prompts(pool: list[str], count: int) -> list[str]:
+    """Resolve a prompt pool to exactly ``count`` prompts for previewing (sc-8671).
+
+    Blank entries are dropped; the surviving pool is cycled (when ``count`` exceeds
+    the pool size) or truncated (when it's smaller). Repeated prompts still render
+    distinct images because the kernel seeds each sample by its index. An empty pool
+    or ``count <= 0`` yields no samples."""
+    cleaned = [str(prompt).strip() for prompt in pool if str(prompt).strip()]
+    if not cleaned or count <= 0:
+        return []
+    return [cleaned[index % len(cleaned)] for index in range(count)]
 
 
 def project_relative_path(plan: dict[str, Any], path: Path) -> str | None:

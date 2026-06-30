@@ -255,7 +255,11 @@ pub struct TrainingConfig {
     /// Trigger word baked into captions and surfaced on the output LoRA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_word: Option<String>,
-    /// Advanced, collapsed-by-default fields. Free-form by design.
+    /// Advanced, collapsed-by-default fields. Free-form by design. Preview-sample
+    /// knobs live here: `sampleEvery` (cadence in steps; 0 disables), `sampleSteps`,
+    /// `sampleGuidanceScale`, `sampleCount` (images per step; default 4), and
+    /// `samplePrompts` (string array; empty falls back to trigger-derived defaults).
+    /// All four backends (torch/Lens/candle/MLX) cycle the prompt pool to `sampleCount`.
     pub advanced: JsonObject,
     #[serde(flatten)]
     pub extra: ExtraFields,

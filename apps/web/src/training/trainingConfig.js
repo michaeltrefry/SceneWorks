@@ -70,6 +70,8 @@ export const configFieldLabels = {
   sampleEvery: "Sample cadence",
   sampleSteps: "Sample steps",
   sampleGuidanceScale: "Guidance scale",
+  sampleCount: "Sample count",
+  samplePrompts: "Sample prompts",
   batchSize: "Batch size",
   gradientAccumulation: "Gradient accumulation",
   seed: "Seed",
@@ -156,6 +158,15 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     sampleEvery: numericDraft(advanced.sampleEvery),
     sampleSteps: numericDraft(advanced.sampleSteps),
     sampleGuidanceScale: numericDraft(advanced.sampleGuidanceScale),
+    sampleCount: numericDraft(advanced.sampleCount ?? defaultSampleCount),
+    // Prefilled with the preset's prompts when it carries them, otherwise the
+    // trigger-derived defaults. The screen keeps this in sync with the trigger
+    // phrase until the user edits it (configPromptsFollowTrigger).
+    samplePrompts: promptListToLines(
+      Array.isArray(advanced.samplePrompts) && advanced.samplePrompts.length
+        ? advanced.samplePrompts
+        : samplePromptsFromTrigger(triggerPhrase || asText(defaults.triggerWord)),
+    ),
     batchSize: numericDraft(defaults.batchSize),
     gradientAccumulation: numericDraft(defaults.gradientAccumulation),
     seed: numericDraft(defaults.seed),
@@ -204,9 +215,33 @@ export function samplePromptsFromTrigger(triggerWord) {
   ];
 }
 
+// Default number of preview images rendered per sample step (sc-8671). Matches
+// the four trigger-derived default prompts, so the out-of-the-box behavior is
+// unchanged when neither knob is touched. The backends clamp/cycle the prompt
+// pool to this count, so it can differ from the number of prompts supplied.
+export const defaultSampleCount = 4;
+
+// The sample-prompts textarea holds one prompt per line; the worker payload wants
+// a string array. These two convert between the draft string and the array.
+export function promptLinesToList(text) {
+  return String(text ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export function promptListToLines(list) {
+  return (Array.isArray(list) ? list : []).join("\n");
+}
+
 export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true }) {
   const defaults = selectedTarget?.defaults ?? {};
   const networkType = asText(configDraft.networkType).trim() || "lora";
+  // The user-edited prompt pool, one per line. Empty falls back to the trigger-derived
+  // defaults so previews still render (and {trigger} substitution is preserved). The
+  // backends cycle/truncate this pool to sampleCount, so its length need not equal the count.
+  const editedPrompts = promptLinesToList(configDraft.samplePrompts);
+  const samplePrompts = editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
   const advanced = compactObject({
     ...(defaults.advanced ?? {}),
     networkType,
@@ -228,7 +263,8 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
     sampleSteps: numberFromDraft(configDraft.sampleSteps),
     sampleGuidanceScale: numberFromDraft(configDraft.sampleGuidanceScale),
-    samplePrompts: samplePromptsFromTrigger(configDraft.triggerWord),
+    sampleCount: numberFromDraft(configDraft.sampleCount),
+    samplePrompts,
     qualityPreset: configDraft.qualityPreset,
     outputScope: configDraft.outputScope,
     requestedGpu: configDraft.requestedGpu,

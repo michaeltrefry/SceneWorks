@@ -124,6 +124,34 @@ describe("trainingConfigSnapshot", () => {
     expect(snap.config.advanced.samplePrompts).toHaveLength(4);
   });
 
+  it("prefills the sample-prompts draft and defaults the sample count to 4 (sc-8671)", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"], "ohwx woman");
+    expect(draft.sampleCount).toBe("4");
+    expect(draft.samplePrompts.split("\n")).toHaveLength(4);
+    expect(draft.samplePrompts).toContain("ohwx woman");
+  });
+
+  it("sends the user's edited prompt pool verbatim and a custom count (sc-8671)", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"], "ohwx woman");
+    const snap = snapshot({ ...draft, samplePrompts: "a cat\n  a dog  \n\na bird", sampleCount: "6" });
+    expect(snap.config.advanced.sampleCount).toBe(6);
+    // Blank lines dropped, surviving lines trimmed; backends cycle this pool to the count.
+    expect(snap.config.advanced.samplePrompts).toEqual(["a cat", "a dog", "a bird"]);
+  });
+
+  it("falls back to trigger-derived prompts when the pool is cleared (sc-8671)", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"], "ohwx woman");
+    const snap = snapshot({ ...draft, samplePrompts: "   \n  " });
+    expect(snap.config.advanced.samplePrompts).toHaveLength(4);
+    expect(snap.config.advanced.samplePrompts[0]).toContain("ohwx woman");
+  });
+
+  it("drops a blank sample count so the worker applies its own default (sc-8671)", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"], "ohwx woman");
+    const snap = snapshot({ ...draft, sampleCount: "" });
+    expect(snap.config.advanced).not.toHaveProperty("sampleCount");
+  });
+
   it("carries the preset id/version when a preset is selected", () => {
     const snap = snapshot(configDraftFromTarget(target, dataset, ["auto"]), {
       selectedPreset: { id: "preset-1", version: 5 },

@@ -495,17 +495,80 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         sample_every: advanced_u32(advanced, "sampleEvery", 0),
         sample_steps: advanced_u32(advanced, "sampleSteps", 20),
         sample_guidance_scale: advanced_f32(advanced, "sampleGuidanceScale", 1.0),
-        sample_prompts: advanced
-            .get("samplePrompts")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_owned))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
+        // sc-8671 — the engine renders one preview per prompt, so resolve the user's prompt pool
+        // to exactly `sampleCount` entries (cycling/truncating). Absent `sampleCount` → 4, matching
+        // the historical fixed count. An empty pool falls back to the trigger-derived defaults so the
+        // candle/MLX path previews the same prompts as torch when the UI didn't supply any.
+        sample_prompts: {
+            let pool = advanced
+                .get("samplePrompts")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|pool| !pool.is_empty())
+                .unwrap_or_else(|| {
+                    default_sample_prompts(config.trigger_word.as_deref().unwrap_or(""))
+                });
+            resolve_sample_prompts(
+                pool,
+                advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
+            )
+        },
     }
+}
+
+/// Default number of preview images rendered per sample step when the plan doesn't set
+/// `advanced.sampleCount`. Matches the four default prompts, so legacy payloads preview
+/// exactly as before this knob existed (sc-8671).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const DEFAULT_SAMPLE_COUNT: u32 = 4;
+
+/// Trigger-derived default preview prompts. Mirrors `samplePromptsFromTrigger` in the web UI and
+/// `training_adapters.default_sample_prompts` on the torch path, so all three backends preview the
+/// same concepts when no prompts are supplied (sc-8671).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn default_sample_prompts(trigger_word: &str) -> Vec<String> {
+    let trigger = trigger_word.trim();
+    let trigger = if trigger.is_empty() {
+        "the trained subject"
+    } else {
+        trigger
+    };
+    vec![
+        format!("{trigger}, studio portrait, soft key light, detailed face"),
+        format!("{trigger}, full body fashion editorial photo, natural pose"),
+        format!("{trigger}, cinematic outdoor portrait, golden hour"),
+        format!("{trigger}, close-up character portrait, dramatic rim light"),
+    ]
+}
+
+/// Resolve a prompt pool to exactly `count` prompts by cycling (when `count` exceeds the pool) or
+/// truncating (when smaller). Repeated prompts still render distinct images because the engine seeds
+/// each sample by its index. An empty pool or `count == 0` yields no samples (sampling stays off).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
+    if pool.is_empty() || count == 0 {
+        return Vec::new();
+    }
+    (0..count as usize)
+        .map(|index| pool[index % pool.len()].clone())
+        .collect()
 }
 
 /// Whether the candle (Windows/CUDA + Linux/NVIDIA) backend MUST run this family with gradient
