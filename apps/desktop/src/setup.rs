@@ -1339,10 +1339,18 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         if let Some(child) = mlx_worker {
             let _ = child.kill();
         }
-        // Windows-only (candle is Windows); None elsewhere. The Windows shutdown
-        // path force-kills (no SIGTERM grace above), and the worker also honours the
-        // parent-death watchdog, so this is the belt to that suspenders.
+        // Windows-only (candle is Windows); None elsewhere. The candle `auto` worker
+        // is a supervisor that spawns one child per GPU plus a CPU child;
+        // CommandChild::kill() (TerminateProcess) reaps ONLY the supervisor and
+        // orphans those children — the exact leak that left N worker processes
+        // running after every quit. Tree-kill the whole group by PID instead
+        // (taskkill /T /F, the same reap path `reap_stale_sidecars` uses). The
+        // worker's parent-death watchdog is the belt to this suspenders for the
+        // force-quit/crash path that skips this teardown entirely.
         if let Some(child) = candle_worker {
+            #[cfg(windows)]
+            kill_pid(child.pid());
+            #[cfg(not(windows))]
             let _ = child.kill();
         }
         if let Some(child) = api_child {

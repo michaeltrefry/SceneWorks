@@ -477,24 +477,24 @@ pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
             "SceneWorks Rust worker defaulting HF_HOME"
         );
     }
-    #[cfg(unix)]
-    {
-        tokio::select! {
-            result = sceneworks_worker::run() => result?,
-            _ = parent_death(parent_pid_to_watch()) => {
-                tracing::info!(
-                    event = "worker_parent_gone",
-                    "SceneWorks Rust worker: watched parent process gone, exiting"
-                );
-            }
+    // Race the worker against the parent-death watchdog on every platform. The
+    // desktop sets SCENEWORKS_PARENT_PID to its own PID; a force-quit/crash skips
+    // the shell's graceful teardown, and a graceful quit on Windows TerminateProcess-
+    // kills only the `auto` supervisor — never its per-GPU/CPU children. Without this
+    // watchdog those children orphan, holding multi-GB CUDA contexts and a jobs.db
+    // handle until the next launch reaps them (and the reap only knows the supervisor
+    // PID, so the children accumulated unbounded). Unset (server/Docker) -> the
+    // watchdog future stays pending and never fires.
+    tokio::select! {
+        result = sceneworks_worker::run() => result?,
+        _ = parent_death(parent_pid_to_watch()) => {
+            tracing::info!(
+                event = "worker_parent_gone",
+                "SceneWorks Rust worker: watched parent process gone, exiting"
+            );
         }
-        Ok(())
     }
-    #[cfg(not(unix))]
-    {
-        sceneworks_worker::run().await?;
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Spawns the utility worker loop ([`sceneworks_worker::run_worker_loop`]) as a
@@ -560,14 +560,12 @@ impl InProcessUtilityWorker {
 }
 
 /// Poll cadence for the parent-death watchdog (see [`shutdown_signal`]).
-#[cfg(unix)]
 const PARENT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// The parent PID this process should watch, parsed from `SCENEWORKS_PARENT_PID`.
 /// `None` when the var is unset/blank/unparseable or `<= 1`: a value of 0 or 1
 /// (init/launchd) means "already reparented or no real parent", so the watchdog
 /// must not fire. Server/Docker deployments leave the var unset.
-#[cfg(unix)]
 fn parent_pid_to_watch() -> Option<i32> {
     let pid: i64 = std::env::var("SCENEWORKS_PARENT_PID")
         .ok()?
@@ -589,10 +587,28 @@ fn pid_alive(pid: i32) -> bool {
     }
 }
 
+/// True while `pid` names a live process. The workspace forbids `unsafe`, so we
+/// can't `OpenProcess`/`WaitForSingleObject` directly; instead we shell out to
+/// `tasklist` (the same liveness probe the desktop shell uses to reap sidecars).
+/// `tasklist /FO CSV` quotes every field, so a live PID appears as `"<pid>"` in a
+/// data row while the no-match case prints only an `INFO:` banner — anchoring on
+/// the quoted PID is locale-proof and immune to the digits colliding with another
+/// column. A probe we can't even launch is treated as "alive" so a transient
+/// failure never makes the worker self-terminate spuriously.
+#[cfg(windows)]
+fn pid_alive(pid: i32) -> bool {
+    let Ok(output) = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return true;
+    };
+    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+}
+
 /// Resolves once the watched parent process disappears, polling every
 /// [`PARENT_POLL_INTERVAL`]. With no parent to watch (`None`) it stays pending
 /// forever, so the `select!` branch in [`shutdown_signal`] never fires.
-#[cfg(unix)]
 async fn parent_death(parent_pid: Option<i32>) {
     let Some(parent_pid) = parent_pid else {
         std::future::pending::<()>().await;
@@ -624,14 +640,10 @@ async fn shutdown_signal() {
     // Parent-death watchdog: when launched as a desktop sidecar the Tauri shell
     // sets SCENEWORKS_PARENT_PID to its own PID. A force-quit/crash skips the
     // shell's graceful teardown (`begin_shutdown`), so without this the API
-    // orphans to launchd (PPID=1) — holding its OS-assigned port and a jobs.db
-    // handle until the next launch reaps it. Unset (server/Docker) -> the future
-    // stays pending and this branch never fires.
-    #[cfg(unix)]
+    // orphans (reparented to PID 1 / the Windows session) — holding its
+    // OS-assigned port and a jobs.db handle until the next launch reaps it. Unset
+    // (server/Docker) -> the future stays pending and this branch never fires.
     let parent_gone = parent_death(parent_pid_to_watch());
-
-    #[cfg(not(unix))]
-    let parent_gone = std::future::pending::<()>();
 
     tokio::select! {
         _ = ctrl_c => {}
