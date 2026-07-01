@@ -497,6 +497,24 @@ describe("WorkerProgressCard thumbnails", () => {
     expect(api.container.querySelector("video")).not.toBeNull();
   });
 
+  it("suppresses the native context menu on the video-player thumbnail (sc-8731)", () => {
+    api = render(
+      <WorkerProgressCard
+        job={videoJob}
+        thumbnailsVariant="video-player"
+        thumbnailAssets={[videoAsset]}
+      />,
+      makeContext([]),
+    );
+    const wrapper = api.container.querySelector(".worker-progress-card__thumbnails--video-player");
+    expect(wrapper).not.toBeNull();
+    const event = new window.MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    act(() => {
+      wrapper.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+  });
+
   it("renders a video placeholder when no asset is available yet", () => {
     api = render(
       <WorkerProgressCard

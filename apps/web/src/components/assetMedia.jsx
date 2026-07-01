@@ -25,6 +25,21 @@ export function assetCanRenderAsVideo(asset) {
   return asset?.type === "video" || asset?.file?.mimeType?.startsWith("video/");
 }
 
+// Suppress the native WKWebView context menu on grid thumbnails (sc-8731). Right-
+// clicking a thumbnail image in a Tauri webview otherwise pops the OS "Download
+// Image / Copy Image / Share" menu; thumbnails have no custom menu, so we just
+// swallow the default. Only preventDefault the contextmenu event — never
+// stopPropagation of clicks — so left-click selection / open-preview stay intact.
+// Applied at the shared AssetThumbnail seam so every grid that renders it (Queue's
+// WorkerProgressCard, pickers, studios) inherits the suppression from one place.
+// The Library grid renders AssetMedia directly (assetPanels.jsx), so AssetGrid
+// imports this and attaches it at the tile-cell level. The full-size
+// FullscreenPreview renderer is intentionally left alone: it gets its own custom
+// right-click menu in sc-8729.
+export function suppressThumbnailContextMenu(event) {
+  event.preventDefault();
+}
+
 // Generated videos get a sibling `<name>.poster.jpg` (the worker extracts frame 0).
 // WKWebView won't paint a <video>'s own first frame as a poster, so the UI shows
 // this real image instead — as the thumbnail and as the player's poster attribute.
@@ -42,7 +57,13 @@ export function posterUrl(asset) {
 // thumbnails for purged outputs read as removed rather than broken.
 export function MissingMedia({ className = "" }) {
   return (
-    <span className={`asset-thumb-missing ${className}`.trim()} role="img" aria-label="Deleted asset" title="Deleted">
+    <span
+      aria-label="Deleted asset"
+      className={`asset-thumb-missing ${className}`.trim()}
+      onContextMenu={suppressThumbnailContextMenu}
+      role="img"
+      title="Deleted"
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
         <path d="M6 6l12 12M18 6L6 18" />
       </svg>
@@ -57,7 +78,7 @@ function ImageThumb({ src, className }) {
   if (failed) {
     return <MissingMedia className={className} />;
   }
-  return <img alt="" className={className} src={src} onError={() => setFailed(true)} />;
+  return <img alt="" className={className} onContextMenu={suppressThumbnailContextMenu} onError={() => setFailed(true)} src={src} />;
 }
 
 export function AssetThumbnail({ asset, className = "" }) {
@@ -66,7 +87,7 @@ export function AssetThumbnail({ asset, className = "" }) {
   }
   const src = assetUrl(asset);
   if (!src) {
-    return <span className={className}>{asset.type ?? "asset"}</span>;
+    return <span className={className} onContextMenu={suppressThumbnailContextMenu}>{asset.type ?? "asset"}</span>;
   }
   if (assetCanRenderAsVideo(asset)) {
     return <VideoPoster asset={asset} className={className} />;
@@ -81,12 +102,12 @@ function VideoPoster({ asset, className }) {
   const [failed, setFailed] = React.useState(false);
   const poster = posterUrl(asset);
   if (!poster) {
-    return <span className={className}>{asset.type ?? "video"}</span>;
+    return <span className={className} onContextMenu={suppressThumbnailContextMenu}>{asset.type ?? "video"}</span>;
   }
   if (failed) {
     return <MissingMedia className={className} />;
   }
-  return <img alt="" className={className} src={poster} onError={() => setFailed(true)} />;
+  return <img alt="" className={className} onContextMenu={suppressThumbnailContextMenu} onError={() => setFailed(true)} src={poster} />;
 }
 
 export const AssetMedia = React.forwardRef(function AssetMedia({ asset, className = "", controls = true, ...mediaProps }, ref) {

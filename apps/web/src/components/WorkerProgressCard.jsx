@@ -3,7 +3,7 @@ import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
 import { useAppContext } from "../context/AppContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
-import { AssetMedia, AssetThumbnail, assetUrl, posterUrl } from "./assetMedia.jsx";
+import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
@@ -339,6 +339,7 @@ function VideoThumbnail({ assets, onThumbnailClick }) {
       className="worker-progress-card__thumbnails worker-progress-card__thumbnails--video-player"
       role="group"
       aria-label="Job output"
+      onContextMenu={suppressThumbnailContextMenu}
     >
       {src ? (
         <AssetMedia asset={asset} className="worker-progress-card__video" />

@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AssetGrid } from "./assetPanels.jsx";
+import { AssetCard, AssetGrid } from "./assetPanels.jsx";
 
 const assets = [
   { id: "a", type: "image", displayName: "one.png", file: { path: "assets/one.png", mimeType: "image/png" }, projectId: "p1" },
@@ -67,5 +67,62 @@ describe("AssetGrid multi-select (sc-6112)", () => {
     // The tile body still drives single-select (the detail flow is unchanged).
     await act(async () => tiles()[0].click());
     expect(setSelectedAssetId).toHaveBeenCalledWith("a");
+  });
+
+  it("suppresses the native context menu on a Library grid thumbnail cell (sc-8731) without breaking selection", async () => {
+    const setSelectedAssetId = vi.fn();
+    await act(() => {
+      root.render(<AssetGrid assets={assets} onPreview={vi.fn()} selectedAsset={null} setSelectedAssetId={setSelectedAssetId} />);
+    });
+    const tile = tiles()[0];
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    tile.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+
+    // Suppressing the contextmenu must not disturb the left-click select flow.
+    await act(async () => tile.click());
+    expect(setSelectedAssetId).toHaveBeenCalledWith("a");
+  });
+});
+
+describe("AssetCard native context-menu suppression (sc-8731)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("suppresses the native menu on the studio AssetCard thumbnail without breaking open-preview", async () => {
+    const onPreview = vi.fn();
+    await act(() => {
+      root.render(
+        <AssetCard
+          asset={assets[0]}
+          deleteAsset={vi.fn()}
+          purgeAsset={vi.fn()}
+          onPreview={onPreview}
+          updateAssetStatus={vi.fn()}
+        />,
+      );
+    });
+    const preview = container.querySelector(".preview-button");
+    expect(preview).not.toBeNull();
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    preview.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+
+    // Left-click still opens the preview.
+    await act(async () => preview.click());
+    expect(onPreview).toHaveBeenCalledWith(assets[0]);
   });
 });
