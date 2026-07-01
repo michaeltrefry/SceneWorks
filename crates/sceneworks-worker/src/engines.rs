@@ -304,7 +304,10 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "chroma1_hd",
         engine_id: "chroma1_hd",
-        default_repo: "lodestones/Chroma1-HD",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8777, epic 8506, Group-B): standard
+        // q4/q8/bf16 subdirs (standard_tier_subdir) — transformer packed, T5-XXL + VAE dense.
+        // Public/ungated re-host of lodestones/Chroma1-HD.
+        default_repo: "SceneWorks/chroma1-hd-mlx",
         default_steps: 40,
         default_guidance: 3.0,
         adapter_label: "mlx_chroma",
@@ -312,7 +315,10 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "chroma1_base",
         engine_id: "chroma1_base",
-        default_repo: "lodestones/Chroma1-Base",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8777, epic 8506, Group-B): standard
+        // q4/q8/bf16 subdirs (standard_tier_subdir) — transformer packed, T5-XXL + VAE dense.
+        // Public/ungated re-host of lodestones/Chroma1-Base.
+        default_repo: "SceneWorks/chroma1-base-mlx",
         default_steps: 40,
         default_guidance: 3.0,
         adapter_label: "mlx_chroma",
@@ -323,7 +329,10 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "chroma1_flash",
         engine_id: "chroma1_flash",
-        default_repo: "lodestones/Chroma1-Flash",
+        // SceneWorks pre-built quant-matrix turnkey (sc-8777, epic 8506, Group-B): standard
+        // q4/q8/bf16 subdirs (standard_tier_subdir) — transformer packed, T5-XXL + VAE dense.
+        // Public/ungated re-host of lodestones/Chroma1-Flash.
+        default_repo: "SceneWorks/chroma1-flash-mlx",
         default_steps: 12,
         default_guidance: 1.0,
         adapter_label: "mlx_chroma",

@@ -2514,16 +2514,48 @@
       "adapter": "chroma_diffusers",
       "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8777, epic 8506, Group-B): public/ungated
+        // re-host of lodestones/Chroma1-HD (Apache-2.0). Per-tier self-contained subdirs q4/ (default),
+        // q8/, bf16/ — the worker loads the chosen tier's subdir directly (standard_tier_subdir). Each
+        // subdir bundles the packed transformer + a dense (bf16, never quantized) T5-XXL text encoder +
+        // dense VAE; only the transformer is quantized per tier. Sizes measured on-disk (HF tree API).
         {
-          // Whole-repo download (diffusers ChromaPipeline layout + bundled checkpoint).
           "provider": "huggingface",
-          "repo": "lodestones/Chroma1-HD",
-          "files": [],
-          "estimatedSizeBytes": 45300383271
+          "repo": "SceneWorks/chroma1-hd-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 15121207891,
+          "footprint": { "diskSizeBytes": 15121207891, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/chroma1-hd-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19424564251,
+          "footprint": { "diskSizeBytes": 19424564251, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/chroma1-hd-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 27493363692,
+          "footprint": { "diskSizeBytes": 27493363692, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/lodestones/Chroma1-HD"
+        "model": "${HF_CACHE}/SceneWorks/chroma1-hd-mlx"
+      },
+      "gated": false,
+      "mlx": {
+        // q4/ default tier (sc-8777); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
+        // resolve_quant=Q4 packs ONLY the transformer; the T5-XXL text encoder stays dense (chroma
+        // never quantizes its T5), so NO denseTextEncoderTier. standardTierLayout drives the
+        // standard_tier_subdir packed-load path.
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "defaults": {
         // True classifier-free guidance with negative prompts: ~40 steps, guidance 3.0.
@@ -2569,16 +2601,48 @@
       "adapter": "chroma_diffusers",
       "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8777, epic 8506, Group-B): public/ungated
+        // re-host of lodestones/Chroma1-Base (Apache-2.0). Per-tier self-contained subdirs q4/ (default),
+        // q8/, bf16/ — the worker loads the chosen tier's subdir directly (standard_tier_subdir). Each
+        // subdir bundles the packed transformer + a dense (bf16, never quantized) T5-XXL text encoder +
+        // dense VAE; only the transformer is quantized per tier. Sizes measured on-disk (HF tree API).
         {
-          // Whole-repo download (diffusers ChromaPipeline layout + bundled checkpoint).
           "provider": "huggingface",
-          "repo": "lodestones/Chroma1-Base",
-          "files": [],
-          "estimatedSizeBytes": 45294403859
+          "repo": "SceneWorks/chroma1-base-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 15121207547,
+          "footprint": { "diskSizeBytes": 15121207547, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/chroma1-base-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19424563899,
+          "footprint": { "diskSizeBytes": 19424563899, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/chroma1-base-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 27493363362,
+          "footprint": { "diskSizeBytes": 27493363362, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/lodestones/Chroma1-Base"
+        "model": "${HF_CACHE}/SceneWorks/chroma1-base-mlx"
+      },
+      "gated": false,
+      "mlx": {
+        // q4/ default tier (sc-8777); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
+        // resolve_quant=Q4 packs ONLY the transformer; the T5-XXL text encoder stays dense (chroma
+        // never quantizes its T5), so NO denseTextEncoderTier. standardTierLayout drives the
+        // standard_tier_subdir packed-load path.
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "defaults": {
         // Neutral finetuning foundation: ~40 steps, guidance 3.0, true CFG + negative prompts.
@@ -2624,16 +2688,48 @@
       "adapter": "chroma_diffusers",
       "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8777, epic 8506, Group-B): public/ungated
+        // re-host of lodestones/Chroma1-Flash (Apache-2.0). Per-tier self-contained subdirs q4/ (default),
+        // q8/, bf16/ — the worker loads the chosen tier's subdir directly (standard_tier_subdir). Each
+        // subdir bundles the packed transformer + a dense (bf16, never quantized) T5-XXL text encoder +
+        // dense VAE; only the transformer is quantized per tier. Sizes measured on-disk (HF tree API).
         {
-          // Whole-repo download (diffusers ChromaPipeline layout + bundled checkpoints).
           "provider": "huggingface",
-          "repo": "lodestones/Chroma1-Flash",
-          "files": [],
-          "estimatedSizeBytes": 63094436928
+          "repo": "SceneWorks/chroma1-flash-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 15121207973,
+          "footprint": { "diskSizeBytes": 15121207973, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/chroma1-flash-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19424564095,
+          "footprint": { "diskSizeBytes": 19424564095, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/chroma1-flash-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 27493363732,
+          "footprint": { "diskSizeBytes": 27493363732, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/lodestones/Chroma1-Flash"
+        "model": "${HF_CACHE}/SceneWorks/chroma1-flash-mlx"
+      },
+      "gated": false,
+      "mlx": {
+        // q4/ default tier (sc-8777); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
+        // resolve_quant=Q4 packs ONLY the transformer; the T5-XXL text encoder stays dense (chroma
+        // never quantizes its T5), so NO denseTextEncoderTier. standardTierLayout drives the
+        // standard_tier_subdir packed-load path.
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "defaults": {
         // CFG baked: Heun at ~12 steps, guidance 1.0 (CFG off, negative prompt ignored).

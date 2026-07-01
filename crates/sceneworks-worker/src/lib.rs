@@ -178,6 +178,14 @@ mod sdxl_base_q8_mlx_smoke;
 // non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
 #[cfg(all(test, target_os = "macos"))]
 mod lens_turbo_q4_mlx_smoke;
+// Real-weight MLX smoke for the Chroma1-Base Q4 worker lane (sc-8777, epic 8506 Group-B). Test-only +
+// macOS-only; drives `gen_core::load("chroma1_base")` with a Q4 LoadSpec against the packed `q4/` turnkey
+// subdir. On-device evidence that the SceneWorks/chroma1-base-mlx pre-quantized q4 tier loads through the
+// worker packed path (`mlx.standardTierLayout` → `standard_tier_subdir` resolves `q4/`) and renders
+// non-degenerate. Chroma packs ONLY the transformer per-tier (the T5-XXL TE + VAE stay dense — chroma
+// never quantizes its T5, so no denseTextEncoderTier). hd/flash share this crate + layout.
+#[cfg(all(test, target_os = "macos"))]
+mod chroma1_base_q4_mlx_smoke;
 // On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506). Test-only + macOS-only;
 // #[ignore]d real-weight smokes that drive `gen_core::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})
