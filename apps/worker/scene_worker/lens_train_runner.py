@@ -481,7 +481,8 @@ def train(spec: dict[str, Any], progress: _Progress) -> dict[str, Any]:
         f"steps={steps} rank={rank} alpha={alpha} lr={learning_rate} targets={target_modules}"
     )
 
-    # ---- Load the base model (microsoft/Lens by default) -------------------
+    # ---- Load the base model (the SceneWorks/Lens rehost by default; the ----
+    # ---- original microsoft/Lens repo is dead, sc-8797) ---------------------
     progress.emit(event="stage", stage="loading_model", message=f"Loading Lens base model ({source}).")
     text_encoder_kwargs: dict[str, Any] = {"subfolder": "text_encoder", "dtype": dtype}
     mxfp4_config = getattr(transformers, "Mxfp4Config", None)

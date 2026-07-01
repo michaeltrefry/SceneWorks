@@ -1120,9 +1120,13 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
 /// of Turbo, so the adapter transfers cleanly — and the output registers as a
 /// `lens` family LoRA the Lens adapter loads onto Lens-Turbo at generation time.
 /// `base_model_repo` points the plan's `baseModelPath` at the Lens HF cache,
-/// independent of the served `lens_turbo` model. `microsoft/Lens-Base` (50-step
-/// supervised) is the fallback base if RL-tuning hurts LoRA stability; override
-/// via `advanced.baseModelRepo` (sc-1584).
+/// independent of the served `lens_turbo` model. Microsoft pulled the original
+/// `microsoft/Lens*` repos from HF, so the base is the `SceneWorks/Lens` re-host
+/// (sc-8797) — a self-contained diffusers snapshot rebuilt from Comfy-Org/Lens +
+/// openai/gpt-oss-20b (MXFP4) + FLUX.2-dev, layout-identical to the original, the
+/// same repo the off-Mac candle inference lane loads (sc-8799). The old
+/// `microsoft/Lens-Base` (50-step supervised) fallback (sc-1584) died with the
+/// pull; `advanced.baseModelRepo` still overrides the source if another appears.
 ///
 /// Unlike Z-Image's separate `to_q/to_k/to_v`, Lens uses *fused* QKV attention
 /// (`img_qkv`/`txt_qkv`) plus joint-attention output projections. The image output
@@ -1137,7 +1141,7 @@ fn lens_turbo_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "lens".to_owned(),
         base_model: "lens".to_owned(),
-        base_model_repo: Some("microsoft/Lens".to_owned()),
+        base_model_repo: Some("SceneWorks/Lens".to_owned()),
         kernel: "lens_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
@@ -1170,9 +1174,10 @@ fn lens_turbo_lora_target() -> TrainingTarget {
                 // errors on the ModuleList itself (sc-2218). Suffixes must match the
                 // LensTransformer2DModel module names or PEFT injects nothing.
                 "loraTargetModules": ["img_qkv", "txt_qkv", "to_out.0", "to_add_out"],
-                // Non-distilled training base; override with "microsoft/Lens-Base"
-                // to train on the 50-step supervised checkpoint instead (sc-1584).
-                "baseModelRepo": "microsoft/Lens",
+                // Non-distilled training base: the SceneWorks/Lens diffusers re-host
+                // (the original microsoft/Lens is dead, sc-8797). Override via this
+                // key to train on an alternative checkpoint (sc-1584).
+                "baseModelRepo": "SceneWorks/Lens",
                 // In-training previews render on the loaded base model (not the
                 // distilled Turbo), so they use the base's 20-step / CFG 5.0
                 // settings — 4-step / CFG 1.0 on the non-distilled base is garbage.

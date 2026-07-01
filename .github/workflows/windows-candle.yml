@@ -63,7 +63,7 @@ jobs:
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
       CUDA_COMPUTE_CAP: "120"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       # No rust-toolchain action: the self-hosted box has rustup + the repo's
       # `rust-toolchain.toml`-pinned toolchain (incl. clippy) pre-installed, and the
       # action's bash step breaks here — `bash` resolves to the box's WSL stub, not

@@ -57,9 +57,10 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, macOS, ARM64, nax]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
+          toolchain: stable
           components: clippy
       # No MACOSX_DEPLOYMENT_TARGET override: the workspace /.cargo/config.toml pins
       # 26.2, so the NAX kernels compile in and the fast path is actually built.

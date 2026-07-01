@@ -308,7 +308,10 @@ function deleteResultText(result, name) {
 // The declared quant tiers of a matrix model, in suggestion-fidelity order (bf16 → q8 → q4, i.e.
 // highest first) so the panel lists the biggest/best at the top. `suggestTier` already orders on
 // this basis; we surface the same order to the user. Each entry is the raw `variants[]` object.
-const TIER_DISPLAY_ORDER = ["bf16", "q8", "q4"];
+// "training" (sc-8797) is the extra flat-diffusers LoRA-training-base artifact a tiered model can
+// host (lens on macOS); it renders last so the quant tiers stay the visual focus. It is not in
+// tierSuggestion's fidelity list, so it is never the suggested/preselected download.
+const TIER_DISPLAY_ORDER = ["bf16", "q8", "q4", "training"];
 
 function orderedMatrixVariants(model) {
   if (!model?.hasVariantMatrix || !Array.isArray(model.variants)) {

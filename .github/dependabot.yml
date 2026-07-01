@@ -1,0 +1,13 @@
+# Keeps the SHA-pinned GitHub Actions in .github/workflows/ fresh (sc-8801).
+# Dependabot rewrites the pinned commit SHA and its trailing `# vX.Y.Z` comment
+# when upstream publishes a new release.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

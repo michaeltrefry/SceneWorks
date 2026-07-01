@@ -212,16 +212,18 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > stack (peak rises to ~46 GB; a 64 GB+ Mac is recommended with them on), and the
 > distilled sampler ignores `sampleSteps`/`sampleGuidanceScale`.
 
-> **Lens LoRA (`microsoft/Lens` → Lens-Turbo):** the `lens_lora` kernel
+> **Lens LoRA (base Lens → Lens-Turbo):** the `lens_lora` kernel
 > (`target.kernel`) trains an image LoRA for Microsoft Lens. Lens-Turbo is a
-> 4-step *distillation* of `microsoft/Lens`; training a LoRA directly on the
+> 4-step *distillation* of base Lens; training a LoRA directly on the
 > distilled velocity field drifts (the same failure mode the Z-Image de-distill
 > adapter exists to avoid). So — unlike Z-Image — Lens needs **no de-distill
-> adapter**: it trains on the non-distilled **`microsoft/Lens`** (20-step, CFG 5.0,
+> adapter**: it trains on the non-distilled base (20-step, CFG 5.0,
 > the direct weight-parent of Turbo) and the resulting `lens`-family LoRA applies
-> cleanly to **Lens-Turbo** at inference. Install the **Lens (base)** model
-> (`microsoft/Lens`) from the Model Manager before a real run; `microsoft/Lens-Base`
-> (50-step supervised) is the fallback base, selectable via
+> cleanly to **Lens-Turbo** at inference. The training base is the
+> **`SceneWorks/Lens`** diffusers rehost (sc-8797; Microsoft pulled the original
+> `microsoft/Lens*` repos). On Windows/Linux the **Lens (base)** install already
+> fetches it; on macOS install the Lens **training** variant from the Model
+> Manager before a real run. Another source is selectable via
 > `advanced.baseModelRepo`.
 >
 > Like the Lens inference path, training runs in the isolated **Lens sidecar venv**
@@ -373,7 +375,7 @@ messages:
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | *"Base model 'z_image_turbo' is not installed."* (submit) | Z-Image-Turbo not downloaded | Install it from the Model Manager, then retry the real run. Dry runs work without it. |
-| *"Base model 'lens' is not installed."* (submit) | `microsoft/Lens` (the Lens training base) not downloaded | Install **Lens (base)** from the Model Manager. Lens trains on the non-distilled base and applies the LoRA to Lens-Turbo. |
+| *"Base model 'lens' is not installed."* (submit) | `SceneWorks/Lens` (the Lens training base) not downloaded | Install **Lens (base)** from the Model Manager (on macOS, its **training** variant — the MLX inference tiers alone don't include the flat training base). Lens trains on the non-distilled base and applies the LoRA to Lens-Turbo. |
 | *"LoRA adapter attached no trainable parameters…"* (runtime) | `loraTargetModules` matched nothing | For Lens use the fused-QKV names (`img_qkv`, `txt_qkv`, `to_out`, `to_add_out`), not Z-Image's `to_q`/`to_k`/`to_v`. |
 | *"Lens LoRA training requires the isolated Lens sidecar venv…"* (submit) | Worker built without the Lens sidecar | Rebuild with `INCLUDE_LENS=1`, or set `SCENEWORKS_LENS_PYTHON`. |
 | *"… cannot target CPU workers."* (submit) | `requestedGpu` was `cpu` | Training is GPU-only. Use `auto` or a GPU id. |

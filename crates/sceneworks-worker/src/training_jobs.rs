@@ -316,7 +316,8 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // Kolors is an SDXL U-Net under a ChatGLM3-6B encoder; the engine registers its
         // LoRA/LoKr trainer under the same id as its generator (`"kolors"`), sc-4568.
         "kolors_lora" => Some("kolors"),
-        // Lens trains the base `microsoft/Lens` DiT; the engine registers its LoRA/LoKr trainer
+        // Lens trains the base (non-distilled) Lens DiT — the `SceneWorks/Lens` diffusers rehost
+        // since sc-8797 (microsoft/Lens is dead); the engine registers its LoRA/LoKr trainer
         // under the base generator id `"lens"` (arch-identical to lens_turbo), sc-5148.
         "lens_lora" => Some("lens"),
         // Krea trains the undistilled `krea/Krea-2-Raw` DiT; the engine registers its LoRA/LoKr
@@ -2109,7 +2110,8 @@ mod tests {
     }
 
     /// sc-5180 — the Lens training cutover's worker smoke: load the Lens trainer from the installed
-    /// `microsoft/Lens` snapshot and run two LoRA micro-steps on a one-image dataset. Proves the
+    /// `SceneWorks/Lens` snapshot (the training-base diffusers rehost; the original `microsoft/Lens`
+    /// is dead, sc-8797) and run two LoRA micro-steps on a one-image dataset. Proves the
     /// worker LINKS `mlx-gen-lens` (the `load_trainer("lens", …)` trainer registration survives
     /// linker GC — the dead-strip gotcha that bit Kolors) and a real step runs (finite loss) + writes
     /// an adapter through the full worker path. The trainer loads the gpt-oss encoder Q8 (~12 GB) +
@@ -2118,17 +2120,17 @@ mod tests {
     /// `cargo test -p sceneworks-worker --lib -- --ignored lens_real_weights_trains --nocapture`.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "needs real microsoft/Lens weights + Metal device; loads the 20B gpt-oss encoder (Q8)"]
+    #[ignore = "needs real SceneWorks/Lens weights + Metal device; loads the 20B gpt-oss encoder (Q8)"]
     fn lens_real_weights_trains_a_lora_step() {
         let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME set"));
         let snapshot = std::fs::read_dir(
-            home.join(".cache/huggingface/hub/models--microsoft--Lens/snapshots"),
+            home.join(".cache/huggingface/hub/models--SceneWorks--Lens/snapshots"),
         )
         .expect("lens snapshots dir")
         .flatten()
         .map(|entry| entry.path())
         .find(|path| path.is_dir() && path.join("transformer").is_dir())
-        .expect("a microsoft/Lens snapshot dir");
+        .expect("a SceneWorks/Lens snapshot dir");
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let image_path = tmp.path().join("swatch.png");
@@ -2683,15 +2685,16 @@ mod tests {
     }
 
     /// sc-7817 — the candle Lens training smoke. Loads `load_trainer("lens", …)` from the installed
-    /// `microsoft/Lens` snapshot (`tokenizer/ text_encoder/ transformer/ vae/`) and trains two LoRA
+    /// `SceneWorks/Lens` snapshot (`tokenizer/ text_encoder/ transformer/ vae/` — the training-base
+    /// diffusers rehost; the original `microsoft/Lens` is dead, sc-8797) and trains two LoRA
     /// micro-steps at resolution 64 (the gpt-oss-20b encoder load dominates; the per-step DiT graph
     /// stays tiny). Checkpointing on for the large 48-layer MMDiT. Run on demand (one smoke per GPU):
     /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored candle_lens_real_weights --nocapture`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    #[ignore = "needs real microsoft/Lens weights + a CUDA device; loads the gpt-oss-20b encoder"]
+    #[ignore = "needs real SceneWorks/Lens weights + a CUDA device; loads the gpt-oss-20b encoder"]
     fn candle_lens_real_weights_trains_a_lora_step() {
-        let snapshot = candle_hf_snapshot("models--microsoft--Lens", "transformer");
+        let snapshot = candle_hf_snapshot("models--SceneWorks--Lens", "transformer");
         candle_real_weights_smoke("lens", &snapshot, 64, true, "candle_lens_smoke.safetensors");
     }
 

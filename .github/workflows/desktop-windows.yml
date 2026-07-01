@@ -54,18 +54,19 @@ jobs:
       # Ampere->Blackwell (sc-3676); build-sidecar.mjs defaults this too.
       CUDA_COMPUTE_CAP: "80"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
       # Put the VS2022 MSVC toolchain (cl.exe) on PATH so nvcc finds the host
       # compiler when candle-kernels' build script compiles the CUDA kernels.
       - name: Set up MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
       # the candle `cuda` feature links against. Sets CUDA_PATH for the build +
       # the redist staging in build-sidecar.mjs.
@@ -74,7 +75,7 @@ jobs:
         # pin tops out at 12.8.0 (network method still validates against the map), so
         # `cuda: "12.9.1"` failed with "Version not available". (Kept in lockstep with
         # server-candle-linux.yml's pin.)
-        uses: Jimver/cuda-toolkit@v0.2.35
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
         with:
           cuda: "12.9.1"
           method: "network"
@@ -115,7 +116,7 @@ jobs:
       - name: Build Windows candle installers (NSIS + MSI)
         run: npm --prefix apps/desktop run build -- --bundles nsis,msi
       - name: Upload installer artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sceneworks-windows-installers
           path: |

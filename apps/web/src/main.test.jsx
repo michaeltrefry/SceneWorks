@@ -672,6 +672,126 @@ describe("SceneWorks app shell", () => {
     expect(logsTokens.every((value) => value === "pair-tok-123")).toBe(true);
   });
 
+  // sc-8808 (F-007): the login gate's password box keeps its own draft state.
+  // Before the fix it wrote every keystroke straight into the live `token`, so
+  // the first character flipped `authenticated` and the [authenticated, token]
+  // effects fired refreshData + the SSE ticket POST per keystroke, each 401ing
+  // with a partial password and filling the notices band mid-typing.
+  function mockAuthRequiredFetch({ verifyOk, requests, tokens }) {
+    global.fetch = vi.fn((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests?.push({ path, method: options.method ?? "GET" });
+      tokens?.push(new Headers(options.headers ?? {}).get("X-SceneWorks-Token"));
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: true }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: true }));
+      }
+      if (path.endsWith("/auth/verify")) {
+        return Promise.resolve(response({ ok: verifyOk }));
+      }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+      }
+      return Promise.resolve(response([]));
+    });
+  }
+
+  it("does not fire API calls or SSE connections while typing the login password", async () => {
+    const requests = [];
+    mockAuthRequiredFetch({ verifyOk: true, requests });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    const gateInput = document.body.querySelector("#token");
+    expect(gateInput).not.toBeNull();
+    // Auth is required and no token is saved: no protected load, no SSE ticket.
+    expect(requests.every((request) => !request.path.endsWith("/projects"))).toBe(true);
+    expect(requests.every((request) => !request.path.endsWith("/jobs/events/ticket"))).toBe(true);
+    expect(FakeEventSource.instances.length).toBe(0);
+
+    const requestCountBeforeTyping = requests.length;
+    for (const partial of ["s", "se", "sec", "secr", "secre", "secret"]) {
+      await changeField(gateInput, partial);
+      await settle();
+    }
+
+    // Typing is pure local state: zero requests, zero EventSource churn, no notices.
+    expect(requests.length).toBe(requestCountBeforeTyping);
+    expect(FakeEventSource.instances.length).toBe(0);
+    expect(document.body.querySelectorAll(".notice.error").length).toBe(0);
+    expect(gateInput.value).toBe("secret");
+  });
+
+  it("keeps the gate up with an inline error when the password is wrong", async () => {
+    const requests = [];
+    mockAuthRequiredFetch({ verifyOk: false, requests });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    await changeField(document.body.querySelector("#token"), "wrong-password");
+    await act(async () => {
+      buttonInside(document.body, "Unlock").click();
+    });
+    await settle();
+
+    // Wrong password: inline error inside the gate, token never persisted,
+    // no protected loads and no SSE connection attempted.
+    expect(document.body.querySelector(".auth-band")?.textContent).toContain("Incorrect password. Try again.");
+    expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
+    expect(document.body.querySelector("#token")).not.toBeNull();
+    expect(requests.filter((request) => request.path.endsWith("/auth/verify")).length).toBe(1);
+    expect(requests.every((request) => !request.path.endsWith("/projects"))).toBe(true);
+    expect(FakeEventSource.instances.length).toBe(0);
+  });
+
+  it("unlocks and loads data exactly once after the password verifies", async () => {
+    const requests = [];
+    const tokens = [];
+    mockAuthRequiredFetch({ verifyOk: true, requests, tokens });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    // Trailing whitespace exercises the trim: the stored token must be exact.
+    await changeField(document.body.querySelector("#token"), "correct-password ");
+    await act(async () => {
+      buttonInside(document.body, "Unlock").click();
+    });
+    await settle();
+
+    expect(window.localStorage.getItem("sceneworks-token")).toBe("correct-password");
+    // The gate keys off the token state, so it drops after verification.
+    expect(document.body.querySelector("#token")).toBeNull();
+    expect(document.body.querySelector(".auth-band")).toBeNull();
+    // The [authenticated, token] effect performs the initial load exactly once
+    // (no duplicate refresh from the submit handler), with the verified token.
+    const projectLoads = requests
+      .map((request, index) => ({ ...request, headerToken: tokens[index] }))
+      .filter((request) => request.path.endsWith("/projects"));
+    expect(projectLoads.length).toBe(1);
+    expect(projectLoads[0].headerToken).toBe("correct-password");
+    // SSE comes up once, via the ticket POST, after authentication.
+    expect(requests.filter((request) => request.path.endsWith("/jobs/events/ticket")).length).toBe(1);
+    expect(FakeEventSource.instances.length).toBe(1);
+    expect(FakeEventSource.instances[0].url).toContain("ticket=stream-ticket");
+  });
+
   it("gates the studios behind workspace creation when no projects exist", async () => {
     const requests = [];
     global.fetch.mockImplementation((url, options = {}) => {

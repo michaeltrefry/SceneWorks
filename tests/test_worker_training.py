@@ -1087,7 +1087,7 @@ def test_lens_trainer_drives_sidecar_and_shapes_result(tmp_path, monkeypatch):
     assert result["kernel"] == "lens_lora"
     assert result["stepsCompleted"] == 4
     assert result["outputPath"] == os.path.join(plan["output"]["outputDir"], "aurora.safetensors")
-    assert result["baseModelSource"] == "microsoft/Lens"
+    assert result["baseModelSource"] == "SceneWorks/Lens"
     assert result["triggerWords"] == ["auroraStyle"]
     assert os.path.exists(result["outputPath"])
 

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio as StdStdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -17,8 +19,8 @@ use tempfile::tempdir;
 use super::api_client::ApiClient;
 use super::downloads::{
     build_source_url_client, credential_for_host, download_lora_source_url,
-    download_progress_payload, download_snapshot_into_cache, normalize_sha256, DownloadContext,
-    DownloadProgress, HuggingFaceSnapshot, SnapshotFile,
+    download_progress_payload, download_snapshot_into_cache, normalize_sha256,
+    report_download_progress, DownloadContext, DownloadProgress, HuggingFaceSnapshot, SnapshotFile,
 };
 #[cfg(target_os = "macos")]
 use super::gpu::mlx_gpu;
@@ -2180,11 +2182,24 @@ async fn lora_url_import_rejects_failed_and_oversized_downloads() {
     assert!(error.to_string().contains("exceeds"));
 }
 
+/// sc-8806 — the source-URL chunk loop no longer polls the cancel endpoint per
+/// received HTTP chunk (that issued one `GET /api/v1/jobs/{id}` per chunk on a
+/// multi-GB download and serialized the transfer on API round-trips). A user
+/// cancel is observed on the progress-report tick instead — exactly like
+/// `download_file_inner` — and the decision is read from the `JobSnapshot` the
+/// progress POST already returns, never a separate GET. The stub's binary body
+/// stalls after the first chunk so ONLY the interval tick can trip this cancel;
+/// the GET counter proves the loop never fell back to polling.
 #[tokio::test]
-async fn lora_url_import_honors_midstream_cancel() {
+async fn lora_url_import_honors_cancel_on_progress_tick() {
     let temp = tempdir().expect("tempdir creates");
-    let source_url =
-        spawn_binary_stub_with_options(b"url-lora".to_vec(), AxumStatusCode::OK, true).await;
+    let job_gets = Arc::new(AtomicUsize::new(0));
+    let source_url = spawn_cancel_tick_stub(CancelTickStubState {
+        job_gets: job_gets.clone(),
+        progress_cancel_requested: true,
+        stall_after_first_chunk: true,
+    })
+    .await;
     let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
     settings.api_url = source_url.clone();
     let api = ApiClient::new(&settings);
@@ -2203,9 +2218,103 @@ async fn lora_url_import_honors_midstream_cancel() {
         &temp.path().join("cancel-target"),
     )
     .await
-    .expect_err("cancel request interrupts the URL import");
+    .expect_err("cancel request interrupts the URL import on the report tick");
 
     assert!(matches!(error, WorkerError::Canceled(_)));
+    assert_eq!(
+        job_gets.load(Ordering::SeqCst),
+        0,
+        "the chunk loop must not poll the job endpoint; cancel comes from the progress POST snapshot"
+    );
+}
+
+/// sc-8806 — a successful source-URL download must not touch the job endpoint
+/// while streaming: no per-chunk cancel GETs (the regression this story removes).
+#[tokio::test]
+async fn lora_url_import_streams_chunks_without_cancel_polls() {
+    let temp = tempdir().expect("tempdir creates");
+    let job_gets = Arc::new(AtomicUsize::new(0));
+    let source_url = spawn_cancel_tick_stub(CancelTickStubState {
+        job_gets: job_gets.clone(),
+        progress_cancel_requested: false,
+        stall_after_first_chunk: false,
+    })
+    .await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = source_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let target_dir = temp.path().join("url-target");
+
+    download_lora_source_url(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &format!("{source_url}/loras/style.safetensors"),
+        &target_dir,
+    )
+    .await
+    .expect("url LoRA downloads");
+
+    assert_eq!(
+        tokio::fs::read(target_dir.join("style.safetensors"))
+            .await
+            .unwrap(),
+        b"url-lora"
+    );
+    assert_eq!(
+        job_gets.load(Ordering::SeqCst),
+        0,
+        "a multi-chunk transfer must issue zero cancel GETs"
+    );
+}
+
+/// sc-8806 (snapshot reuse) — the download report tick reads `cancel_requested`
+/// off the `JobSnapshot` the progress POST already returns instead of issuing a
+/// third GET per tick. The stub's GET route reports NOT-canceled (and counts
+/// hits) while the POST snapshot says canceled: the tick must trip the cancel
+/// purely off the POST response, with zero GETs — the pre-fix code (POST result
+/// discarded, decision from a fresh GET) would have returned Ok here.
+#[tokio::test]
+async fn download_progress_tick_cancels_from_progress_post_snapshot() {
+    let job_gets = Arc::new(AtomicUsize::new(0));
+    let base_url = spawn_cancel_tick_stub(CancelTickStubState {
+        job_gets: job_gets.clone(),
+        progress_cancel_requested: true,
+        stall_after_first_chunk: false,
+    })
+    .await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let progress = DownloadProgress::new("owner/model", 0, Some(64), Duration::from_secs(5));
+
+    let error = report_download_progress(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &progress,
+    )
+    .await
+    .expect_err("a cancel-requested progress snapshot trips the tick cancel");
+
+    assert!(matches!(error, WorkerError::Canceled(_)));
+    assert_eq!(
+        job_gets.load(Ordering::SeqCst),
+        0,
+        "the tick must not GET the job for its cancel decision"
+    );
 }
 
 #[test]
@@ -3052,6 +3161,87 @@ fn job_snapshot_json(job_id: &str, cancel_requested: bool) -> Value {
         "canceledAt": null,
         "lastHeartbeatAt": null
     })
+}
+
+fn worker_snapshot_json(worker_id: &str) -> Value {
+    json!({
+        "id": worker_id,
+        "gpuId": "cpu",
+        "gpuName": null,
+        "status": "busy",
+        "currentJobId": "job-1",
+        "capabilities": [],
+        "loadedModels": [],
+        "registeredAt": "2026-07-01T00:00:00Z",
+        "lastSeenAt": "2026-07-01T00:00:00Z"
+    })
+}
+
+/// sc-8806 — stub for the tick-driven download-cancel path. Counts GETs of the
+/// job snapshot (the chunk loop must never poll it), serves the progress POST
+/// with a configurable `cancelRequested` (the snapshot the tick reuses for its
+/// cancel decision), answers worker heartbeats, and serves the binary either as
+/// a short multi-chunk body or as a stream that stalls after the first chunk —
+/// so only the interval tick can observe a cancel.
+#[derive(Clone)]
+struct CancelTickStubState {
+    job_gets: Arc<AtomicUsize>,
+    progress_cancel_requested: bool,
+    stall_after_first_chunk: bool,
+}
+
+async fn spawn_cancel_tick_stub(state: CancelTickStubState) -> String {
+    use futures_util::StreamExt;
+
+    async fn job_route(
+        State(state): State<CancelTickStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        state.job_gets.fetch_add(1, Ordering::SeqCst);
+        // Deliberately NOT canceled: only the progress POST snapshot says
+        // canceled, so a cancel can only come from reusing that snapshot.
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn progress_route(
+        State(state): State<CancelTickStubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(job_snapshot_json(&job_id, state.progress_cancel_requested)).into_response()
+    }
+    async fn heartbeat_route(
+        axum::extract::Path(worker_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(worker_snapshot_json(&worker_id)).into_response()
+    }
+    async fn binary_route(State(state): State<CancelTickStubState>) -> Response {
+        let chunks = futures_util::stream::iter(vec![
+            Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b"url-")),
+            Ok(axum::body::Bytes::from_static(b"lora")),
+        ]);
+        if state.stall_after_first_chunk {
+            Body::from_stream(chunks.chain(futures_util::stream::pending())).into_response()
+        } else {
+            Body::from_stream(chunks).into_response()
+        }
+    }
+
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .route("/*path", get(binary_route))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
 }
 
 fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) -> Settings {

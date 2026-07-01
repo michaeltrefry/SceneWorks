@@ -302,7 +302,7 @@
       "outputKind": "lora",
       "family": "lens",
       "baseModel": "lens",
-      "baseModelRepo": "microsoft/Lens",
+      "baseModelRepo": "SceneWorks/Lens",
       "kernel": "lens_lora",
       "defaults": {
         "rank": 16,
@@ -316,7 +316,7 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "baseModelRepo": "microsoft/Lens",
+          "baseModelRepo": "SceneWorks/Lens",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,

@@ -716,6 +716,7 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 18998339228,
           "footprint": { "diskSizeBytes": 18998339228, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -724,6 +725,7 @@
           "repo": "SceneWorks/lens-mlx",
           "variant": "q8",
           "files": ["q8/*"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 29921486998,
           "footprint": { "diskSizeBytes": 29921486998, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -732,8 +734,45 @@
           "repo": "SceneWorks/lens-mlx",
           "variant": "bf16",
           "files": ["bf16/*"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 22347329085,
           "footprint": { "diskSizeBytes": 22347329085, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Off-Mac candle (Windows/Linux) diffusers rehost (sc-8799): the MLX turnkeys above are packed
+          // q4/q8/bf16 tiers the candle diffusers loader can't read, so the candle lane loads THIS
+          // self-contained diffusers snapshot (tokenizer/ text_encoder/ transformer/ vae/ at the repo
+          // root — what candle_gen_lens::Pipeline::load_components reads), rebuilt from Comfy-Org/Lens +
+          // openai/gpt-oss-20b (MXFP4) + FLUX.2-dev after the original microsoft/Lens went dead. Whole
+          // repo (files: []); the candle provider quantizes on-the-fly (Q4/Q8, descriptor-gated) at
+          // load, so the single bf16 source serves every candle quant tier. Mirrors ideogram_4's
+          // off-Mac bf16 entry + the Wan2.2 macOS-MLX/off-Mac-diffusers split. Resolved by
+          // `candle_lens_repo` (image_jobs/base.rs). Candle sibling of the MLX host sc-8767.
+          "provider": "huggingface",
+          "repo": "SceneWorks/Lens",
+          "variant": "bf16",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 22334041829,
+          "footprint": { "diskSizeBytes": 22334041829, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // macOS LoRA-training base (sc-8797): the same SceneWorks/Lens diffusers rehost the off-Mac
+          // entry above fetches, exposed as an installable variant on macOS. The MLX q4/q8/bf16 tiers
+          // above are packed turnkey SUBDIRS the trainer's flat-diffusers loader doesn't read and the
+          // training installed-gate (`training_base_model_installed`, keyed on the target's
+          // `baseModelRepo` HF-cache presence) doesn't see — before the tier split (sc-8767) the lens
+          // install WAS the flat microsoft/Lens repo, so one download served inference + training.
+          // Installing this variant restores that for macOS training; off-Mac needs nothing extra (the
+          // bf16 candle entry already fetches the whole repo). Per-variant install state probes this
+          // entry's own repo, so it tracks independently of the MLX tiers (sc-8508).
+          "provider": "huggingface",
+          "repo": "SceneWorks/Lens",
+          "variant": "training",
+          "files": [],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 22334041829,
+          "footprint": { "diskSizeBytes": 22334041829, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -815,6 +854,7 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 21830326407,
           // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
           // Apple Silicon, 1024², fresh process, via mlx_rs::memory::{get_active_memory,get_peak_memory}.
@@ -830,6 +870,7 @@
           "repo": "SceneWorks/lens-turbo-mlx",
           "variant": "q8",
           "files": ["q8/*"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 32753474289,
           "footprint": { "diskSizeBytes": 32753474289, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -838,8 +879,25 @@
           "repo": "SceneWorks/lens-turbo-mlx",
           "variant": "bf16",
           "files": ["bf16/*"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 30651441376,
           "footprint": { "diskSizeBytes": 30651441376, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Off-Mac candle (Windows/Linux) diffusers rehost (sc-8799): the distilled sibling of the
+          // base-Lens off-Mac entry above. The MLX turnkeys are packed q4/q8/bf16 tiers the candle
+          // diffusers loader can't read, so the candle lane loads THIS self-contained diffusers snapshot
+          // (tokenizer/ text_encoder/ transformer/ vae/ at the repo root), rebuilt from Comfy-Org/Lens'
+          // lens_turbo_bf16 DiT + openai/gpt-oss-20b (MXFP4) + FLUX.2-dev after microsoft/Lens-Turbo went
+          // dead. Whole repo (files: []); candle quantizes on-the-fly at load. Resolved by
+          // `candle_lens_repo`. Candle sibling of the MLX host sc-8763.
+          "provider": "huggingface",
+          "repo": "SceneWorks/Lens-Turbo",
+          "variant": "bf16",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 22334041788,
+          "footprint": { "diskSizeBytes": 22334041788, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -865,7 +923,8 @@
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "loraCompatibility": {
-        // Lens LoRA training (sc-1583) trains on the non-distilled microsoft/Lens
+        // Lens LoRA training (sc-1583) trains on the non-distilled base Lens (the
+        // SceneWorks/Lens diffusers rehost since sc-8797; microsoft/Lens is dead)
         // and applies the adapter here on Lens-Turbo. The `lens` family maps to
         // the `lens_turbo` adapter in lora_family.rs.
         "families": ["lens"],

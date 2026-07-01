@@ -793,7 +793,11 @@ pub(crate) async fn download_source_url(
                 let Some(chunk) = chunk? else {
                     break;
                 };
-                check_download_cancel(context).await?;
+                // No per-chunk cancel poll here (sc-8806): a GET per received HTTP
+                // chunk turned a multi-GB download into tens of thousands of API
+                // round-trips and serialized the transfer on them. The interval arm
+                // below heartbeats + cancel-checks every report tick, exactly like
+                // `download_file_inner`, so cancel latency is the tick interval.
                 output.write_all(&chunk).await?;
                 progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
                 if progress.downloaded_bytes() > max_bytes {
@@ -1013,8 +1017,16 @@ pub(crate) async fn report_download_progress(
         Some(context.job_id),
     )
     .await?;
-    update_job(context.api, context.job_id, progress.payload()).await?;
-    check_download_cancel(context).await
+    // The progress POST already returns the job snapshot; read `cancel_requested`
+    // off it instead of issuing a separate GET per tick (sc-8806). Cancel only
+    // trips on a successful POST that confirms the request, so a transient API
+    // failure can never be misread as a user cancel (same posture as sc-4174).
+    let job = update_job(context.api, context.job_id, progress.payload()).await?;
+    if job.cancel_requested {
+        mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
+        return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
+    }
+    Ok(())
 }
 
 async fn check_download_cancel(context: &DownloadContext<'_>) -> WorkerResult<()> {

@@ -385,7 +385,7 @@ def _lens_train_plan(tmp_path, *, steps=4):
             "targetId": "lens_turbo_lora",
             "kernel": "lens_lora",
             "baseModel": "lens",
-            "baseModelRepo": "microsoft/Lens",
+            "baseModelRepo": "SceneWorks/Lens",
             "baseModelPath": str(tmp_path / "absent"),
         },
         "config": {
