@@ -698,6 +698,21 @@ export function App() {
     createTrainingJob,
   } = useTraining({ token, activeProject, setError, setJobs });
 
+  // sc-8811: useModelsAndLoras lists these two cross-cutting refresh orchestrators as
+  // useCallback deps of deleteModel/deleteLora, which sit in appContextValue's
+  // dependency array. The orchestrator bodies (refreshData / refreshDataWithLoraOverlay,
+  // defined below) are plain per-render function declarations published into the
+  // refs above, so passing them in directly would give deleteModel/deleteLora — and
+  // therefore the whole ~130-key context value — a fresh identity on every App render,
+  // silently defeating the sc-4194 memoization. These identity-stable wrappers delegate
+  // through the refs instead: callers always invoke the latest body (fresh token /
+  // activeProject), while the hook's actions stay referentially stable.
+  const stableRefreshData = useCallback((...args) => refreshDataRef.current?.(...args), []);
+  const stableRefreshDataWithLoraOverlay = useCallback(
+    (...args) => refreshDataWithLoraOverlayRef.current?.(...args),
+    [],
+  );
+
   const {
     models,
     setModels,
@@ -717,8 +732,8 @@ export function App() {
     setError,
     setJobs,
     setActiveView,
-    refreshData,
-    refreshDataWithLoraOverlay,
+    refreshData: stableRefreshData,
+    refreshDataWithLoraOverlay: stableRefreshDataWithLoraOverlay,
   });
 
   const {
