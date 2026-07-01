@@ -2077,6 +2077,45 @@ describe("SceneWorks app shell", () => {
     expect(onUseRecipe).toHaveBeenCalledWith(asset);
   });
 
+  // sc-8730: the FullscreenPreview "Edit" button invokes onEditImage, which App now
+  // wires to sendAssetToImageEditor (the Image Editor canvas route) instead of the
+  // Image Studio edit_image route. This proves the button → onEditImage contract the
+  // repointed call site depends on.
+  it("routes the FullscreenPreview Edit button through onEditImage", async () => {
+    const noop = () => {};
+    const onEditImage = vi.fn();
+    const asset = {
+      id: "asset-edit",
+      displayName: "Plate",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/plate.png" },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={asset}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onEditImage={onEditImage}
+          onPreviewAsset={noop}
+          previousAsset={null}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
+    });
+
+    expect(onEditImage).toHaveBeenCalledWith(asset);
+  });
+
   it("reports the scroll direction when navigating the FullscreenPreview", async () => {
     const noop = () => {};
     const onPreviewAsset = vi.fn();
