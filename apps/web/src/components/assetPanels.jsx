@@ -543,6 +543,9 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
 // asserted against these in tests.
 const PREVIEW_MENU_WIDTH = 220;
 const PREVIEW_MENU_HEIGHT = 260;
+// Estimated "Edit in" submenu panel width used for the right-edge flip decision when
+// jsdom has no layout to measure (sc-8749). Matches the CSS min-width.
+const SUBMENU_PANEL_WIDTH = 160;
 
 // Clamp a desired {x, y} open-position so the menu box stays within the viewport,
 // nudging it left/up when it would overflow the right/bottom edges and never letting
@@ -573,6 +576,11 @@ function PreviewContextMenu({ x, y, items, submenu, onClose }) {
     ),
   );
   const [submenuOpen, setSubmenuOpen] = React.useState(false);
+  // Which side the "Edit in" submenu panel opens on. Default right (CSS left:100%);
+  // flip to the left when there isn't room on the right of the viewport (sc-8749).
+  const submenuRef = React.useRef(null);
+  const submenuPanelRef = React.useRef(null);
+  const [submenuFlipLeft, setSubmenuFlipLeft] = React.useState(false);
 
   // Refine the clamp once we can measure the real rendered box, then focus the menu
   // so keyboard (Escape / arrow traversal) works without a click.
@@ -608,6 +616,32 @@ function PreviewContextMenu({ x, y, items, submenu, onClose }) {
     };
   }, [onClose]);
 
+  // Choose which side the submenu opens on when it becomes visible. Measure the
+  // trigger's right edge against the viewport; if the panel (rendered right by
+  // default via CSS left:100%) would overflow, flip it to the left. Re-measured on
+  // every open so viewport/menu changes are respected (sc-8749).
+  React.useEffect(() => {
+    if (!submenuOpen) {
+      setSubmenuFlipLeft(false);
+      return;
+    }
+    const trigger = submenuRef.current;
+    if (!trigger) {
+      return;
+    }
+    const rect = trigger.getBoundingClientRect?.();
+    if (!rect) {
+      return;
+    }
+    const viewportWidth = typeof window !== "undefined" ? window.innerWidth : 0;
+    const panelWidth = submenuPanelRef.current?.getBoundingClientRect?.().width || SUBMENU_PANEL_WIDTH;
+    const roomRight = viewportWidth - rect.right;
+    const roomLeft = rect.left;
+    // Flip left only when the right side can't fit the panel AND the left side has
+    // more room — otherwise keep the default right placement.
+    setSubmenuFlipLeft(roomRight < panelWidth && roomLeft > roomRight);
+  }, [submenuOpen]);
+
   const runAction = (onSelect) => {
     onClose();
     onSelect?.();
@@ -636,9 +670,10 @@ function PreviewContextMenu({ x, y, items, submenu, onClose }) {
       ))}
       {submenu ? (
         <div
-          className={`preview-context-menu-submenu${submenuOpen ? " open" : ""}`}
+          className={`preview-context-menu-submenu${submenuOpen ? " open" : ""}${submenuFlipLeft ? " flip-left" : ""}`}
           onMouseEnter={() => setSubmenuOpen(true)}
           onMouseLeave={() => setSubmenuOpen(false)}
+          ref={submenuRef}
         >
           <button
             aria-expanded={submenuOpen}
@@ -651,7 +686,12 @@ function PreviewContextMenu({ x, y, items, submenu, onClose }) {
             {submenu.label}
             <span aria-hidden="true" className="preview-context-menu-caret">▸</span>
           </button>
-          <div className="preview-context-menu-submenu-panel" role="menu" aria-label={submenu.label}>
+          <div
+            className="preview-context-menu-submenu-panel"
+            ref={submenuPanelRef}
+            role="menu"
+            aria-label={submenu.label}
+          >
             {submenu.items.map((item) => (
               <button
                 className="preview-context-menu-item"
@@ -778,11 +818,14 @@ export function FullscreenPreview({
   const openContextMenu = React.useCallback(
     (event) => {
       event.preventDefault();
+      // Save As / Reveal target the DISPLAYED variant — what the user is actually
+      // looking at, including the upscaled variant (sc-8749). The remaining footer
+      // actions stay on the base `asset`.
       const items = [
-        { key: "save-as", label: "Save As…", onSelect: () => saveAssetAs(asset) },
+        { key: "save-as", label: "Save As…", onSelect: () => saveAssetAs(displayedAsset) },
       ];
       if (isDesktop) {
-        items.push({ key: "reveal", label: "Reveal in Finder/Explorer", onSelect: () => revealAsset(asset) });
+        items.push({ key: "reveal", label: "Reveal in Finder/Explorer", onSelect: () => revealAsset(displayedAsset) });
       }
       if (!isVideo) {
         items.push({ key: "zoom-in", label: "Zoom In", onSelect: zoomIn });
@@ -799,7 +842,7 @@ export function FullscreenPreview({
       const submenu = submenuItems.length ? { label: "Edit in", items: submenuItems } : null;
       setContextMenu({ x: event.clientX, y: event.clientY, items, submenu });
     },
-    [asset, isVideo, zoomIn, zoomOut, fitToView, onEditImage, onEditInStudio],
+    [asset, displayedAsset, isVideo, zoomIn, zoomOut, fitToView, onEditImage, onEditInStudio],
   );
 
   return (
@@ -905,8 +948,9 @@ export function FullscreenPreview({
             </div>
           ) : null}
           <div className="preview-actions">
-            {/* Simple, discoverable Save As path — present in desktop AND browser (sc-8729). */}
-            <button onClick={() => saveAssetAs(asset)} type="button">
+            {/* Simple, discoverable Save As path — present in desktop AND browser (sc-8729).
+                Saves the DISPLAYED variant (upscaled when shown), not the base asset (sc-8749). */}
+            <button onClick={() => saveAssetAs(displayedAsset)} type="button">
               Save As…
             </button>
             {onUseRecipe && asset.type === "image" && (asset.generationSet?.recipe || asset.recipe) ? (

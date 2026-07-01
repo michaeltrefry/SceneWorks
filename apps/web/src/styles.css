@@ -1280,6 +1280,13 @@ label {
   gap: 2px;
 }
 
+/* When there isn't room on the right of the viewport, open the submenu to the LEFT
+   of the main menu instead of off-screen (sc-8749). JS sets .flip-left on open. */
+.preview-context-menu-submenu.flip-left .preview-context-menu-submenu-panel {
+  left: auto;
+  right: 100%;
+}
+
 /* Toolbars */
 .toolbar,
 .review-actions,

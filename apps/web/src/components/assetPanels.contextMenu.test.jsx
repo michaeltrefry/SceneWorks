@@ -49,6 +49,35 @@ const videoAsset = {
   file: { path: "assets/videos/clip.mp4", mimeType: "video/mp4" },
 };
 
+// An asset with upscale variants — displayedAsset defaults to the upscaled variant,
+// which differs from the base asset. Used to prove Save As / Reveal target the
+// displayed variant, not the base asset (sc-8749).
+const originalVariant = {
+  id: "asset-variant-original",
+  projectId: "project-1",
+  displayName: "Plate (original)",
+  type: "image",
+  status: {},
+  file: { path: "assets/images/plate.png", mimeType: "image/png" },
+};
+const upscaledVariant = {
+  id: "asset-variant-upscaled",
+  projectId: "project-1",
+  displayName: "Plate (upscaled)",
+  type: "image",
+  status: {},
+  file: { path: "assets/images/plate-upscaled.png", mimeType: "image/png" },
+};
+const variantAsset = {
+  id: "asset-with-variants",
+  projectId: "project-1",
+  displayName: "Plate",
+  type: "image",
+  status: {},
+  file: { path: "assets/images/plate.png", mimeType: "image/png" },
+  variants: { original: originalVariant, upscaled: upscaledVariant },
+};
+
 let container;
 let root;
 let FullscreenPreview;
@@ -258,6 +287,87 @@ describe("FullscreenPreview context menu (desktop)", () => {
       saveButton.click();
     });
     expect(actionMocks.saveAssetAs).toHaveBeenCalledWith(imageAsset);
+  });
+
+  // sc-8749 item 1: Save As / Reveal target the DISPLAYED variant (upscaled by
+  // default when an asset has upscale variants), not the base asset.
+  it("Save As (menu) saves the displayed upscaled variant for a variant-bearing asset", async () => {
+    await renderPreview(baseProps({ asset: variantAsset }));
+    await rightClickStage();
+
+    await act(async () => {
+      [...document.body.querySelectorAll(".preview-context-menu-item")]
+        .find((b) => b.textContent.trim() === "Save As…")
+        .click();
+    });
+    expect(actionMocks.saveAssetAs).toHaveBeenCalledWith(upscaledVariant);
+    expect(actionMocks.saveAssetAs).not.toHaveBeenCalledWith(variantAsset);
+  });
+
+  it("Reveal (menu) reveals the displayed upscaled variant for a variant-bearing asset", async () => {
+    await renderPreview(baseProps({ asset: variantAsset }));
+    await rightClickStage();
+
+    await act(async () => {
+      [...document.body.querySelectorAll(".preview-context-menu-item")]
+        .find((b) => b.textContent.trim() === "Reveal in Finder/Explorer")
+        .click();
+    });
+    expect(actionMocks.revealAsset).toHaveBeenCalledWith(upscaledVariant);
+  });
+
+  it("footer Save As saves the displayed upscaled variant for a variant-bearing asset", async () => {
+    await renderPreview(baseProps({ asset: variantAsset }));
+    const saveButton = [...document.body.querySelectorAll(".preview-actions button")].find(
+      (b) => b.textContent.trim() === "Save As…",
+    );
+    await act(async () => {
+      saveButton.click();
+    });
+    expect(actionMocks.saveAssetAs).toHaveBeenCalledWith(upscaledVariant);
+    expect(actionMocks.saveAssetAs).not.toHaveBeenCalledWith(variantAsset);
+  });
+
+  // sc-8749 item 2: the "Edit in" submenu flips to the left of the main menu when
+  // there isn't room on the right of the viewport.
+  it("Edit in submenu flips left when the menu opens near the right edge", async () => {
+    const onEditImage = vi.fn();
+    const onEditInStudio = vi.fn();
+    await renderPreview(baseProps({ asset: imageAsset, onEditImage, onEditInStudio }));
+    await rightClickStage();
+
+    const submenu = document.body.querySelector(".preview-context-menu-submenu");
+    // Simulate the trigger sitting hard against the right edge of a narrow viewport:
+    // no room on the right, plenty on the left.
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { value: 300, configurable: true });
+    submenu.getBoundingClientRect = () => ({ left: 100, right: 300, top: 0, bottom: 24, width: 200, height: 24 });
+
+    await act(async () => {
+      document.body.querySelector(".preview-context-menu-submenu-trigger").click();
+    });
+
+    expect(submenu.classList.contains("flip-left")).toBe(true);
+    Object.defineProperty(window, "innerWidth", { value: originalInnerWidth, configurable: true });
+  });
+
+  it("Edit in submenu stays on the right when there is room", async () => {
+    const onEditImage = vi.fn();
+    const onEditInStudio = vi.fn();
+    await renderPreview(baseProps({ asset: imageAsset, onEditImage, onEditInStudio }));
+    await rightClickStage();
+
+    const submenu = document.body.querySelector(".preview-context-menu-submenu");
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { value: 1600, configurable: true });
+    submenu.getBoundingClientRect = () => ({ left: 100, right: 300, top: 0, bottom: 24, width: 200, height: 24 });
+
+    await act(async () => {
+      document.body.querySelector(".preview-context-menu-submenu-trigger").click();
+    });
+
+    expect(submenu.classList.contains("flip-left")).toBe(false);
+    Object.defineProperty(window, "innerWidth", { value: originalInnerWidth, configurable: true });
   });
 });
 
