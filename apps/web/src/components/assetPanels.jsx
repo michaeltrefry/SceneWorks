@@ -1,5 +1,7 @@
 import React from "react";
 import { isAbortError } from "../api.js";
+import { saveAssetAs, revealAsset } from "../assetActions.js";
+import { isDesktop } from "../runtime.js";
 import { AssetMedia, assetCanRenderAsVideo, assetUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
@@ -535,12 +537,146 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
   );
 }
 
+// Estimated menu footprint used to keep it inside the viewport (sc-8729). jsdom has
+// no layout so we can't measure the real DOM rect; these are conservative defaults
+// that the real DOM measurement (below) refines on mount. Reposition-if-overflow is
+// asserted against these in tests.
+const PREVIEW_MENU_WIDTH = 220;
+const PREVIEW_MENU_HEIGHT = 260;
+
+// Clamp a desired {x, y} open-position so the menu box stays within the viewport,
+// nudging it left/up when it would overflow the right/bottom edges and never letting
+// it go negative. Pure so the clamping is unit-testable without layout.
+export function clampMenuPosition(x, y, menuWidth, menuHeight, viewportWidth, viewportHeight) {
+  const clampedX = Math.max(0, Math.min(x, Math.max(0, viewportWidth - menuWidth)));
+  const clampedY = Math.max(0, Math.min(y, Math.max(0, viewportHeight - menuHeight)));
+  return { x: clampedX, y: clampedY };
+}
+
+// Self-contained right-click menu for the fullscreen preview (sc-8729). Renders our
+// own menu in place of the WKWebView native one (which differs per <img>/<video>),
+// opens at the cursor, clamps within the viewport, and closes on outside-click /
+// Escape / after any action. Items are passed in so the image vs video variants share
+// one component; the "Edit in" entry is a nested submenu.
+//   items: [{ key, label, onSelect }] flat action rows
+//   submenu: { label, items: [{ key, label, onSelect }] } | null
+function PreviewContextMenu({ x, y, items, submenu, onClose }) {
+  const menuRef = React.useRef(null);
+  const [position, setPosition] = React.useState(() =>
+    clampMenuPosition(
+      x,
+      y,
+      PREVIEW_MENU_WIDTH,
+      PREVIEW_MENU_HEIGHT,
+      typeof window !== "undefined" ? window.innerWidth : PREVIEW_MENU_WIDTH,
+      typeof window !== "undefined" ? window.innerHeight : PREVIEW_MENU_HEIGHT,
+    ),
+  );
+  const [submenuOpen, setSubmenuOpen] = React.useState(false);
+
+  // Refine the clamp once we can measure the real rendered box, then focus the menu
+  // so keyboard (Escape / arrow traversal) works without a click.
+  React.useEffect(() => {
+    const node = menuRef.current;
+    if (node) {
+      const rect = node.getBoundingClientRect?.();
+      const width = rect?.width || PREVIEW_MENU_WIDTH;
+      const height = rect?.height || PREVIEW_MENU_HEIGHT;
+      setPosition(clampMenuPosition(x, y, width, height, window.innerWidth, window.innerHeight));
+      node.focus?.();
+    }
+  }, [x, y]);
+
+  // Close on Escape or on any pointer-down outside the menu.
+  React.useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onClose();
+      }
+    };
+    const onPointerDown = (event) => {
+      if (!menuRef.current?.contains(event.target)) {
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("mousedown", onPointerDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("mousedown", onPointerDown, true);
+    };
+  }, [onClose]);
+
+  const runAction = (onSelect) => {
+    onClose();
+    onSelect?.();
+  };
+
+  return (
+    <div
+      className="preview-context-menu"
+      ref={menuRef}
+      role="menu"
+      aria-label="Asset actions"
+      tabIndex={-1}
+      style={{ left: `${position.x}px`, top: `${position.y}px` }}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {items.map((item) => (
+        <button
+          className="preview-context-menu-item"
+          key={item.key}
+          onClick={() => runAction(item.onSelect)}
+          role="menuitem"
+          type="button"
+        >
+          {item.label}
+        </button>
+      ))}
+      {submenu ? (
+        <div
+          className={`preview-context-menu-submenu${submenuOpen ? " open" : ""}`}
+          onMouseEnter={() => setSubmenuOpen(true)}
+          onMouseLeave={() => setSubmenuOpen(false)}
+        >
+          <button
+            aria-expanded={submenuOpen}
+            aria-haspopup="menu"
+            className="preview-context-menu-item preview-context-menu-submenu-trigger"
+            onClick={() => setSubmenuOpen((open) => !open)}
+            role="menuitem"
+            type="button"
+          >
+            {submenu.label}
+            <span aria-hidden="true" className="preview-context-menu-caret">▸</span>
+          </button>
+          <div className="preview-context-menu-submenu-panel" role="menu" aria-label={submenu.label}>
+            {submenu.items.map((item) => (
+              <button
+                className="preview-context-menu-item"
+                key={item.key}
+                onClick={() => runAction(item.onSelect)}
+                role="menuitem"
+                type="button"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function FullscreenPreview({
   asset,
   deleteAsset,
   nextAsset,
   onClose,
   onEditImage,
+  onEditInStudio,
   onPreviewAsset,
   onUseRecipe,
   previousAsset,
@@ -632,12 +768,46 @@ export function FullscreenPreview({
 
   const zoomed = view.scale > PREVIEW_MIN_SCALE;
 
+  // Right-click context menu (sc-8729). Override the native WKWebView menu on the
+  // stage for BOTH the <img> and <video> paths and render our own at the cursor.
+  const [contextMenu, setContextMenu] = React.useState(null);
+  const closeContextMenu = React.useCallback(() => setContextMenu(null), []);
+
+  // Rebuild the menu items on open so the actions close over the current asset.
+  // Image gets the zoom rows; video omits them. Reveal is desktop-only.
+  const openContextMenu = React.useCallback(
+    (event) => {
+      event.preventDefault();
+      const items = [
+        { key: "save-as", label: "Save As…", onSelect: () => saveAssetAs(asset) },
+      ];
+      if (isDesktop) {
+        items.push({ key: "reveal", label: "Reveal in Finder/Explorer", onSelect: () => revealAsset(asset) });
+      }
+      if (!isVideo) {
+        items.push({ key: "zoom-in", label: "Zoom In", onSelect: zoomIn });
+        items.push({ key: "zoom-out", label: "Zoom Out", onSelect: zoomOut });
+        items.push({ key: "fit", label: "Fit to View", onSelect: fitToView });
+      }
+      const submenuItems = [];
+      if (onEditImage) {
+        submenuItems.push({ key: "image-editor", label: "Image Editor", onSelect: () => onEditImage(asset) });
+      }
+      if (onEditInStudio) {
+        submenuItems.push({ key: "image-studio", label: "Image Studio", onSelect: () => onEditInStudio(asset) });
+      }
+      const submenu = submenuItems.length ? { label: "Edit in", items: submenuItems } : null;
+      setContextMenu({ x: event.clientX, y: event.clientY, items, submenu });
+    },
+    [asset, isVideo, zoomIn, zoomOut, fitToView, onEditImage, onEditInStudio],
+  );
+
   return (
     <Modal className="preview-modal" label="Asset preview" onClose={onClose}>
       <button className="modal-close" onClick={onClose} type="button">
         Close
       </button>
-      <div className="preview-modal-stage">
+      <div className="preview-modal-stage" onContextMenu={openContextMenu}>
           <button
             aria-label="Previous asset"
             className="preview-nav-button previous"
@@ -701,6 +871,15 @@ export function FullscreenPreview({
               </button>
             </div>
           )}
+          {contextMenu ? (
+            <PreviewContextMenu
+              x={contextMenu.x}
+              y={contextMenu.y}
+              items={contextMenu.items}
+              submenu={contextMenu.submenu}
+              onClose={closeContextMenu}
+            />
+          ) : null}
         </div>
         <footer>
           <div className="preview-modal-meta">
@@ -726,6 +905,10 @@ export function FullscreenPreview({
             </div>
           ) : null}
           <div className="preview-actions">
+            {/* Simple, discoverable Save As path — present in desktop AND browser (sc-8729). */}
+            <button onClick={() => saveAssetAs(asset)} type="button">
+              Save As…
+            </button>
             {onUseRecipe && asset.type === "image" && (asset.generationSet?.recipe || asset.recipe) ? (
               <button onClick={() => onUseRecipe(asset)} type="button">
                 Use this recipe

@@ -2370,6 +2370,7 @@ export function App() {
           nextAsset={previewNavigation.next}
           onClose={closePreview}
           onEditImage={sendAssetToImageEditor}
+          onEditInStudio={sendAssetToImageEdit}
           onPreviewAsset={(asset, direction) => {
             if (direction) {
               previewDirectionRef.current = direction;

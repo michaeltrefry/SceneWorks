@@ -1214,6 +1214,72 @@ label {
   padding: 6px 10px;
 }
 
+/* Fullscreen preview right-click context menu (sc-8729). Positioned within the
+   stage; clamped in JS so it never overflows the viewport. */
+.preview-context-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 200px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  outline: none;
+}
+
+.preview-context-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.preview-context-menu-item:hover,
+.preview-context-menu-item:focus-visible {
+  background: var(--surface-hover);
+}
+
+.preview-context-menu-submenu {
+  position: relative;
+}
+
+.preview-context-menu-caret {
+  opacity: 0.6;
+}
+
+.preview-context-menu-submenu-panel {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 100%;
+  min-width: 160px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+}
+
+.preview-context-menu-submenu:hover .preview-context-menu-submenu-panel,
+.preview-context-menu-submenu.open .preview-context-menu-submenu-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 /* Toolbars */
 .toolbar,
 .review-actions,
