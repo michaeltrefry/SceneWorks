@@ -982,6 +982,53 @@ export function App() {
       .catch(() => setSetupCompleted(true));
   }, []);
 
+  // Desktop (WebView2) only: opening a native file dialog from an
+  // `<input type="file">` can leave the composited app shell painted blank on
+  // Windows — a WebView2 GPU-compositing bug with the backdrop-filter /
+  // scrollable-overflow layers under `.app`. The DOM stays intact; only the GPU
+  // layer fails to repaint, so it never recovers on its own (picking a file or
+  // cancelling both leave the screen blank). When the window regains focus after
+  // the dialog closes, promote-then-demote the shell layer across two frames to
+  // force WebView2 to rebuild and repaint it. Portaled modals live on
+  // `document.body`, outside `.app`, which is why the image-picker modal's file
+  // input never triggers the blank in the first place.
+  useEffect(() => {
+    if (!isDesktopShell) {
+      return undefined;
+    }
+    let armed = false;
+    const arm = (event) => {
+      const target = event.target;
+      if (target instanceof HTMLInputElement && target.type === "file") {
+        armed = true;
+      }
+    };
+    const repaint = () => {
+      if (!armed) {
+        return;
+      }
+      armed = false;
+      const shell = document.querySelector(".app");
+      if (!(shell instanceof HTMLElement)) {
+        return;
+      }
+      const previous = shell.style.transform;
+      requestAnimationFrame(() => {
+        shell.style.transform = "translateZ(0)";
+        requestAnimationFrame(() => {
+          shell.style.transform = previous;
+        });
+      });
+    };
+    // Capture phase so we arm before the input's own handlers run.
+    document.addEventListener("click", arm, true);
+    window.addEventListener("focus", repaint);
+    return () => {
+      document.removeEventListener("click", arm, true);
+      window.removeEventListener("focus", repaint);
+    };
+  }, []);
+
   useEffect(() => {
     if (!authenticated) {
       return;
