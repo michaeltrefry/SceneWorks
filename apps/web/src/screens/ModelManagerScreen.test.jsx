@@ -852,3 +852,219 @@ describe("ModelManagerScreen remote memory gating (REST)", () => {
     expect(container.textContent).toContain("~16 GB");
   });
 });
+
+// sc-8509 (epic 8506): the Models page renders a per-tier download panel for a quant-matrix model,
+// with a RAM-based suggested default and multi-tier install. These tests drive the host memory over
+// the REST host-capabilities signal (same seam as the gating tests above) so the suggestion is
+// deterministic.
+describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
+  let container;
+  let root;
+  let apiFetch;
+  let createModelDownloadJob;
+  let hostMemoryGb;
+  let ModelManagerScreen;
+  let AppContext;
+
+  const GB = 1024 * 1024 * 1024;
+
+  // A quant-matrix model in the sc-8508 /models shape: hasVariantMatrix + a per-tier variants[]
+  // carrying variant / installState / downloadSizeBytes / footprint. Tiers are sized so the RAM
+  // suggestion lands on q4 at 32 GB (budget 25.6 GB: q4 est 6 GB fits; q8/bf16 overflow) and on bf16
+  // at 512 GB (budget 409 GB: bf16 est 36 GB fits).
+  function matrixModel({ installed = [] } = {}) {
+    const tiers = [
+      { variant: "q4", diskGb: 4 }, // est 6 GB
+      { variant: "q8", diskGb: 18 }, // est 27 GB > 25.6 → excluded at 32 GB
+      { variant: "bf16", diskGb: 24 }, // est 36 GB > 25.6 → excluded at 32 GB
+    ];
+    return {
+      id: "z_image_turbo",
+      name: "Z-Image-Turbo",
+      type: "image",
+      family: "z-image",
+      downloadable: true,
+      installState: installed.length ? "installed" : "missing",
+      hasVariantMatrix: true,
+      variants: tiers.map((tier) => ({
+        variant: tier.variant,
+        installState: installed.includes(tier.variant) ? "installed" : "missing",
+        cacheState: installed.includes(tier.variant) ? "complete" : "missing",
+        downloadSizeBytes: tier.diskGb * GB,
+        footprint: { diskSizeBytes: tier.diskGb * GB, residentMemoryBytes: null, peakMemoryBytes: null },
+      })),
+      ui: { description: "Matrix model." },
+    };
+  }
+
+  // A plain single-variant model — its download UX must be unchanged (single Download button, no
+  // tier panel).
+  const SINGLE_MODEL = {
+    id: "real_esrgan",
+    name: "Real-ESRGAN",
+    type: "utility",
+    family: "real-esrgan",
+    downloadable: true,
+    installState: "missing",
+    hasVariantMatrix: false,
+    variants: [{ variant: "default", installState: "missing" }],
+    downloadSizeLabel: "64 MB",
+    ui: { description: "Single-variant model." },
+  };
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    delete window.__TAURI__;
+    hostMemoryGb = 32;
+    createModelDownloadJob = vi.fn(async () => ({ id: "job", payload: {} }));
+    apiFetch = vi.fn(async (path) => {
+      if (path === "/api/v1/host-capabilities") {
+        return { platform: "macos", unifiedMemoryGb: hostMemoryGb };
+      }
+      return [];
+    });
+    vi.resetModules();
+    vi.doMock("../api.js", () => ({
+      apiFetch,
+      isAbortError: () => false,
+      API_BASE_URL: "",
+      eventUrl: () => "",
+    }));
+    ({ AppContext } = await import("../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    vi.doUnmock("../api.js");
+    vi.restoreAllMocks();
+  });
+
+  async function render(models) {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras: [],
+      models,
+      presets: [],
+      jobAction: () => {},
+      setActiveView: () => {},
+      deleteLora: () => {},
+      deleteModel: () => {},
+      createModelDownloadJob,
+      createModelConvertJob: () => {},
+      createLoraImportJob: () => {},
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    // Flush the host-capabilities effect promise so the memory signal resolves.
+    await act(async () => {});
+  }
+
+  function tierRows() {
+    return [...container.querySelectorAll(".model-tier-row")];
+  }
+
+  it("renders a per-tier panel with each tier's size + install state for a matrix model", async () => {
+    await render([matrixModel({ installed: ["q8"] })]);
+    const rows = tierRows();
+    // Three declared quant tiers, highest-fidelity first (bf16, q8, q4).
+    expect(rows.length).toBe(3);
+    const labels = rows.map((row) => row.querySelector(".model-tier-label").textContent);
+    expect(labels[0]).toContain("bf16");
+    expect(labels[2]).toContain("Q4");
+    // Sizes render from downloadSizeBytes.
+    expect(container.textContent).toContain("24.0 GB");
+    expect(container.textContent).toContain("4.0 GB");
+    // The installed tier reports installed; the others report not installed.
+    const q8Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("Q8"));
+    expect(q8Row.querySelector(".status-badge").textContent).toBe("installed");
+  });
+
+  it("highlights q4 as the suggested tier on a 32 GB host", async () => {
+    hostMemoryGb = 32;
+    await render([matrixModel()]);
+    const suggested = container.querySelector(".model-tier-row.suggested");
+    expect(suggested).toBeTruthy();
+    expect(suggested.querySelector(".model-tier-label").textContent).toContain("Q4");
+    expect(suggested.textContent).toContain("Suggested");
+  });
+
+  it("highlights bf16 as the suggested tier on a 512 GB Studio", async () => {
+    hostMemoryGb = 512;
+    await render([matrixModel()]);
+    const suggested = container.querySelector(".model-tier-row.suggested");
+    expect(suggested.querySelector(".model-tier-label").textContent).toContain("bf16");
+  });
+
+  it("preselects the suggested tier and installs it with the right variant", async () => {
+    hostMemoryGb = 32; // → q4 suggested + preselected
+    await render([matrixModel()]);
+    const downloadButton = [...container.querySelectorAll(".model-tier-actions button")][0];
+    expect(downloadButton.disabled).toBe(false);
+    expect(downloadButton.textContent).toContain("Q4");
+    await click(downloadButton);
+    expect(createModelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "z_image_turbo" }),
+      { variant: "q4" },
+    );
+  });
+
+  it("installs multiple selected tiers, one job per tier with the correct variant (A/B)", async () => {
+    hostMemoryGb = 512; // bf16 suggested + preselected
+    await render([matrixModel()]);
+    // Also select q4 → two selected tiers.
+    const q4Checkbox = tierRows()
+      .find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"))
+      .querySelector("input");
+    await click(q4Checkbox);
+    const downloadButton = [...container.querySelectorAll(".model-tier-actions button")][0];
+    expect(downloadButton.textContent).toContain("2 tiers");
+    await click(downloadButton);
+    expect(createModelDownloadJob).toHaveBeenCalledTimes(2);
+    const variants = createModelDownloadJob.mock.calls.map((call) => call[1].variant).sort();
+    expect(variants).toEqual(["bf16", "q4"]);
+  });
+
+  it("keeps every tier installable regardless of RAM (never withhold)", async () => {
+    hostMemoryGb = 8; // tiny host — nothing "fits", but every uninstalled tier stays selectable
+    await render([matrixModel()]);
+    const checkboxes = tierRows().map((row) => row.querySelector("input"));
+    // No tier is installed → all three checkboxes are enabled.
+    expect(checkboxes.every((box) => box.disabled === false)).toBe(true);
+    // Select bf16 (the heaviest) and confirm it can still be queued despite not fitting.
+    const bf16Row = tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes("bf16"));
+    await click(bf16Row.querySelector("input"));
+    const downloadButton = [...container.querySelectorAll(".model-tier-actions button")][0];
+    await click(downloadButton);
+    const variants = createModelDownloadJob.mock.calls.map((call) => call[1].variant);
+    expect(variants).toContain("bf16");
+  });
+
+  it("leaves a single-variant model's download UX unchanged (no tier panel)", async () => {
+    await render([SINGLE_MODEL]);
+    expect(container.querySelector(".model-tier-panel")).toBeNull();
+    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find((button) =>
+      button.textContent.startsWith("Download"),
+    );
+    expect(downloadButton).toBeTruthy();
+    await click(downloadButton);
+    // Single-variant download sends NO variant option (back-compat).
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "real_esrgan" }));
+    const secondArg = createModelDownloadJob.mock.calls[0][1];
+    expect(secondArg).toBeUndefined();
+  });
+});

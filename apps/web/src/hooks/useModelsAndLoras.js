@@ -167,11 +167,18 @@ export function useModelsAndLoras({
   );
 
   const createModelDownloadJob = useCallback(
-    async (model) => {
+    async (model, options = {}) => {
       try {
+        // sc-8509: install a specific quant tier when the caller passes one (the Models-page tier
+        // picker for a quant-matrix model). Absent `variant` installs the model's default tier —
+        // the back-compat single-download behavior every other caller relies on.
+        const body = { requestedGpu: "auto" };
+        if (options.variant) {
+          body.variant = options.variant;
+        }
         const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
           method: "POST",
-          body: JSON.stringify({ requestedGpu: "auto" }),
+          body: JSON.stringify(body),
         });
         setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
         setError("");

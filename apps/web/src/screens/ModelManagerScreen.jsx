@@ -13,6 +13,8 @@ import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { apiFetch } from "../api.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
+import { tierLabel } from "../quantTier.js";
+import { suggestTier } from "../tierSuggestion.js";
 
 // Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
 // base models accept the optional low-noise expert upload (sc-1991). The 5B model
@@ -62,6 +64,21 @@ function downloadSizeText(model) {
     return "Unavailable";
   }
   return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
+}
+
+// Human-readable size for a per-tier byte count (sc-8509). The catalog gives per-variant sizes as
+// raw `downloadSizeBytes` numbers (unlike the model-level `downloadSizeLabel` string), so the tier
+// panel formats them here. Binary units (GiB-based) to match the model-level label's convention.
+function formatTierSize(bytes) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) {
+    return "Size unavailable";
+  }
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) {
+    return `${gb.toFixed(1)} GB`;
+  }
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(0)} MB`;
 }
 
 // MLX status text, keyed off the macOS catalog's mlxConversionState. Turnkey
@@ -288,6 +305,151 @@ function deleteResultText(result, name) {
   return `${removed} for ${name}.${warnings}`;
 }
 
+// The declared quant tiers of a matrix model, in suggestion-fidelity order (bf16 → q8 → q4, i.e.
+// highest first) so the panel lists the biggest/best at the top. `suggestTier` already orders on
+// this basis; we surface the same order to the user. Each entry is the raw `variants[]` object.
+const TIER_DISPLAY_ORDER = ["bf16", "q8", "q4"];
+
+function orderedMatrixVariants(model) {
+  if (!model?.hasVariantMatrix || !Array.isArray(model.variants)) {
+    return [];
+  }
+  // Only real quant tiers (a single-variant model's "default" pseudo-tier never renders a matrix).
+  const tiers = model.variants.filter((variant) => TIER_DISPLAY_ORDER.includes(variant?.variant));
+  return [...tiers].sort(
+    (a, b) => TIER_DISPLAY_ORDER.indexOf(a.variant) - TIER_DISPLAY_ORDER.indexOf(b.variant),
+  );
+}
+
+// Per-tier quant-download panel (sc-8509, epic 8506). Shown instead of the single Download button
+// when a model advertises a quant matrix (`hasVariantMatrix`). Lets the user:
+//   - see every tier's on-disk size + install state,
+//   - see (and start on) a RAM-based SUGGESTED tier (`suggestTier`), highlighted,
+//   - multi-select and install MORE THAN ONE tier at once (for A/B), each fetching its own artifact.
+// SUGGEST-NEVER-WITHHOLD: every not-installed tier is selectable regardless of RAM; the suggestion
+// only preselects/highlights. `onDownloadVariant(model, tier)` wires each selection through the
+// existing install path with the tier's `variant`.
+function ModelTierDownloadPanel({
+  model,
+  unifiedMemoryGb,
+  downloadJobs,
+  licenseAckRequired,
+  onDownloadVariant,
+}) {
+  const variants = orderedMatrixVariants(model);
+  const suggested = suggestTier(model, unifiedMemoryGb);
+  // In-flight download job per tier, keyed by the job payload's `variant` (sc-8508 records it).
+  const activeJobByTier = new Map();
+  for (const job of downloadJobs) {
+    const tier = job.payload?.variant;
+    if (tier && !terminalStatuses.has(job.status)) {
+      activeJobByTier.set(tier, job);
+    }
+  }
+  // Selection defaults to the suggested tier (if it isn't already installed). Recomputed only on
+  // mount + when the suggested tier changes (e.g. the memory signal resolves after first paint).
+  const [selected, setSelected] = useState(() => new Set());
+  const initializedForSuggestion = React.useRef(null);
+  useEffect(() => {
+    if (suggested && initializedForSuggestion.current !== suggested) {
+      initializedForSuggestion.current = suggested;
+      const suggestedVariant = variants.find((variant) => variant.variant === suggested);
+      // Preselect the suggestion only when it's still installable (not already installed).
+      if (suggestedVariant && suggestedVariant.installState !== "installed") {
+        setSelected(new Set([suggested]));
+      }
+    }
+  }, [suggested]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function toggle(tier) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(tier)) {
+        next.delete(tier);
+      } else {
+        next.add(tier);
+      }
+      return next;
+    });
+  }
+
+  // Tiers we can actually queue now: selected, not already installed, and no in-flight job.
+  const downloadable = [...selected].filter((tier) => {
+    const variant = variants.find((entry) => entry.variant === tier);
+    return variant && variant.installState !== "installed" && !activeJobByTier.has(tier);
+  });
+
+  function downloadSelected() {
+    for (const tier of downloadable) {
+      onDownloadVariant(model, tier);
+    }
+    // Clear the queued tiers from the selection so the button reflects only still-pending picks.
+    setSelected((current) => {
+      const next = new Set(current);
+      for (const tier of downloadable) {
+        next.delete(tier);
+      }
+      return next;
+    });
+  }
+
+  return (
+    <div className="model-tier-panel">
+      <div className="model-tier-panel-heading">
+        <span className="eyebrow">Quant tiers</span>
+        <span className="helper-copy">Suggested for this machine is highlighted. Pick one or more to A/B.</span>
+      </div>
+      <ul className="model-tier-list">
+        {variants.map((variant) => {
+          const tier = variant.variant;
+          const installed = variant.installState === "installed";
+          const activeJob = activeJobByTier.get(tier);
+          const isSuggested = tier === suggested;
+          const checked = selected.has(tier);
+          const rowClasses = ["model-tier-row"];
+          if (isSuggested) {
+            rowClasses.push("suggested");
+          }
+          return (
+            <li className={rowClasses.join(" ")} key={tier}>
+              <label className="model-tier-select">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={installed || Boolean(activeJob) || licenseAckRequired}
+                  onChange={() => toggle(tier)}
+                />
+                <span className="model-tier-label">
+                  {tierLabel(tier)}
+                  {isSuggested ? <span className="model-tier-suggested-badge">Suggested</span> : null}
+                </span>
+              </label>
+              <span className="model-tier-size">{formatTierSize(variant.downloadSizeBytes)}</span>
+              <span className={installed ? "status-badge installed" : "status-badge"}>
+                {activeJob ? activeJob.status : installed ? "installed" : "not installed"}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="model-tier-actions">
+        <button
+          type="button"
+          disabled={downloadable.length === 0 || licenseAckRequired}
+          title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
+          onClick={downloadSelected}
+        >
+          {downloadable.length > 1
+            ? `Download ${downloadable.length} tiers`
+            : downloadable.length === 1
+              ? `Download ${tierLabel(downloadable[0])}`
+              : "Select a tier to download"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ModelManagerScreen() {
   const {
     activeProject,
@@ -315,6 +477,9 @@ export function ModelManagerScreen() {
   const onDeleteLora = deleteLoraAction;
   const onDeleteModel = deleteModelAction;
   const onDownloadModel = createModelDownloadJob;
+  // Install a specific quant tier of a matrix model (sc-8509). Threads the tier through the existing
+  // download path via the `variant` option so each install fetches that tier's own artifact.
+  const onDownloadVariant = (model, variant) => createModelDownloadJob(model, { variant });
   const onDownloadLora = createLoraDownloadJob;
   const onImportLora = createLoraImportJob;
   const onImportModel = createModelImportJob;
@@ -706,6 +871,9 @@ export function ModelManagerScreen() {
     // gated models (no notice shown) are never blocked.
     const licenseAcknowledged = licenseAcks[model.id] === true;
     const licenseAckRequired = gated && !installed && !licenseAcknowledged;
+    // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
+    // + multi-select instead of the single Download button. Single-variant models are unchanged.
+    const hasTierMatrix = model.hasVariantMatrix === true && orderedMatrixVariants(model).length > 0;
     return (
       <article className="model-card" key={model.id}>
         <div>
@@ -803,29 +971,57 @@ export function ModelManagerScreen() {
             ) : null}
           </div>
         ) : null}
+        {hasTierMatrix ? (
+          <ModelTierDownloadPanel
+            model={model}
+            unifiedMemoryGb={unifiedMemoryGb}
+            downloadJobs={downloadJobs}
+            licenseAckRequired={licenseAckRequired}
+            onDownloadVariant={onDownloadVariant}
+          />
+        ) : null}
         <div className="model-card-actions">
-          <button
-            disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
-            title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
-            onClick={() =>
-              failedDownload
-                ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
-                : onDownloadModel(model)
-            }
-            type="button"
-          >
-            {downloadJob
-              ? downloadJob.status
-              : failedDownload
-                  ? "Resume Download"
-                  : incomplete
-                    ? "Fix"
-                    : installed
-                      ? "Ready"
-                      : model.downloadSizeLabel
-                        ? `Download ${downloadSize}`
-                        : "Download"}
-          </button>
+          {hasTierMatrix ? (
+            // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
+            // affordance here for an incomplete cache; otherwise there's no single-tier button.
+            incomplete ? (
+              <button
+                disabled={!model.downloadable || Boolean(downloadJob) || licenseAckRequired}
+                title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
+                onClick={() =>
+                  failedDownload
+                    ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
+                    : onDownloadModel(model)
+                }
+                type="button"
+              >
+                {downloadJob ? downloadJob.status : failedDownload ? "Resume Download" : "Fix"}
+              </button>
+            ) : null
+          ) : (
+            <button
+              disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
+              title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
+              onClick={() =>
+                failedDownload
+                  ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
+                  : onDownloadModel(model)
+              }
+              type="button"
+            >
+              {downloadJob
+                ? downloadJob.status
+                : failedDownload
+                    ? "Resume Download"
+                    : incomplete
+                      ? "Fix"
+                      : installed
+                        ? "Ready"
+                        : model.downloadSizeLabel
+                          ? `Download ${downloadSize}`
+                          : "Download"}
+            </button>
+          )}
           <button className="danger-action" disabled={!canDelete || deletingItem === deleteKey} onClick={() => deleteModel(model)} type="button">
             {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
           </button>

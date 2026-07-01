@@ -4402,6 +4402,88 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
+/* Per-tier quant-download panel (sc-8509, epic 8506). Shown on a quant-matrix model in place of the
+   single Download button: lists each tier with its size + install state, highlights the RAM-based
+   suggestion, and supports multi-select install for A/B. */
+.model-tier-panel {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.model-tier-panel-heading {
+  display: grid;
+  gap: 2px;
+}
+
+.model-tier-panel-heading .eyebrow {
+  margin: 0;
+}
+
+.model-tier-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.model-tier-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* The RAM-suggested tier: highlighted so the recommended default reads at a glance. */
+.model-tier-row.suggested {
+  border-color: var(--accent, var(--border));
+  background: var(--surface-raised, transparent);
+}
+
+.model-tier-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.model-tier-select input {
+  margin: 0;
+}
+
+.model-tier-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.model-tier-suggested-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent, var(--border));
+  color: var(--accent-contrast, var(--text));
+}
+
+.model-tier-size {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.model-tier-actions {
+  display: grid;
+}
+
 .model-gated-actions {
   display: flex;
   flex-wrap: wrap;
