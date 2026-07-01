@@ -699,16 +699,47 @@
       "adapter": "lens_turbo",
       "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8767, epic 8506, Group-B): the recovered +
+        // rebuilt non-distilled base Lens, re-hosted from Comfy-Org/Lens (the original microsoft/Lens
+        // source is dead). Per-tier self-contained subdirs (transformer DiT + gpt-oss-20b MoE text
+        // encoder + FLUX.2 VAE + tokenizer + scheduler + model_index.json): q4/ (default), q8/, bf16/.
+        // The worker loads the chosen tier's subdir directly (standard_tier_subdir,
+        // mlx.standardTierLayout), mirroring lens_turbo. Base Lens is NOT dense-TE: the gpt-oss MoE
+        // encoder ships packed per-tier alongside the transformer (q4/q8 packed), so no
+        // denseTextEncoderTier. Per-tier variants (sc-8508): each tier is a SEPARATE installable
+        // artifact tagged with a `variant` key + a `footprint` (required on-disk diskSizeBytes;
+        // resident/peak backfilled by sc-8770). diskSizeBytes are the EXACT summed on-disk bytes of
+        // each SceneWorks/lens-mlx tier subdir. Replaces the dead whole-repo microsoft/Lens download.
         {
           "provider": "huggingface",
-          "repo": "microsoft/Lens",
-          "files": [],
-          "estimatedSizeBytes": 30800000000
+          "repo": "SceneWorks/lens-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 18998339228,
+          "footprint": { "diskSizeBytes": 18998339228, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/lens-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 29921486998,
+          "footprint": { "diskSizeBytes": 29921486998, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/lens-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 22347329085,
+          "footprint": { "diskSizeBytes": 22347329085, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/microsoft/Lens"
+        "model": "${HF_CACHE}/SceneWorks/lens-mlx"
       },
+      "gated": false,
       "defaults": {
         // Non-distilled base: 20 steps, CFG 5.0 (vs Turbo's 4 / 1.0).
         "resolution": "1024x1024",
@@ -730,6 +761,19 @@
         // Same `lens` family as Lens-Turbo; a LoRA trained here applies to both.
         "families": ["lens"],
         "types": ["style", "enhance", "character"]
+      },
+      // macOS-only native-MLX backend. mlx.quantize/tier config is consumed by the RUST worker
+      // (standard_tier_subdir / resolve_quant). q4/ default tier (sc-8767); q8/ + bf16/ hosted +
+      // selectable via advanced.mlxQuantize (standard_tier_subdir resolves the subdir). Base Lens is
+      // NOT dense-TE: the gpt-oss-20b MoE text encoder is packed per-tier alongside the transformer,
+      // so there is no denseTextEncoderTier override — every component is packed at the chosen tier.
+      "mlx": {
+        "minMemoryGb": 60,
+        // sc-8508: the manifest-driven form of the STANDARD_TIER_MODELS registry. Additive here opts
+        // this id into `uses_standard_tier_layout` so the worker resolves the q4/q8/bf16 subdir
+        // directly from the turnkey snapshot.
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "ui": {
         "label": "Lens (base)",

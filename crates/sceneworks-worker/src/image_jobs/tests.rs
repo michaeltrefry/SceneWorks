@@ -1112,18 +1112,20 @@ fn flux2_klein_9b_kv_real_weights_generates_one_image() {
     );
 }
 
-/// Real-weights smoke: Microsoft Lens base (epic 3164 / sc-5105) — 20-step, standard guidance 5.0 +
-/// a negative prompt (the `mlx-gen-lens` descriptor is `supports_guidance` + `supports_negative_prompt`,
-/// NOT true-CFG). Loads the `microsoft/Lens` snapshot dir (tokenizer/ text_encoder/ transformer/ vae/)
-/// at the Q8 default (encoder MoE + DiT). Needs the HF cache + a Metal device; run on demand:
+/// Real-weights smoke: base Lens (epic 3164 / sc-5105, re-hosted sc-8767) — 20-step, standard
+/// guidance 5.0 + a negative prompt (the `mlx-gen-lens` descriptor is `supports_guidance` +
+/// `supports_negative_prompt`, NOT true-CFG). The upstream `microsoft/Lens` source is dead (Microsoft
+/// pulled it); base `lens` now defaults to the tier-subdir'd `SceneWorks/lens-mlx`, so this loads the
+/// `bf16/` tier subdir (the flat diffusers tree: tokenizer/ text_encoder/ transformer/ vae/) at the Q8
+/// default (encoder MoE + DiT). Needs the HF cache + a Metal device; run on demand:
 /// `cargo test -p sceneworks-worker --lib -- --ignored lens_real_weights`.
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "needs real microsoft/Lens weights + Metal device"]
+#[ignore = "needs real SceneWorks/lens-mlx weights + Metal device"]
 fn lens_real_weights_generates_one_image() {
     smoke_generate_one(
         "lens",
-        hf_snapshot("models--microsoft--Lens"),
+        hf_snapshot("models--SceneWorks--lens-mlx").join("bf16"),
         Some(5.0),
         Some("blurry, low quality".to_owned()),
     );

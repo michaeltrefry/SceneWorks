@@ -382,11 +382,13 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // The two SceneWorks ids map 1:1 to the engine registry ids of the same name and differ only in
     // their step/guidance defaults: base `lens` is 20-step / CFG 5.0, distilled `lens_turbo` is
     // 4-step / guidance 1.0 (≈ no CFG) — Python `MODEL_TARGETS` parity. Each variant resolves its own
-    // `microsoft/Lens` / `microsoft/Lens-Turbo` HF snapshot dir.
+    // SceneWorks re-host: base `lens` → `SceneWorks/lens-mlx` (recovered/rebuilt from Comfy-Org/Lens,
+    // sc-8767; original microsoft/Lens source is dead), distilled `lens_turbo` → `SceneWorks/lens-turbo-mlx`.
+    // Both are pre-quantized per-tier turnkey snapshots (q4/q8/bf16, standardTierLayout).
     ModelRow {
         sceneworks_id: "lens",
         engine_id: "lens",
-        default_repo: "microsoft/Lens",
+        default_repo: "SceneWorks/lens-mlx",
         default_steps: 20,
         default_guidance: 5.0,
         adapter_label: "mlx_lens",
