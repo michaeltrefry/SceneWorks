@@ -195,6 +195,74 @@ describe("ImageEditor scaffold", () => {
     expect(container.querySelector(".image-editor-shortcuts")).toBeNull();
     input.remove();
   });
+
+  // sc-8730: the editorLaunch channel routes an asset into the editor canvas from
+  // outside (the FullscreenPreview "Edit" button). The id-keyed effect calls openAsset
+  // for the launched asset, which fetches its media URL — so a fetch to that URL is the
+  // observable signal that the launch was consumed. Entering with no launch must not
+  // auto-open anything, and consuming the launch calls clearEditorLaunch so navigating
+  // back doesn't re-open a stale asset.
+  describe("editorLaunch channel (sc-8730)", () => {
+    const IMAGE_ASSET = {
+      id: "asset-launch",
+      type: "image",
+      displayName: "Launched plate",
+      projectId: "project_1",
+      file: { path: "assets/images/launched.png" },
+    };
+
+    let fetchSpy;
+
+    beforeEach(() => {
+      fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(["x"], { type: "image/png" }),
+      });
+    });
+
+    afterEach(() => {
+      fetchSpy.mockRestore();
+    });
+
+    it("does not auto-open anything when entering with no launch", async () => {
+      await render(baseContext({ assets: [IMAGE_ASSET], editorLaunch: null }));
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("opens the launched asset (fetches its media) and clears the launch", async () => {
+      const clearEditorLaunch = vi.fn();
+      await render(
+        baseContext({
+          assets: [IMAGE_ASSET],
+          editorLaunch: { id: "launch-1", assetId: IMAGE_ASSET.id },
+          clearEditorLaunch,
+        }),
+      );
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy.mock.calls[0][0]).toContain(
+        "/api/v1/projects/project_1/files/assets/images/launched.png",
+      );
+      // The launch is consumed exactly once so returning to the editor won't re-open it.
+      expect(clearEditorLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores a launch whose asset isn't a renderable image in the project", async () => {
+      const clearEditorLaunch = vi.fn();
+      await render(
+        baseContext({
+          assets: [IMAGE_ASSET],
+          editorLaunch: { id: "launch-2", assetId: "missing-asset" },
+          clearEditorLaunch,
+        }),
+      );
+      // openAsset returns early (asset not found) → no fetch. The launch is still
+      // cleared so it doesn't linger and re-fire on the next id-keyed evaluation.
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(clearEditorLaunch).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe("crop geometry", () => {
