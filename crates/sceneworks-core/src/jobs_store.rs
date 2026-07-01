@@ -3821,13 +3821,12 @@ const CANDLE_ROUTED_MODELS: &[&str] = &[
     // conditioning-incompatible).
     "realvisxl_lightning",
     "z_image_turbo",
-    // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379): same candle `z_image_diffusers` family
-    // as Turbo. On candle it is currently routed ONLY for the strict-control lane (`z_image` +
-    // `advanced.poses` → `generate_candle_zimage_control_stream`, the base Fun-Controlnet-Union branch);
-    // its plain-txt2img candle path is not wired yet, so a non-pose `z_image` job still defers to torch
-    // via `image_request_candle_eligible` (which has no base-z-image txt2img provider). Membership here is
-    // required so the strict-control branch + the pose-reject exclusion in `image_job_is_candle_eligible`
-    // see it as a candle-routed model.
+    // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379 control + sc-8679 txt2img): same candle
+    // `z_image_diffusers` family as Turbo. Now routed for BOTH the strict-control lane (`z_image` +
+    // `advanced.poses` → `generate_candle_zimage_control_stream`, the base Fun-Controlnet-Union branch)
+    // AND plain txt2img (sc-8679): the registered candle `z_image` base generator (shift-6.0 / ~50-step /
+    // real CFG) runs a non-pose `z_image` job through the generic candle txt2img lane, the base sibling of
+    // `z_image_turbo`. Edit/reference/mask shapes still defer to torch (`image_request_candle_eligible`).
     "z_image",
     "flux_schnell",
     "flux_dev",
@@ -4161,15 +4160,13 @@ fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> b
     if !CANDLE_ROUTED_MODELS.contains(&model) {
         return false;
     }
-    // Base (non-distilled) Z-Image is candle-routed ONLY for its strict-control lane (sc-8379); the candle
-    // `is_candle_engine` set has no base-z-image txt2img provider, so a plain (non-pose) `z_image` job must
-    // NOT be claimed for the candle txt2img path here — it falls through to MLX/torch. (The pose job is
-    // branched out by `zimage_control_candle_eligible` in `image_job_is_candle_eligible` before reaching
-    // this gate.) Without this guard a plain `z_image` job would be claimed but the worker's
-    // `is_candle_engine` would not match it, silently dropping it to the unhandled tail.
-    if model == "z_image" {
-        return false;
-    }
+    // Base (non-distilled, full-CFG) Z-Image txt2img (sc-8679, epic 8236): the candle `z_image` base
+    // generator (shift-6.0 / ~50-step / real CFG) is now a candle txt2img provider (`is_candle_engine`),
+    // so a plain (non-pose, non-edit) `z_image` job routes to the generic candle txt2img lane here — the
+    // base sibling of `z_image_turbo`. Its strict-pose control (`advanced.poses`) is still branched out by
+    // `zimage_control_candle_eligible` in `image_job_is_candle_eligible` BEFORE this gate; its edit shapes
+    // are rejected below with every other family. (The prior sc-8379 guard that hard-rejected base z_image
+    // here — because no candle txt2img provider existed — is retired now that one does.)
     // img2img / inpaint / outpaint all arrive as `mode == "edit_image"` (+ a source); reject the
     // whole edit family up front (the worker's `sdxl_sub_mode` keys off the same mode).
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
@@ -6199,23 +6196,36 @@ mod candle_routing_tests {
 
     #[test]
     fn candle_routed_models_plain_txt2img_are_eligible() {
-        // SDXL/RealVisXL (sc-3678) + the four image families wired in sc-5096 — every base txt2img id.
-        // EXCEPT base `z_image` (sc-8379): it is candle-routed ONLY for its strict-control lane (no candle
-        // txt2img provider), so a plain txt2img `z_image` job correctly defers to MLX/torch.
+        // SDXL/RealVisXL (sc-3678) + the image families wired in sc-5096 — every base txt2img id, now
+        // INCLUDING base `z_image` (sc-8679): the registered candle `z_image` base generator makes a plain
+        // txt2img `z_image` job candle-eligible, the base sibling of `z_image_turbo`. (Its strict-pose
+        // control lane is branched out earlier in `image_job_is_candle_eligible`; its edit shapes reject
+        // below — see `new_candle_families_conditioning_shapes_fall_back_to_torch`.)
         for model in CANDLE_ROUTED_MODELS {
-            if *model == "z_image" {
-                assert!(
-                    !image_request_candle_eligible(
-                        model,
-                        &object(json!({ "prompt": "a red fox" }))
-                    ),
-                    "base z_image plain txt2img must NOT be candle-eligible (control-only lane)"
-                );
-                continue;
-            }
             assert!(
                 image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
                 "{model} plain txt2img should be candle-eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn base_z_image_txt2img_is_candle_eligible_but_edit_shapes_are_not() {
+        // sc-8679: base `z_image` plain txt2img rides the candle lane (the base sibling of z_image_turbo);
+        // its edit / reference / mask conditioning shapes still defer to the Python torch worker (no candle
+        // base-z-image edit provider — that is a separate story).
+        assert!(
+            image_request_candle_eligible("z_image", &object(json!({ "prompt": "a red fox" }))),
+            "base z_image plain txt2img must be candle-eligible (sc-8679)"
+        );
+        for payload in [
+            json!({ "prompt": "p", "mode": "edit_image", "sourceAssetId": "a" }),
+            json!({ "prompt": "p", "referenceAssetId": "a" }),
+            json!({ "prompt": "p", "maskAssetId": "a" }),
+        ] {
+            assert!(
+                !image_request_candle_eligible("z_image", &object(payload.clone())),
+                "base z_image conditioning shape must fall back to torch: {payload}"
             );
         }
     }
@@ -8140,11 +8150,12 @@ mod candle_routing_tests {
         let payload = json!({ "model": "z_image", "advanced": { "poses": [{ "keypoints": [] }] } });
         assert!(zimage_control_candle_eligible(&object(payload.clone())));
         assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
-        // A base z_image with no poses is plain txt2img — NOT a candle lane (no base-z-image txt2img
-        // provider on candle), so it defers to torch via the txt2img gate.
-        assert!(!image_job_is_candle_eligible(&image_generate_job(
-            json!({ "model": "z_image", "prompt": "a misty fjord" })
-        )));
+        // A base z_image with no poses is plain txt2img — now a candle lane too (sc-8679: the registered
+        // candle `z_image` base generator), so it routes to the generic candle txt2img gate rather than
+        // deferring to torch. It is NOT this strict-control lane, though.
+        let plain = json!({ "model": "z_image", "prompt": "a misty fjord" });
+        assert!(!zimage_control_candle_eligible(&object(plain.clone())));
+        assert!(image_job_is_candle_eligible(&image_generate_job(plain)));
         // Both Turbo and base have a candle pose lane (so neither is pose-rejected).
         assert!(model_has_candle_pose_lane("z_image"));
         assert!(model_has_candle_pose_lane("z_image_turbo"));

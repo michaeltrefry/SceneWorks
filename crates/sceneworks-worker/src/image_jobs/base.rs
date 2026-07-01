@@ -2312,6 +2312,13 @@ fn is_candle_engine(model: &str) -> bool {
             // router defers its conditioning shapes to torch), so it rides the base candle txt2img lane.
             | "realvisxl_lightning"
             | "z_image_turbo"
+            // Base (non-distilled, full-CFG) Z-Image (sc-8679, epic 8236): the registered candle
+            // `z_image` base generator (shift-6.0 / ~50-step / real CFG) rides the generic candle txt2img
+            // lane, the base sibling of `z_image_turbo`. Shares the `standard_tier_subdir` turnkey layout;
+            // `generate_candle_stream` resolves its own repo/steps/guidance/negative from the descriptor.
+            // txt2img only — edit / identity / strict-pose shapes have their own bespoke lanes (the
+            // `z_image` control lane is `advanced.poses`, branched out before this gate).
+            | "z_image"
             | "flux_schnell"
             | "flux_dev"
             | "flux2_klein_9b"
@@ -2369,7 +2376,8 @@ fn is_candle_engine(model: &str) -> bool {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_adapter_label(model: &str) -> &'static str {
     match model {
-        "z_image_turbo" => "candle_z_image",
+        // Base z_image (sc-8679) shares the candle z-image family label with Turbo.
+        "z_image_turbo" | "z_image" => "candle_z_image",
         "flux_schnell" | "flux_dev" => "candle_flux",
         // The base klein + its `_kv` / `_true_v2` weight variants (sc-7459) + dev all run candle FLUX.2.
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
@@ -2653,7 +2661,8 @@ async fn generate_candle_stream(
     match request.model.as_str() {
         // realvisxl_lightning shares the candle `sdxl` engine (sc-7176), so the SDXL flash toggle applies.
         "sdxl" | "realvisxl" | "realvisxl_lightning" => candle_gen_sdxl::set_flash_attn(flash_attn),
-        "z_image_turbo" => candle_gen_z_image::set_accel_attn(flash_attn),
+        // Base z_image (sc-8679) shares the candle z-image accel-attention toggle with Turbo.
+        "z_image_turbo" | "z_image" => candle_gen_z_image::set_accel_attn(flash_attn),
         _ => {}
     }
 
@@ -3163,6 +3172,8 @@ mod candle_label_tests {
             "realvisxl",
             "realvisxl_lightning",
             "z_image_turbo",
+            // Base (non-distilled, full-CFG) Z-Image txt2img (sc-8679): the base sibling of z_image_turbo.
+            "z_image",
             "flux_schnell",
             "flux_dev",
             "flux2_klein_9b",
