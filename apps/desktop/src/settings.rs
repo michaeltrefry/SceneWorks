@@ -673,14 +673,14 @@ pub fn reveal_in_os(path: String) -> Result<(), String> {
     result.map(|_| ()).map_err(|error| error.to_string())
 }
 
-fn validate_reveal_target(path: &str) -> Result<PathBuf, String> {
-    let target = path.trim();
-    if target.is_empty() {
-        return Err("A path is required.".to_owned());
-    }
-    let target = std::fs::canonicalize(target).map_err(|error| error.to_string())?;
+/// The app-managed roots a revealed/saved file must live inside: the SceneWorks data
+/// directory (projects, generated assets) and the Hugging Face cache. Reads the user's
+/// persisted overrides, falling back to the platform defaults. Canonicalized so the
+/// `starts_with` containment check in [`path_within_roots`] compares real paths (and so
+/// a symlinked root is resolved once here rather than per-check).
+fn app_managed_roots() -> Vec<PathBuf> {
     let settings = load_settings();
-    let roots = [
+    [
         settings
             .data_dir
             .as_deref()
@@ -691,18 +691,104 @@ fn validate_reveal_target(path: &str) -> Result<PathBuf, String> {
             .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(shared_huggingface_home),
-    ];
-    let roots = roots
-        .iter()
-        .filter_map(|root| std::fs::canonicalize(root).ok())
-        .collect::<Vec<_>>();
-    if roots.iter().any(|root| target.starts_with(root)) {
+    ]
+    .iter()
+    .filter_map(|root| std::fs::canonicalize(root).ok())
+    .collect()
+}
+
+/// Pure containment check: is `target` inside any of `roots`? Extracted so the guard's
+/// core logic is unit-testable without touching real settings/disk (the canonicalized
+/// inputs are supplied by the caller). Both sides are expected to be already
+/// canonicalized so `starts_with` compares real, prefix-aligned components.
+fn path_within_roots(target: &std::path::Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| target.starts_with(root))
+}
+
+/// Canonicalize `path` and confirm it lives inside an app-managed root (data dir or HF
+/// cache). Shared by [`reveal_in_os`] and [`save_asset_as`] so both reject paths outside
+/// the SceneWorks-managed trees identically — a save/reveal must never touch an arbitrary
+/// file the frontend hands us. Returns the canonicalized path on success.
+fn validate_reveal_target(path: &str) -> Result<PathBuf, String> {
+    let target = path.trim();
+    if target.is_empty() {
+        return Err("A path is required.".to_owned());
+    }
+    let target = std::fs::canonicalize(target).map_err(|error| error.to_string())?;
+    if path_within_roots(&target, &app_managed_roots()) {
         return Ok(target);
     }
     Err(
         "Can only reveal files inside the SceneWorks data directory or Hugging Face cache."
             .to_owned(),
     )
+}
+
+/// The resolved workspace data directory: the user's persisted override, or the platform
+/// default. This is the root under which projects (and thus assets) live on disk; the
+/// project registry (`<data_dir>/recent-projects.json`) maps a `projectId` to its
+/// `.sceneworks` project directory, onto which a project-relative `file.path` joins.
+fn resolved_data_dir() -> PathBuf {
+    load_settings()
+        .data_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(default_data_dir)
+}
+
+/// Turn an asset's project-relative `file.path` (as carried by the frontend alongside its
+/// `projectId`) into its absolute on-disk path (sc-8726). Assets are addressed in the API
+/// as `/api/v1/projects/<id>/files/<relativePath>`; that route resolves through the shared
+/// [`ProjectStore`](sceneworks_core::project_store::ProjectStore), which looks the project
+/// up in the data-dir registry and joins the relative path onto its `.sceneworks`
+/// directory — with the same traversal guard and canonicalization the API uses. We reuse
+/// that exact resolver here (rather than re-deriving the layout) so reveal/save operate on
+/// the real file the API would serve. Exposed as a command so the frontend (sc-8727) can
+/// turn an asset into an absolute path to feed [`reveal_in_os`] / [`save_asset_as`].
+#[tauri::command]
+pub fn resolve_asset_path(project_id: String, relative_path: String) -> Result<String, String> {
+    let store = sceneworks_core::project_store::ProjectStore::new(
+        resolved_data_dir(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    let project_file = store
+        .project_file(&project_id, &relative_path)
+        .map_err(|error| error.to_string())?;
+    Ok(project_file.path.to_string_lossy().into_owned())
+}
+
+/// Save an asset file to a user-chosen destination (sc-8726). Opens the native "save as"
+/// dialog pre-filled with `suggested_filename`, then copies the bytes from `source_path`
+/// to the chosen destination. `source_path` must be an already-resolved absolute path
+/// (see [`resolve_asset_path`]); it is validated to live inside an app-managed root by the
+/// same guard as [`reveal_in_os`] so the frontend can't ask us to copy an arbitrary file
+/// off disk. Returns `Ok(None)` when the user cancels the dialog and `Ok(Some(dest))` with
+/// the absolute destination path on success.
+#[tauri::command]
+pub async fn save_asset_as(
+    app: AppHandle,
+    source_path: String,
+    suggested_filename: String,
+) -> Result<Option<String>, String> {
+    // Guard the SOURCE before opening any dialog: only files inside the SceneWorks data
+    // dir / HF cache may be copied out.
+    let source = validate_reveal_target(&source_path)?;
+
+    let suggested = suggested_filename.trim();
+    let mut dialog = app.dialog().file();
+    if !suggested.is_empty() {
+        dialog = dialog.set_file_name(suggested);
+    }
+    let Some(destination) = dialog
+        .blocking_save_file()
+        .and_then(|file| file.into_path().ok())
+    else {
+        // User dismissed the save dialog.
+        return Ok(None);
+    };
+
+    std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+    Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
 /// Enumerate stored credentials for the Settings screen: host, label, scheme, and
@@ -872,6 +958,87 @@ pub fn get_gpu_info() -> GpuInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A unique scratch directory under the system temp dir, so the path-resolution
+    /// tests below don't need a `tempfile` dependency. Cleaned up by the caller.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let unique = format!(
+            "sceneworks-desktop-test-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// sc-8726: the source-path guard's containment core accepts a file inside an
+    /// app-managed root and rejects one outside it. This is the pure half of
+    /// `validate_reveal_target` (the canonicalization + settings read is the shell
+    /// around it), so a save/reveal can never be pointed at an arbitrary file.
+    #[test]
+    fn path_within_roots_accepts_inside_and_rejects_outside() {
+        let root = scratch_dir("guard");
+        let data_root = root.join("data");
+        std::fs::create_dir_all(data_root.join("projects")).expect("data root");
+        // Canonicalize both sides exactly as the guard does.
+        let canonical_root = std::fs::canonicalize(&data_root).expect("canonical root");
+        let inside = data_root.join("projects").join("asset.png");
+        std::fs::write(&inside, b"x").expect("inside file");
+        let inside = std::fs::canonicalize(&inside).expect("canonical inside");
+
+        let outside = root.join("outside.png");
+        std::fs::write(&outside, b"x").expect("outside file");
+        let outside = std::fs::canonicalize(&outside).expect("canonical outside");
+
+        let roots = vec![canonical_root];
+        assert!(path_within_roots(&inside, &roots));
+        assert!(!path_within_roots(&outside, &roots));
+        // A root the target is not under is not sufficient.
+        assert!(!path_within_roots(&inside, &[]));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-8726: `resolve_asset_path` turns a (projectId, project-relative file.path)
+    /// into the correct absolute on-disk path by delegating to the same `ProjectStore`
+    /// resolver the API's `/projects/<id>/files/<path>` route uses. Drives that resolver
+    /// against a real temp data dir + created project to prove the layout is right (the
+    /// command only adds the `resolved_data_dir()` wiring around this call).
+    #[test]
+    fn project_store_resolves_relative_asset_to_absolute_disk_path() {
+        use sceneworks_core::project_store::ProjectStore;
+
+        let root = scratch_dir("resolve");
+        let data_dir = root.join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let project = store.create_project("Resolver").expect("project creates");
+
+        // Materialize an asset inside the project's `.sceneworks` dir at a known
+        // relative path, mirroring how the worker writes generated assets.
+        let project_path = store
+            .list_projects()
+            .expect("list projects")
+            .into_iter()
+            .find(|p| p.id == project.id)
+            .map(|p| PathBuf::from(p.path))
+            .expect("project path");
+        let relative = "assets/images/shot.png";
+        let asset_path = project_path.join(relative);
+        std::fs::create_dir_all(asset_path.parent().unwrap()).expect("asset dir");
+        std::fs::write(&asset_path, b"png-bytes").expect("write asset");
+
+        let resolved = store
+            .project_file(&project.id, relative)
+            .expect("resolve asset");
+        let expected = std::fs::canonicalize(&asset_path).expect("canonical asset");
+        assert_eq!(resolved.path, expected);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn normalizes_hosts_and_urls() {
