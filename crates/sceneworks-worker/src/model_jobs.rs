@@ -1639,30 +1639,36 @@ pub(crate) async fn run_lora_import_job(
         .await?;
     } else if let Some(source_path) = source_path {
         let prefer_move = payload_bool(&job.payload, "uploadedSourcePath");
+        // sc-8803: the source path is client-supplied over the unauthenticated jobs
+        // API; confine it (staged-upload cache for uploads, app-managed roots
+        // otherwise) before the copy/move reaches the filesystem.
+        let source_path = resolve_import_source_path(
+            settings,
+            &job.payload,
+            source_path,
+            "lora-uploads",
+            "LoRA import sourcePath",
+        )?;
         if let Some(secondary_source_path) =
             optional_payload_string(&job.payload, "secondarySourcePath")
         {
+            let secondary_source_path = resolve_import_source_path(
+                settings,
+                &job.payload,
+                secondary_source_path,
+                "lora-uploads",
+                "LoRA import secondarySourcePath",
+            )?;
             // Paired Wan A14B MoE upload (sc-1991): write both halves into one
             // record under the high/low_noise convention so the high half resolves
             // as the primary (transformer) and the low half as the transformer_2
             // sibling, regardless of the user's original upload filenames.
             let (high_name, low_name) = wan_moe_pair_filenames(&target_name);
-            import_lora_source_file_as(
-                Path::new(source_path),
-                &target_dir,
-                &high_name,
-                prefer_move,
-            )
-            .await?;
-            import_lora_source_file_as(
-                Path::new(secondary_source_path),
-                &target_dir,
-                &low_name,
-                prefer_move,
-            )
-            .await?;
+            import_lora_source_file_as(&source_path, &target_dir, &high_name, prefer_move).await?;
+            import_lora_source_file_as(&secondary_source_path, &target_dir, &low_name, prefer_move)
+                .await?;
         } else {
-            import_lora_source_path(Path::new(source_path), &target_dir, prefer_move).await?;
+            import_lora_source_path(&source_path, &target_dir, prefer_move).await?;
         }
     } else if let Some(source_url) = source_url {
         download_lora_source_url(
@@ -1979,8 +1985,18 @@ pub(crate) async fn run_model_import_job(
         )
         .await?;
     } else if let Some(source_path) = source_path {
+        // sc-8803: confine the client-supplied model import source the same way as
+        // LoRA imports (staged model-upload cache for uploads, app-managed roots
+        // otherwise) before the copy/move reaches the filesystem.
+        let source_path = resolve_import_source_path(
+            settings,
+            &job.payload,
+            source_path,
+            "model-uploads",
+            "Model import sourcePath",
+        )?;
         import_lora_source_path(
-            Path::new(source_path),
+            &source_path,
             &target_dir,
             payload_bool(&job.payload, "uploadedSourcePath"),
         )

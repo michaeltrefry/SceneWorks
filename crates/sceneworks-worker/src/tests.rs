@@ -2877,6 +2877,163 @@ fn lora_paths_resolve_symlinks_before_root_check() {
     assert!(error.to_string().contains("LoRA path must be inside"));
 }
 
+// sc-8803 / F-002: LoRA/model import *source* paths are client-supplied over the
+// unauthenticated jobs API; the worker must confine them before copying (or, for
+// uploads, moving) the file into an app-listable directory.
+#[test]
+fn import_source_paths_are_confined_to_app_managed_roots() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let staged_dir = data_dir
+        .join("cache")
+        .join("lora-uploads")
+        .join("upload-abc");
+    let loras_dir = data_dir.join("loras").join("existing");
+    let outside_dir = temp.path().join("outside");
+    std::fs::create_dir_all(&staged_dir).expect("staged dir creates");
+    std::fs::create_dir_all(&loras_dir).expect("loras dir creates");
+    std::fs::create_dir_all(&outside_dir).expect("outside dir creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir.clone();
+
+    // Uploaded (move-mode) sources are accepted only from the staged-upload cache.
+    let staged_file = staged_dir.join("lora.safetensors");
+    std::fs::write(&staged_file, b"staged").expect("staged file writes");
+    let mut uploaded = JsonObject::new();
+    uploaded.insert("uploadedSourcePath".to_owned(), Value::Bool(true));
+    let resolved = super::resolve_import_source_path(
+        &settings,
+        &uploaded,
+        &staged_file.display().to_string(),
+        "lora-uploads",
+        "LoRA import sourcePath",
+    )
+    .expect("staged upload source accepted");
+    assert!(resolved.ends_with("lora.safetensors"));
+
+    // Uploaded flag with a source elsewhere in data_dir is rejected: move mode
+    // would otherwise delete arbitrary app-managed files.
+    let installed_file = loras_dir.join("installed.safetensors");
+    std::fs::write(&installed_file, b"installed").expect("installed file writes");
+    let error = super::resolve_import_source_path(
+        &settings,
+        &uploaded,
+        &installed_file.display().to_string(),
+        "lora-uploads",
+        "LoRA import sourcePath",
+    )
+    .expect_err("uploaded source outside the staged-upload cache rejects");
+    assert!(error
+        .to_string()
+        .contains("LoRA import sourcePath must be inside"));
+
+    // Copy-mode sources under data_dir are accepted (re-import of an installed file).
+    let copy_payload = JsonObject::new();
+    super::resolve_import_source_path(
+        &settings,
+        &copy_payload,
+        &installed_file.display().to_string(),
+        "lora-uploads",
+        "LoRA import sourcePath",
+    )
+    .expect("data_dir source accepted for copy-mode import");
+
+    // The model-import upload cache confines the same way.
+    let model_staged = data_dir
+        .join("cache")
+        .join("model-uploads")
+        .join("upload-def");
+    std::fs::create_dir_all(&model_staged).expect("model staged dir creates");
+    let model_file = model_staged.join("model.safetensors");
+    std::fs::write(&model_file, b"model").expect("model file writes");
+    super::resolve_import_source_path(
+        &settings,
+        &uploaded,
+        &model_file.display().to_string(),
+        "model-uploads",
+        "Model import sourcePath",
+    )
+    .expect("staged model upload accepted");
+
+    // An absolute path outside data_dir (the exfiltration primitive) is rejected
+    // in both modes.
+    let secret = outside_dir.join("id_rsa");
+    std::fs::write(&secret, b"secret").expect("secret writes");
+    for payload in [&uploaded, &copy_payload] {
+        let error = super::resolve_import_source_path(
+            &settings,
+            payload,
+            &secret.display().to_string(),
+            "lora-uploads",
+            "LoRA import sourcePath",
+        )
+        .expect_err("host path outside app-managed roots rejects");
+        assert!(error
+            .to_string()
+            .contains("LoRA import sourcePath must be inside"));
+    }
+
+    // A `..` traversal that starts inside data_dir but escapes is rejected.
+    let traversal = data_dir
+        .join("loras")
+        .join("..")
+        .join("..")
+        .join("outside")
+        .join("id_rsa");
+    super::resolve_import_source_path(
+        &settings,
+        &copy_payload,
+        &traversal.display().to_string(),
+        "lora-uploads",
+        "LoRA import sourcePath",
+    )
+    .expect_err("traversal escape rejects");
+
+    // An empty source path is rejected.
+    super::resolve_import_source_path(
+        &settings,
+        &copy_payload,
+        "  ",
+        "lora-uploads",
+        "LoRA import sourcePath",
+    )
+    .expect_err("empty source path rejects");
+}
+
+// Symlinks resolve before the root check, so a link planted inside data_dir cannot
+// smuggle an outside file through the import copy.
+#[cfg(unix)]
+#[test]
+fn import_source_symlink_escape_is_rejected() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let loras_dir = data_dir.join("loras");
+    let outside_dir = temp.path().join("outside");
+    std::fs::create_dir_all(&loras_dir).expect("loras dir creates");
+    std::fs::create_dir_all(&outside_dir).expect("outside dir creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir.clone();
+
+    let outside_file = outside_dir.join("escape.safetensors");
+    std::fs::write(&outside_file, b"outside").expect("outside file writes");
+    let link = loras_dir.join("escape-link.safetensors");
+    std::os::unix::fs::symlink(&outside_file, &link).expect("symlink creates");
+
+    let error = super::resolve_import_source_path(
+        &settings,
+        &JsonObject::new(),
+        &link.display().to_string(),
+        "lora-uploads",
+        "LoRA import sourcePath",
+    )
+    .expect_err("symlink target outside managed roots rejects");
+    assert!(error
+        .to_string()
+        .contains("LoRA import sourcePath must be inside"));
+}
+
 #[tokio::test]
 async fn ffmpeg_runner_surfaces_bounded_stderr_from_failing_process() {
     let args = if cfg!(windows) {

@@ -283,6 +283,51 @@ pub(crate) fn project_path_for_payload(
     Ok(Some(PathBuf::from(project.path)))
 }
 
+/// Confine a client-supplied import *source* path (sc-8803 / F-002). LoRA/model
+/// import jobs arrive over the unauthenticated local jobs API (LAN-exposed via
+/// epic 4484), and the worker copies — or with `uploadedSourcePath: true`, moves —
+/// the source into an app-listable target dir, so an unconfined source is an
+/// arbitrary-file-read/exfiltration primitive (and move mode deletes the original).
+/// The rust-api validates `sourcePath` at job creation, but the worker is the
+/// stated trust boundary and must re-confine:
+/// - uploaded sources (move mode) must live in the API's staged-upload cache,
+///   `<data>/cache/<upload_cache>` (`lora-uploads` / `model-uploads`), matching
+///   `cleanup_uploaded_import_source`;
+/// - copy-mode sources must live under the app data dir or, for project-scoped
+///   imports, the owning project's `loras` tree (resolved from the trusted
+///   project store, mirroring `resolve_lora_import_target`).
+///
+/// Symlinks resolve before the root check, like `normalize_app_managed_lora_path`.
+pub(crate) fn resolve_import_source_path(
+    settings: &Settings,
+    payload: &JsonObject,
+    raw_path: &str,
+    upload_cache: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let mut roots = Vec::new();
+    if payload_bool(payload, "uploadedSourcePath") {
+        let upload_root = settings.data_dir.join("cache").join(upload_cache);
+        roots.push(normalize_absolute_path(&upload_root)?);
+        roots.push(normalize_existing_or_absolute(&upload_root)?);
+    } else {
+        roots.push(normalized_data_dir(settings)?);
+        roots.push(normalize_existing_or_absolute(&settings.data_dir)?);
+        if let Some(project_path) = project_path_for_payload(settings, payload)? {
+            let project_loras = project_path.join("loras");
+            roots.push(normalize_absolute_path(&project_loras)?);
+            roots.push(normalize_existing_or_absolute(&project_loras)?);
+        }
+    }
+    let normalized = normalize_absolute_path(Path::new(raw_path))?;
+    let resolved = normalize_existing_or_absolute(&normalized)?;
+    ensure_path_under(resolved, &roots, label)
+}
+
 pub(crate) fn resolve_lora_import_target(
     settings: &Settings,
     payload: &JsonObject,
