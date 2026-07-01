@@ -102,7 +102,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "flux_schnell",
         engine_id: "flux1_schnell",
-        default_repo: "black-forest-labs/FLUX.1-schnell",
+        // sc-8669: SceneWorks pre-quantized q4/q8/bf16 turnkey re-host (Apache-2.0).
+        default_repo: "SceneWorks/flux1-schnell-mlx",
         default_steps: 4,
         default_guidance: 0.0,
         adapter_label: "mlx_flux",
@@ -110,7 +111,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "flux_dev",
         engine_id: "flux1_dev",
-        default_repo: "black-forest-labs/FLUX.1-dev",
+        // sc-8669: SceneWorks pre-quantized q4/q8/bf16 turnkey re-host (FLUX.1 [dev] Non-Commercial).
+        default_repo: "SceneWorks/flux1-dev-mlx",
         default_steps: 28,
         default_guidance: 3.5,
         adapter_label: "mlx_flux",

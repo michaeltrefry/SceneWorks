@@ -911,18 +911,33 @@
       "adapter": "flux_diffusers",
       "capabilities": ["text_to_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8669, epic 8506): a public re-host of
+        // FLUX.1-schnell (Apache-2.0). Per-tier subdirs (q4/ default, q8/, bf16/), each a complete
+        // from_snapshot tree (packed/dense transformer + CLIP + T5 + VAE + both tokenizers +
+        // scheduler). Replaces the whole dense download + install-time quantize.
         {
-          // Whole-repo download (~53.9 GiB: bundles the original single-file
-          // checkpoint AND the diffusers folders FluxPipeline loads).
           "provider": "huggingface",
-          "repo": "black-forest-labs/FLUX.1-schnell",
-          "files": [],
-          "estimatedSizeBytes": 57845743616
+          "repo": "SceneWorks/flux1-schnell-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 9611551284
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-schnell-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 17999175703
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-schnell-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 33725923002
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/black-forest-labs/FLUX.1-schnell"
+        "model": "${HF_CACHE}/SceneWorks/flux1-schnell-mlx"
       },
+      "gated": false,
       "defaults": {
         // Guidance-distilled: ignores CFG (guidance 0), ~4 steps.
         "resolution": "1024x1024",
@@ -947,10 +962,11 @@
       // Q4/Q8 same speed with lower peak memory. quantize default Q8 (sweet spot —
       // matches bf16 speed on M-series, ~25% mem reduction, no visible quality drift).
       // minMemoryGb mirrors the Q4 peak (sc-1969: ~41.6 GB) so 64 GB Macs see this
-      // tier; advanced.mlxQuantize=4 makes Q4 the runtime pick on smaller Macs.
+      // tier. Default tier is now q4 (sc-8669): the pre-quantized q4/ subdir
+      // auto-downloads + loads packed; q8/ + bf16/ are selectable.
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 8
+        "quantize": 4
       },
       "ui": {
         "label": "FLUX.1 [schnell]",
@@ -978,16 +994,32 @@
       // no native IP-Adapter trained for it, so this stays flux_dev-only.
       "capabilities": ["text_to_image", "character_image", "style_variations"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8669, epic 8506): a public re-host of
+        // FLUX.1-dev under the FLUX.1 [dev] Non-Commercial License (LICENSE + NOTICE included).
+        // Per-tier subdirs (q4/ default, q8/, bf16/), each a complete from_snapshot tree
+        // (packed/dense transformer + CLIP + T5 + VAE + both tokenizers + scheduler). Replaces the
+        // GATED BFL download + HF-token requirement + install-time quantize.
         {
-          // Gated repo (Non-Commercial License). Whole-repo download (~53.9 GiB).
           "provider": "huggingface",
-          "repo": "black-forest-labs/FLUX.1-dev",
-          "files": [],
-          "estimatedSizeBytes": 57886638080
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 9617334683
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 18010071290
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 33746402173
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/black-forest-labs/FLUX.1-dev"
+        "model": "${HF_CACHE}/SceneWorks/flux1-dev-mlx"
       },
       "defaults": {
         // Guided: guidance ~3.5, ~28 steps (higher quality than schnell).
@@ -1011,19 +1043,17 @@
       // generations on flux_dev keep routing to the torch path even on macOS
       // (see _should_route_flux_to_mlx in image_adapters.py). FLUX.1 [dev] uses
       // 28 steps + guidance 3.5 (per the model card), so a single MLX run is
-      // proportionally longer than schnell; Q8 default keeps peak memory tight
-      // on 64 GB Macs.
+      // proportionally longer than schnell. Default tier is now q4 (sc-8669): the
+      // pre-quantized q4/ subdir auto-downloads + loads packed; q8/ + bf16/ selectable.
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 8
+        "quantize": 4
       },
-      // Gated download: accept the FLUX.1 [dev] Non-Commercial License on the model
-      // card and add a Hugging Face token before downloading. `credentialHost`/
-      // `licenseUrl` drive the Models-screen gated banner + credential-screen link
-      // (sc-1898); `credentialHost` would otherwise derive from the HF provider.
-      "gated": true,
-      "credentialHost": "huggingface.co",
-      "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.1-dev",
+      // sc-8669: re-hosted ungated on SceneWorks (FLUX.1 [dev] Non-Commercial License redistributed
+      // with LICENSE + NOTICE, the flux2_dev re-host precedent) — no HF token / license-accept gate.
+      // `licenseUrl` still points at the NC license for the Models-screen banner.
+      "gated": false,
+      "licenseUrl": "https://huggingface.co/SceneWorks/flux1-dev-mlx/blob/main/LICENSE.md",
       "ui": {
         "label": "FLUX.1 [dev]",
         "description": "Black Forest Labs FLUX.1 [dev] — higher-quality ~28-step (guidance 3.5) text-to-image. Distributed under the FLUX.1 [dev] Non-Commercial License: generations are for non-commercial use only. Gated Hugging Face download — accept the license at huggingface.co/black-forest-labs/FLUX.1-dev and add a Hugging Face token under Settings → Service credentials (or set HF_TOKEN on a server) before downloading. For commercial use choose FLUX.1 [schnell] (Apache-2.0). 12B transformer + T5-XXL; ~34GB bf16 VRAM, large-VRAM GPU. With a character reference, runs XLabs IP-Adapter for scene-flexible resemblance (faithful identity belongs to PuLID-FLUX).",
