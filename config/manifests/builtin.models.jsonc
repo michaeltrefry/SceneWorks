@@ -38,7 +38,15 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 5909406487,
-          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², fresh process, via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          // resident = steady-state weights (post-gen, transient released); peak = load+gen high-water.
+          // The peak−resident transient is ~14.04 GiB — the SAME (to within ~4 MiB) as sdxl-q8,
+          // z-image-q4 and lens-turbo-q4 despite a 3.9→16.5 GiB resident spread over 3 different VAEs.
+          // That is REAL, not a "resident + fixed constant" artifact: the fixed 1024² VAE-decode +
+          // attention working set dominates the MLX peak, so the transient is resolution-bound, not
+          // weight-bound. Each row is a genuine distinct get_peak_memory() reading (resident & peak vary).
+          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": 5776463496, "peakMemoryBytes": 20854139600 }
         },
         {
           "provider": "huggingface",
@@ -165,7 +173,12 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 5907321677,
-          "footprint": { "diskSizeBytes": 5907321677, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², fresh process, via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          // resident = steady-state weights (post-gen, transient released); peak = load+gen high-water.
+          // peak−resident transient ~14.04 GiB (the fixed 1024² VAE-decode + attention working set —
+          // see z_image_turbo q4 for the full spread analysis: ~4 MiB across all measured tiers).
+          "footprint": { "diskSizeBytes": 5907321677, "residentMemoryBytes": 5774471944, "peakMemoryBytes": 20852069456 }
         },
         {
           "provider": "huggingface",
@@ -270,7 +283,9 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 5909406487,
-          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Footprint shared from z_image_turbo (same turnkey, sc-8670) — NOT independently measured;
+          // z_image_edit runs the identical Turbo weights + VAE, so its per-tier memory is the same.
+          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": 5776463496, "peakMemoryBytes": 20854139600 }
         },
         {
           "provider": "huggingface",
@@ -757,7 +772,14 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 21830326407,
-          "footprint": { "diskSizeBytes": 21830326407, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², fresh process, via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          // resident = steady-state weights (post-gen, transient released); peak = load+gen high-water.
+          // resident 16.46 GiB is ~3× the z-image tiers yet peak−resident transient is STILL ~14.04 GiB
+          // (the fixed 1024² VAE-decode + attention working set — see z_image_turbo q4 for the full
+          // spread analysis: ~4 MiB across all measured tiers). This is the heaviest measured tier: peak
+          // 30.50 GiB → suggested only on ≥48 GB hosts (48×0.9=43.2 fits; 32×0.9=28.8 does not).
+          "footprint": { "diskSizeBytes": 21830326407, "residentMemoryBytes": 17672647240, "peakMemoryBytes": 32749818036 }
         },
         {
           "provider": "huggingface",
@@ -3227,7 +3249,13 @@
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4177386896,
-          "footprint": { "diskSizeBytes": 4177386896, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
+          // Apple Silicon, 1024², fresh process, via mlx_rs::memory::{get_active_memory,get_peak_memory}.
+          // resident = steady-state weights (post-gen, transient released); peak = load+gen high-water.
+          // resident 3.93 GiB > on-disk 3.89 GiB: the dense VAE + int8 weights up-cast slightly at load.
+          // peak−resident transient ~14.04 GiB (the fixed 1024² VAE-decode + attention working set — see
+          // z_image_turbo q4 for the full spread analysis: ~4 MiB across all measured tiers).
+          "footprint": { "diskSizeBytes": 4177386896, "residentMemoryBytes": 4219172640, "peakMemoryBytes": 19292622120 }
         },
         {
           "provider": "huggingface",

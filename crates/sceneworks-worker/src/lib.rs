@@ -178,6 +178,14 @@ mod sdxl_base_q8_mlx_smoke;
 // non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
 #[cfg(all(test, target_os = "macos"))]
 mod lens_turbo_q4_mlx_smoke;
+// On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506). Test-only + macOS-only;
+// #[ignore]d real-weight smokes that drive `gen_core::load(id)` + ONE generation while sampling the MLX
+// process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})
+// generator_cache.rs already publishes — producing measured resident + peak footprint per (model, tier)
+// to calibrate the sc-8509 RAM→tier suggestion (apps/web/src/tierSuggestion.js) and backfill the sc-8508
+// manifest footprint fields.
+#[cfg(all(test, target_os = "macos"))]
+mod footprint_measure;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DISK_TO_RESIDENT_MULTIPLIER,
   MEMORY_HEADROOM_FRACTION,
+  TRANSIENT_HEADROOM_BYTES,
   declaredTiers,
   suggestTier,
   tierFits,
@@ -27,6 +28,9 @@ function matrixModel(tiers = defaultTiers()) {
       if (spec.residentGb != null) {
         footprint.residentMemoryBytes = spec.residentGb * GB;
       }
+      if (spec.peakGb != null) {
+        footprint.peakMemoryBytes = spec.peakGb * GB;
+      }
       return {
         variant: spec.variant,
         installState: spec.installed ? "installed" : "missing",
@@ -46,24 +50,41 @@ function defaultTiers() {
 }
 
 describe("variantFootprintBytes", () => {
-  it("uses measured residentMemoryBytes verbatim when present", () => {
+  it("uses measured peakMemoryBytes verbatim when present (the true ceiling)", () => {
+    // sc-8516: peak is the memory a generation must fit, so it wins over resident when measured.
+    const result = variantFootprintBytes({
+      variant: "bf16",
+      footprint: {
+        diskSizeBytes: 16 * GB,
+        residentMemoryBytes: 20 * GB,
+        peakMemoryBytes: 34 * GB,
+      },
+    });
+    expect(result).toEqual({ bytes: 34 * GB, measured: true });
+  });
+
+  it("uses measured residentMemoryBytes + fixed transient when peak is absent", () => {
     const result = variantFootprintBytes({
       variant: "bf16",
       footprint: { diskSizeBytes: 16 * GB, residentMemoryBytes: 20 * GB },
     });
-    expect(result).toEqual({ bytes: 20 * GB, measured: true });
+    expect(result).toEqual({ bytes: 20 * GB + TRANSIENT_HEADROOM_BYTES, measured: true });
   });
 
-  it("estimates from diskSizeBytes × multiplier when memory is not measured", () => {
+  it("estimates diskSizeBytes × multiplier + transient when memory is not measured", () => {
     const result = variantFootprintBytes({ variant: "q4", footprint: { diskSizeBytes: 4 * GB } });
     expect(result.measured).toBe(false);
-    expect(result.bytes).toBe(Math.round(4 * GB * DISK_TO_RESIDENT_MULTIPLIER));
+    expect(result.bytes).toBe(
+      Math.round(4 * GB * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
+    );
   });
 
-  it("falls back to downloadSizeBytes × multiplier when no footprint object", () => {
+  it("falls back to downloadSizeBytes × multiplier + transient when no footprint object", () => {
     const result = variantFootprintBytes({ variant: "q4", downloadSizeBytes: 4 * GB, footprint: null });
     expect(result.measured).toBe(false);
-    expect(result.bytes).toBe(Math.round(4 * GB * DISK_TO_RESIDENT_MULTIPLIER));
+    expect(result.bytes).toBe(
+      Math.round(4 * GB * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
+    );
   });
 
   it("returns null when nothing is estimable", () => {
@@ -103,23 +124,25 @@ describe("tierFits", () => {
     expect(tierFits({ variant: "q4", footprint: null }, 8)).toBe(true);
   });
 
-  it("fits when the estimated footprint is under the headroom budget", () => {
-    // q4: 4 GB disk × 1.5 = 6 GB resident. 32 GB × 0.8 = 25.6 GB budget → fits.
+  it("fits when the estimated peak is under the headroom budget", () => {
+    // q4: 4 GB disk × 1.0 + 14 GB transient = 18 GB peak. 32 GB × 0.9 = 28.8 GB budget → fits.
     const q4 = { variant: "q4", footprint: { diskSizeBytes: 4 * GB } };
     expect(tierFits(q4, 32)).toBe(true);
   });
 
-  it("does not fit when the estimated footprint exceeds the headroom budget", () => {
-    // bf16: 16 GB disk × 1.5 = 24 GB resident. On a 16 GB host budget is 16 × 0.8 = 12.8 GB → no.
+  it("does not fit when the estimated peak exceeds the headroom budget", () => {
+    // bf16: 16 GB disk × 1.0 + 14 GB transient = 30 GB peak. On a 24 GB host budget is 24 × 0.9 =
+    // 21.6 GB → no.
     const bf16 = { variant: "bf16", footprint: { diskSizeBytes: 16 * GB } };
-    expect(tierFits(bf16, 16)).toBe(false);
+    expect(tierFits(bf16, 24)).toBe(false);
   });
 
   it("respects the exact headroom boundary", () => {
-    // footprint exactly at budget fits; a byte over does not.
-    const budgetGb = 10;
-    const footBytes = budgetGb * GB * MEMORY_HEADROOM_FRACTION; // resident bytes we want
-    const diskBytes = footBytes / DISK_TO_RESIDENT_MULTIPLIER;
+    // A peak exactly at budget fits; a byte over does not. Solve for the disk size whose estimated
+    // peak (disk × MULT + transient) lands exactly on the budget.
+    const budgetGb = 30;
+    const budgetBytes = budgetGb * GB * MEMORY_HEADROOM_FRACTION; // 27 GB peak we target
+    const diskBytes = (budgetBytes - TRANSIENT_HEADROOM_BYTES) / DISK_TO_RESIDENT_MULTIPLIER;
     const atBudget = { variant: "q8", footprint: { diskSizeBytes: diskBytes } };
     const overBudget = { variant: "q8", footprint: { diskSizeBytes: diskBytes + GB } };
     expect(tierFits(atBudget, budgetGb)).toBe(true);
@@ -129,21 +152,22 @@ describe("tierFits", () => {
 
 describe("suggestTier", () => {
   it("suggests q4 on a 32 GB host when the larger tiers overflow the budget (acceptance)", () => {
-    // Budget on 32 GB = 32 × 0.8 = 25.6 GB. Size q8/bf16 to exceed it so only q4 fits, matching the
-    // acceptance criterion (a 32 GB user sees q4 pre-selected).
+    // Peak-based budget on 32 GB = 32 × 0.9 = 28.8 GB. Estimated peak = diskGb × 1.0 + 14 GB transient.
+    // Size q8/bf16 to exceed the budget so only q4 fits (a 32 GB user sees q4 pre-selected).
     const model = matrixModel([
-      { variant: "q4", diskGb: 4 }, // 6 GB est → fits
-      { variant: "q8", diskGb: 18 }, // 27 GB est > 25.6 → no
-      { variant: "bf16", diskGb: 24 }, // 36 GB est > 25.6 → no
+      { variant: "q4", diskGb: 4 }, // 4 + 14 = 18 GB peak < 28.8 → fits
+      { variant: "q8", diskGb: 18 }, // 18 + 14 = 32 GB peak > 28.8 → no
+      { variant: "bf16", diskGb: 24 }, // 24 + 14 = 38 GB peak > 28.8 → no
     ]);
     expect(suggestTier(model, 32)).toBe("q4");
   });
 
   it("suggests q8 when bf16 is too big but q8 fits on a 32 GB host", () => {
+    // Budget 28.8 GB (32 × 0.9); estimated peak = diskGb + 14 GB transient.
     const model = matrixModel([
-      { variant: "q4", diskGb: 4 }, // 6 GB
-      { variant: "q8", diskGb: 10 }, // 15 GB < 25.6 → fits
-      { variant: "bf16", diskGb: 24 }, // 36 GB → no
+      { variant: "q4", diskGb: 4 }, // 18 GB peak
+      { variant: "q8", diskGb: 10 }, // 10 + 14 = 24 GB peak < 28.8 → fits
+      { variant: "bf16", diskGb: 24 }, // 38 GB peak → no
     ]);
     // q8 is higher fidelity than q4 and fits → preferred over q4.
     expect(suggestTier(model, 32)).toBe("q8");
@@ -153,18 +177,29 @@ describe("suggestTier", () => {
     expect(suggestTier(matrixModel(), 512)).toBe("bf16");
   });
 
-  it("prefers measured resident memory over the disk estimate", () => {
-    // bf16 disk is small (would estimate as fitting) but MEASURED resident is huge → excluded.
+  it("prefers a measured peak footprint over the disk estimate", () => {
+    // bf16 disk is small (would estimate as fitting) but MEASURED peak is huge → excluded on 32 GB
+    // (budget 28.8 GB). Exercises the measured-footprint path the way real manifest data flows.
     const model = matrixModel([
       { variant: "q4", diskGb: 4 },
-      { variant: "bf16", diskGb: 8, residentGb: 40 }, // measured 40 GB > 25.6 → no
+      { variant: "bf16", diskGb: 8, peakGb: 40 }, // measured peak 40 GB > 28.8 → no
     ]);
     expect(suggestTier(model, 32)).toBe("q4");
   });
 
+  it("suggests a MEASURED tier whose peak fits on a right-sized host (sc-8516 calibration)", () => {
+    // Real measured lens_turbo-class numbers: q4 peak ≈ 30.5 GB. On a 48 GB Mac (budget 43.2 GB) it
+    // fits; on a 32 GB Mac (budget 28.8 GB) it does not — the exact threshold behavior the harness
+    // measured. Only q4 is declared here (the only lens tier sc-8516 measured).
+    const lensQ4 = matrixModel([{ variant: "q4", diskGb: 20, peakGb: 30.5 }]);
+    expect(suggestTier(lensQ4, 48)).toBe("q4");
+    expect(tierFits(lensQ4.variants[0], 32)).toBe(false);
+    expect(tierFits(lensQ4.variants[0], 48)).toBe(true);
+  });
+
   it("falls back to the smallest tier when nothing fits", () => {
     const model = matrixModel([
-      { variant: "q4", diskGb: 40 }, // 60 GB est
+      { variant: "q4", diskGb: 40 }, // 40 + 14 = 54 GB peak est
       { variant: "bf16", diskGb: 80 },
     ]);
     // Tiny 8 GB host, every tier over budget → smallest declared tier (q4).
