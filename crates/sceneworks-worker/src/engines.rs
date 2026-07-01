@@ -344,7 +344,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "sensenova_u1_8b",
         engine_id: "sensenova_u1_8b",
-        default_repo: "sensenova/SenseNova-U1-8B-MoT",
+        // sc-8771: SceneWorks MLX quant-matrix re-host (q4/q8/bf16 packed tiers, mlx-gen #623).
+        default_repo: "SceneWorks/sensenova-u1-8b-mlx",
         default_steps: 50,
         default_guidance: 4.0,
         adapter_label: "mlx_sensenova",

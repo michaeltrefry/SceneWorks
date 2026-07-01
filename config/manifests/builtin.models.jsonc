@@ -872,16 +872,45 @@
       // is honest about that.
       "capabilities": ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8771, epic 8506): a public/ungated re-host
+        // of sensenova/SenseNova-U1-8B-MoT. Per-tier subdirs, each a complete from_snapshot tree
+        // (packed backbone + tokenizer + config): q4/ (default), q8/, bf16/. SenseNova-U1 is a UNIFIED
+        // MoT (multimodal-of-transformer) — the whole backbone packs; there is NO separate text encoder,
+        // so this is NOT a dense-TE tier (no denseTextEncoderTier). Replaces the old bf16 diffusers
+        // download; the worker loads the chosen tier's subdir directly (standard_tier_subdir).
+        // Per-tier variants (sc-8508): each tier is a SEPARATE installable artifact, tagged with a
+        // `variant` key + a required `footprint.diskSizeBytes` (EXACT on-disk bytes measured from the
+        // hosted repo per subdir). `default: true` marks q4 as the tier that installs by default.
         {
           "provider": "huggingface",
-          "repo": "sensenova/SenseNova-U1-8B-MoT",
-          "files": [],
-          "estimatedSizeBytes": 35200000000
+          "repo": "SceneWorks/sensenova-u1-8b-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 11824472971,
+          "footprint": { "diskSizeBytes": 11824472971, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19927870461,
+          "footprint": { "diskSizeBytes": 19927870461, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 35121691427,
+          "footprint": { "diskSizeBytes": 35121691427, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/sensenova/SenseNova-U1-8B-MoT"
+        "model": "${HF_CACHE}/SceneWorks/sensenova-u1-8b-mlx"
       },
+      "gated": false,
       "defaults": {
         "resolution": "2048x2048",
         "steps": 50,
@@ -914,6 +943,16 @@
         // distill LoRA exists upstream but is not wired.)
         "families": ["sensenova-u1"],
         "types": []
+      },
+      "mlx": {
+        // q4/ is the shipped default tier (sc-8771); q8/ + bf16/ are hosted and selectable via
+        // advanced.mlxQuantize (standard_tier_subdir resolves the subdir).
+        "quantize": 4,
+        // sc-8508 manifest-driven STANDARD_TIER_MODELS: catalog-declares the standard q4/q8/bf16
+        // turnkey routing. SenseNova-U1 is a unified MoT — the WHOLE backbone packs, no separate TE,
+        // so NO denseTextEncoderTier (contrast: dense-TE crates keep the TE bf16 and pack only the
+        // transformer). packed-load is via mlx-gen #623 (0108fe6).
+        "standardTierLayout": true
       },
       "ui": {
         "label": "SenseNova-U1 8B",

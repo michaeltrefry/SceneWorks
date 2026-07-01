@@ -383,6 +383,10 @@ fn is_dense_te_tier(request: &ImageRequest) -> bool {
 /// under `unet/`, never `transformer/`. This covers every backbone regardless of its packed filename
 /// (`diffusion_pytorch_model.safetensors`, `model.safetensors`, …), so a new model needs only a
 /// [`STANDARD_TIER_MODELS`] entry (or `mlx.standardTierLayout`), no bespoke resolver.
+///
+/// Unified-model turnkeys (SenseNova-U1 MoT, sc-8771) have NO component subdir: the whole backbone
+/// is a flat `model.safetensors` (or sharded `*.index.json`) directly in the tier dir. The presence
+/// check also accepts weights at the tier root so a flat unified tier resolves like a component one.
 fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
@@ -402,8 +406,12 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
         // DiT turnkeys pack the backbone under `transformer/`; SDXL-family turnkeys under `unet/`.
+        // Unified-model turnkeys (SenseNova-U1 MoT, sc-8771) have NO component subdirs — the whole
+        // backbone is a flat `model.safetensors` (or sharded `*.index.json`) directly in the tier
+        // dir. Accept any of the three so a flat unified tier resolves like a component one.
         let has_backbone = component_has_weights(&dir.join("transformer"))
-            || component_has_weights(&dir.join("unet"));
+            || component_has_weights(&dir.join("unet"))
+            || component_has_weights(&dir);
         has_backbone.then_some(dir)
     };
     // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
@@ -3307,6 +3315,36 @@ mod standard_tier_tests {
         seed_unet("q8");
         seed_unet("bf16");
         // Default q4, q8 selection, bf16 opt-out all resolve to the unet-backed tier subdir.
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({}))),
+            root.join("q4")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+            root.join("q8")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 0 }))),
+            root.join("bf16")
+        );
+    }
+
+    /// sc-8771: SenseNova-U1 is a unified MoT turnkey — no `transformer/`/`unet/` component, the whole
+    /// backbone is a flat `model.safetensors` (q4/q8) or sharded `*.index.json` (bf16) directly in the
+    /// tier dir. [`standard_tier_subdir`]'s probe must recognize weights at the tier root itself.
+    #[test]
+    fn resolves_flat_unified_backbone_tiers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let seed_flat = |tier: &str, file: &str| {
+            let dir = root.join(tier);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(file), b"x").unwrap();
+        };
+        // Packed q4/q8 single-file, dense sharded bf16 (index.json shape) — the SenseNova layout.
+        seed_flat("q4", "model.safetensors");
+        seed_flat("q8", "model.safetensors");
+        seed_flat("bf16", "model.safetensors.index.json");
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
             root.join("q4")

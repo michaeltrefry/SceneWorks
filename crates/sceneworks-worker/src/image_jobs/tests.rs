@@ -233,7 +233,8 @@ fn mlx_model_table_maps_known_families() {
     // negative prompt — so it is NOT a `uses_true_cfg` family (see `uses_true_cfg`).
     let base = mlx_model("sensenova_u1_8b").unwrap();
     assert_eq!(base.engine_id(), "sensenova_u1_8b");
-    assert_eq!(base.default_repo(), "sensenova/SenseNova-U1-8B-MoT");
+    // sc-8771: base points at the SceneWorks MLX quant-matrix re-host (q4/q8/bf16 packed tiers).
+    assert_eq!(base.default_repo(), "SceneWorks/sensenova-u1-8b-mlx");
     assert_eq!(base.default_steps(), 50);
     assert_eq!(base.default_guidance(), 4.0);
     assert_eq!(base.adapter_label(), "mlx_sensenova");
@@ -244,6 +245,9 @@ fn mlx_model_table_maps_known_families() {
     );
     let fast = mlx_model("sensenova_u1_8b_fast").unwrap();
     assert_eq!(fast.engine_id(), "sensenova_u1_8b_fast");
+    // sc-8771: _fast is UNCHANGED — stays on the dense bf16 repo + distill-LoRA-at-load path
+    // (packed fast tiers are tracked separately as sc-8775), NOT the new packed re-host.
+    assert_eq!(fast.default_repo(), "sensenova/SenseNova-U1-8B-MoT");
     assert_eq!(fast.default_steps(), 8);
     assert_eq!(fast.default_guidance(), 1.0);
     assert_eq!(fast.adapter_label(), "mlx_sensenova");

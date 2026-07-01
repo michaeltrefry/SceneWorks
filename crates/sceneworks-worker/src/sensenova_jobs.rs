@@ -1485,6 +1485,79 @@ mod tests {
         );
     }
 
+    /// sc-8771 on-device verify (MLX, epic 8506 Group-B): drive the ACTUAL packed worker seam against
+    /// the downloaded SceneWorks/sensenova-u1-8b-mlx **q4** turnkey tier. SenseNova-U1 is a unified MoT
+    /// (no separate TE/VAE) whose whole backbone packs into a flat `q4/model.safetensors`; the worker's
+    /// `standard_tier_subdir` (covered by `resolves_flat_unified_backbone_tiers`) resolves the `q4/`
+    /// subdir from the tier root, then `load_sensenova_model` loads it — the shared `load_raw` +
+    /// `T2iModel::from_weights` auto-detect the packed `.scales` sidecars (mlx-gen #623) and build the
+    /// quantized decoder stack with NO dense bf16 transient. A short think-mode interleave rollout then
+    /// renders a real image, proving the packed q4 tier both loads AND generates non-degenerately.
+    /// Small 512² + 8 steps for speed (production is 1536²+/50 steps). Run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_q4_tier_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight MLX smoke; needs the SceneWorks/sensenova-u1-8b-mlx q4 tier cached + a Metal device"]
+    fn sensenova_q4_tier_real_weights_produces_image() {
+        // Resolve the packed `q4/` tier subdir from the turnkey root — the same selection the worker's
+        // `standard_tier_subdir` makes for the manifest default (`mlx.standardTierLayout` + q4 default).
+        let root = hf_snapshot("models--SceneWorks--sensenova-u1-8b-mlx");
+        let q4_dir = root.join("q4");
+        assert!(
+            q4_dir.join("model.safetensors").is_file(),
+            "packed q4 tier not found at {} — download it: \
+             hf download SceneWorks/sensenova-u1-8b-mlx --include 'q4/*'",
+            q4_dir.display()
+        );
+        let (model, tokenizer) = load_sensenova_model(&q4_dir).expect("load packed q4 model");
+        let opts = T2iOptions {
+            cfg_scale: 4.0,
+            img_cfg_scale: 1.0,
+            num_steps: 8,
+            timestep_shift: 3.0,
+            seed: 42,
+            think_mode: true,
+            ..Default::default()
+        };
+        let out = model
+            .interleave_gen(
+                &tokenizer,
+                "Generate an illustration of a single red circle on a white background, then briefly describe it.",
+                &[],
+                512,
+                512,
+                &opts,
+                INTERLEAVE_SYSTEM_MESSAGE,
+                512,
+                4,
+                None,
+            )
+            .expect("interleave_gen");
+        assert!(
+            !out.images.is_empty(),
+            "packed q4 tier should render >= 1 image"
+        );
+        let decoded = decoded_to_image(&out.images[0]).expect("decode");
+        assert_eq!(
+            decoded.pixels.len(),
+            (decoded.width * decoded.height * 3) as usize
+        );
+        // Non-degenerate check: a NaN/all-black/flat decode collapses the per-pixel std toward 0.
+        let n = decoded.pixels.len() as f64;
+        let mean = decoded.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
+        let std = (decoded
+            .pixels
+            .iter()
+            .map(|&p| (p as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n)
+            .sqrt();
+        assert!(
+            std > 10.0,
+            "packed q4 render looks degenerate (std {std:.2}, mean {mean:.2}) — possible NaN / all-black / flat decode"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn build_segments_trailing_image_without_marker_is_appended() {
