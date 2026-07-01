@@ -509,7 +509,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Already installed");
     expect(container.textContent).toContain("~30.6 GB");
 
-    const checkboxes = [...container.querySelectorAll("input[type=checkbox]")];
+    const checkboxes = [...document.body.querySelectorAll("input[type=checkbox]")];
     // DOM order: image group (z_image_turbo, qwen_image[installed]), then video (wan_2_2, ltx_2_3).
     expect(checkboxes[0].checked).toBe(true); // z_image_turbo — recommended, autoDownload not disabled
     expect(checkboxes[1].disabled).toBe(true); // qwen_image — installed, not selectable
@@ -517,7 +517,7 @@ describe("SceneWorks app shell", () => {
     expect(checkboxes[3].checked).toBe(false); // ltx_2_3 — recommended but autoDownload:false (~146 GB)
     // LTX-2.3 is still surfaced as recommended (badge) and shows its size so the choice is informed.
     expect(container.textContent).toContain("146 GB");
-    expect(container.querySelectorAll(".setup-wizard-tag").length).toBe(2); // z_image_turbo + ltx_2_3
+    expect(document.body.querySelectorAll(".setup-wizard-tag").length).toBe(2); // z_image_turbo + ltx_2_3
   });
 
   it("auto-selects recommended models, leaving autoDownload:false ones opt-in", async () => {
@@ -527,7 +527,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const downloadButton = [...container.querySelectorAll("button")].find((button) =>
+    const downloadButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.startsWith("Download"),
     );
     expect(downloadButton.textContent).toContain("1");
@@ -551,17 +551,17 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Continue").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Continue").click();
     });
     await settle();
     expect(container.textContent).toContain("Create your first project");
     // Skipping downloads is allowed — Continue advanced without firing any.
     expect(props.onDownloadModel).not.toHaveBeenCalled();
 
-    const input = container.querySelector("input[type=text]") ?? container.querySelector("input");
+    const input = document.body.querySelector("input[type=text]") ?? document.body.querySelector("input");
     await changeField(input, "My First Project");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Finish setup").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Finish setup").click();
     });
     await settle();
 
@@ -576,13 +576,13 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Continue").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Continue").click();
     });
     await settle();
-    const input = container.querySelector("input");
+    const input = document.body.querySelector("input");
     await changeField(input, "Doomed Project");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Finish setup").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Finish setup").click();
     });
     await settle();
 
@@ -615,7 +615,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const queueChip = () => [...container.querySelectorAll(".queue-chip")][0];
+    const queueChip = () => [...document.body.querySelectorAll(".queue-chip")][0];
     expect(queueChip()?.textContent).toContain("Queue 0");
 
     // Pure queue.updated: two active jobs, and no job.updated to mutate `jobs`.
@@ -656,7 +656,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Logs").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Logs").click();
     });
     await settle();
 
@@ -693,7 +693,7 @@ describe("SceneWorks app shell", () => {
     // With zero workspaces the studio area is replaced by the create gate.
     expect(container.textContent).toContain("Create your first workspace");
 
-    await changeField(container.querySelector('[aria-label="Workspace name"]'), "My First Project");
+    await changeField(document.body.querySelector('[aria-label="Workspace name"]'), "My First Project");
     await act(async () => {
       buttonInside(container, "Create workspace").click();
     });
@@ -732,7 +732,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Train").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Train").click();
     });
     await settle();
 
@@ -740,7 +740,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Configure Job");
     expect(container.textContent).toContain("Data Sets");
     expect(container.textContent).not.toContain("Rename & Caption");
-    expect([...container.querySelectorAll("button")].some((button) => /queue training/i.test(button.textContent))).toBe(false);
+    expect([...document.body.querySelectorAll("button")].some((button) => /queue training/i.test(button.textContent))).toBe(false);
   });
 
   it("keeps Training Studio focused on selecting existing datasets", async () => {
@@ -755,10 +755,10 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(container.querySelector("#training-tab-configure").getAttribute("aria-selected")).toBe("true");
+    expect(document.body.querySelector("#training-tab-configure").getAttribute("aria-selected")).toBe("true");
     expect(container.textContent).toContain("A dry run validates the Rust-resolved training plan");
-    expect(container.querySelector("#training-tab-dataset")).toBeNull();
-    expect(container.querySelector("#training-tab-rename-caption")).toBeNull();
+    expect(document.body.querySelector("#training-tab-dataset")).toBeNull();
+    expect(document.body.querySelector("#training-tab-rename-caption")).toBeNull();
     expect(container.textContent).not.toContain("Import images & captions");
   });
 
@@ -785,19 +785,19 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Dataset name"), "Mira Set");
     // Add the image via the Asset Library tab of the add dialog.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
     });
     await act(async () => {
-      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
+      [...document.body.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
     });
     await act(async () => {
-      container.querySelector(".dataset-add-card").click();
+      document.body.querySelector(".dataset-add-card").click();
     });
     await act(async () => {
-      container.querySelector(".dataset-add-footer button.primary-action").click();
+      document.body.querySelector(".dataset-add-footer button.primary-action").click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
     });
 
     expect(createDataset).toHaveBeenCalledWith(
@@ -841,9 +841,9 @@ describe("SceneWorks app shell", () => {
     const captionFile = new File(["a portrait of mira"], "mira.txt", { type: "text/plain" });
     // Import via the File tab of the add dialog (default tab).
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
     });
-    const fileInput = container.querySelector(".dataset-add-dropzone input[type=file]");
+    const fileInput = document.body.querySelector(".dataset-add-dropzone input[type=file]");
     await act(async () => {
       Object.defineProperty(fileInput, "files", { configurable: true, value: [imageFile, captionFile] });
       fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -855,11 +855,11 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Imported 1 image with 1 caption");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Close").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Close").click();
     });
     await changeField(field(container, "Dataset name"), "Mira Set");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
     });
 
     expect(createDataset).toHaveBeenCalledWith(
@@ -907,32 +907,32 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      container.querySelector(".compact-selector-pill").click();
+      document.body.querySelector(".compact-selector-pill").click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
+      [...document.body.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
     expect(loadDataset).toHaveBeenCalledWith("dataset-a");
     // The editor body shows only the dataset's own member (asset-a), not all assets.
-    expect(container.querySelectorAll(".training-caption-card")).toHaveLength(1);
-    expect(container.querySelector(".training-caption-grid").textContent).toContain("Mira.png");
+    expect(document.body.querySelectorAll(".training-caption-card")).toHaveLength(1);
+    expect(document.body.querySelector(".training-caption-grid").textContent).toContain("Mira.png");
 
     // Add the second asset through the Asset Library tab (current members excluded).
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
     });
     await act(async () => {
-      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
+      [...document.body.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
     });
     await act(async () => {
-      container.querySelector(".dataset-add-card").click();
+      document.body.querySelector(".dataset-add-card").click();
     });
     await act(async () => {
-      container.querySelector(".dataset-add-footer button.primary-action").click();
+      document.body.querySelector(".dataset-add-footer button.primary-action").click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
     });
 
     expect(updateDataset).toHaveBeenCalledWith(
@@ -983,37 +983,37 @@ describe("SceneWorks app shell", () => {
 
     await changeField(field(container, "Dataset name"), "Kelsie Set");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
     });
 
     // Asset Library tab is scoped: the Character Studio output is hidden.
     await act(async () => {
-      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
+      [...document.body.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click();
     });
-    const libraryCards = [...container.querySelectorAll(".dataset-add-card")];
+    const libraryCards = [...document.body.querySelectorAll(".dataset-add-card")];
     expect(libraryCards).toHaveLength(1);
     expect(libraryCards[0].textContent).toContain("Studio render.png");
 
     // Character tab intentionally surfaces the character's image (its character_studio output).
     await act(async () => {
-      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Character").click();
+      [...document.body.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Character").click();
     });
-    const characterCards = [...container.querySelectorAll(".dataset-add-card")];
+    const characterCards = [...document.body.querySelectorAll(".dataset-add-card")];
     expect(characterCards).toHaveLength(1);
     expect(characterCards[0].textContent).toContain("Kelsie hero.png");
     await act(async () => {
       characterCards[0].click();
     });
     await act(async () => {
-      container.querySelector(".dataset-add-footer button.primary-action").click();
+      document.body.querySelector(".dataset-add-footer button.primary-action").click();
     });
 
     // The editor body is the member grid only — no all-asset picker remains.
-    expect(container.querySelector(".training-asset-picker")).toBeNull();
-    expect(container.querySelector(".training-caption-grid").textContent).toContain("Kelsie hero.png");
+    expect(document.body.querySelector(".training-asset-picker")).toBeNull();
+    expect(document.body.querySelector(".training-caption-grid").textContent).toContain("Kelsie hero.png");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Create dataset").click();
     });
     // Importing from the Character tab associates the dataset with that
     // character (sc-2022).
@@ -1040,17 +1040,17 @@ describe("SceneWorks app shell", () => {
     });
 
     // Pill shows the New-dataset draft placeholder before anything is opened.
-    expect(container.querySelector(".compact-selector-pill").textContent).toContain("New dataset");
+    expect(document.body.querySelector(".compact-selector-pill").textContent).toContain("New dataset");
 
     await act(async () => {
-      container.querySelector(".compact-selector-pill").click();
+      document.body.querySelector(".compact-selector-pill").click();
     });
 
     // A "New dataset" create item sits at the top of the dropdown.
-    expect(container.querySelector(".compact-selector-create").textContent).toContain("New dataset");
+    expect(document.body.querySelector(".compact-selector-create").textContent).toContain("New dataset");
 
     // Every dataset row renders its server-provided cover thumbnail.
-    const datasetItem = [...container.querySelectorAll(".compact-selector-item")].find((button) =>
+    const datasetItem = [...document.body.querySelectorAll(".compact-selector-item")].find((button) =>
       button.textContent.includes("Portrait Set"),
     );
     const cover = datasetItem.querySelector("img");
@@ -1089,21 +1089,21 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      container.querySelector(".compact-selector-pill").click();
+      document.body.querySelector(".compact-selector-pill").click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
+      [...document.body.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
 
     expect(container.textContent).toContain("Asset is no longer available");
-    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").disabled).toBe(true);
+    expect([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").disabled).toBe(true);
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Remove").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Remove").click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
     });
 
     expect(updateDataset).toHaveBeenCalledWith(
@@ -1137,14 +1137,14 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      container.querySelector(".compact-selector-pill").click();
+      document.body.querySelector(".compact-selector-pill").click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
+      [...document.body.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
 
-    const saveButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset");
+    const saveButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save dataset");
     expect(saveButton.disabled).toBe(true);
     expect(updateDataset).not.toHaveBeenCalled();
   });
@@ -1152,10 +1152,10 @@ describe("SceneWorks app shell", () => {
   // Open the lone "Portrait Set" dataset through the compact selector.
   async function openPortraitSet() {
     await act(async () => {
-      container.querySelector(".compact-selector-pill").click();
+      document.body.querySelector(".compact-selector-pill").click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
+      [...document.body.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Portrait Set")).click();
     });
     await settle();
   }
@@ -1193,11 +1193,11 @@ describe("SceneWorks app shell", () => {
     });
     await openPortraitSet();
 
-    const caption = container.querySelector(".training-caption-card-text");
+    const caption = document.body.querySelector(".training-caption-card-text");
     expect(caption.value).toBe("mira portrait");
     await changeField(caption, "mira studio portrait");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
     });
 
     expect(updateDataset).toHaveBeenCalledWith(
@@ -1227,12 +1227,12 @@ describe("SceneWorks app shell", () => {
     await openPortraitSet();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Caption all").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Caption all").click();
     });
     // The dialog prefills the character name from the dataset.
-    expect(field(container, "Character name").value).toBe("Portrait Set");
+    expect(field(document.body, "Character name").value).toBe("Portrait Set");
     await act(async () => {
-      [...container.querySelectorAll(".dataset-caption-footer button")].find((button) => button.textContent.startsWith("Caption")).click();
+      [...document.body.querySelectorAll(".dataset-caption-footer button")].find((button) => button.textContent.startsWith("Caption")).click();
     });
     await settle();
 
@@ -1260,10 +1260,10 @@ describe("SceneWorks app shell", () => {
     await openPortraitSet();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Re-Caption").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Re-Caption").click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".dataset-caption-footer button")].find((button) => button.textContent.startsWith("Re-caption")).click();
+      [...document.body.querySelectorAll(".dataset-caption-footer button")].find((button) => button.textContent.startsWith("Re-caption")).click();
     });
     await settle();
 
@@ -1292,7 +1292,7 @@ describe("SceneWorks app shell", () => {
     await openPortraitSet();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Apply ordered names")).click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes("Apply ordered names")).click();
     });
     await settle();
 
@@ -1338,7 +1338,7 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Trigger phrase").value).toBe("Portrait Set");
 
     await changeField(field(container, "Trigger phrase"), "manualTrigger");
-    expect(container.querySelector("#training-tab-rename-caption")).toBeNull();
+    expect(document.body.querySelector("#training-tab-rename-caption")).toBeNull();
     expect(field(container, "Trigger phrase").value).toBe("manualTrigger");
   });
 
@@ -1379,7 +1379,7 @@ describe("SceneWorks app shell", () => {
     // The unified WorkerProgressCard renders the stage with title-case via
     // defaultChipLabel ("rendering" -> "Rendering"); same content, different style.
     expect(container.textContent).toContain("Rendering");
-    expect([...container.querySelectorAll(".worker-progress-card__thumb-media")].map((image) => image.src)).toEqual([
+    expect([...document.body.querySelectorAll(".worker-progress-card__thumb-media")].map((image) => image.src)).toEqual([
       "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-1.png",
       "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-2.png",
       "http://localhost:8000/api/v1/projects/project-a/files/loras/lora_1/samples/sample-3.png",
@@ -1420,7 +1420,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector("#training-tab-configure").click();
+      document.body.querySelector("#training-tab-configure").click();
     });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
@@ -1436,7 +1436,7 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Guidance scale"), "1.2");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
     });
     await settle();
 
@@ -1502,7 +1502,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector("#training-tab-configure").click();
+      document.body.querySelector("#training-tab-configure").click();
     });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
@@ -1515,7 +1515,7 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Sample cadence").value).toBe("200");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
     });
     await settle();
 
@@ -1567,7 +1567,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector("#training-tab-configure").click();
+      document.body.querySelector("#training-tab-configure").click();
     });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
@@ -1581,7 +1581,7 @@ describe("SceneWorks app shell", () => {
     await changeField(adapterSelect, "v1");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
     });
     await settle();
 
@@ -1614,7 +1614,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector("#training-tab-configure").click();
+      document.body.querySelector("#training-tab-configure").click();
     });
     await changeField(field(container, "Rank"), "24");
 
@@ -1654,14 +1654,14 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector("#training-tab-configure").click();
+      document.body.querySelector("#training-tab-configure").click();
     });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
     });
     await settle();
 
@@ -1711,7 +1711,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector("#training-tab-configure").click();
+      document.body.querySelector("#training-tab-configure").click();
     });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
@@ -1719,7 +1719,7 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Run mode"), "real");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Start training").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").click();
     });
     await settle();
 
@@ -1769,7 +1769,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      container.querySelector("#training-tab-configure").click();
+      document.body.querySelector("#training-tab-configure").click();
     });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
@@ -1827,19 +1827,19 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      container.querySelector("#training-tab-configure").click();
+      document.body.querySelector("#training-tab-configure").click();
     });
 
     expect(container.textContent).toContain("Select a saved dataset");
     expect(container.textContent).toContain("Add a trigger phrase");
-    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").disabled).toBe(true);
+    expect([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").disabled).toBe(true);
 
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
     await changeField(field(container, "Checkpoint cadence"), "");
 
-    const submitButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job");
+    const submitButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job");
     expect(container.textContent).toContain("Checkpoint cadence must be greater than zero");
     expect(submitButton.disabled).toBe(true);
 
@@ -1875,46 +1875,46 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select image").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Select image").click();
     });
 
-    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(container.textContent).toContain("Images 2");
-    expect(container.textContent).toContain("Video 1");
-    expect(container.textContent).toContain("Uploads 1");
-    expect(container.textContent).toContain("Renders 2");
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("Images 2");
+    expect(document.body.textContent).toContain("Video 1");
+    expect(document.body.textContent).toContain("Uploads 1");
+    expect(document.body.textContent).toContain("Renders 2");
 
     await act(async () => {
-      [...container.querySelectorAll(".asset-picker-toolbar button")].find((button) => button.textContent.includes("Video")).click();
+      [...document.body.querySelectorAll(".asset-picker-toolbar button")].find((button) => button.textContent.includes("Video")).click();
     });
 
-    expect(container.querySelectorAll(".asset-picker-card")).toHaveLength(1);
-    expect(container.querySelector('[title="clip-gamma"]')).not.toBeNull();
+    expect(document.body.querySelectorAll(".asset-picker-card")).toHaveLength(1);
+    expect(document.body.querySelector('[title="clip-gamma"]')).not.toBeNull();
 
     await act(async () => {
-      [...container.querySelectorAll(".asset-picker-toolbar button")].find((button) => button.textContent.includes("All")).click();
+      [...document.body.querySelectorAll(".asset-picker-toolbar button")].find((button) => button.textContent.includes("All")).click();
     });
-    await changeField(container.querySelector('[aria-label="Search assets"]'), "plate");
+    await changeField(document.body.querySelector('[aria-label="Search assets"]'), "plate");
 
-    expect(container.querySelectorAll(".asset-picker-card")).toHaveLength(1);
-    expect(container.textContent).toContain("Plate");
+    expect(document.body.querySelectorAll(".asset-picker-card")).toHaveLength(1);
+    expect(document.body.textContent).toContain("Plate");
 
     await act(async () => {
-      container.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      document.body.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     });
 
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select image").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Select image").click();
     });
 
-    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    const cards = [...document.body.querySelectorAll(".asset-picker-card")];
     await act(async () => {
       cards[1].click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
     });
 
     expect(onChange).toHaveBeenCalledWith("image-beta");
@@ -1935,13 +1935,13 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("image-beta".slice(-6));
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Change").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Change").click();
     });
     await act(async () => {
-      container.querySelector('[role="dialog"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      document.body.querySelector('[role="dialog"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
 
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it("dismisses FullscreenPreview via Escape and backdrop click", async () => {
@@ -1971,15 +1971,15 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
 
     await act(async () => {
-      container.querySelector('[role="dialog"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      document.body.querySelector('[role="dialog"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(onClose).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      container.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      document.body.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     });
     expect(onClose).toHaveBeenCalledTimes(2);
   });
@@ -2023,15 +2023,15 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(container.querySelector(".preview-modal img").getAttribute("src")).toContain("upscaled.png");
-    expect(container.textContent).toContain("Original");
-    expect(container.textContent).toContain("Upscaled");
+    expect(document.body.querySelector(".preview-modal img").getAttribute("src")).toContain("upscaled.png");
+    expect(document.body.textContent).toContain("Original");
+    expect(document.body.textContent).toContain("Upscaled");
 
     await act(async () => {
-      [...container.querySelectorAll(".preview-variant-toggle button")].find((button) => button.textContent === "Original").click();
+      [...document.body.querySelectorAll(".preview-variant-toggle button")].find((button) => button.textContent === "Original").click();
     });
 
-    expect(container.querySelector(".preview-modal img").getAttribute("src")).toContain("original.png");
+    expect(document.body.querySelector(".preview-modal img").getAttribute("src")).toContain("original.png");
   });
 
   it("offers recipe reuse from FullscreenPreview image assets", async () => {
@@ -2071,10 +2071,49 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
     });
 
     expect(onUseRecipe).toHaveBeenCalledWith(asset);
+  });
+
+  // sc-8730: the FullscreenPreview "Edit" button invokes onEditImage, which App now
+  // wires to sendAssetToImageEditor (the Image Editor canvas route) instead of the
+  // Image Studio edit_image route. This proves the button → onEditImage contract the
+  // repointed call site depends on.
+  it("routes the FullscreenPreview Edit button through onEditImage", async () => {
+    const noop = () => {};
+    const onEditImage = vi.fn();
+    const asset = {
+      id: "asset-edit",
+      displayName: "Plate",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/plate.png" },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={asset}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onEditImage={onEditImage}
+          onPreviewAsset={noop}
+          previousAsset={null}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
+    });
+
+    expect(onEditImage).toHaveBeenCalledWith(asset);
   });
 
   it("reports the scroll direction when navigating the FullscreenPreview", async () => {
@@ -2101,12 +2140,12 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      container.querySelector(".preview-nav-button.next").click();
+      document.body.querySelector(".preview-nav-button.next").click();
     });
     expect(onPreviewAsset).toHaveBeenLastCalledWith(next, "next");
 
     await act(async () => {
-      container.querySelector(".preview-nav-button.previous").click();
+      document.body.querySelector(".preview-nav-button.previous").click();
     });
     expect(onPreviewAsset).toHaveBeenLastCalledWith(previous, "previous");
   });
@@ -2124,16 +2163,16 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Change").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Change").click();
     });
     await act(async () => {
-      container.querySelectorAll(".asset-picker-card")[1].click();
+      document.body.querySelectorAll(".asset-picker-card")[1].click();
     });
     await act(async () => {
       root.render(<AssetPickerField assets={[...assets]} label="Source" onChange={onChange} value="image-alpha" />);
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
     });
 
     expect(onChange).toHaveBeenCalledWith("image-beta");
@@ -2153,17 +2192,17 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Select").click();
     });
 
-    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    const cards = [...document.body.querySelectorAll(".asset-picker-card")];
     await act(async () => {
       cards[0].click();
       cards[1].click();
       cards[0].click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
     });
 
     expect(onChange).toHaveBeenCalledWith(["image-beta"]);
@@ -2172,7 +2211,7 @@ describe("SceneWorks app shell", () => {
       root.render(<AssetPickerField assets={assets} label="Reference assets" multiple onChange={onChange} values={["image-beta"]} />);
     });
 
-    expect(container.querySelectorAll(".asset-preview-chip")).toHaveLength(1);
+    expect(document.body.querySelectorAll(".asset-preview-chip")).toHaveLength(1);
     expect(container.textContent).toContain("Beta");
   });
 
@@ -2190,13 +2229,13 @@ describe("SceneWorks app shell", () => {
       );
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Select").click();
     });
 
     // No "Asset category" segmented control, but the scoped grid still renders.
-    expect(container.querySelector('[aria-label="Asset category"]')).toBeNull();
+    expect(document.body.querySelector('[aria-label="Asset category"]')).toBeNull();
     expect(container.textContent).not.toContain("Renders");
-    expect(container.querySelectorAll(".asset-picker-card")).toHaveLength(2);
+    expect(document.body.querySelectorAll(".asset-picker-card")).toHaveLength(2);
   });
 
   const characterImportAssets = () => [
@@ -2232,19 +2271,19 @@ describe("SceneWorks app shell", () => {
     });
 
     // Three tabs, all multi-select; Images excludes already-linked + other-project.
-    expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent.replace(/\d+/g, ""))).toEqual([
+    expect([...document.body.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent.replace(/\d+/g, ""))).toEqual([
       "Images",
       "Videos",
       "Upload",
     ]);
-    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    const cards = [...document.body.querySelectorAll(".asset-picker-card")];
     expect(cards).toHaveLength(2);
     await act(async () => {
       cards[0].click();
       cards[1].click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Import")).click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Import")).click();
     });
     expect(props.onImport).toHaveBeenCalledWith(["p-img1", "p-img2"]);
     expect(props.onClose).toHaveBeenCalled();
@@ -2258,16 +2297,16 @@ describe("SceneWorks app shell", () => {
 
     // Videos tab lists only project videos.
     await act(async () => {
-      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.startsWith("Videos")).click();
+      [...document.body.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.startsWith("Videos")).click();
     });
-    expect(container.querySelectorAll(".asset-picker-card")).toHaveLength(1);
-    expect(container.querySelector('[title="p-vid1"]')).not.toBeNull();
+    expect(document.body.querySelectorAll(".asset-picker-card")).toHaveLength(1);
+    expect(document.body.querySelector('[title="p-vid1"]')).not.toBeNull();
 
     // Upload tab accepts local image + video files, then imports + attaches them.
     await act(async () => {
-      [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Upload").click();
+      [...document.body.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Upload").click();
     });
-    const fileInput = container.querySelector('input[type="file"]');
+    const fileInput = document.body.querySelector('input[type="file"]');
     expect(fileInput.getAttribute("accept")).toBe("image/*,video/*");
     expect(fileInput.multiple).toBe(true);
     const file = new File(["x"], "ref.png", { type: "image/png" });
@@ -2330,25 +2369,25 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add image or frame").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add image or frame").click();
     });
 
-    const cards = [...container.querySelectorAll(".asset-picker-card")];
+    const cards = [...document.body.querySelectorAll(".asset-picker-card")];
     await act(async () => {
       cards[0].click();
       cards[1].click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use Selection").click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add").click();
     });
 
     expect(addCharacterReference).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain("Added 1 reference");
     expect(container.textContent).toContain("network hiccup");
-    expect(container.querySelectorAll(".asset-preview-chip")).toHaveLength(1);
+    expect(document.body.querySelectorAll(".asset-preview-chip")).toHaveLength(1);
     expect(container.textContent).toContain("Beta");
   });
 
@@ -2387,37 +2426,37 @@ describe("SceneWorks app shell", () => {
     });
 
     // Five accessible tabs, Character selected by default.
-    const tablist = container.querySelector('[role="tablist"]');
+    const tablist = document.body.querySelector('[role="tablist"]');
     expect(tablist.getAttribute("aria-label")).toBe("Character workspace");
-    expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual([
+    expect([...document.body.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual([
       "Character",
       "Assets",
       "Angles",
       "Poses",
       "Test",
     ]);
-    expect(container.querySelector("#character-tab-character").getAttribute("aria-selected")).toBe("true");
+    expect(document.body.querySelector("#character-tab-character").getAttribute("aria-selected")).toBe("true");
 
     // The active panel is shown; the others are mounted but hidden so their state survives.
-    expect(container.querySelector("#character-panel-character").hidden).toBe(false);
-    expect(container.querySelector("#character-panel-assets").hidden).toBe(true);
-    expect(container.querySelector("#character-panel-test").hidden).toBe(true);
+    expect(document.body.querySelector("#character-panel-character").hidden).toBe(false);
+    expect(document.body.querySelector("#character-panel-assets").hidden).toBe(true);
+    expect(document.body.querySelector("#character-panel-test").hidden).toBe(true);
 
     // The identity form carries its own section heading (sc-2295) like its siblings.
-    expect([...container.querySelectorAll("#character-panel-character .eyebrow")].map((node) => node.textContent)).toContain(
+    expect([...document.body.querySelectorAll("#character-panel-character .eyebrow")].map((node) => node.textContent)).toContain(
       "Identity",
     );
 
     // Edit the lifted character draft, switch tabs, and switch back: the draft survives.
     await changeField(field(container, "Name"), "Mira Vex");
     await act(async () => {
-      container.querySelector("#character-tab-test").click();
+      document.body.querySelector("#character-tab-test").click();
     });
-    expect(container.querySelector("#character-panel-test").hidden).toBe(false);
-    expect(container.querySelector("#character-panel-character").hidden).toBe(true);
-    expect(container.querySelector("#character-tab-test").getAttribute("aria-selected")).toBe("true");
+    expect(document.body.querySelector("#character-panel-test").hidden).toBe(false);
+    expect(document.body.querySelector("#character-panel-character").hidden).toBe(true);
+    expect(document.body.querySelector("#character-tab-test").getAttribute("aria-selected")).toBe("true");
     await act(async () => {
-      container.querySelector("#character-tab-character").click();
+      document.body.querySelector("#character-tab-character").click();
     });
     expect(field(container, "Name").value).toBe("Mira Vex");
 
@@ -2427,23 +2466,23 @@ describe("SceneWorks app shell", () => {
         .querySelector("#character-tab-character")
         .dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
     });
-    expect(container.querySelector("#character-tab-assets").getAttribute("aria-selected")).toBe("true");
+    expect(document.body.querySelector("#character-tab-assets").getAttribute("aria-selected")).toBe("true");
     await act(async () => {
       container
         .querySelector("#character-tab-assets")
         .dispatchEvent(new window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
     });
-    expect(container.querySelector("#character-tab-test").getAttribute("aria-selected")).toBe("true");
+    expect(document.body.querySelector("#character-tab-test").getAttribute("aria-selected")).toBe("true");
     await act(async () => {
       container
         .querySelector("#character-tab-test")
         .dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
     });
-    expect(container.querySelector("#character-tab-character").getAttribute("aria-selected")).toBe("true");
+    expect(document.body.querySelector("#character-tab-character").getAttribute("aria-selected")).toBe("true");
 
     // The active tab is persisted per workspace and restored on remount.
     await act(async () => {
-      container.querySelector("#character-tab-poses").click();
+      document.body.querySelector("#character-tab-poses").click();
     });
     expect(window.localStorage.getItem("sceneworks-studio-character-project-1")).toContain('"activeTab":"poses"');
     await act(async () => {
@@ -2453,8 +2492,8 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       root.render(withAppContext(baseContext, <CharacterStudio />));
     });
-    expect(container.querySelector("#character-tab-poses").getAttribute("aria-selected")).toBe("true");
-    expect(container.querySelector("#character-panel-poses").hidden).toBe(false);
+    expect(document.body.querySelector("#character-tab-poses").getAttribute("aria-selected")).toBe("true");
+    expect(document.body.querySelector("#character-panel-poses").hidden).toBe(false);
   });
 
   it("confirms before archiving and lets you view and restore archived characters (sc-6066)", async () => {
@@ -2507,7 +2546,7 @@ describe("SceneWorks app shell", () => {
     });
 
     const archiveButton = () =>
-      [...container.querySelectorAll("#character-panel-character button")].find((button) => button.textContent === "Archive");
+      [...document.body.querySelectorAll("#character-panel-character button")].find((button) => button.textContent === "Archive");
 
     // Declining the confirm leaves the character untouched.
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
@@ -2525,21 +2564,21 @@ describe("SceneWorks app shell", () => {
     expect(archiveCharacter).toHaveBeenCalledWith("char-1");
 
     // The archived view is hidden until opened, then lazily fetches archived characters.
-    expect(container.querySelector(".archived-character-list")).toBeNull();
+    expect(document.body.querySelector(".archived-character-list")).toBeNull();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Show archived characters").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Show archived characters").click();
     });
     await settle();
     expect(listArchivedCharacters).toHaveBeenCalled();
-    expect(container.querySelector(".archived-character-list").textContent).toContain("Old Hero");
+    expect(document.body.querySelector(".archived-character-list").textContent).toContain("Old Hero");
 
     // Restore returns it to the active roster.
     await act(async () => {
-      [...container.querySelectorAll(".archived-character-row button")].find((button) => button.textContent === "Restore").click();
+      [...document.body.querySelectorAll(".archived-character-row button")].find((button) => button.textContent === "Restore").click();
     });
     await settle();
     expect(unarchiveCharacter).toHaveBeenCalledWith("char-archived");
-    expect(container.querySelector(".archived-character-list")).toBeNull();
+    expect(document.body.querySelector(".archived-character-list")).toBeNull();
 
     confirmSpy.mockRestore();
   });
@@ -2593,9 +2632,9 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      container.querySelector("#character-tab-assets").click();
+      document.body.querySelector("#character-tab-assets").click();
     });
-    const section = [...container.querySelectorAll(".character-section")].find(
+    const section = [...document.body.querySelectorAll(".character-section")].find(
       (item) => item.querySelector(".eyebrow")?.textContent === "Character assets",
     );
     expect(section).toBeTruthy();
@@ -2660,9 +2699,9 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      container.querySelector("#character-tab-assets").click();
+      document.body.querySelector("#character-tab-assets").click();
     });
-    const section = [...container.querySelectorAll(".character-section")].find(
+    const section = [...document.body.querySelectorAll(".character-section")].find(
       (item) => item.querySelector(".eyebrow")?.textContent === "Character assets",
     );
     expect(section).toBeTruthy();
@@ -2709,8 +2748,8 @@ describe("SceneWorks app shell", () => {
     });
 
     // The full-height character list is replaced by a compact selector pill.
-    expect(container.querySelector(".character-list")).toBeNull();
-    const pill = container.querySelector(".compact-selector-pill");
+    expect(document.body.querySelector(".character-list")).toBeNull();
+    const pill = document.body.querySelector(".compact-selector-pill");
     expect(pill.textContent).toContain("Mira");
     expect(field(container, "Name").value).toBe("Mira");
 
@@ -2719,11 +2758,11 @@ describe("SceneWorks app shell", () => {
       pill.click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Dax")).click();
+      [...document.body.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Dax")).click();
     });
 
     expect(field(container, "Name").value).toBe("Dax");
-    expect(container.querySelector(".compact-selector-pill").textContent).toContain("Dax");
+    expect(document.body.querySelector(".compact-selector-pill").textContent).toContain("Dax");
   });
 
   it("creates a character from the selector's New item (sc-2025)", async () => {
@@ -2769,13 +2808,13 @@ describe("SceneWorks app shell", () => {
     });
 
     // No inline header create form anymore — creation lives in the dropdown.
-    expect([...container.querySelectorAll("input")].some((input) => input.getAttribute("aria-label") === "Character name")).toBe(false);
+    expect([...document.body.querySelectorAll("input")].some((input) => input.getAttribute("aria-label") === "Character name")).toBe(false);
 
     await act(async () => {
-      container.querySelector(".compact-selector-pill").click();
+      document.body.querySelector(".compact-selector-pill").click();
     });
     await act(async () => {
-      container.querySelector(".compact-selector-create").click();
+      document.body.querySelector(".compact-selector-create").click();
     });
 
     expect(createCharacter).toHaveBeenCalledWith(expect.objectContaining({ name: "New character", type: "person" }));
@@ -2837,7 +2876,7 @@ describe("SceneWorks app shell", () => {
     });
 
     // The angle-set panel renders with the model's angle count in the button.
-    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+    const generateButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.startsWith("Generate angle set"),
     );
     expect(generateButton).toBeTruthy();
@@ -2923,15 +2962,15 @@ describe("SceneWorks app shell", () => {
 
     // The Identity-structure slider seeds from angleSetDefault, not the 0.80 single-image default.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced")?.click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced")?.click();
     });
-    const lockSlider = [...container.querySelectorAll(".reference-strength")].find((label) =>
+    const lockSlider = [...document.body.querySelectorAll(".reference-strength")].find((label) =>
       label.textContent.includes("Identity structure"),
     );
     expect(lockSlider?.querySelector("span")?.textContent).toBe("0.65");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate angle set")).click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate angle set")).click();
     });
 
     // The softer lock rides advanced.controlnetConditioningScale so the worker's angle-set default
@@ -3016,7 +3055,7 @@ describe("SceneWorks app shell", () => {
     });
 
     // The pose thumbnail loads from the library; select it.
-    const poseButton = [...container.querySelectorAll("button")].find((button) =>
+    const poseButton = [...document.body.querySelectorAll("button")].find((button) =>
       (button.getAttribute("aria-label") ?? "").includes("pose Standing 01"),
     );
     expect(poseButton).toBeTruthy();
@@ -3024,7 +3063,7 @@ describe("SceneWorks app shell", () => {
       poseButton.click();
     });
 
-    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+    const generateButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.startsWith("Generate") && button.textContent.includes("pose"),
     );
     expect(generateButton).toBeTruthy();
@@ -3121,7 +3160,7 @@ describe("SceneWorks app shell", () => {
       await Promise.resolve();
     });
 
-    const poseButton = [...container.querySelectorAll("button")].find((button) =>
+    const poseButton = [...document.body.querySelectorAll("button")].find((button) =>
       (button.getAttribute("aria-label") ?? "").includes("pose Standing 01"),
     );
     expect(poseButton).toBeTruthy();
@@ -3130,7 +3169,7 @@ describe("SceneWorks app shell", () => {
     });
 
     // Strict tier exposes the pose-lock-strength slider (best-effort tiers don't).
-    const slider = container.querySelector('input[aria-label="Pose lock strength"]');
+    const slider = document.body.querySelector('input[aria-label="Pose lock strength"]');
     expect(slider).toBeTruthy();
 
     // Move it off the 1.0 default; the value must thread into advanced.controlScale.
@@ -3140,7 +3179,7 @@ describe("SceneWorks app shell", () => {
       slider.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+    const generateButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.startsWith("Generate") && button.textContent.includes("pose"),
     );
     expect(generateButton).toBeTruthy();
@@ -3201,13 +3240,13 @@ describe("SceneWorks app shell", () => {
       root.render(withAppContext(baseContext, <CharacterStudio />));
     });
 
-    const loraCheckbox = container.querySelector(".character-lora-picker input[type='checkbox']");
+    const loraCheckbox = document.body.querySelector(".character-lora-picker input[type='checkbox']");
     expect(loraCheckbox).toBeTruthy();
     await act(async () => {
       loraCheckbox.click();
     });
 
-    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+    const generateButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.startsWith("Generate angle set"),
     );
     await act(async () => {
@@ -3271,19 +3310,19 @@ describe("SceneWorks app shell", () => {
       await Promise.resolve();
     });
 
-    const poseButton = [...container.querySelectorAll("button")].find((button) =>
+    const poseButton = [...document.body.querySelectorAll("button")].find((button) =>
       (button.getAttribute("aria-label") ?? "").includes("pose Standing 01"),
     );
     await act(async () => {
       poseButton.click();
     });
-    const loraCheckbox = container.querySelector(".character-lora-picker input[type='checkbox']");
+    const loraCheckbox = document.body.querySelector(".character-lora-picker input[type='checkbox']");
     expect(loraCheckbox).toBeTruthy();
     await act(async () => {
       loraCheckbox.click();
     });
 
-    const generateButton = [...container.querySelectorAll("button")].find((button) =>
+    const generateButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.startsWith("Generate") && button.textContent.includes("pose"),
     );
     await act(async () => {
@@ -3316,7 +3355,7 @@ describe("SceneWorks app shell", () => {
     // Counts only assets associated with this character (by recipe characterId or by
     // characterReferences) — not other characters' or unassociated assets.
     expect(container.textContent).toContain("Generated for Mira (2)");
-    const previewButtons = [...container.querySelectorAll("button")].filter((button) =>
+    const previewButtons = [...document.body.querySelectorAll("button")].filter((button) =>
       (button.getAttribute("aria-label") ?? "").startsWith("Preview "),
     );
     expect(previewButtons).toHaveLength(2);
@@ -3343,13 +3382,13 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const importButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Import");
+    const importButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Import");
     expect(importButton).toBeTruthy();
     await act(async () => {
       importButton.click();
     });
-    expect(container.textContent).toContain("Import to Mira");
-    expect(container.querySelector('[title="p-img1"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("Import to Mira");
+    expect(document.body.querySelector('[title="p-img1"]')).not.toBeNull();
   });
 
   it("bulk-discards selected media from the Character Assets toolbar", async () => {
@@ -3406,25 +3445,25 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // Both character images render as full-size selectable cards (matching the Assets page).
-    expect(container.querySelectorAll(".character-asset-card")).toHaveLength(2);
+    expect(document.body.querySelectorAll(".character-asset-card")).toHaveLength(2);
 
     await act(async () => {
-      container.querySelector('input[aria-label="Select Shot A"]').click();
+      document.body.querySelector('input[aria-label="Select Shot A"]').click();
     });
     await act(async () => {
-      container.querySelector('input[aria-label="Select Shot B"]').click();
+      document.body.querySelector('input[aria-label="Select Shot B"]').click();
     });
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Discard").click();
+      [...document.body.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Discard").click();
     });
     await settle();
 
     expect(deleteAsset).toHaveBeenCalledTimes(2);
     expect(deleteAsset).toHaveBeenCalledWith(assets[0]);
     expect(deleteAsset).toHaveBeenCalledWith(assets[1]);
-    expect(container.querySelector(".batch-selection-bar")).toBeNull();
+    expect(document.body.querySelector(".batch-selection-bar")).toBeNull();
   });
 
   it("bulk-moves selected character media to the Main Asset Library (sc-8341)", async () => {
@@ -3482,30 +3521,30 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector('input[aria-label="Select Shot A"]').click();
+      document.body.querySelector('input[aria-label="Select Shot A"]').click();
     });
     await act(async () => {
-      container.querySelector('input[aria-label="Select Shot B"]').click();
+      document.body.querySelector('input[aria-label="Select Shot B"]').click();
     });
     await settle();
 
     // Open the Move picker; "Assets Library" is offered as the first target.
     await act(async () => {
-      [...container.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Move").click();
+      [...document.body.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Move").click();
     });
     await settle();
-    const select = container.querySelector('select[aria-label="Move target"]');
+    const select = document.body.querySelector('select[aria-label="Move target"]');
     expect([...select.options].map((option) => option.textContent)).toContain("Assets Library");
     await changeField(select, "__sceneworks_library__");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent?.startsWith("Move 2 to library")).click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent?.startsWith("Move 2 to library")).click();
     });
     await settle();
 
     expect(moveAssetToLibrary).toHaveBeenCalledTimes(2);
     expect(moveAssetToLibrary).toHaveBeenCalledWith(assets[0]);
     expect(moveAssetToLibrary).toHaveBeenCalledWith(assets[1]);
-    expect(container.querySelector(".batch-selection-bar")).toBeNull();
+    expect(document.body.querySelector(".batch-selection-bar")).toBeNull();
   });
 
   it("lists a character's associated datasets and opens one (sc-2022)", async () => {
@@ -3528,7 +3567,7 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(container.textContent).toContain("For Mira (1)");
-    const row = container.querySelector(".character-dataset-row");
+    const row = document.body.querySelector(".character-dataset-row");
     expect(row.textContent).toContain("Mira identity set");
     expect(row.textContent).toContain("12 images · ready");
 
@@ -3538,7 +3577,7 @@ describe("SceneWorks app shell", () => {
     expect(onOpenDataset).toHaveBeenCalledWith("ds-1");
 
     // The create button reflects how many of the character's images would seed it.
-    const createButton = [...container.querySelectorAll("button")].find((button) =>
+    const createButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Create dataset from 5 images"),
     );
     await act(async () => {
@@ -3596,7 +3635,7 @@ describe("SceneWorks app shell", () => {
     });
 
     // Two of three images belong to this character.
-    const createButton = [...container.querySelectorAll("button")].find((button) =>
+    const createButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Create dataset from 2 images"),
     );
     expect(createButton).toBeTruthy();
@@ -3662,7 +3701,7 @@ describe("SceneWorks app shell", () => {
     });
 
     // The active toggle counts only non-trashed images for this character.
-    const showButton = [...container.querySelectorAll("button")].find((button) =>
+    const showButton = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Show this character's images (1)"),
     );
     expect(showButton).toBeTruthy();
@@ -3671,12 +3710,12 @@ describe("SceneWorks app shell", () => {
     });
 
     // Active grid shows the kept image, not the discarded one.
-    expect(container.querySelectorAll(".review-grid .review-card").length).toBe(1);
-    expect(container.querySelectorAll(".review-grid .review-card.trashed").length).toBe(0);
+    expect(document.body.querySelectorAll(".review-grid .review-card").length).toBe(1);
+    expect(document.body.querySelectorAll(".review-grid .review-card.trashed").length).toBe(0);
 
     // Switch to the Trashcan view and the discarded image becomes reachable.
     // Scope to the Sample-outputs panel, since CharacterAssets also has a toggle.
-    const testPanel = container.querySelector(".test-character-panel");
+    const testPanel = document.body.querySelector(".test-character-panel");
     const trashButton = [...testPanel.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Trashcan (1)"),
     );
@@ -3739,7 +3778,7 @@ describe("SceneWorks app shell", () => {
 
     // The Character assets section renders thumbnails; the discarded one is hidden.
     const findSection = () =>
-      [...container.querySelectorAll(".character-section")].find((section) =>
+      [...document.body.querySelectorAll(".character-section")].find((section) =>
         section.querySelector(".eyebrow")?.textContent === "Character assets",
       );
     const section = findSection();
@@ -3825,7 +3864,7 @@ describe("SceneWorks app shell", () => {
     });
 
     const findSection = () =>
-      [...container.querySelectorAll(".character-section")].find((section) =>
+      [...document.body.querySelectorAll(".character-section")].find((section) =>
         section.querySelector(".eyebrow")?.textContent === "Character assets",
       );
     // No Empty Trash in the active Images view.
@@ -3890,7 +3929,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate variations").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate variations").click();
     });
 
     expect(sendCharacterToImage).toHaveBeenCalledWith(expect.objectContaining({ id: "char-1" }), null, "ref-1");
@@ -3996,14 +4035,14 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector(".project-pill").click();
+      document.body.querySelector(".project-pill").click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "New workspace").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "New workspace").click();
     });
-    await changeField(container.querySelector('[aria-label="New workspace name"]'), "Fresh Workspace");
+    await changeField(document.body.querySelector('[aria-label="New workspace name"]'), "Fresh Workspace");
     await act(async () => {
-      [...container.querySelectorAll(".project-menu-create button")].find((button) => button.textContent === "Create").click();
+      [...document.body.querySelectorAll(".project-menu-create button")].find((button) => button.textContent === "Create").click();
     });
     await settle();
 
@@ -4020,11 +4059,11 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -4041,11 +4080,11 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -4079,11 +4118,11 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -4168,11 +4207,11 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -4207,8 +4246,8 @@ describe("SceneWorks app shell", () => {
     await settle();
     // The studio form is replaced by the availability gate.
     expect(container.textContent).toContain("Image Studio needs an image model");
-    expect(container.querySelector(".model-availability-gate")).not.toBeNull();
-    expect(container.querySelector(".studio-shell")).toBeNull();
+    expect(document.body.querySelector(".model-availability-gate")).not.toBeNull();
+    expect(document.body.querySelector(".studio-shell")).toBeNull();
   });
 
   it("keeps image generation in the studio and shows local progress", async () => {
@@ -4256,11 +4295,11 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
     });
     await settle();
     await act(async () => {
-      container.querySelector(".image-studio form").requestSubmit();
+      document.body.querySelector(".image-studio form").requestSubmit();
     });
     await settle();
 
@@ -4269,11 +4308,11 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Jobs and GPUs");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
     });
     await settle();
 
@@ -4367,19 +4406,19 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
     });
     await settle();
     await act(async () => {
-      container.querySelector(".asset-tile").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      document.body.querySelector(".asset-tile").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
     });
     await settle();
     await act(async () => {
-      container.querySelector(".image-studio form").requestSubmit();
+      document.body.querySelector(".image-studio form").requestSubmit();
     });
     await settle();
 
@@ -4449,11 +4488,11 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
     });
     await settle();
     await act(async () => {
-      container.querySelector(".image-studio form").requestSubmit();
+      document.body.querySelector(".image-studio form").requestSubmit();
     });
     await settle();
 
@@ -4484,11 +4523,11 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
+    expect(document.body.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
       "/api/v1/projects/project-1/files/assets/images/generated-1.png",
     );
     // 1 completed asset + 3 pending slots = 4 total cells; skeletons fill the gaps.
-    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(3);
+    expect(document.body.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(3);
   });
 
   it("reconstructs running image batch slots from partial asset records", async () => {
@@ -4540,11 +4579,11 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
     });
     await settle();
     await act(async () => {
-      container.querySelector(".image-studio form").requestSubmit();
+      document.body.querySelector(".image-studio form").requestSubmit();
     });
     await settle();
 
@@ -4578,12 +4617,12 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Running Z-Image 2 of 4.");
-    expect(container.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
+    expect(document.body.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
       "/api/v1/projects/project-1/files/assets/images/generated_0001.png",
     );
     // 1 completed thumbnail + 3 pending skeleton slots = 4 total cells.
-    expect(container.querySelectorAll(".worker-progress-card__thumb-cell:not(.skeleton)").length).toBe(1);
-    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(3);
+    expect(document.body.querySelectorAll(".worker-progress-card__thumb-cell:not(.skeleton)").length).toBe(1);
+    expect(document.body.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(3);
   });
 
   it("shows local generation failures without duplicating the global banner", async () => {
@@ -4631,11 +4670,11 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image").click();
     });
     await settle();
     await act(async () => {
-      container.querySelector(".image-studio form").requestSubmit();
+      document.body.querySelector(".image-studio form").requestSubmit();
     });
     await settle();
 
@@ -4706,15 +4745,15 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text → Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Text → Video").click();
     });
     await settle();
     await act(async () => {
-      container.querySelector(".video-studio form").requestSubmit();
+      document.body.querySelector(".video-studio form").requestSubmit();
     });
     await settle();
 
@@ -4723,11 +4762,11 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Jobs and GPUs");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Assets").click();
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
 
@@ -4792,11 +4831,11 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Download 12 GB").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Download 12 GB").click();
     });
     await settle();
 
@@ -4846,7 +4885,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
     });
     await settle();
     const panel = loraPanel(container);
@@ -4980,7 +5019,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
     });
     await settle();
     await changeField(field(container, "LoRA family"), "z-image");
@@ -5159,7 +5198,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
     });
     await settle();
     await act(async () => {
@@ -5213,7 +5252,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Presets").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Presets").click();
     });
     await settle();
 
@@ -5224,7 +5263,7 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Source URL")).toBeUndefined();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Open Models").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Open Models").click();
     });
     await settle();
 
@@ -5397,8 +5436,8 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("~30.6 GB");
     expect(container.textContent).toContain("8.0 GB");
     expect(container.textContent).toContain("Unavailable");
-    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Download ~30.6 GB")).toBe(true);
-    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Download 8.0 GB")).toBe(true);
+    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent === "Download ~30.6 GB")).toBe(true);
+    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent === "Download 8.0 GB")).toBe(true);
     expect(container.textContent).not.toContain("~8.0 GB");
   });
 
@@ -5421,7 +5460,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const rows = [...container.querySelectorAll(".lora-row")];
+    const rows = [...document.body.querySelectorAll(".lora-row")];
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain("Ready Style");
     expect(rows[0].textContent).toContain("installed");
@@ -5455,7 +5494,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      container.querySelector(".model-card .danger-action").click();
+      document.body.querySelector(".model-card .danger-action").click();
     });
 
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Delete model "Z-Image Turbo"?'));
@@ -5464,7 +5503,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Removed the registry entry for Z-Image Turbo.");
 
     await act(async () => {
-      container.querySelector(".lora-row .danger-action").click();
+      document.body.querySelector(".lora-row .danger-action").click();
     });
 
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Delete lora "Ready Style"?'));
@@ -5847,7 +5886,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
     });
     await settle();
 
@@ -5858,7 +5897,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Rust CPU utility worker");
     expect(container.textContent).not.toContain("Rust placeholder GPU");
     expect(container.textContent).not.toContain("Stale GPU");
-    expect([...container.querySelector("#queue-gpu").options].map((option) => option.value)).toEqual(["auto", "0"]);
+    expect([...document.body.querySelector("#queue-gpu").options].map((option) => option.value)).toEqual(["auto", "0"]);
   });
 
   it("shows queued job cancellation from the action response even when the list refresh is stale", async () => {
@@ -5915,14 +5954,14 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
     });
     await settle();
 
     expect(container.textContent).toContain("Queued");
 
     await act(async () => {
-      [...container.querySelectorAll(".worker-progress-card__actions button")].find((button) => button.textContent === "Cancel").click();
+      [...document.body.querySelectorAll(".worker-progress-card__actions button")].find((button) => button.textContent === "Cancel").click();
     });
     await settle();
 
@@ -5998,12 +6037,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
     });
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll(".worker-progress-card__actions button")].find((button) => button.textContent === "Retry").click();
+      [...document.body.querySelectorAll(".worker-progress-card__actions button")].find((button) => button.textContent === "Retry").click();
       await Promise.resolve();
     });
     await act(async () => {
@@ -6014,7 +6053,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelector(".progress-track")?.getAttribute("aria-label")).toBe("40% complete");
+    expect(document.body.querySelector(".progress-track")?.getAttribute("aria-label")).toBe("40% complete");
     expect(container.textContent).toContain("Worker advanced during refresh.");
   });
 
@@ -6238,11 +6277,11 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      container.querySelector(".image-studio form").requestSubmit();
+      document.body.querySelector(".image-studio form").requestSubmit();
     });
     await settle();
     await act(async () => {
-      container.querySelector(".image-studio form").requestSubmit();
+      document.body.querySelector(".image-studio form").requestSubmit();
     });
 
     expect(createImageJob).toHaveBeenCalledTimes(1);
@@ -6274,7 +6313,7 @@ describe("SceneWorks app shell", () => {
       setRequestedGpu: () => {},
       updateAssetStatus: () => {},
     };
-    const promptField = () => container.querySelector("textarea[aria-label='Prompt']");
+    const promptField = () => document.body.querySelector("textarea[aria-label='Prompt']");
 
     root = createRoot(container);
     await act(async () => {
@@ -6338,7 +6377,7 @@ describe("SceneWorks app shell", () => {
     });
 
     // Card stays visible while the completed job waits for its asset to arrive.
-    expect(container.querySelector(".worker-progress-card")).not.toBeNull();
+    expect(document.body.querySelector(".worker-progress-card")).not.toBeNull();
     expect(container.textContent).not.toContain("No fresh image batch");
 
     const generatedAsset = {
@@ -6354,7 +6393,7 @@ describe("SceneWorks app shell", () => {
 
     // Once the asset surfaces in latestAssets the card collapses out of the stack
     // (selectStackedJobs + resultVisible). The asset itself is in Recent Assets.
-    expect(container.querySelector(".worker-progress-card")).toBeNull();
+    expect(document.body.querySelector(".worker-progress-card")).toBeNull();
     expect(container.textContent).not.toContain("No fresh image batch");
   });
 
@@ -6415,11 +6454,11 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const images = [...container.querySelectorAll(".worker-progress-card__thumb-media")].map((image) => image.getAttribute("src"));
+    const images = [...document.body.querySelectorAll(".worker-progress-card__thumb-media")].map((image) => image.getAttribute("src"));
     expect(images[0]).toContain("/api/v1/projects/project-1/files/assets/images/generated_0001.png");
     expect(images[1]).toContain("/api/v1/projects/project-1/files/runs/run_0007/assets/images/generated_0002.png");
     // 2 completed thumbnails + 1 skeleton slot = 3 total cells.
-    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(1);
+    expect(document.body.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBe(1);
   });
 
   it("cancels a running image job from the studio progress card", async () => {
@@ -6460,7 +6499,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const cancelButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Cancel");
+    const cancelButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Cancel");
     expect(cancelButton).not.toBeUndefined();
 
     await act(async () => {
@@ -6507,7 +6546,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Cancel run")).toBe(false);
+    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent === "Cancel run")).toBe(false);
   });
 
   it("hides completed image progress with stale missing result metadata", async () => {
@@ -6588,8 +6627,8 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelector(".worker-progress-card")).toBeNull();
-    expect(container.querySelector(".review-placeholder")).toBeNull();
+    expect(document.body.querySelector(".worker-progress-card")).toBeNull();
+    expect(document.body.querySelector(".review-placeholder")).toBeNull();
     expect(container.textContent).not.toContain("Canceled #");
     expect(container.textContent).toContain("No fresh image batch");
   });
@@ -6650,13 +6689,13 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelectorAll(".worker-progress-card").length).toBe(2);
+    expect(document.body.querySelectorAll(".worker-progress-card").length).toBe(2);
     // Running run renders its one finished image alongside its remaining slot.
-    expect(container.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
+    expect(document.body.querySelector(".worker-progress-card__thumb-media")?.getAttribute("src")).toContain(
       "/api/v1/projects/project-1/files/assets/images/generated_0001.png",
     );
     // Queued run shows its own pending skeleton slots while it waits.
-    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBeGreaterThan(0);
+    expect(document.body.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBeGreaterThan(0);
     expect(container.textContent).not.toContain("No fresh image batch");
   });
 
@@ -6716,9 +6755,9 @@ describe("SceneWorks app shell", () => {
       root.render(withImageStudioContext({ ...baseProps, localJobs: [completedJob, nextJob] }));
     });
     await settle();
-    expect(container.querySelectorAll(".worker-progress-card").length).toBe(2);
+    expect(document.body.querySelectorAll(".worker-progress-card").length).toBe(2);
     // The queued next run shows skeleton slots for its expected outputs.
-    expect(container.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBeGreaterThan(0);
+    expect(document.body.querySelectorAll(".worker-progress-card__thumb-cell.skeleton").length).toBeGreaterThan(0);
 
     // The next run starts: the completed run slides out and the running run remains.
     await act(async () => {
@@ -6730,9 +6769,9 @@ describe("SceneWorks app shell", () => {
       );
     });
     await settle();
-    expect(container.querySelectorAll(".worker-progress-card").length).toBe(1);
-    expect(container.querySelector(".worker-progress-card.running")).not.toBeNull();
-    expect(container.querySelector(".worker-progress-card.completed")).toBeNull();
+    expect(document.body.querySelectorAll(".worker-progress-card").length).toBe(1);
+    expect(document.body.querySelector(".worker-progress-card.running")).not.toBeNull();
+    expect(document.body.querySelector(".worker-progress-card.completed")).toBeNull();
   });
 
   it("submits compatible image LoRAs while capping simple user selections at four", async () => {
@@ -6774,11 +6813,11 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Missing LoRA");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
 
     expect(container.textContent).toContain("Built In");
-    const checkboxes = [...container.querySelectorAll('.lora-choice input[type="checkbox"]')];
+    const checkboxes = [...document.body.querySelectorAll('.lora-choice input[type="checkbox"]')];
     await act(async () => {
       checkboxes[0].click();
       checkboxes[1].click();
@@ -6792,14 +6831,14 @@ describe("SceneWorks app shell", () => {
     expect(checkboxes[5].disabled).toBe(true);
 
     await act(async () => {
-      container.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
+      document.body.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
     });
 
     expect(container.textContent).toContain("Qwen Only");
     expect(container.textContent).not.toContain("Missing LoRA");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -6846,10 +6885,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
 
-    const loraNames = [...container.querySelectorAll(".lora-choice strong")].map((node) => node.textContent);
+    const loraNames = [...document.body.querySelectorAll(".lora-choice strong")].map((node) => node.textContent);
     // A kolors-family model must not offer a z-image LoRA as compatible.
     expect(loraNames).toContain("Kolors Style");
     expect(loraNames).not.toContain("Z Style");
@@ -6881,26 +6920,26 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
     await act(async () => {
-      container.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
+      document.body.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
     });
     await act(async () => {
-      container.querySelector('.lora-choice input[type="checkbox"]').click();
+      document.body.querySelector('.lora-choice input[type="checkbox"]').click();
     });
 
-    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
     expect(container.textContent).toContain("Generate is blocked");
     expect(container.textContent).toContain("Qwen Only");
     expect(generate.disabled).toBe(true);
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Hide advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Hide advanced").click();
     });
     await settle();
 
-    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Hide advanced")).toBe(true);
+    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent === "Hide advanced")).toBe(true);
     expect(container.textContent).toContain("Qwen Only");
 
     await act(async () => {
@@ -6958,7 +6997,7 @@ describe("SceneWorks app shell", () => {
 
     // sc-5875: presets are opt-in — select it explicitly before its defaults apply.
     await act(async () => {
-      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
+      [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
     });
 
     expect(container.textContent).toContain("Cinematic");
@@ -6967,7 +7006,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Preset LoRA applied at generation: Cinematic Detail");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -7044,7 +7083,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector(".image-studio form").requestSubmit();
+      document.body.querySelector(".image-studio form").requestSubmit();
     });
     await settle();
 
@@ -7152,19 +7191,19 @@ describe("SceneWorks app shell", () => {
 
     // Primary preset controls are surfaced in the rail (no longer behind Advanced),
     // alongside the hero-mounted prompt + preset chip strip.
-    const railLabels = [...container.querySelectorAll(".preset-rail > label, .preset-rail .preset-rail-row label")].map(
+    const railLabels = [...document.body.querySelectorAll(".preset-rail > label, .preset-rail .preset-rail-row label")].map(
       (label) => label.childNodes[0]?.textContent.trim(),
     );
     expect(railLabels).toEqual(expect.arrayContaining(["Model", "Variations", "Aspect"]));
-    expect(container.querySelector(".prompt-input")).not.toBeNull();
-    expect(container.querySelector(".preset-chips").textContent).toContain("None");
+    expect(document.body.querySelector(".prompt-input")).not.toBeNull();
+    expect(document.body.querySelector(".preset-chips").textContent).toContain("None");
     // sc-5875: a fresh studio defaults to None, so the preset's count (2) is NOT
     // auto-applied — Variations shows the studio default (4) until a preset is picked.
     expect(field(container, "Variations").value).toBe("4");
 
     // Selecting the preset applies its defaults (count 2).
     await act(async () => {
-      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
+      [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
     });
     await settle();
     expect(field(container, "Variations").value).toBe("2");
@@ -7172,7 +7211,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("LoRAs");
 
     await act(async () => {
-      [...container.querySelectorAll(".preset-chip")]
+      [...document.body.querySelectorAll(".preset-chip")]
         .find((chip) => chip.textContent.trim() === "None")
         .click();
     });
@@ -7182,14 +7221,14 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Variations").value).toBe("4");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
 
     expect(field(container, "GPU")).not.toBeUndefined();
     expect(container.textContent).toContain("LoRAs");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -7230,27 +7269,27 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
 
-    expect(container.querySelector('.upscale-toggle input[type="checkbox"]').checked).toBe(false);
+    expect(document.body.querySelector('.upscale-toggle input[type="checkbox"]').checked).toBe(false);
     expect(field(container, "Scale").disabled).toBe(true);
     expect(field(container, "Engine").disabled).toBe(true);
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     expect(createImageJob).toHaveBeenCalledTimes(1);
     expect(createImageJob.mock.calls[0][0]).not.toHaveProperty("upscale");
 
     await act(async () => {
-      container.querySelector('.upscale-toggle input[type="checkbox"]').click();
+      document.body.querySelector('.upscale-toggle input[type="checkbox"]').click();
     });
     await changeField(field(container, "Scale"), "4");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -7328,10 +7367,10 @@ describe("SceneWorks app shell", () => {
 
     // The approved reference renders as a selected identity thumbnail.
     expect(container.textContent).toContain("Reference identity");
-    expect(container.querySelector(".reference-thumb.active")).not.toBeNull();
+    expect(document.body.querySelector(".reference-thumb.active")).not.toBeNull();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -7410,7 +7449,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Reference strength");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     // Tuned InstantID defaults flow through advanced: ipAdapterScale 0.8 (raised from
@@ -7494,7 +7533,7 @@ describe("SceneWorks app shell", () => {
 
     await changeField(field(container, "View angle"), "left_profile");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     // The chosen angle rides advanced.viewAngle for the worker's landmark pack.
@@ -7577,7 +7616,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Variation");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     // Both knobs ride advanced: ipAdapterScale falls back to the global 0.6
@@ -7651,11 +7690,11 @@ describe("SceneWorks app shell", () => {
 
     // The toggle lives in the (collapsed-by-default) Advanced panel — open it first.
     await act(async () => {
-      container.querySelector(".advanced-toggle").click();
+      document.body.querySelector(".advanced-toggle").click();
     });
 
     // The manifest-driven "Enhance prompt" toggle renders for flux2_dev (off by default).
-    const enhanceToggle = container.querySelector(".prompt-enhance-toggle input");
+    const enhanceToggle = document.body.querySelector(".prompt-enhance-toggle input");
     expect(enhanceToggle).not.toBeNull();
     expect(enhanceToggle.checked).toBe(false);
     expect(container.textContent).toContain("Enhance prompt");
@@ -7665,7 +7704,7 @@ describe("SceneWorks app shell", () => {
       enhanceToggle.click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     // The toggle rides advanced.enhancePrompt; the worker threads it into the dev GenerationRequest.
@@ -7745,7 +7784,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Variation");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     // advanced carries trueCfgScale but explicitly NOT ipAdapterScale.
@@ -7785,10 +7824,10 @@ describe("SceneWorks app shell", () => {
     let modelOptions = [...field(container, "Model").options].map((option) => option.textContent);
     expect(modelOptions).toContain("Kolors");
     expect(modelOptions).toContain("FLUX");
-    const sceneSuggestions = [...container.querySelectorAll(".suggestion")].map((button) => button.textContent).join("|");
+    const sceneSuggestions = [...document.body.querySelectorAll(".suggestion")].map((button) => button.textContent).join("|");
 
     await act(async () => {
-      [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
+      [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
     });
     await settle();
 
@@ -7798,7 +7837,7 @@ describe("SceneWorks app shell", () => {
     expect(modelOptions).not.toContain("FLUX");
 
     // Suggestions swap to the variation-oriented set in character mode.
-    const characterSuggestions = [...container.querySelectorAll(".suggestion")].map((button) => button.textContent).join("|");
+    const characterSuggestions = [...document.body.querySelectorAll(".suggestion")].map((button) => button.textContent).join("|");
     expect(characterSuggestions).not.toBe(sceneSuggestions);
   });
 
@@ -7830,7 +7869,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelector(".prompt-input").value).toBe("A grizzled detective in a trench coat");
+    expect(document.body.querySelector(".prompt-input").value).toBe("A grizzled detective in a trench coat");
   });
 
   it("falls back to a type-specific default prompt when the character has no notes", async () => {
@@ -7859,7 +7898,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.querySelector(".prompt-input").value).toBe("The creature in a new setting, varied pose, natural lighting");
+    expect(document.body.querySelector(".prompt-input").value).toBe("The creature in a new setting, varied pose, natural lighting");
   });
 
   it("keeps an edited prompt when switching into character mode", async () => {
@@ -7888,15 +7927,15 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await changeField(container.querySelector(".prompt-input"), "my own deliberate scene");
+    await changeField(document.body.querySelector(".prompt-input"), "my own deliberate scene");
     await act(async () => {
-      [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
+      [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
     });
     await changeField(field(container, "Character"), "char-1");
     await settle();
 
     // The user's wording survives entering character mode.
-    expect(container.querySelector(".prompt-input").value).toBe("my own deliberate scene");
+    expect(document.body.querySelector(".prompt-input").value).toBe("my own deliberate scene");
   });
 
   it("generates without a reference and warns when the character has no approved reference image", async () => {
@@ -7927,10 +7966,10 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("No approved reference");
-    expect(container.querySelector(".reference-thumb")).toBeNull();
+    expect(document.body.querySelector(".reference-thumb")).toBeNull();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -7989,10 +8028,10 @@ describe("SceneWorks app shell", () => {
 
     // sc-5875: presets are opt-in — select it explicitly to exercise the managed-LoRA mismatch block.
     await act(async () => {
-      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
+      [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
     });
 
-    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
     expect(container.textContent).toContain("Preset cannot run with Z-Image");
     expect(container.textContent).toContain("qwen_detail");
     expect(generate.disabled).toBe(true);
@@ -8004,7 +8043,7 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob).not.toHaveBeenCalled();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
     await changeField(field(container, "Model"), "qwen_image");
     await settle();
@@ -8072,17 +8111,17 @@ describe("SceneWorks app shell", () => {
     // Video Studio opens on Text→Video (sc-5716); this preset targets image_to_video, so switch
     // to that tab to exercise the managed-LoRA mismatch surface.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
     // sc-5875: presets are opt-in — select it explicitly to exercise the managed-LoRA mismatch block.
     await act(async () => {
-      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Dream Motion").click();
+      [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Dream Motion").click();
     });
     await settle();
 
-    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
     expect(container.textContent).toContain("Preset cannot run with LTX");
     expect(container.textContent).toContain("wan_motion");
     expect(generate.disabled).toBe(true);
@@ -8146,10 +8185,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll(".mode-control button")].find((button) => button.textContent === "Text → Video").click();
+      [...document.body.querySelectorAll(".mode-control button")].find((button) => button.textContent === "Text → Video").click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
 
     const quantSelect = field(container, "Quantization");
@@ -8163,7 +8202,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
     });
 
     expect(createVideoJob).toHaveBeenCalledWith(
@@ -8223,12 +8262,12 @@ describe("SceneWorks app shell", () => {
     // Video Studio opens on Text→Video (sc-5716); this LTX model is image_to_video-only, so switch
     // to that tab before exercising the LoRA picker + submit.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
     await settle();
 
@@ -8236,19 +8275,19 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("LTX Style");
     expect(container.textContent).not.toContain("Z Glow");
 
-    const loraCheckbox = container.querySelector(".lora-choice-list input[type=checkbox]");
+    const loraCheckbox = document.body.querySelector(".lora-choice-list input[type=checkbox]");
     await act(async () => {
       loraCheckbox.click();
     });
     await settle();
 
     // Selecting a LoRA reveals its weight slider, defaulting to the LoRA weight (0.8).
-    const weightSlider = container.querySelector(".lora-weight-row input[type=range]");
+    const weightSlider = document.body.querySelector(".lora-weight-row input[type=range]");
     expect(weightSlider).toBeTruthy();
-    expect(container.querySelector(".lora-weight-value").textContent).toBe("0.80");
+    expect(document.body.querySelector(".lora-weight-value").textContent).toBe("0.80");
     await changeField(weightSlider, "0.5");
 
-    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
     expect(generate.disabled).toBe(false);
 
     await act(async () => {
@@ -8305,7 +8344,7 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(container.textContent).toContain("Style preset");
-    const noneChip = [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent === "None");
+    const noneChip = [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent === "None");
     expect(noneChip).toBeTruthy();
   });
 
@@ -8347,12 +8386,12 @@ describe("SceneWorks app shell", () => {
 
     // sc-5875: presets are opt-in — select the Qwen preset; the model must stay on Qwen.
     await act(async () => {
-      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Qwen Detail").click();
+      [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Qwen Detail").click();
     });
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen_image", recipePresetId: "qwen_detail" }));
@@ -8403,7 +8442,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit").click();
+      [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit").click();
     });
     await settle();
 
@@ -8463,7 +8502,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Portrait Only");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
     });
     await settle();
 
@@ -8502,14 +8541,14 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Variations").value).toBe("4");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Edit").click();
     });
     await settle();
 
     expect(field(container, "Variations").value).toBe("1");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Text").click();
     });
     await settle();
 
@@ -8572,13 +8611,13 @@ describe("SceneWorks app shell", () => {
 
     // Video Studio opens on Text→Video (sc-5716); this preset targets image_to_video.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
     // sc-5875: presets are opt-in — select it explicitly before its defaults apply.
     await act(async () => {
-      [...container.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Dream Motion").click();
+      [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Dream Motion").click();
     });
     await settle();
 
@@ -8588,7 +8627,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Preset LoRA applied at generation: Video Motion");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
     });
 
     expect(createVideoJob).toHaveBeenCalledWith(
@@ -8662,17 +8701,17 @@ describe("SceneWorks app shell", () => {
 
     // Video Studio opens on Text→Video (sc-5716); SVD is image_to_video-only, so switch tabs.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
     // The prompt field advertises that no prompt is needed for promptless models.
-    const promptField = container.querySelector("textarea[aria-label='Prompt']");
+    const promptField = document.body.querySelector("textarea[aria-label='Prompt']");
     expect(promptField.placeholder).toContain("No prompt needed");
 
     // With a source image selected and an empty prompt, Render clip is enabled
     // and submits (a text-prompted model would be blocked here).
-    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
     expect(generate.disabled).toBe(false);
     await act(async () => {
       generate.click();
@@ -8736,7 +8775,7 @@ describe("SceneWorks app shell", () => {
     // Video Studio opens on Text→Video (sc-5716); enter Image→Video to filter the image_to_video
     // presets, then the test walks Text→Video and a model switch as before.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
@@ -8744,7 +8783,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Wan Motion");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Text → Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Text → Video").click();
     });
     await settle();
 
@@ -8752,7 +8791,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("LTX Motion");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
     await changeField(field(container, "Model"), "wan_2_2");
     await settle();
@@ -8823,7 +8862,7 @@ describe("SceneWorks app shell", () => {
     // Video Studio opens on Text→Video (sc-5716); these presets target image_to_video /
     // first_last_frame, so enter Image→Video to surface them.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
 
@@ -8831,7 +8870,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Start Frame");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "First → Last").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "First → Last").click();
     });
     await settle();
 
@@ -8888,22 +8927,22 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await changeField(field(container, "Name"), "Soft Morning");
     // New flow: open the LoRA picker, then click the compatible LoRA row to add it.
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".lora-pick-row")]
+      [...document.body.querySelectorAll(".lora-pick-row")]
         .find((button) => button.textContent.includes("Global Detail"))
         .click();
     });
     await changeField(field(container, "Weight"), "0.35");
     expect(field(container, "ID").value).toBe("soft_morning");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Create Preset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Create Preset").click();
     });
     expect(createPreset).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -8918,51 +8957,51 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Qwen Only");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await changeField(field(container, "Name"), "Plain Morning");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".lora-pick-row")]
+      [...document.body.querySelectorAll(".lora-pick-row")]
         .find((button) => button.textContent.includes("Global Detail"))
         .click();
     });
-    expect(container.querySelector(".lora-choice-list").textContent).toContain("Global Detail");
+    expect(document.body.querySelector(".lora-choice-list").textContent).toContain("Global Detail");
     await act(async () => {
-      [...container.querySelectorAll(".lora-choice button")].find((button) => button.textContent === "Remove").click();
+      [...document.body.querySelectorAll(".lora-choice button")].find((button) => button.textContent === "Remove").click();
     });
-    expect(container.querySelector(".lora-choice-list")).toBeNull();
+    expect(document.body.querySelector(".lora-choice-list")).toBeNull();
 
     await act(async () => {
-      [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
+      [...document.body.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
     });
     await changeField(field(container, "Description"), "Richer low key color.");
     expect(container.textContent).not.toContain("Queue Import");
     expect(field(container, "Source URL")).toBeUndefined();
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
     });
     await act(async () => {
-      [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
+      [...document.body.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
     });
     await changeField(field(container, "Description"), "Richer low key color.");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").click();
     });
     expect(updatePreset).toHaveBeenCalledWith("moody", expect.objectContaining({ ui: { description: "Richer low key color." } }), "global");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Duplicate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Duplicate").click();
     });
     expect(duplicatePreset).toHaveBeenCalledWith("moody", "global");
 
     await act(async () => {
-      [...container.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
+      [...document.body.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Archive").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Archive").click();
     });
     expect(deletePreset).toHaveBeenCalledWith("moody", "global");
   });
@@ -9005,7 +9044,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Missing or still importing");
     expect(container.textContent).toContain("Save blocked: pending_style has not finished importing.");
     expect(field(container, "Weight").disabled).toBe(true);
-    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").disabled).toBe(true);
+    expect([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").disabled).toBe(true);
     expect(updatePreset).not.toHaveBeenCalled();
   });
 
@@ -9058,16 +9097,16 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Frame 1 / 2");
 
     // Scrub to the second (low-confidence) frame and confirm the quality flag shows.
-    const scrubber = container.querySelector('input[type="range"]');
+    const scrubber = document.body.querySelector('input[type="range"]');
     await changeField(scrubber, "1");
     expect(container.textContent).toContain("Frame 2 / 2");
     expect(container.textContent).toContain("low confidence");
 
     // Scrub back and nudge the box X, then save the correction set.
     await changeField(scrubber, "0");
-    await changeField(container.querySelector('input[aria-label="Box x"]'), "0.5");
+    await changeField(document.body.querySelector('input[aria-label="Box x"]'), "0.5");
 
-    const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save corrections");
+    const save = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save corrections");
     expect(save.disabled).toBe(false);
     await act(async () => {
       save.click();
@@ -9086,18 +9125,18 @@ describe("SceneWorks app shell", () => {
       root.render(<ReplacePersonPanel {...props} />);
     });
 
-    const scrubber = container.querySelector('input[type="range"]');
+    const scrubber = document.body.querySelector('input[type="range"]');
     await changeField(scrubber, "1");
 
-    const reject = container.querySelector('.person-correction-reject input[type="checkbox"]');
+    const reject = document.body.querySelector('.person-correction-reject input[type="checkbox"]');
     await act(async () => {
       reject.click();
     });
 
     // Rejecting a frame disables its box inputs — replacement borrows a neighbor box.
-    expect(container.querySelector('input[aria-label="Box x"]').disabled).toBe(true);
+    expect(document.body.querySelector('input[aria-label="Box x"]').disabled).toBe(true);
 
-    const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save corrections");
+    const save = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save corrections");
     await act(async () => {
       save.click();
     });
@@ -9149,10 +9188,10 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("It appears to be nighttime.");
 
     // Asking a new question dispatches a VQA job for this asset.
-    const input = container.querySelector('textarea[aria-label="Ask about this image"]');
+    const input = document.body.querySelector('textarea[aria-label="Ask about this image"]');
     expect(input).not.toBeNull();
     await changeField(input, "What is the person wearing?");
-    const askButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Ask");
+    const askButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Ask");
     await act(async () => {
       askButton.click();
     });
@@ -9160,10 +9199,10 @@ describe("SceneWorks app shell", () => {
     expect(createVqaJob).toHaveBeenCalledWith(asset, "What is the person wearing?", 256);
 
     // Choosing a longer response length is passed through to the job.
-    await changeField(container.querySelector('select[aria-label="Response length"]'), "512");
+    await changeField(document.body.querySelector('select[aria-label="Response length"]'), "512");
     await changeField(input, "Write a detailed critique of this image.");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Ask").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Ask").click();
     });
     expect(createVqaJob).toHaveBeenLastCalledWith(asset, "Write a detailed critique of this image.", 512);
   });
@@ -9216,19 +9255,19 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await changeField(container.querySelector('select[aria-label="Asset tag"]'), "landscape");
-    const filteredTiles = [...container.querySelectorAll(".asset-tile")];
+    await changeField(document.body.querySelector('select[aria-label="Asset tag"]'), "landscape");
+    const filteredTiles = [...document.body.querySelectorAll(".asset-tile")];
     expect(filteredTiles).toHaveLength(1);
     expect(filteredTiles[0].textContent).toContain("Wide Hill");
 
-    await changeField(container.querySelector('input[aria-label="Add asset tag"]'), "  Moody  ");
+    await changeField(document.body.querySelector('input[aria-label="Add asset tag"]'), "  Moody  ");
     await act(async () => {
-      [...container.querySelectorAll(".asset-tag-form button")].find((button) => button.textContent === "Add").click();
+      [...document.body.querySelectorAll(".asset-tag-form button")].find((button) => button.textContent === "Add").click();
     });
     expect(updateAssetTags).toHaveBeenCalledWith(portrait, ["portrait", "moody"]);
 
     await act(async () => {
-      container.querySelector('button[aria-label="Remove portrait tag"]').click();
+      document.body.querySelector('button[aria-label="Remove portrait tag"]').click();
     });
     expect(updateAssetTags).toHaveBeenLastCalledWith(portrait, []);
   });
@@ -9276,9 +9315,9 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await changeField(container.querySelector('select[aria-label="Target character"]'), "char-2");
+    await changeField(document.body.querySelector('select[aria-label="Target character"]'), "char-2");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Move to Character").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Move to Character").click();
     });
     await settle();
 
@@ -9338,15 +9377,15 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector('input[aria-label="Select Plate A"]').click();
+      document.body.querySelector('input[aria-label="Select Plate A"]').click();
     });
     await act(async () => {
-      container.querySelector('input[aria-label="Select Plate B"]').click();
+      document.body.querySelector('input[aria-label="Select Plate B"]').click();
     });
     await settle();
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Discard").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Discard").click();
     });
     await settle();
 
@@ -9354,7 +9393,7 @@ describe("SceneWorks app shell", () => {
     expect(deleteAsset).toHaveBeenCalledWith(assetA);
     expect(deleteAsset).toHaveBeenCalledWith(assetB);
     // Selection clears once the fan-out finishes, so the bar disappears.
-    expect(container.querySelector(".batch-selection-bar")).toBeNull();
+    expect(document.body.querySelector(".batch-selection-bar")).toBeNull();
   });
 
   it("bulk-moves selected Library assets into a chosen character's assets", async () => {
@@ -9407,21 +9446,21 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector('input[aria-label="Select Plate A"]').click();
+      document.body.querySelector('input[aria-label="Select Plate A"]').click();
     });
     await act(async () => {
-      container.querySelector('input[aria-label="Select Plate B"]').click();
+      document.body.querySelector('input[aria-label="Select Plate B"]').click();
     });
     await settle();
 
     // Reveal the inline character picker, target Dax, then confirm.
     await act(async () => {
-      [...container.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Move").click();
+      [...document.body.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Move").click();
     });
     await settle();
-    await changeField(container.querySelector('select[aria-label="Move target"]'), "char-2");
+    await changeField(document.body.querySelector('select[aria-label="Move target"]'), "char-2");
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent?.startsWith("Move 2 to assets")).click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent?.startsWith("Move 2 to assets")).click();
     });
     await settle();
 
@@ -9438,7 +9477,7 @@ describe("SceneWorks app shell", () => {
       role: "asset",
       notes: "Added from Asset Library.",
     });
-    expect(container.querySelector(".batch-selection-bar")).toBeNull();
+    expect(document.body.querySelector(".batch-selection-bar")).toBeNull();
   });
 
   it("disables the Library move action for a character that already owns the asset", async () => {
@@ -9491,7 +9530,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const button = [...container.querySelectorAll("button")].find((item) => item.textContent === "Already added");
+    const button = [...document.body.querySelectorAll("button")].find((item) => item.textContent === "Already added");
     expect(button).toBeTruthy();
     expect(button.disabled).toBe(true);
     await act(async () => {
@@ -9546,7 +9585,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const tiles = [...container.querySelectorAll(".asset-tile")];
+    const tiles = [...document.body.querySelectorAll(".asset-tile")];
     expect(tiles).toHaveLength(1);
     expect(tiles[0].textContent).toContain("Studio Render");
     expect(container.textContent).not.toContain("Character Test");
@@ -9600,7 +9639,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const tileText = [...container.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ");
+    const tileText = [...document.body.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ");
     // Allow-listed origins + legacy (no origin) appear.
     for (const name of ["Image Studio", "Video Studio", "Doc Studio", "Uploaded", "Legacy No Origin"]) {
       expect(tileText).toContain(name);
@@ -9659,7 +9698,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // The detail panel shows the most-recent LIBRARY asset, never the character image.
-    const detail = container.querySelector(".asset-detail");
+    const detail = document.body.querySelector(".asset-detail");
     expect(detail).toBeTruthy();
     expect(detail.querySelector("h3").textContent).toBe("Studio Render");
     expect(container.textContent).not.toContain("Character Test");
@@ -9729,7 +9768,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const tiles = [...container.querySelectorAll(".asset-tile")];
+    const tiles = [...document.body.querySelectorAll(".asset-tile")];
     expect(tiles).toHaveLength(2);
     expect(tiles.map((tile) => tile.textContent).join(" ")).toContain("Castle upscaled");
     expect(tiles.map((tile) => tile.textContent).join(" ")).not.toContain("Castle original");
@@ -9852,21 +9891,21 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect([...container.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).toContain("Active Frame");
-    expect([...container.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).not.toContain("Discarded Frame");
+    expect([...document.body.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).toContain("Active Frame");
+    expect([...document.body.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).not.toContain("Discarded Frame");
 
     await act(async () => {
-      [...container.querySelectorAll('button')].find((button) => button.textContent === "Trashcan").click();
+      [...document.body.querySelectorAll('button')].find((button) => button.textContent === "Trashcan").click();
     });
-    expect([...container.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).toContain("Discarded Frame");
+    expect([...document.body.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).toContain("Discarded Frame");
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Restore").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Restore").click();
     });
     expect(updateAssetStatus).toHaveBeenCalledWith(trashed, { trashed: false });
 
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Purge").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Purge").click();
     });
     expect(purgeAsset).toHaveBeenCalledWith(trashed);
   });
@@ -9924,11 +9963,11 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // Empty Trash only appears in the Trashcan view.
-    expect([...container.querySelectorAll("button")].some((button) => button.textContent.startsWith("Empty Trash"))).toBe(false);
+    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent.startsWith("Empty Trash"))).toBe(false);
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Trashcan").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Trashcan").click();
     });
-    const emptyButton = [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Empty Trash"));
+    const emptyButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Empty Trash"));
     expect(emptyButton).toBeTruthy();
     expect(emptyButton.textContent).toContain("(2)");
 
@@ -9968,8 +10007,8 @@ describe("SceneWorks app shell", () => {
     await settle();
     // An image model without interleave doesn't satisfy Document Studio → gate shows.
     expect(container.textContent).toContain("Document Studio needs an interleave-capable model");
-    expect(container.querySelector(".model-availability-gate")).not.toBeNull();
-    expect(container.querySelector(".studio-form")).toBeNull();
+    expect(document.body.querySelector(".model-availability-gate")).not.toBeNull();
+    expect(document.body.querySelector(".studio-form")).toBeNull();
   });
 
   it("DocumentStudio renders an interleaved document and submits a compose job", async () => {
@@ -10027,24 +10066,24 @@ describe("SceneWorks app shell", () => {
     // The completed document renders text segments in order + the image segment.
     expect(container.textContent).toContain("Boil the water.");
     expect(container.textContent).toContain("Steep three minutes.");
-    const image = container.querySelector("img.document-image");
+    const image = document.body.querySelector("img.document-image");
     expect(image).not.toBeNull();
     expect(image.getAttribute("src")).toContain("assets/images/a.png");
 
     // Only interleave-capable models are offered (Z-Image filtered out).
-    const optionValues = [...container.querySelectorAll("select option")].map((option) => option.value);
+    const optionValues = [...document.body.querySelectorAll("select option")].map((option) => option.value);
     expect(optionValues).toContain("sensenova_u1_8b");
     expect(optionValues).not.toContain("z_image_turbo");
     // The size control offers the interleave buckets.
     expect(optionValues).toContain("2048x1152");
     // The system prompt is exposed and prefilled with the default.
-    const textareas = [...container.querySelectorAll("textarea")];
+    const textareas = [...document.body.querySelectorAll("textarea")];
     expect(textareas.some((field) => field.value.includes("multimodal assistant capable of reasoning"))).toBe(true);
 
     // Submitting composes an interleave job with prompt, model, size, and max images.
-    await changeField(container.querySelector("textarea"), "An illustrated guide to brewing tea");
-    await changeField(container.querySelector("input[type='number']"), "999");
-    const submit = [...container.querySelectorAll("button")].find((button) =>
+    await changeField(document.body.querySelector("textarea"), "An illustrated guide to brewing tea");
+    await changeField(document.body.querySelector("input[type='number']"), "999");
+    const submit = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Compose document"),
     );
     await act(async () => {
@@ -10117,10 +10156,10 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // Both runs stack: the finished document plus the queued run's progress card.
-    expect(container.querySelectorAll(".local-job-group").length).toBe(2);
+    expect(document.body.querySelectorAll(".local-job-group").length).toBe(2);
     expect(container.textContent).toContain("Boil the water.");
-    expect(container.querySelector(".document-view")).not.toBeNull();
-    expect(container.querySelector(".worker-progress-card.queued")).not.toBeNull();
+    expect(document.body.querySelector(".document-view")).not.toBeNull();
+    expect(document.body.querySelector(".worker-progress-card.queued")).not.toBeNull();
     expect(container.textContent).not.toContain("Your generated document will appear here.");
   });
 
@@ -10169,7 +10208,7 @@ describe("SceneWorks app shell", () => {
     // The saved document's text + image segments render in order.
     expect(container.textContent).toContain("Boil the water.");
     expect(container.textContent).toContain("Steep three minutes.");
-    const image = container.querySelector("img.document-image");
+    const image = document.body.querySelector("img.document-image");
     expect(image).not.toBeNull();
     expect(image.getAttribute("src")).toContain("assets/images/a.png");
     // The document JSON was fetched from its file path (with an abort signal).
@@ -10237,7 +10276,7 @@ describe("prompt guide popup (sc-1817)", () => {
   });
 
   const guideButton = () =>
-    [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "Prompt guide");
+    [...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === "Prompt guide");
 
   it("opens the selected image model's guide without submitting the form", async () => {
     const createImageJob = vi.fn();
@@ -10285,9 +10324,9 @@ describe("prompt guide popup (sc-1817)", () => {
     });
     await settle();
 
-    expect(container.querySelector("[role=dialog]")).not.toBeNull();
-    expect(container.querySelector("#prompt-guide-title").textContent).toBe("Z Guide");
-    expect(container.textContent).toContain("fetched /prompt-guides/z-image-turbo.md");
+    expect(document.body.querySelector("[role=dialog]")).not.toBeNull();
+    expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Z Guide");
+    expect(document.body.textContent).toContain("fetched /prompt-guides/z-image-turbo.md");
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
@@ -10335,10 +10374,10 @@ describe("prompt guide popup (sc-1817)", () => {
       guideButton().click();
     });
     await settle();
-    expect(container.querySelector("#prompt-guide-title").textContent).toBe("Z Guide");
+    expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Z Guide");
 
     await act(async () => {
-      container.querySelector(".modal-close").click();
+      document.body.querySelector(".modal-close").click();
     });
     await changeField(field(container, "Model"), "qwen_image");
     await settle();
@@ -10347,8 +10386,8 @@ describe("prompt guide popup (sc-1817)", () => {
       guideButton().click();
     });
     await settle();
-    expect(container.querySelector("#prompt-guide-title").textContent).toBe("Qwen Guide");
-    expect(container.textContent).toContain("fetched /prompt-guides/qwen-image.md");
+    expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Qwen Guide");
+    expect(document.body.textContent).toContain("fetched /prompt-guides/qwen-image.md");
   });
 
   it("falls back to the generic image guide when the model declares none", async () => {
@@ -10382,7 +10421,7 @@ describe("prompt guide popup (sc-1817)", () => {
     await settle();
 
     expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/generic-image.md");
-    expect(container.querySelector("#prompt-guide-title").textContent).toBe("Image Prompt Guide");
+    expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Image Prompt Guide");
   });
 
   it("falls back to the generic video guide and does not submit the video form", async () => {
@@ -10433,7 +10472,7 @@ describe("prompt guide popup (sc-1817)", () => {
     await settle();
 
     expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/generic-video.md");
-    expect(container.querySelector("#prompt-guide-title").textContent).toBe("Video Prompt Guide");
+    expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Video Prompt Guide");
     expect(createVideoJob).not.toHaveBeenCalled();
   });
 });
@@ -10490,7 +10529,7 @@ describe("refine my prompt (sc-2041)", () => {
       );
     });
 
-    const refine = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Refine my prompt"));
+    const refine = [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes("Refine my prompt"));
     await act(async () => {
       refine.click();
     });
@@ -10503,17 +10542,17 @@ describe("refine my prompt (sc-2041)", () => {
       guide: "# Guide\n\nWrite vividly.",
       signal: expect.any(AbortSignal),
     }));
-    expect(container.querySelector(".refine-review-text").textContent).toBe("A cinematic neon street at midnight, rain-slick.");
+    expect(document.body.querySelector(".refine-review-text").textContent).toBe("A cinematic neon street at midnight, rain-slick.");
     // Original prompt unchanged until the user applies.
-    expect(container.querySelector(".prompt-input").value).toBe("A cinematic frame of a neon street at midnight");
+    expect(document.body.querySelector(".prompt-input").value).toBe("A cinematic frame of a neon street at midnight");
 
-    const apply = [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "Apply");
+    const apply = [...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === "Apply");
     await act(async () => {
       apply.click();
     });
     await settle();
 
-    expect(container.querySelector(".prompt-input").value).toBe("A cinematic neon street at midnight, rain-slick.");
-    expect(container.querySelector(".refine-review")).toBeNull();
+    expect(document.body.querySelector(".prompt-input").value).toBe("A cinematic neon street at midnight, rain-slick.");
+    expect(document.body.querySelector(".refine-review")).toBeNull();
   });
 });

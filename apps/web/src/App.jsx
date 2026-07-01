@@ -527,6 +527,11 @@ export function App() {
     setPreviewAsset(null);
   };
   const [studioLaunch, setStudioLaunch] = useState(null);
+  // sc-8730: the launch channel INTO the Image Editor canvas (crop/upscale/refine
+  // screen, activeView === "ImageEditor"). Mirrors studioLaunch but targets the
+  // editor's openAsset(assetId) rather than Image Studio. `id` is a fresh UUID per
+  // launch so relaunching the same asset still fires the editor's id-keyed effect.
+  const [editorLaunch, setEditorLaunch] = useState(null);
   // sc-4198: a small notices store replaces the single `error` string that used to
   // double as a message bus — the fragile "lora import:"/"lora training:" startsWith
   // protocol. Each notice has a stable `kind`; pushing a kind replaces only that kind
@@ -1693,9 +1698,11 @@ export function App() {
     setActiveView("Image");
   }, []);
 
-  // "Edit" from the fullscreen preview: open Image Studio in edit mode with this
-  // image as the source, preselecting the family-matched edit model when possible.
-  function sendAssetToImageEdit(asset) {
+  // Open Image Studio in edit mode with this image as the source, preselecting the
+  // family-matched edit model when possible. sc-8730: this is the model-based path,
+  // no longer wired to the preview Edit button — it stays on the context so S4
+  // (sc-8729) can offer it as an "Edit in > Image Studio" context-menu item.
+  const sendAssetToImageEdit = useCallback((asset) => {
     if (!asset) {
       return;
     }
@@ -1708,7 +1715,24 @@ export function App() {
       model: editModelForAsset(asset, imageModels),
     });
     setActiveView("Image");
-  }
+  }, [imageModels]);
+
+  // sc-8730: "Edit" from the fullscreen preview now opens the Image Editor canvas
+  // (crop/upscale/refine) with this asset loaded via the editor's openAsset. This is
+  // the model-free path; the model-based Image Studio edit_image path lives in
+  // sendAssetToImageEdit above (kept for the S4 "Edit in > Image Studio" menu item).
+  const sendAssetToImageEditor = useCallback((asset) => {
+    if (!asset) {
+      return;
+    }
+    setSelectedAssetId(asset.id);
+    setEditorLaunch({ id: crypto.randomUUID(), assetId: asset.id });
+    setActiveView("ImageEditor");
+  }, []);
+
+  // The editor consumes editorLaunch and calls this to drop it, so navigating away
+  // and back into the Image Editor without a fresh launch doesn't re-open a stale asset.
+  const clearEditorLaunch = useCallback(() => setEditorLaunch(null), []);
 
   function recipeForAsset(asset) {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
@@ -1994,6 +2018,13 @@ export function App() {
     imageLocalJobs,
     documentLocalJobs,
     studioLaunch,
+    // sc-8730: Image Editor launch channel + the two Edit paths. sendAssetToImageEditor
+    // routes to the editor canvas (FullscreenPreview Edit button); sendAssetToImageEdit
+    // routes to Image Studio edit_image (exposed for the S4 sc-8729 context menu).
+    editorLaunch,
+    clearEditorLaunch,
+    sendAssetToImageEditor,
+    sendAssetToImageEdit,
     rememberLocalGenerationJob,
     // Person tracks (Video Studio + Replace Person)
     personTracks,
@@ -2087,6 +2118,7 @@ export function App() {
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
     createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
+    editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,
     loras, deleteLora, deleteModel, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
@@ -2337,7 +2369,7 @@ export function App() {
           }}
           nextAsset={previewNavigation.next}
           onClose={closePreview}
-          onEditImage={sendAssetToImageEdit}
+          onEditImage={sendAssetToImageEditor}
           onPreviewAsset={(asset, direction) => {
             if (direction) {
               previewDirectionRef.current = direction;

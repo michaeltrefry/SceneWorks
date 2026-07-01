@@ -47,27 +47,27 @@ describe("Markdown renderer", () => {
       />,
     );
 
-    expect(container.querySelector("h1").textContent).toBe("Title");
-    expect(container.querySelector("h2").textContent).toBe("Section");
-    expect(container.querySelector("strong").textContent).toBe("bold");
-    expect(container.querySelector("code").textContent).toBe("code");
-    const link = container.querySelector("a");
+    expect(document.body.querySelector("h1").textContent).toBe("Title");
+    expect(document.body.querySelector("h2").textContent).toBe("Section");
+    expect(document.body.querySelector("strong").textContent).toBe("bold");
+    expect(document.body.querySelector("code").textContent).toBe("code");
+    const link = document.body.querySelector("a");
     expect(link.getAttribute("href")).toBe("https://example.com/guide");
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
-    expect([...container.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["first item", "second item"]);
+    expect([...document.body.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["first item", "second item"]);
   });
 
   it("renders ordered lists and fenced code blocks", () => {
     render(<Markdown content={["1. step one", "2. step two", "", "```", "raw code line", "```"].join("\n")} />);
-    expect(container.querySelector("ol")).not.toBeNull();
-    expect([...container.querySelectorAll("ol li")].map((li) => li.textContent)).toEqual(["step one", "step two"]);
-    expect(container.querySelector("pre code").textContent).toBe("raw code line");
+    expect(document.body.querySelector("ol")).not.toBeNull();
+    expect([...document.body.querySelectorAll("ol li")].map((li) => li.textContent)).toEqual(["step one", "step two"]);
+    expect(document.body.querySelector("pre code").textContent).toBe("raw code line");
   });
 
   it("drops unsafe link hrefs instead of rendering a javascript: anchor", () => {
     render(<Markdown content={"Click [here](javascript:alert(1)) now."} />);
-    expect(container.querySelector("a")).toBeNull();
+    expect(document.body.querySelector("a")).toBeNull();
     expect(container.textContent).toContain("here");
   });
 });
@@ -103,10 +103,10 @@ describe("PromptGuideModal", () => {
     await settle();
 
     expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/z-image-turbo.md");
-    expect(container.querySelector("#prompt-guide-title").textContent).toBe("Z-Image-Turbo Prompt Guide");
-    expect(container.textContent).toContain("Z-Image-Turbo · Prompt guide");
-    expect(container.querySelector(".markdown-body h1").textContent).toBe("Z-Image Guide");
-    expect(container.textContent).toContain("Use short prompts.");
+    expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Z-Image-Turbo Prompt Guide");
+    expect(document.body.textContent).toContain("Z-Image-Turbo · Prompt guide");
+    expect(document.body.querySelector(".markdown-body h1").textContent).toBe("Z-Image Guide");
+    expect(document.body.textContent).toContain("Use short prompts.");
   });
 
   it("renders metadata source links when provided", async () => {
@@ -126,7 +126,7 @@ describe("PromptGuideModal", () => {
     });
     await settle();
 
-    const source = container.querySelector(".prompt-guide-sources a");
+    const source = document.body.querySelector(".prompt-guide-sources a");
     expect(source.textContent).toBe("Model card");
     expect(source.getAttribute("href")).toBe("https://example.com/card");
   });
@@ -139,8 +139,8 @@ describe("PromptGuideModal", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("could not be loaded");
-    expect(container.querySelector(".markdown-body")).toBeNull();
+    expect(document.body.textContent).toContain("could not be loaded");
+    expect(document.body.querySelector(".markdown-body")).toBeNull();
   });
 
   it("closes on Escape", async () => {
@@ -153,7 +153,7 @@ describe("PromptGuideModal", () => {
     await settle();
 
     await act(async () => {
-      container.querySelector("[role=dialog]").dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      document.body.querySelector("[role=dialog]").dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(onClose).toHaveBeenCalled();
   });

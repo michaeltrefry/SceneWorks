@@ -96,9 +96,9 @@ describe("StructuredPromptBuilder", () => {
     vi.clearAllMocks();
   });
 
-  const byPlaceholder = (prefix) => container.querySelector(`[placeholder^="${prefix}"]`);
+  const byPlaceholder = (prefix) => document.body.querySelector(`[placeholder^="${prefix}"]`);
   const buttonByText = (text) =>
-    [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+    [...document.body.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
 
   async function mount(props = {}) {
     await act(async () => root.render(<Harness {...props} />));
@@ -135,7 +135,7 @@ describe("StructuredPromptBuilder", () => {
     await mount();
     await act(async () => setValue(byPlaceholder("The scene behind"), "bg"));
     await act(async () => click(buttonByText("+ Object")));
-    const hex = container.querySelector('input[aria-label="Hex color"]');
+    const hex = document.body.querySelector('input[aria-label="Hex color"]');
     await act(async () => setValue(hex, "#ff0000"));
     await act(async () => click(buttonByText("Add")));
     await act(async () => setValue(hex, "#00ff00"));
@@ -150,9 +150,9 @@ describe("StructuredPromptBuilder", () => {
     await act(async () => setValue(byPlaceholder("The scene behind"), "a calm studio"));
     // Enable style so the document-level palette is available (the schema only
     // allows an overall palette inside a style block with a discriminator).
-    await act(async () => click(container.querySelector('.structured-checkline input[type="checkbox"]')));
+    await act(async () => click(document.body.querySelector('.structured-checkline input[type="checkbox"]')));
     await act(async () => setValue(byPlaceholder("telephoto"), "studio strobe, eye-level"));
-    const hex = container.querySelector('input[aria-label="Hex color"]');
+    const hex = document.body.querySelector('input[aria-label="Hex color"]');
     await act(async () => setValue(hex, "#0A2540"));
     await act(async () => click(buttonByText("Add")));
 
@@ -163,7 +163,7 @@ describe("StructuredPromptBuilder", () => {
 
   it("shows the live ordered-JSON preview and applies raw-JSON edits", async () => {
     await mount({ initialMode: "json" });
-    const editor = container.querySelector('textarea[aria-label="JSON caption"]');
+    const editor = document.body.querySelector('textarea[aria-label="JSON caption"]');
     expect(editor).toBeTruthy();
 
     const edited = '{"compositional_deconstruction": {"background": "new bg", "elements": []}}';
@@ -172,23 +172,23 @@ describe("StructuredPromptBuilder", () => {
 
     // Invalid JSON surfaces an error and preserves the last valid caption.
     await act(async () => setValue(editor, "{not json"));
-    expect(container.querySelector(".structured-error")).toBeTruthy();
+    expect(document.body.querySelector(".structured-error")).toBeTruthy();
     expect(snap.caption.compositional_deconstruction.background).toBe("new bg");
   });
 
   it("renders the plain-text fallback and forwards edits", async () => {
     await mount({ initialMode: "plain" });
-    const plain = container.querySelector('textarea[aria-label="Plain prompt"]');
+    const plain = document.body.querySelector('textarea[aria-label="Plain prompt"]');
     expect(plain).toBeTruthy();
     await act(async () => setValue(plain, "a fox in the snow"));
     expect(snap.plain).toBe("a fox in the snow");
     // No JSON preview in plain mode.
-    expect(container.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
+    expect(document.body.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
   });
 
   it("switches modes via the segmented control", async () => {
     await mount();
-    const jsonTab = [...container.querySelectorAll(".structured-mode button")].find(
+    const jsonTab = [...document.body.querySelectorAll(".structured-mode button")].find(
       (b) => b.textContent.trim() === "JSON",
     );
     await act(async () => click(jsonTab));
@@ -216,7 +216,7 @@ describe("StructuredPromptBuilder", () => {
     await mount({ initialMode: "plain", initialPlain: "an idea", onMagicExpand });
     await clickAndSettle(buttonByText("✨ Expand to caption"));
 
-    expect(container.querySelector(".structured-error")?.textContent).toContain("expansion blew up");
+    expect(document.body.querySelector(".structured-error")?.textContent).toContain("expansion blew up");
     expect(snap.mode).toBe("plain");
   });
 
@@ -257,7 +257,7 @@ describe("StructuredPromptBuilder", () => {
   // Pick a reference image through the asset picker modal so the caption button enables.
   async function selectReference() {
     await clickAndSettle(buttonByText("Select reference image"));
-    const card = container.querySelector(".asset-picker-card");
+    const card = document.body.querySelector(".asset-picker-card");
     await clickAndSettle(card);
     await clickAndSettle(buttonByText("Use Selection"));
   }
@@ -330,7 +330,7 @@ describe("StructuredPromptBuilder", () => {
     await selectReference();
     await clickAndSettle(buttonByText("✨ Generate JSON from image"));
 
-    expect(container.querySelector(".structured-error")?.textContent).toContain("captioning blew up");
+    expect(document.body.querySelector(".structured-error")?.textContent).toContain("captioning blew up");
     expect(snap.mode).toBe("plain");
   });
 
@@ -355,7 +355,7 @@ describe("StructuredPromptBuilder", () => {
     expect(buttonByText("✨ Generate JSON from image")).toBeFalsy();
     expect(buttonByText("Select reference image")).toBeFalsy();
     // The gate renders its download offer for the captioner.
-    expect(container.querySelector(".model-availability-gate")).toBeTruthy();
+    expect(document.body.querySelector(".model-availability-gate")).toBeTruthy();
     const download = buttonByText("Download");
     expect(download).toBeTruthy();
     await clickAndSettle(download);
@@ -372,7 +372,7 @@ describe("StructuredPromptBuilder", () => {
       visionCaptionReady: true,
     });
     // Ready → the live picker + button render, and the gate is NOT shown.
-    expect(container.querySelector(".model-availability-gate")).toBeFalsy();
+    expect(document.body.querySelector(".model-availability-gate")).toBeFalsy();
     expect(buttonByText("Select reference image")).toBeTruthy();
     expect(buttonByText("✨ Generate JSON from image")).toBeTruthy();
   });
@@ -380,7 +380,7 @@ describe("StructuredPromptBuilder", () => {
   it("hides the reference-image flow when no captioner is wired (gating, sc-8108)", async () => {
     await mount({ initialMode: "plain", initialPlain: "an idea" });
     expect(buttonByText("✨ Generate JSON from image")).toBeFalsy();
-    expect(container.querySelector(".structured-reference")).toBeFalsy();
+    expect(document.body.querySelector(".structured-reference")).toBeFalsy();
   });
 
   it("reports blocking validation errors in the preview (out-of-range bbox)", async () => {
@@ -392,26 +392,26 @@ describe("StructuredPromptBuilder", () => {
     };
     await mount({ initialCaption: bad });
     expect(snap.validation.ok).toBe(false);
-    expect(container.querySelector(".structured-issues-error")).toBeTruthy();
+    expect(document.body.querySelector(".structured-issues-error")).toBeTruthy();
   });
 
   it("shows the read-only caption preview in form mode (sc-8114)", async () => {
     await mount({ initialMode: "form" });
-    expect(container.querySelector('[aria-label="Caption preview"]')).toBeTruthy();
+    expect(document.body.querySelector('[aria-label="Caption preview"]')).toBeTruthy();
   });
 
   it("hides the duplicate read-only caption preview on the JSON tab (sc-8114)", async () => {
     await mount({ initialMode: "json" });
     // The JSON textarea already shows the canonical JSON, so the duplicate
     // read-only <pre> preview must NOT render on the JSON tab.
-    expect(container.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
+    expect(document.body.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
     // The editable JSON textarea is still present.
-    expect(container.querySelector('textarea[aria-label="JSON caption"]')).toBeTruthy();
+    expect(document.body.querySelector('textarea[aria-label="JSON caption"]')).toBeTruthy();
   });
 
   it("hides the read-only caption preview in plain mode (sc-8114)", async () => {
     await mount({ initialMode: "plain" });
-    expect(container.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
+    expect(document.body.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
   });
 
   it("still surfaces schema validation errors on the JSON tab without the preview (sc-8114)", async () => {
@@ -423,19 +423,19 @@ describe("StructuredPromptBuilder", () => {
     };
     await mount({ initialMode: "json", initialCaption: bad });
     // No duplicate preview pane...
-    expect(container.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
+    expect(document.body.querySelector('[aria-label="Caption preview"]')).toBeFalsy();
     // ...but the schema validation errors are still visible on the JSON tab.
     expect(snap.validation.ok).toBe(false);
-    expect(container.querySelector(".structured-issues-error")).toBeTruthy();
+    expect(document.body.querySelector(".structured-issues-error")).toBeTruthy();
   });
 
   // ----- accordion / collapsible elements (sc-8115) -----
 
   // Helpers scoped to the element list. An expanded row renders the editable
   // <textarea>; a collapsed row renders only the one-line summary button.
-  const elementRows = () => [...container.querySelectorAll(".structured-element")];
-  const expandedRows = () => [...container.querySelectorAll(".structured-element.expanded")];
-  const summaryButtons = () => [...container.querySelectorAll(".structured-element-summary")];
+  const elementRows = () => [...document.body.querySelectorAll(".structured-element")];
+  const expandedRows = () => [...document.body.querySelectorAll(".structured-element.expanded")];
+  const summaryButtons = () => [...document.body.querySelectorAll(".structured-element-summary")];
 
   const captionWithElements = (els) => ({
     compositional_deconstruction: { background: "bg", elements: els },
@@ -642,7 +642,7 @@ describe("StructuredPromptBuilder", () => {
     });
     expect(expandedRows()).toHaveLength(1);
     // Click the expanded row's toggle to collapse it -> zero expanded.
-    const toggle = container.querySelector(".structured-element-toggle");
+    const toggle = document.body.querySelector(".structured-element-toggle");
     await act(async () => click(toggle));
     expect(expandedRows()).toHaveLength(0);
     expect(summaryButtons()).toHaveLength(1);

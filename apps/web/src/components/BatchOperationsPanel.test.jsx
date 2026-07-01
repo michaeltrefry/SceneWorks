@@ -52,20 +52,20 @@ describe("BatchOperationsPanel (sc-6112)", () => {
       );
     });
 
-  const tab = (label) => [...container.querySelectorAll(".batch-ops-tabs button")].find((b) => b.textContent.trim() === label);
-  const runButton = () => [...container.querySelectorAll(".batch-ops-actions button")].find((b) => /^Run on/.test(b.textContent));
+  const tab = (label) => [...document.body.querySelectorAll(".batch-ops-tabs button")].find((b) => b.textContent.trim() === label);
+  const runButton = () => [...document.body.querySelectorAll(".batch-ops-actions button")].find((b) => /^Run on/.test(b.textContent));
 
   it("shows the op tabs + upscale params, and the asset count in the head", async () => {
     await mount();
-    expect(container.querySelector(".batch-ops-head h3").textContent).toContain("2 images");
-    expect([...container.querySelectorAll(".batch-ops-tabs button")].map((b) => b.textContent.trim())).toEqual([
+    expect(document.body.querySelector(".batch-ops-head h3").textContent).toContain("2 images");
+    expect([...document.body.querySelectorAll(".batch-ops-tabs button")].map((b) => b.textContent.trim())).toEqual([
       "Upscale",
       "Detail enhance",
       "AI edit",
     ]);
     // Default op is upscale → an Engine + Factor select.
-    expect(container.querySelector(".batch-ops-params").textContent).toContain("Engine");
-    expect(container.querySelector(".batch-ops-params").textContent).toContain("Factor");
+    expect(document.body.querySelector(".batch-ops-params").textContent).toContain("Engine");
+    expect(document.body.querySelector(".batch-ops-params").textContent).toContain("Factor");
   });
 
   it("fans the upscale op + params back to onRun", async () => {
@@ -84,7 +84,7 @@ describe("BatchOperationsPanel (sc-6112)", () => {
     await act(async () => tab("AI edit").click());
     // Empty prompt → Run disabled.
     expect(runButton().disabled).toBe(true);
-    const textarea = container.querySelector(".batch-ops-params textarea");
+    const textarea = document.body.querySelector(".batch-ops-params textarea");
     await act(async () => setValue(textarea, "make it snow"));
     expect(runButton().disabled).toBe(false);
     await act(async () => runButton().click());
@@ -101,8 +101,8 @@ describe("BatchOperationsPanel (sc-6112)", () => {
     });
     // Progress view replaces the form (no Run button) and lists per-item status.
     expect(runButton()).toBeUndefined();
-    expect(container.querySelector(".batch-ops-summary").textContent).toContain("1 / 2 done");
-    const items = [...container.querySelectorAll(".batch-ops-item")];
+    expect(document.body.querySelector(".batch-ops-summary").textContent).toContain("1 / 2 done");
+    const items = [...document.body.querySelectorAll(".batch-ops-item")];
     expect(items).toHaveLength(2);
     expect(items[0].textContent).toContain("Done");
     expect(items[1].textContent).toContain("Running");

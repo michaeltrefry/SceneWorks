@@ -107,14 +107,14 @@ describe("KeyPointLibraryScreen", () => {
     presets = [builtinPreset(), customPreset()];
     await render();
     // Each preset card carries an SVG overlay with exactly 5 landmark dots.
-    const overlays = container.querySelectorAll(".keypoint-card .kps-overlay");
+    const overlays = document.body.querySelectorAll(".keypoint-card .kps-overlay");
     expect(overlays.length).toBeGreaterThanOrEqual(2);
     const dots = overlays[0].querySelectorAll(".kps-overlay-dot");
     expect(dots.length).toBe(5);
     // Built-ins render on a neutral canvas (no source image); captures show their photo.
     expect(container.textContent).toContain("Front");
     expect(container.textContent).toContain("My Side");
-    const image = [...container.querySelectorAll("image")].find((el) =>
+    const image = [...document.body.querySelectorAll("image")].find((el) =>
       (el.getAttribute("href") ?? "").includes("assets/keypoints/asset_k1.png"),
     );
     expect(image).toBeTruthy();
@@ -123,7 +123,7 @@ describe("KeyPointLibraryScreen", () => {
   it("protects built-ins (no delete) and deletes a user preset against the reserved project", async () => {
     presets = [builtinPreset(), customPreset()];
     await render();
-    const deletes = [...container.querySelectorAll("button")].filter((b) => b.textContent.trim() === "Delete");
+    const deletes = [...document.body.querySelectorAll("button")].filter((b) => b.textContent.trim() === "Delete");
     // Only the one custom preset is deletable; the built-in has no delete control.
     expect(deletes).toHaveLength(1);
     await click(deletes[0]);
@@ -143,10 +143,10 @@ describe("KeyPointLibraryScreen", () => {
       result: { detected: true, kps: FRONT_KPS, lowConfidence: false, sourceWidth: 800, sourceHeight: 1000 },
     };
     await render(makeContext({ jobs: [job] }));
-    await click(container.querySelector("#keypoint-tab-capture"));
+    await click(document.body.querySelector("#keypoint-tab-capture"));
     await click(byText("Choose image")); // open the shared asset dialog (File tab default)
 
-    const fileInput = container.querySelector('#keypoint-panel-capture input[type="file"]');
+    const fileInput = document.body.querySelector('.modal-backdrop input[type="file"]');
     const file = new File(["x"], "face.png", { type: "image/png" });
     Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
     await act(async () => fileInput.dispatchEvent(new window.Event("change", { bubbles: true })));
@@ -159,7 +159,7 @@ describe("KeyPointLibraryScreen", () => {
     expect(JSON.parse(jobPost.body).payload.sourcePath).toBe("/data/cache/keypoint-uploads/upload-x.png");
 
     // The completed job yields a preview + a name seeded from the filename.
-    const nameInput = container.querySelector('#keypoint-panel-capture input[type="text"], #keypoint-panel-capture input:not([type])');
+    const nameInput = document.body.querySelector('#keypoint-panel-capture input[type="text"], #keypoint-panel-capture input:not([type])');
     expect(nameInput.value).toBe("face");
     await setInputValue(nameInput, "Captured front");
     await click(byText("Save preset"));
@@ -199,7 +199,7 @@ describe("KeyPointLibraryScreen", () => {
       result: { detected: true, kps: FRONT_KPS, lowConfidence: false, sourceWidth: 640, sourceHeight: 640 },
     };
     await render(makeContext({ jobs: [job], assets: [asset] }));
-    await click(container.querySelector("#keypoint-tab-capture"));
+    await click(document.body.querySelector("#keypoint-tab-capture"));
     await click(byText("Choose image"));
     await click(byText("Asset Library")); // dialog tab
     await click(byText("Studio Photo")); // candidate card
@@ -211,7 +211,7 @@ describe("KeyPointLibraryScreen", () => {
     expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/keypoints/sources")).toBe(true);
     expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/jobs")).toBe(true);
 
-    const nameInput = container.querySelector('#keypoint-panel-capture input[type="text"], #keypoint-panel-capture input:not([type])');
+    const nameInput = document.body.querySelector('#keypoint-panel-capture input[type="text"], #keypoint-panel-capture input:not([type])');
     await setInputValue(nameInput, "From asset");
     await click(byText("Save preset"));
 
@@ -223,16 +223,16 @@ describe("KeyPointLibraryScreen", () => {
     presets = [builtinPreset()];
     const job = { id: "job_kps_1", type: "kps_extract", status: "completed", result: { detected: false, reason: "no_face" } };
     await render(makeContext({ jobs: [job] }));
-    await click(container.querySelector("#keypoint-tab-capture"));
+    await click(document.body.querySelector("#keypoint-tab-capture"));
     await click(byText("Choose image"));
 
-    const fileInput = container.querySelector('#keypoint-panel-capture input[type="file"]');
+    const fileInput = document.body.querySelector('.modal-backdrop input[type="file"]');
     const file = new File(["x"], "face.png", { type: "image/png" });
     Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
     await act(async () => fileInput.dispatchEvent(new window.Event("change", { bubbles: true })));
     await act(async () => {});
 
-    expect(container.querySelector("#keypoint-panel-capture").textContent).toContain("No usable face");
+    expect(document.body.querySelector("#keypoint-panel-capture").textContent).toContain("No usable face");
     // No Save control offered and nothing posted to the preset endpoint.
     expect(byText("Save preset")).toBeFalsy();
     expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/keypoints")).toBe(false);
@@ -244,9 +244,9 @@ describe("KeyPointLibraryScreen", () => {
       { id: "builtin_default", name: "Default angles", orderedPresetIds: ["builtin_front"], isDefault: true, builtin: true },
     ];
     await render();
-    await click(container.querySelector("#keypoint-tab-collections"));
+    await click(document.body.querySelector("#keypoint-tab-collections"));
 
-    const nameInput = container.querySelector('#keypoint-panel-collections input');
+    const nameInput = document.body.querySelector('#keypoint-panel-collections input');
     await setInputValue(nameInput, "LoRA coverage");
     // Add both presets from the picker grid (in order).
     await click(byText("Front", ".keypoint-pick"));
@@ -268,7 +268,7 @@ describe("KeyPointLibraryScreen", () => {
       { id: "col_user", name: "My Set", orderedPresetIds: ["builtin_front"], isDefault: false },
     ];
     await render();
-    await click(container.querySelector("#keypoint-tab-collections"));
+    await click(document.body.querySelector("#keypoint-tab-collections"));
 
     await click(byText("Set default"));
     expect(

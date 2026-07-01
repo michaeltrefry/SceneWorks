@@ -19,7 +19,7 @@ const baseSettings = {
 };
 
 function buttonByText(container, text) {
-  return [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === text);
+  return [...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === text);
 }
 
 async function settle() {
@@ -68,8 +68,8 @@ describe("DatasetCaptionDialog", () => {
       />,
     );
 
-    expect(container.querySelector(".caption-missing-model").textContent).toContain("isn’t installed");
-    expect(container.querySelector(".caption-missing-model").textContent).toContain("17.0 GB");
+    expect(document.body.querySelector(".caption-missing-model").textContent).toContain("isn’t installed");
+    expect(document.body.querySelector(".caption-missing-model").textContent).toContain("17.0 GB");
     // Run is blocked while the model is missing.
     expect(buttonByText(container, "Caption missing").disabled).toBe(true);
 
@@ -81,7 +81,7 @@ describe("DatasetCaptionDialog", () => {
     await settle();
 
     expect(onDownloadModel).toHaveBeenCalledTimes(1);
-    expect(container.querySelector(".caption-missing-model").textContent).toContain("Downloading");
+    expect(document.body.querySelector(".caption-missing-model").textContent).toContain("Downloading");
   });
 
   it("shows no affordance and enables Run when the captioning model is present", () => {
@@ -97,7 +97,7 @@ describe("DatasetCaptionDialog", () => {
       />,
     );
 
-    expect(container.querySelector(".caption-missing-model")).toBeNull();
+    expect(document.body.querySelector(".caption-missing-model")).toBeNull();
     expect(buttonByText(container, "Caption missing").disabled).toBe(false);
   });
 });

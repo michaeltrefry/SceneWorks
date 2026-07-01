@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
@@ -761,6 +762,8 @@ export function ImageEditor() {
     purgeAsset,
     registerLeaveGuard,
     imageModels,
+    editorLaunch = null,
+    clearEditorLaunch,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
   // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
@@ -1355,6 +1358,22 @@ export function ImageEditor() {
     },
     [imageAssets, openFromBlob],
   );
+
+  // sc-8730: consume the App-level Image Editor launch channel. When something outside
+  // the editor (currently the FullscreenPreview "Edit" button via sendAssetToImageEditor)
+  // routes an asset here, App switches activeView to "ImageEditor" and stashes
+  // { id, assetId } in editorLaunch. Keyed on the launch id so it fires once per launch
+  // (relaunching the same asset gets a fresh id) and never on unrelated re-renders.
+  // Entering via the nav with no launch leaves editorLaunch null → no auto-open. We clear
+  // the launch after consuming it so navigating away and back doesn't re-open a stale asset.
+  useEffect(() => {
+    if (!editorLaunch?.assetId) {
+      return;
+    }
+    openAsset(editorLaunch.assetId);
+    clearEditorLaunch?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editorLaunch?.id]);
 
   const openFile = useCallback(
     (file) => {
@@ -3872,7 +3891,12 @@ export function ImageEditor() {
         />
       ) : null}
 
-      {newLayoutOpen ? (
+      {/* Portaled to document.body: the backdrop is `position: fixed`, which only
+          anchors to the viewport when no ancestor establishes a containing block.
+          Rendering it inline under the editor section left it vulnerable to being
+          trapped inside a transformed/filtered ancestor (see Modal.jsx). */}
+      {newLayoutOpen
+        ? createPortal(
         <div
           className="image-editor-modal-backdrop"
           onClick={() => setNewLayoutOpen(false)}
@@ -3922,8 +3946,10 @@ export function ImageEditor() {
               </button>
             </div>
           </div>
-        </div>
-      ) : null}
+        </div>,
+            document.body,
+          )
+        : null}
     </section>
   );
 }

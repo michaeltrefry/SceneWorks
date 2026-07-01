@@ -36,7 +36,7 @@ describe("ReferenceCaptionPicker", () => {
   });
 
   const buttonByText = (text) =>
-    [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+    [...document.body.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
 
   const refAsset = {
     id: "ref-1",
@@ -47,7 +47,7 @@ describe("ReferenceCaptionPicker", () => {
 
   async function selectReference() {
     await clickAndSettle(buttonByText("Select reference image"));
-    const card = container.querySelector(".asset-picker-card");
+    const card = document.body.querySelector(".asset-picker-card");
     await clickAndSettle(card);
     await clickAndSettle(buttonByText("Use Selection"));
   }
@@ -97,7 +97,7 @@ describe("ReferenceCaptionPicker", () => {
     await clickAndSettle(buttonByText("✨ Describe image"));
 
     expect(onApply).not.toHaveBeenCalled();
-    expect(container.querySelector(".structured-error")?.textContent).toContain(
+    expect(document.body.querySelector(".structured-error")?.textContent).toContain(
       "No usable description.",
     );
   });
@@ -111,7 +111,7 @@ describe("ReferenceCaptionPicker", () => {
     await selectReference();
     await clickAndSettle(buttonByText("✨ Describe image"));
 
-    expect(container.querySelector(".structured-error")?.textContent).toContain("describe blew up");
+    expect(document.body.querySelector(".structured-error")?.textContent).toContain("describe blew up");
   });
 
   it("gates behind the download offer (no picker/button) when the captioner is missing", async () => {
@@ -126,7 +126,7 @@ describe("ReferenceCaptionPicker", () => {
 
     expect(buttonByText("✨ Describe image")).toBeFalsy();
     expect(buttonByText("Select reference image")).toBeFalsy();
-    expect(container.querySelector(".model-availability-gate")).toBeTruthy();
+    expect(document.body.querySelector(".model-availability-gate")).toBeTruthy();
     const download = buttonByText("Download");
     expect(download).toBeTruthy();
     await clickAndSettle(download);

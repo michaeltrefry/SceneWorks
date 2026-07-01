@@ -101,9 +101,9 @@ describe("PoseLibraryScreen", () => {
   it("discards a selected pose against the reserved project", async () => {
     poseAssets = [poseAsset()];
     await render();
-    const tile = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Arm Raised"));
+    const tile = [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes("Arm Raised"));
     await click(tile);
-    const discard = [...container.querySelectorAll("button")].find((b) => b.textContent.trim() === "Discard");
+    const discard = [...document.body.querySelectorAll("button")].find((b) => b.textContent.trim() === "Discard");
     expect(discard).toBeTruthy();
     await click(discard);
     expect(
@@ -114,20 +114,20 @@ describe("PoseLibraryScreen", () => {
   it("opens a pose in the shared fullscreen preview on double-click", async () => {
     poseAssets = [poseAsset()];
     await render();
-    const tile = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Arm Raised"));
+    const tile = [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes("Arm Raised"));
     await act(async () => {
       tile.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true }));
     });
-    expect(container.querySelector(".preview-modal")).toBeTruthy();
+    expect(document.body.querySelector(".preview-modal")).toBeTruthy();
   });
 
   it("switches to the Create tab", async () => {
     poseAssets = [poseAsset()];
     await render();
-    const createTab = container.querySelector("#pose-library-tab-create");
+    const createTab = document.body.querySelector("#pose-library-tab-create");
     await click(createTab);
-    expect(container.querySelector("#pose-library-panel-poses").hidden).toBe(true);
-    expect(container.querySelector("#pose-library-panel-create").hidden).toBe(false);
+    expect(document.body.querySelector("#pose-library-panel-poses").hidden).toBe(true);
+    expect(document.body.querySelector("#pose-library-panel-create").hidden).toBe(false);
   });
 });
 
@@ -215,9 +215,9 @@ describe("PoseLibraryScreen — Create tab", () => {
   }
 
   const byText = (text, selector = "button") =>
-    [...container.querySelectorAll(selector)].find((el) => el.textContent.includes(text));
+    [...document.body.querySelectorAll(selector)].find((el) => el.textContent.includes(text));
   const exactBtn = (text) =>
-    [...container.querySelectorAll("button")].find((el) => el.textContent.trim() === text);
+    [...document.body.querySelectorAll("button")].find((el) => el.textContent.trim() === text);
 
   async function setInputValue(input, value) {
     await act(async () => {
@@ -229,7 +229,7 @@ describe("PoseLibraryScreen — Create tab", () => {
 
   it("runs photo → detect → categorize → save and posts to /api/v1/poses", async () => {
     await render();
-    await click(container.querySelector("#pose-library-tab-create"));
+    await click(document.body.querySelector("#pose-library-tab-create"));
 
     // Pick a Library image via the shared DatasetAddDialog.
     await click(byText("Add images"));
@@ -243,7 +243,7 @@ describe("PoseLibraryScreen — Create tab", () => {
     await click(byText("Generate poses"));
 
     // The completed job (from context.jobs) yields one candidate to categorize.
-    const categoryInput = container.querySelector('input[list="pose-category-suggestions"]');
+    const categoryInput = document.body.querySelector('input[list="pose-category-suggestions"]');
     expect(categoryInput).toBeTruthy();
     await setInputValue(categoryInput, "standing");
 
@@ -262,12 +262,12 @@ describe("PoseLibraryScreen — Create tab", () => {
     });
     expect(body.poses[0].pose.keypoints).toEqual([[0.5, 0.1, 5.0]]);
     // After save, control returns to the Poses tab.
-    expect(container.querySelector("#pose-library-panel-poses").hidden).toBe(false);
+    expect(document.body.querySelector("#pose-library-panel-poses").hidden).toBe(false);
   });
 
   it("fires the detector with assetId sources, not browser paths", async () => {
     await render();
-    await click(container.querySelector("#pose-library-tab-create"));
+    await click(document.body.querySelector("#pose-library-tab-create"));
     await click(byText("Add images"));
     await click(byText("Asset Library"));
     await click(byText("Photo"));
@@ -287,10 +287,10 @@ describe("PoseLibraryScreen — Create tab", () => {
     window.URL.createObjectURL = () => "blob:test";
     window.URL.revokeObjectURL = () => {};
     await render();
-    await click(container.querySelector("#pose-library-tab-create"));
+    await click(document.body.querySelector("#pose-library-tab-create"));
     await click(byText("Add images"));
     // File tab is the default; fire a change on its <input type=file> with an image.
-    const fileInput = container.querySelector('input[type="file"]');
+    const fileInput = document.body.querySelector('input[type="file"]');
     const file = new File(["x"], "photo.png", { type: "image/png" });
     Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
     await act(async () => {
@@ -321,7 +321,7 @@ describe("PoseLibraryScreen — Create tab", () => {
       result: { sources: [{ ...source, poses: [{ ...source.poses[0], keypoints: kps }] }] },
     };
     await render(makeContext({ jobs: [job] }));
-    await click(container.querySelector("#pose-library-tab-create"));
+    await click(document.body.querySelector("#pose-library-tab-create"));
     await click(byText("Add images"));
     await click(byText("Asset Library"));
     await click(byText("Photo"));
@@ -336,7 +336,7 @@ describe("PoseLibraryScreen — Create tab", () => {
 
   it("requires a workspace before creating poses", async () => {
     await render(makeContext({ activeProject: null }));
-    await click(container.querySelector("#pose-library-tab-create"));
-    expect(container.querySelector("#pose-library-panel-create").textContent).toContain("Open a workspace");
+    await click(document.body.querySelector("#pose-library-tab-create"));
+    expect(document.body.querySelector("#pose-library-panel-create").textContent).toContain("Open a workspace");
   });
 });
