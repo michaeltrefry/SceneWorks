@@ -103,6 +103,13 @@ import {
 } from "../modelEligibility.js";
 import { ControlPanel } from "../components/ControlPanel.jsx";
 import { pidToggleVisible } from "../pidEligibility.js";
+import {
+  defaultTierSelection,
+  installedTiers,
+  shouldShowTierPicker,
+  tierLabel,
+  tierQuantize,
+} from "../quantTier.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { pickClosestResolution } from "../resolutionMatch.js";
 import {
@@ -440,6 +447,21 @@ export function ImageStudio() {
   // Boogu precision toggle (sc-6568): off = the packed Q8 default; on emits `advanced.mlxQuantize: 0`
   // (the full-precision bf16 build, fetched on demand by the worker). Sticky pref, default off (Q8).
   const [bf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
+  // Generation-time quant-tier toggle (sc-8515, epic 8506): for a model with MORE THAN ONE
+  // quant tier installed (sc-8508 per-variant install state), the advanced panel renders a
+  // picker so the user can A/B a bf16 vs Q8 vs Q4 build. The picked tier rides
+  // `advanced.mlxQuantize` (bf16→0, q8→8, q4→4); the worker's resolve_quant + generator cache
+  // route to it (reload-always — the cache evicts + reloads on a heavy-tier switch). `quantTier`
+  // holds the selected tier key ("" = no picker / not applicable). Last-used is persisted PER
+  // MODEL in `lastUsedTiers` so re-entering a model restores the tier you last generated with.
+  const [lastUsedTiers, setLastUsedTiers] = useState(
+    saved.lastUsedTiers && typeof saved.lastUsedTiers === "object" ? saved.lastUsedTiers : {},
+  );
+  const [quantTier, setQuantTier] = useState("");
+  // Brief "loading <tier>" hint shown right after a switch (reload-always): switching a heavy
+  // tier evicts + reloads on the worker, so we surface a transient loading note rather than
+  // implying an instant swap. Cleared on a short timer; purely cosmetic.
+  const [tierSwitching, setTierSwitching] = useState("");
   // PiD decoder toggle (epic 7840, sc-7851): off = the model's native VAE decode; on emits
   // `advanced.usePid: true`, routing decode through the optional PiD pixel-diffusion decoder
   // (decode + 2K/4K super-resolve, non-commercial output). Sticky pref, default off; the
@@ -659,6 +681,12 @@ export function ImageStudio() {
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
   // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
   const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
+  // Installed quant tiers of the active model + whether the tier picker should show (sc-8515).
+  // The picker renders only when MORE THAN ONE tier is installed; a single installed tier keeps
+  // the studio unchanged (no toggle). Boogu's `precisionToggle` is orthogonal — those models are
+  // single-download (no variant matrix), so they never hit this path.
+  const availableTiers = useMemo(() => installedTiers(selectedModel), [selectedModel]);
+  const showTierPicker = useMemo(() => shouldShowTierPicker(selectedModel), [selectedModel]);
   // PiD decoder toggle visibility (epic 7840, sc-7851): the model's latent space has a PiD
   // backbone (ui.pid) AND that backbone's PiD checkpoint is installed. Hidden otherwise — for
   // non-eligible models (e.g. SenseNova) and for eligible models whose checkpoint isn't
@@ -893,6 +921,38 @@ export function ImageStudio() {
     }
     setResolution(preferredResolution(selectedModel, resolutionOptions));
   }, [resolutionOptions, resolution, selectedModel]);
+  // Keep the selected quant tier valid for the active model (sc-8515). When the current tier is
+  // still installed for this model, leave it; otherwise snap to the model's default selection
+  // (last-used-for-this-model → declared default → q4 → first installed). Also clears to "" when
+  // no tier is installed / the model has no matrix, so a stale tier never leaks into the payload.
+  // Keyed on `model` (not `selectedModel`) plus the installed-tier list so a catalog refresh that
+  // newly installs a second tier re-derives the default without churning on every render.
+  const availableTiersKey = availableTiers.join(",");
+  useEffect(() => {
+    if (availableTiers.includes(quantTier)) {
+      return;
+    }
+    setQuantTier(defaultTierSelection(selectedModel, lastUsedTiers[model]) ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, availableTiersKey]);
+  // Switch the active quant tier (sc-8515): persist it as this model's last-used tier and surface
+  // a brief "loading <tier>" note (reload-always — the worker evicts + reloads a heavy tier on the
+  // next generation; there is no co-residence). The note is cosmetic and self-clears.
+  const tierSwitchTimer = useRef(null);
+  useEffect(() => () => clearTimeout(tierSwitchTimer.current), []);
+  const handleTierChange = useCallback(
+    (nextTier) => {
+      if (nextTier === quantTier) {
+        return;
+      }
+      setQuantTier(nextTier);
+      setLastUsedTiers((prev) => ({ ...prev, [model]: nextTier }));
+      setTierSwitching(nextTier);
+      clearTimeout(tierSwitchTimer.current);
+      tierSwitchTimer.current = setTimeout(() => setTierSwitching(""), 1500);
+    },
+    [model, quantTier],
+  );
   const {
     availablePresets,
     selectedPreset,
@@ -1210,6 +1270,7 @@ export function ImageStudio() {
     enhancePrompt,
     bf16Precision,
     usePid,
+    lastUsedTiers,
   });
 
   // Snapshot the current working config into a named recipe preset in the
@@ -1474,6 +1535,15 @@ export function ImageStudio() {
           // exposes the precision toggle AND bf16 is selected; the default Q8 emits nothing (the
           // worker reads manifest mlx.quantize and fetches the `<variant>-bf16/` subfolder on demand).
           ...(precisionToggle && bf16Precision ? { mlxQuantize: 0 } : {}),
+          // Quant-tier A/B (sc-8515): when the model has >1 tier installed and a tier is picked,
+          // send that tier's mlxQuantize (bf16→0, q8→8, q4→4). The worker's resolve_quant +
+          // generator cache route to it (reload-always). Emitted only when the picker is shown
+          // AND the picked tier maps to a known quant value, so single-tier models and the
+          // "default" pseudo-variant never leak an mlxQuantize into the payload. Takes precedence
+          // over the Boogu precisionToggle above (which is on a disjoint set of non-matrix models).
+          ...(showTierPicker && tierQuantize(quantTier) !== null
+            ? { mlxQuantize: tierQuantize(quantTier) }
+            : {}),
           // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
           // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
           // VAE for the PiD decode + 2K/4K super-resolve pass; it rides `advanced` (opaque
@@ -2196,6 +2266,26 @@ export function ImageStudio() {
                       type="checkbox"
                     />
                     Enhance prompt
+                  </label>
+                ) : null}
+                {showTierPicker ? (
+                  <label className="quant-tier-picker" title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation.">
+                    Quant tier
+                    <select
+                      onChange={(event) => handleTierChange(event.target.value)}
+                      value={quantTier}
+                    >
+                      {availableTiers.map((tier) => (
+                        <option key={tier} value={tier}>
+                          {tierLabel(tier)}
+                        </option>
+                      ))}
+                    </select>
+                    {tierSwitching ? (
+                      <span className="field-hint" role="status">
+                        Loading {tierLabel(tierSwitching)}…
+                      </span>
+                    ) : null}
                   </label>
                 ) : null}
                 {precisionToggle ? (
