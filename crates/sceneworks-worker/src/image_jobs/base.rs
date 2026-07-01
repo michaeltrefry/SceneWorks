@@ -317,6 +317,12 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "qwen_image",
     "qwen_image_edit_2511",
     "qwen_image_edit_2511_lightning",
+    // FLUX.1 (sc-8669, Group-B): schnell + dev ship the standard q4/q8/bf16 turnkey. FLUX quantizes
+    // all four components (DiT transformer + CLIP + T5 + VAE attention), so the TE is packed too —
+    // hence NOT in DENSE_TE_TIER_MODELS (the q4/q8 load-quant is a harmless no-op on already-packed
+    // weights, bf16 resolves to Quant::None). Replaces the gated BFL download + install-time quantize.
+    "flux_schnell",
+    "flux_dev",
 ];
 
 /// Standard-tier models whose text encoder ships DENSE bf16 in EVERY tier (epic 8506, sc-8711:
