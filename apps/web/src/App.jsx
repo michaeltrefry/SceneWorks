@@ -469,6 +469,10 @@ export function App() {
   // of "access token required" errors (epic 4484).
   const [accessResolved, setAccessResolved] = useState(false);
   const [token, setToken] = useState(() => window.localStorage.getItem("sceneworks-token") ?? "");
+  // What the user is typing into the login gate (sc-8808). Kept separate from the
+  // live `token` so keystrokes never flip `authenticated` or churn the data/SSE
+  // effects; `token` only changes once /api/v1/auth/verify accepts the draft.
+  const [passwordDraft, setPasswordDraft] = useState("");
   // Wrong-password feedback for the remote-browser login gate (epic 4484 story 7).
   const [authError, setAuthError] = useState("");
   const [projects, setProjects] = useState([]);
@@ -1262,13 +1266,16 @@ export function App() {
 
 
   // Remote-browser login (epic 4484 story 7): the password IS the API access token.
-  // Verify it against the public /api/v1/auth/verify endpoint BEFORE persisting, so a
-  // wrong password keeps the gate up (instead of saving a bad token and silently
-  // failing every subsequent request). A correct password is stored to localStorage
-  // and unlocks the app; it persists across reloads.
+  // Verify the typed draft against the public /api/v1/auth/verify endpoint BEFORE
+  // promoting it to the live `token`, so a wrong password keeps the gate up with an
+  // inline error (instead of saving a bad token and silently failing every subsequent
+  // request). A correct password is stored to localStorage and unlocks the app; it
+  // persists across reloads. Promoting the token here flips `authenticated`, and the
+  // [authenticated, token] effects perform the initial data load and SSE connect
+  // exactly once — no explicit refreshData() call, or it would double-fetch (sc-8808).
   async function saveToken(event) {
     event.preventDefault();
-    const candidate = token.trim();
+    const candidate = passwordDraft.trim();
     if (!candidate) {
       setAuthError("Enter the password.");
       return;
@@ -1285,17 +1292,18 @@ export function App() {
     }
     window.localStorage.setItem("sceneworks-token", candidate);
     setToken(candidate);
+    setPasswordDraft("");
     setAuthError("");
     setError("");
-    refreshData();
   }
 
   // Clear the stored password and re-show the login gate ("lock"/forget affordance,
-  // epic 4484 story 7). Setting the token state to "" forces a re-render so the gate
-  // (which keys off the stored token) reappears.
+  // epic 4484 story 7). Setting the token state to "" re-renders the gate, which
+  // keys off the token state (sc-8808).
   function lockRemote() {
     window.localStorage.removeItem("sceneworks-token");
     setToken("");
+    setPasswordDraft("");
     setAuthError("");
   }
 
@@ -2252,17 +2260,20 @@ export function App() {
           <p className="notice error" key={notice.kind}>{notice.message}</p>
         ))}
 
-        {access.authRequired && !isDesktopShell && !window.localStorage.getItem("sceneworks-token") ? (
+        {/* Gate visibility keys off the token STATE (not a render-time localStorage
+            read), and the input edits a local draft — never the live token — so
+            typing can't flip `authenticated` or fire API/SSE traffic (sc-8808). */}
+        {access.authRequired && !isDesktopShell && !token ? (
           <section className="auth-band">
             <form onSubmit={saveToken}>
               <label htmlFor="token">Password</label>
               <div className="form-row">
                 <input
                   id="token"
-                  onChange={(event) => setToken(event.target.value)}
+                  onChange={(event) => setPasswordDraft(event.target.value)}
                   placeholder="Enter the access password"
                   type="password"
-                  value={token}
+                  value={passwordDraft}
                 />
                 <button type="submit">Unlock</button>
               </div>
