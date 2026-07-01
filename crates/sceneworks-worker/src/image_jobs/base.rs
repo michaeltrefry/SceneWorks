@@ -2539,6 +2539,55 @@ fn candle_krea_repo(request: &ImageRequest) -> String {
         .unwrap_or_else(|| CANDLE_KREA_REPO.to_owned())
 }
 
+/// The default candle Lens / Lens-Turbo weights repo for a variant. Microsoft pulled the original
+/// `microsoft/Lens` + `microsoft/Lens-Turbo` from HF; the macOS/MLX path recovered them as the
+/// packed `SceneWorks/lens-mlx` / `SceneWorks/lens-turbo-mlx` tiers (sc-8767 — the `MODEL_TABLE`
+/// default + the macOS MLX repo), which are MLX-quantized (`bf16/`/`q8/`/`q4/` subdirs) and NOT
+/// candle-readable. The candle lane instead loads a re-assembled **self-contained diffusers** snapshot
+/// (`tokenizer/ text_encoder/ transformer/ vae/` at the repo root — exactly what `Pipeline::load_components`
+/// reads): `SceneWorks/Lens` (base) / `SceneWorks/Lens-Turbo` (distilled), rebuilt from the Comfy-Org/Lens
+/// DiT + stock `openai/gpt-oss-20b` (MXFP4) encoder/tokenizer + the FLUX.2-dev VAE (sc-8799 — the candle
+/// sibling of sc-8767). Loaded from the snapshot root, no subdir. Per-variant like `candle_boogu_default_repo`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_lens_default_repo(model: &str) -> &'static str {
+    match model {
+        "lens_turbo" => "SceneWorks/Lens-Turbo",
+        _ => "SceneWorks/Lens",
+    }
+}
+
+/// Resolve the candle Lens weights repo for `request.model`: the off-Mac (`std::env::consts::OS`)
+/// download entry's `repo` from the manifest (the single source of truth, also driving the downloader) —
+/// else the per-variant [`candle_lens_default_repo`]. Deliberately NOT the entry-level `repo` /
+/// `model_repo`, which is the macOS MLX turnkey (`SceneWorks/lens-mlx`, unreadable by the candle
+/// diffusers loader). Mirrors `candle_boogu_repo` / `candle_krea_repo`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_lens_repo(request: &ImageRequest) -> String {
+    let os = std::env::consts::OS;
+    request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|downloads| {
+            downloads.iter().find_map(|entry| {
+                let matches_os = entry
+                    .get("platforms")
+                    .and_then(Value::as_array)
+                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
+                if !matches_os {
+                    return None;
+                }
+                entry
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|repo| !repo.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| candle_lens_default_repo(&request.model).to_owned())
+}
+
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
 /// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
 /// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →
@@ -2597,19 +2646,29 @@ async fn generate_candle_stream(
     // q8/q4, so the candle lane loads bf16 from the ungated public `krea/Krea-2-Turbo` (the boogu pattern —
     // the diffusers snapshot root, no subdir).
     let is_krea = request.model == "krea_2_turbo";
-    // Ideogram + Boogu + Krea are the candle image families whose `MODEL_TABLE` turnkey isn't
+    // Lens / Lens-Turbo (sc-8799) is the fourth such family: Microsoft pulled the original
+    // `microsoft/Lens*`, and the recovered `SceneWorks/lens-mlx` / `SceneWorks/lens-turbo-mlx` turnkeys
+    // (sc-8767) are MLX-packed q4/q8/bf16 tiers the candle diffusers loader can't read, so the candle lane
+    // loads the re-assembled self-contained diffusers snapshot `SceneWorks/Lens` / `SceneWorks/Lens-Turbo`
+    // (snapshot root, no subdir).
+    let is_lens = matches!(request.model.as_str(), "lens" | "lens_turbo");
+    // Ideogram + Boogu + Krea + Lens are the candle image families whose `MODEL_TABLE` turnkey isn't
     // candle-readable: the published `SceneWorks/ideogram-4-mlx` / `SceneWorks/boogu-image-mlx` /
-    // `SceneWorks/krea-2-turbo-mlx` (the macOS MLX repos) are MLX-quantized, so the candle lane loads bf16
-    // from a different repo. Ideogram re-hosts a bf16 copy (`SceneWorks/ideogram-4`'s `bf16/` subdir,
-    // because the upstream is gated); Boogu + Krea point straight at their ungated public originals
-    // (`Boogu/Boogu-Image-0.1-*` / `krea/Krea-2-Turbo`, loaded from the snapshot root). macOS keeps the MLX
-    // turnkeys. Every other candle family shares its upstream diffusers repo via `model_repo`.
+    // `SceneWorks/krea-2-turbo-mlx` / `SceneWorks/lens{,-turbo}-mlx` (the macOS MLX repos) are
+    // MLX-quantized, so the candle lane loads from a different repo. Ideogram re-hosts a bf16 copy
+    // (`SceneWorks/ideogram-4`'s `bf16/` subdir, because the upstream is gated); Boogu + Krea point straight
+    // at their ungated public originals (`Boogu/Boogu-Image-0.1-*` / `krea/Krea-2-Turbo`); Lens loads a
+    // re-assembled diffusers rehost (`SceneWorks/Lens{,-Turbo}`, the original source being dead) — all from
+    // the snapshot root. macOS keeps the MLX turnkeys. Every other candle family shares its upstream
+    // diffusers repo via `model_repo`.
     let repo = if is_ideogram {
         candle_ideogram_repo(request)
     } else if is_boogu {
         candle_boogu_repo(request)
     } else if is_krea {
         candle_krea_repo(request)
+    } else if is_lens {
+        candle_lens_repo(request)
     } else {
         model_repo(request, &model)
     };
@@ -3163,6 +3222,23 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("sd3_5_large"), "candle_sd3");
         assert_eq!(candle_adapter_label("sd3_5_large_turbo"), "candle_sd3");
         assert_eq!(candle_adapter_label("sd3_5_medium"), "candle_sd3");
+    }
+
+    // sc-8799: the candle Lens lane resolves the re-assembled diffusers rehost per variant (NOT the
+    // MLX-packed `SceneWorks/lens{,-turbo}-mlx` turnkey `model_repo` falls back to), since Microsoft
+    // pulled the original `microsoft/Lens*`. Base → `SceneWorks/Lens`, distilled → `SceneWorks/Lens-Turbo`.
+    // `candle_lens_repo` layers only a manifest-`downloads` override on top of this default (the exact
+    // shape unit-tested for the sibling `candle_ideogram_repo` lane), so the per-variant map is the crux.
+    #[test]
+    fn candle_lens_default_repo_is_per_variant_diffusers_rehost() {
+        assert_eq!(candle_lens_default_repo("lens"), "SceneWorks/Lens");
+        assert_eq!(
+            candle_lens_default_repo("lens_turbo"),
+            "SceneWorks/Lens-Turbo"
+        );
+        // Neither default is the MLX turnkey the entry-level `repo` / `model_repo` would supply.
+        assert!(!candle_lens_default_repo("lens").ends_with("-mlx"));
+        assert!(!candle_lens_default_repo("lens_turbo").ends_with("-mlx"));
     }
 
     #[test]
