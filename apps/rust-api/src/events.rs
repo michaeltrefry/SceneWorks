@@ -38,66 +38,22 @@ impl EventHub {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct EventTicketStore {
-    ttl: Duration,
-    tickets: Mutex<HashMap<String, Instant>>,
-}
-
-impl EventTicketStore {
-    pub(crate) fn new(ttl_seconds: u64) -> Self {
-        Self {
-            ttl: Duration::from_secs(ttl_seconds),
-            tickets: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn issue(&self) -> Result<EventTicket, ApiError> {
-        let now = Instant::now();
-        let mut tickets = self.tickets.lock();
-        prune_tickets(&mut tickets, now);
-        let ticket = Uuid::new_v4().simple().to_string();
-        tickets.insert(ticket.clone(), now + self.ttl);
-        Ok(EventTicket {
-            ticket,
-            expires_in_seconds: self.ttl.as_secs(),
-        })
-    }
-
-    fn consume(&self, ticket: &str) -> Result<(), ApiError> {
-        let now = Instant::now();
-        let mut tickets = self.tickets.lock();
-        prune_tickets(&mut tickets, now);
-        match tickets.remove(ticket) {
-            Some(expires_at) if expires_at >= now => Ok(()),
-            _ => Err(ApiError::unauthorized(
-                "Invalid or expired event stream ticket",
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EventTicket {
-    ticket: String,
-    expires_in_seconds: u64,
-}
-
-pub(crate) async fn create_event_ticket(
-    State(state): State<AppState>,
-) -> Result<Json<EventTicket>, ApiError> {
-    Ok(Json(state.event_tickets.issue()?))
+pub(crate) async fn create_event_ticket(State(state): State<AppState>) -> Json<TicketResponse> {
+    Json(state.event_tickets.issue())
 }
 
 pub(crate) async fn job_events(
     State(state): State<AppState>,
     Query(query): Query<EventsQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    if !state.settings.access_token.is_empty() {
-        state
+    if !state.settings.access_token.is_empty()
+        && !state
             .event_tickets
-            .consume(query.ticket.as_deref().unwrap_or_default())?;
+            .consume(query.ticket.as_deref().unwrap_or_default())
+    {
+        return Err(ApiError::unauthorized(
+            "Invalid or expired event stream ticket",
+        ));
     }
     Ok(Sse::new(sse_event_stream(state.events.subscribe())))
 }
@@ -140,8 +96,4 @@ fn sse_message_event(message: EventMessage) -> Event {
 
 fn heartbeat_event() -> Event {
     Event::default().event("heartbeat").data(HEARTBEAT_SSE_DATA)
-}
-
-fn prune_tickets(tickets: &mut HashMap<String, Instant>, now: Instant) {
-    tickets.retain(|_, expires_at| *expires_at >= now);
 }

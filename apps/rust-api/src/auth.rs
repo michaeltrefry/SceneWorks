@@ -16,6 +16,7 @@ pub(crate) async fn access_control(
         || !requires_token(request.uri().path())
         || loopback_trusted(state.settings.trust_loopback, peer)
         || is_authorized(request.headers(), &state.settings)
+        || media_ticket_authorized(&state, &request)
     {
         return next.run(request).await;
     }
@@ -86,6 +87,56 @@ pub(crate) fn requires_token(path: &str) -> bool {
 /// a live listener; mirrors `should_warn_open_bind`.
 pub(crate) fn loopback_trusted(trust_loopback: bool, peer: Option<SocketAddr>) -> bool {
     trust_loopback && peer.is_some_and(|addr| addr.ip().is_loopback())
+}
+
+/// Whether a request may bypass the header-token check because it carries a valid
+/// media ticket (sc-8810). Browsers cannot attach headers to element-driven requests
+/// (`<img src>`, `<video src>`, `<a download>`), so — mirroring the SSE ticket — an
+/// authenticated client mints a short-lived ticket (POST /api/v1/files/ticket) and
+/// appends it as a `?ticket=` query param. The bypass is scoped hard: GET only, and
+/// only the read-only media routes (project files + pose previews); every other
+/// route still requires the real token, and an SSE event ticket is never accepted
+/// here (separate store).
+fn media_ticket_authorized(state: &AppState, request: &Request<axum::body::Body>) -> bool {
+    if request.method() != Method::GET {
+        return false;
+    }
+    if !is_ticketed_media_path(request.uri().path()) {
+        return false;
+    }
+    match ticket_from_query(request.uri().query().unwrap_or_default()) {
+        Some(ticket) => state.media_tickets.validate(ticket),
+        None => false,
+    }
+}
+
+/// The exact route families a media ticket unlocks:
+///   GET /api/v1/projects/:project_id/files/*relative_path
+///   GET /api/v1/poses/preview/:job_id/:file_name
+/// Matched on the raw request path (same shape the router matches); the handlers
+/// keep their own traversal/validity checks, the ticket only answers "is this
+/// caller allowed", identically to a header-token caller on these routes.
+pub(crate) fn is_ticketed_media_path(path: &str) -> bool {
+    if let Some(rest) = path.strip_prefix("/api/v1/projects/") {
+        let mut segments = rest.split('/');
+        let has_project = segments.next().is_some_and(|s| !s.is_empty());
+        let files_literal = segments.next() == Some("files");
+        let has_file = segments.next().is_some_and(|s| !s.is_empty());
+        return has_project && files_literal && has_file;
+    }
+    if let Some(rest) = path.strip_prefix("/api/v1/poses/preview/") {
+        return !rest.is_empty();
+    }
+    false
+}
+
+/// Extract the raw `ticket` query-param value. Tickets are hex UUIDs, so no
+/// percent-decoding is needed; a decoded-away match simply fails validation.
+fn ticket_from_query(query: &str) -> Option<&str> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("ticket="))
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn is_authorized(headers: &HeaderMap, settings: &Settings) -> bool {

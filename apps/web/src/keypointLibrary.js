@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { API_BASE_URL, apiFetch } from "./api.js";
+import { API_BASE_URL, apiFetch, withMediaTicket } from "./api.js";
 import { useAppContext } from "./context/AppContext.js";
 
 // The reserved global project that holds user-created keypoint (face-angle) preset assets
@@ -30,7 +30,9 @@ export function keypointSourceImageUrl(sourceImageRef) {
     return "";
   }
   const normalized = String(sourceImageRef).replaceAll("\\", "/");
-  return `${API_BASE_URL}/api/v1/projects/${GLOBAL_KEYPOINTS_PROJECT_ID}/files/${normalized}`;
+  return withMediaTicket(
+    `${API_BASE_URL}/api/v1/projects/${GLOBAL_KEYPOINTS_PROJECT_ID}/files/${normalized}`,
+  );
 }
 
 export async function loadKeypointPresets(token, options = {}) {

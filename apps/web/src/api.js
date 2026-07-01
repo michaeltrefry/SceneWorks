@@ -44,3 +44,31 @@ export function eventUrl(path, ticket) {
   }
   return url.toString();
 }
+
+// ---- Media tickets (sc-8810) ---------------------------------------------------
+// Element-driven requests (<img src>, <video src>, <a download>) cannot attach the
+// X-SceneWorks-Token header, so in remote-auth mode every bare media URL would 401.
+// Mirroring the SSE ticket, App.jsx mints a short-lived reusable ticket from
+// POST /api/v1/files/ticket (header-authenticated) and stores it here; every media
+// URL producer routes through `withMediaTicket` so the ticket rides along as a
+// query param that the API honors on the project-files and pose-preview routes.
+// Module-level (not React state) because URL producers like assetUrl() are plain
+// functions called from render paths and non-component code (browserDownload).
+let mediaTicket = "";
+
+export function setMediaTicket(ticket) {
+  mediaTicket = typeof ticket === "string" ? ticket : "";
+}
+
+export function getMediaTicket() {
+  return mediaTicket;
+}
+
+// Append the current media ticket to a media URL. No-op while no ticket is set
+// (desktop/loopback or auth-off deployments), so local mode is untouched.
+export function withMediaTicket(url) {
+  if (!url || !mediaTicket) {
+    return url;
+  }
+  return `${url}${url.includes("?") ? "&" : "?"}ticket=${encodeURIComponent(mediaTicket)}`;
+}

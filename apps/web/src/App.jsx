@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, eventUrl, isAbortError } from "./api.js";
+import { apiFetch, eventUrl, isAbortError, setMediaTicket } from "./api.js";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
@@ -781,6 +781,57 @@ export function App() {
       (accessResolved && (!access.authRequired || token.length > 0)),
     [accessResolved, access, token],
   );
+  // sc-8810: whether media URLs are renderable yet. When auth is on, element-driven
+  // requests (<img>/<video>) can't send the token header, so every media URL needs
+  // the query-param ticket minted below. Data loads hold until the first ticket is
+  // stored (mediaReady), otherwise thumbnails rendered in the gap would 401 and
+  // stick as "deleted" placeholders. When auth is off this resolves immediately.
+  const [mediaReady, setMediaReady] = useState(false);
+  const ready = authenticated && mediaReady;
+
+  useEffect(() => {
+    if (!authenticated || !accessResolved) {
+      return undefined;
+    }
+    if (!access.authRequired) {
+      setMediaTicket("");
+      setMediaReady(true);
+      return undefined;
+    }
+    let closed = false;
+    let timer = null;
+    let attempt = 0;
+    async function acquire() {
+      try {
+        // Header-authenticated mint (loopback-trusted desktop sends no token and
+        // still passes). The server keeps re-arming the same sliding ticket, so
+        // already-rendered media URLs stay valid across refreshes.
+        const response = await apiFetch("/api/v1/files/ticket", token, { method: "POST" });
+        if (closed) {
+          return;
+        }
+        setMediaTicket(response.ticket);
+        setMediaReady(true);
+        attempt = 0;
+        const ttlMs = Math.max(15, Number(response.expiresInSeconds) || 0) * 1000;
+        timer = window.setTimeout(acquire, Math.max(5000, Math.floor(ttlMs / 3)));
+      } catch {
+        if (closed) {
+          return;
+        }
+        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        attempt += 1;
+        timer = window.setTimeout(acquire, delay);
+      }
+    }
+    acquire();
+    return () => {
+      closed = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [access.authRequired, accessResolved, authenticated, token]);
   const imageModels = useMemo(() => {
     const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
@@ -1002,14 +1053,14 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!authenticated) {
+    if (!ready) {
       return;
     }
     refreshDataRef.current?.();
-  }, [authenticated, token]);
+  }, [ready, token]);
 
   useEffect(() => {
-    if (!activeProject || !authenticated) {
+    if (!activeProject || !ready) {
       setAssets([]);
       setCharacters([]);
       setPersonTracks([]);
@@ -1036,10 +1087,12 @@ export function App() {
     refreshPersonTracksRef.current?.(activeProject.id, { signal });
     refreshTimelinesRef.current?.(activeProject.id, { signal });
     return () => controller.abort();
-  }, [activeProject?.id, authenticated, token]);
+  }, [activeProject?.id, ready, token]);
 
   useEffect(() => {
-    if (!authenticated) {
+    // Gated on `ready` (not just `authenticated`): SSE job updates carry assets whose
+    // thumbnails render immediately, so the media ticket must exist first (sc-8810).
+    if (!ready) {
       return undefined;
     }
 
@@ -1178,7 +1231,7 @@ export function App() {
       }
       events?.close();
     };
-  }, [access.authRequired, authenticated, token]);
+  }, [access.authRequired, ready, token]);
 
   async function refreshData() {
     const fetchInitial = async (label, path, fallback, optional = false) => {

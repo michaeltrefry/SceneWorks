@@ -89,6 +89,8 @@ mod workers;
 use workers::*;
 mod events;
 use events::*;
+mod tickets;
+use tickets::*;
 mod dto;
 use dto::*;
 mod manifest;
@@ -131,6 +133,12 @@ const DEFAULT_CORS_ORIGINS: &str = concat!(
     "http://localhost:5176,http://127.0.0.1:5176"
 );
 const EVENT_BUFFER_SIZE: usize = 100;
+// SSE tickets are single-use and consumed on connect, so a tight window suffices.
+const EVENT_TICKET_TTL_SECONDS: u64 = 30;
+// Media tickets ride in <img>/<video>/<a download> URLs (headers impossible), so
+// they are multi-use; the web client re-arms the sliding ticket every TTL/3, and a
+// leaked URL dies at most one TTL after the last authenticated refresh (sc-8810).
+const MEDIA_TICKET_TTL_SECONDS: u64 = 300;
 const HEARTBEAT_SSE_DATA: &str = "{}";
 #[cfg(test)]
 const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
@@ -274,7 +282,8 @@ pub struct AppState {
     jobs_store: Arc<JobsStore>,
     project_store: Arc<ProjectStore>,
     events: Arc<EventHub>,
-    event_tickets: Arc<EventTicketStore>,
+    event_tickets: Arc<TicketStore>,
+    media_tickets: Arc<TicketStore>,
     manifest_cache: Arc<Mutex<ManifestCache>>,
     manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
     model_size_cache: Arc<Mutex<ModelSizeCache>>,
@@ -707,7 +716,8 @@ pub(crate) fn create_app_with_state(
         jobs_store,
         project_store,
         events: Arc::new(EventHub::default()),
-        event_tickets: Arc::new(EventTicketStore::new(30)),
+        event_tickets: Arc::new(TicketStore::new(EVENT_TICKET_TTL_SECONDS)),
+        media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
@@ -992,6 +1002,9 @@ pub(crate) fn create_app_with_state(
         .route("/api/v1/jobs/claim", post(claim_job))
         .route("/api/v1/jobs/events", get(job_events))
         .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
+        // Media ticket (sc-8810): auth-protected mint endpoint; the ticket is honored
+        // as a query param by the project-files and pose-preview GETs (see auth.rs).
+        .route("/api/v1/files/ticket", post(create_media_ticket))
         .route("/api/v1/jobs/:job_id", get(get_job))
         .route("/api/v1/jobs/:job_id/cancel", post(cancel_job))
         .route("/api/v1/jobs/:job_id/retry", post(retry_job))

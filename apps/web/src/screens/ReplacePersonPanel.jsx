@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { API_BASE_URL } from "../api.js";
+import { API_BASE_URL, withMediaTicket } from "../api.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 
@@ -59,7 +59,7 @@ function maskUrl(projectId, relPath) {
     return "";
   }
   const normalized = String(relPath).replaceAll("\\", "/");
-  return `${API_BASE_URL}/api/v1/projects/${projectId}/files/${normalized}`;
+  return withMediaTicket(`${API_BASE_URL}/api/v1/projects/${projectId}/files/${normalized}`);
 }
 
 /**

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { API_BASE_URL, apiFetch, isAbortError } from "../api.js";
+import { API_BASE_URL, apiFetch, isAbortError, withMediaTicket } from "../api.js";
 import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -361,9 +361,11 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
                   >
                     <img
                       alt={`Pose skeleton from ${candidate.sourceDisplayName}`}
-                      src={`${API_BASE_URL}/api/v1/poses/preview/${encodeURIComponent(
-                        candidate.jobId,
-                      )}/${encodeURIComponent(candidate.skeletonFile)}`}
+                      src={withMediaTicket(
+                        `${API_BASE_URL}/api/v1/poses/preview/${encodeURIComponent(
+                          candidate.jobId,
+                        )}/${encodeURIComponent(candidate.skeletonFile)}`,
+                      )}
                     />
                     <span>
                       {candidate.sourceDisplayName} · {candidate.facing}

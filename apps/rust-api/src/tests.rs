@@ -9055,6 +9055,213 @@ async fn event_tickets_are_protected_and_match_contract_shape() {
 }
 
 #[tokio::test]
+async fn media_tickets_authenticate_project_file_urls() {
+    // sc-8810: element-driven media requests (<img>/<video>/<a download>) cannot
+    // attach the token header, so the files route honors a short-lived query-param
+    // ticket minted by an authenticated client — mirroring the SSE ticket.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let auth = [("x-sceneworks-token", "secret-token")];
+
+    let (_, created) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Ticketed media" }),
+        &auth,
+    )
+    .await;
+    let project_id = created["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+    std::fs::write(project_path.join("assets/images/image.png"), b"image-bytes")
+        .expect("media writes");
+    let file_uri = format!("/api/v1/projects/{project_id}/files/assets/images/image.png");
+
+    // Minting a media ticket itself requires authentication.
+    let (status, _) = request(app.clone(), "POST", "/api/v1/files/ticket", Value::Null).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, ticket) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket_value = ticket["ticket"].as_str().expect("ticket string").to_owned();
+    assert!(ticket_value.len() == 32 && ticket_value.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(ticket["expiresInSeconds"], 300);
+
+    // Re-minting while the ticket is alive returns the SAME sliding ticket, so
+    // already-rendered media URLs stay stable across client refreshes.
+    let (_, reissued) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    assert_eq!(reissued["ticket"], ticket_value.as_str());
+
+    // Bare media URL (what an <img src> sends): still 401 without a ticket.
+    let (status, _) = request(app.clone(), "GET", &file_uri, Value::Null).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // With the ticket: authorized, and multi-use (a page renders many thumbnails
+    // and <video> issues multiple Range requests against one URL).
+    for _ in 0..2 {
+        let (status, _, bytes) = request_raw(
+            app.clone(),
+            "GET",
+            &format!("{file_uri}?ticket={ticket_value}"),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"image-bytes");
+    }
+
+    // A garbage ticket stays locked out.
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        &format!("{file_uri}?ticket=not-a-ticket"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Scope isolation: an SSE event ticket is NOT valid on the files route…
+    let (_, event_ticket) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    let event_ticket_value = event_ticket["ticket"].as_str().expect("event ticket");
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        &format!("{file_uri}?ticket={event_ticket_value}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // …and a media ticket is NOT valid on the SSE stream…
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/events?ticket={ticket_value}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // …and a media ticket never unlocks any non-media route.
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs?ticket={ticket_value}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects?ticket={ticket_value}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // A files-shaped path with a non-GET method stays locked too.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("{file_uri}?ticket={ticket_value}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Pose previews are the other element-driven media family: the ticket clears
+    // auth (the 404 is the handler's own missing-file answer, not a 401).
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/poses/preview/job_missing/preview.png",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = request(
+        app,
+        "GET",
+        &format!("/api/v1/poses/preview/job_missing/preview.png?ticket={ticket_value}"),
+        Value::Null,
+    )
+    .await;
+    assert_ne!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn media_ticket_paths_cover_exactly_the_media_routes() {
+    use super::auth::is_ticketed_media_path;
+    // Project files + pose previews are ticketed…
+    assert!(is_ticketed_media_path(
+        "/api/v1/projects/p1/files/assets/images/one.png"
+    ));
+    assert!(is_ticketed_media_path("/api/v1/projects/p1/files/a"));
+    assert!(is_ticketed_media_path("/api/v1/poses/preview/job_1/p.png"));
+    // …nothing else is.
+    assert!(!is_ticketed_media_path("/api/v1/projects"));
+    assert!(!is_ticketed_media_path("/api/v1/projects/p1"));
+    assert!(!is_ticketed_media_path("/api/v1/projects/p1/files"));
+    assert!(!is_ticketed_media_path("/api/v1/projects/p1/files/"));
+    assert!(!is_ticketed_media_path("/api/v1/projects/p1/assets"));
+    assert!(!is_ticketed_media_path("/api/v1/projects//files/a"));
+    assert!(!is_ticketed_media_path("/api/v1/poses/preview/"));
+    assert!(!is_ticketed_media_path("/api/v1/jobs"));
+    assert!(!is_ticketed_media_path("/api/v1/credentials"));
+}
+
+#[test]
+fn ticket_store_sliding_reuse_and_expiry() {
+    use super::tickets::TicketStore;
+    // Sliding (media) tickets: reusable, stable across re-issue, non-consuming.
+    let store = TicketStore::new(300);
+    let first = store.issue_sliding();
+    let second = store.issue_sliding();
+    assert_eq!(first.ticket, second.ticket, "live sliding ticket is reused");
+    assert!(store.validate(&first.ticket));
+    assert!(store.validate(&first.ticket), "validate must not consume");
+    assert!(!store.validate("bogus"));
+    assert!(!store.validate(""));
+
+    // Single-use (SSE) tickets: consume removes them.
+    let sse = store.issue();
+    assert!(store.consume(&sse.ticket));
+    assert!(!store.consume(&sse.ticket), "consume is single-use");
+
+    // TTL 0: expired as soon as any time passes (the sleep guards against two
+    // Instant::now() calls landing on the same tick).
+    let expired = TicketStore::new(0);
+    let sliding = expired.issue_sliding();
+    let single = expired.issue();
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(!expired.validate(&sliding.ticket));
+    assert!(!expired.consume(&single.ticket));
+}
+
+#[tokio::test]
 async fn lagged_event_subscribers_are_disconnected() {
     let hub = EventHub::default();
     let mut stream = hub.subscribe();

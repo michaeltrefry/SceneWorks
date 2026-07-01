@@ -1,7 +1,10 @@
 import React from "react";
-import { API_BASE_URL } from "../api.js";
+import { API_BASE_URL, withMediaTicket } from "../api.js";
 
-export function assetUrl(asset) {
+// Ticket-free URL builder; internal so every exported producer appends the media
+// ticket (sc-8810) exactly once, and posterUrl can swap the file extension before
+// the query string exists.
+function bareAssetUrl(asset) {
   if (asset?.url) {
     return API_BASE_URL + asset.url;
   }
@@ -15,6 +18,13 @@ export function assetUrl(asset) {
     return `${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${normalizedPath}`;
   }
   return "";
+}
+
+// Displayable/fetchable URL for an asset. In remote-auth mode this carries the
+// media ticket so element-driven requests (<img>/<video>/<a download>) — which
+// cannot send the token header — still authenticate (sc-8810).
+export function assetUrl(asset) {
+  return withMediaTicket(bareAssetUrl(asset));
 }
 
 export function assetCanRenderAsImage(asset) {
@@ -44,11 +54,11 @@ export function suppressThumbnailContextMenu(event) {
 // WKWebView won't paint a <video>'s own first frame as a poster, so the UI shows
 // this real image instead — as the thumbnail and as the player's poster attribute.
 export function posterUrl(asset) {
-  const src = assetUrl(asset);
+  const src = bareAssetUrl(asset);
   if (!src || !assetCanRenderAsVideo(asset)) {
     return "";
   }
-  return src.replace(/\.\w+$/, ".poster.jpg");
+  return withMediaTicket(src.replace(/\.\w+$/, ".poster.jpg"));
 }
 
 // Placeholder shown when an asset's underlying file can't be loaded — e.g. it
