@@ -1558,6 +1558,79 @@ mod tests {
         );
     }
 
+    /// sc-8775 on-device verify (MLX, epic 8506 Group-B): the DISTILLED `_fast` variant's own packed
+    /// re-host. `SceneWorks/sensenova-u1-8b-fast-mlx` ships the 8-step distill LoRA PRE-MERGED into the
+    /// generation path and then packed, so its `q4/model.safetensors` is a distinct checkpoint from the
+    /// base re-host. The worker's `standard_tier_subdir` resolves the flat `q4/` subdir identically to
+    /// the base (covered by `resolves_flat_unified_backbone_tiers`); `load_sensenova_model`'s shared
+    /// `load_raw` + `T2iModel::from_weights` auto-detect the packed `.scales` sidecars and build the
+    /// quantized decoder stack with the merged gen-path weights (NO dense transient, NO load-time
+    /// merge). A short 8-NFE / CFG-1.0 T2I rollout — the distilled defaults — then renders a real image,
+    /// proving the pre-merged packed tier both loads AND generates non-degenerately (a bad merge would
+    /// corrupt the gen path and flatten the decode). The marker-gated `load_fast` skip that the engine
+    /// registry uses for this tier is separately proven in mlx-gen's `prequantize_real_weights`
+    /// (`SC8771_MODEL=sensenova_u1_8b_fast`). Run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_fast_q4_tier_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight MLX smoke; needs the SceneWorks/sensenova-u1-8b-fast-mlx q4 tier cached + a Metal device"]
+    fn sensenova_fast_q4_tier_real_weights_produces_image() {
+        let root = hf_snapshot("models--SceneWorks--sensenova-u1-8b-fast-mlx");
+        let q4_dir = root.join("q4");
+        assert!(
+            q4_dir.join("model.safetensors").is_file(),
+            "packed fast q4 tier not found at {} — download it: \
+             hf download SceneWorks/sensenova-u1-8b-fast-mlx --include 'q4/*'",
+            q4_dir.display()
+        );
+        // The distill LoRA is baked in; the marker rides the tier for provenance/loader gating.
+        assert!(
+            q4_dir.join("distill_merged.json").is_file(),
+            "pre-merged fast tier missing its distill_merged.json marker at {}",
+            q4_dir.display()
+        );
+        let (model, tokenizer) = load_sensenova_model(&q4_dir).expect("load packed fast q4 model");
+        // Distilled defaults: 8 NFE at CFG 1.0 (the `_fast` variant's manifest defaults).
+        let opts = T2iOptions {
+            cfg_scale: 1.0,
+            img_cfg_scale: 1.0,
+            num_steps: 8,
+            timestep_shift: 3.0,
+            seed: 42,
+            ..Default::default()
+        };
+        let out = model
+            .generate(
+                &tokenizer,
+                "a single red circle on a white background, flat vector illustration",
+                512,
+                512,
+                &opts,
+                None,
+                None,
+            )
+            .expect("fast t2i generate");
+        let decoded = decoded_to_image(&out.image).expect("decode");
+        assert_eq!(
+            decoded.pixels.len(),
+            (decoded.width * decoded.height * 3) as usize
+        );
+        // Non-degenerate check: a NaN/all-black/flat decode (e.g. a corrupt merge) collapses std → 0.
+        let n = decoded.pixels.len() as f64;
+        let mean = decoded.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
+        let std = (decoded
+            .pixels
+            .iter()
+            .map(|&p| (p as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n)
+            .sqrt();
+        assert!(
+            std > 10.0,
+            "packed fast q4 render looks degenerate (std {std:.2}, mean {mean:.2}) — possible NaN / all-black / flat decode or a bad distill merge"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn build_segments_trailing_image_without_marker_is_appended() {

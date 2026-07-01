@@ -245,9 +245,9 @@ fn mlx_model_table_maps_known_families() {
     );
     let fast = mlx_model("sensenova_u1_8b_fast").unwrap();
     assert_eq!(fast.engine_id(), "sensenova_u1_8b_fast");
-    // sc-8771: _fast is UNCHANGED — stays on the dense bf16 repo + distill-LoRA-at-load path
-    // (packed fast tiers are tracked separately as sc-8775), NOT the new packed re-host.
-    assert_eq!(fast.default_repo(), "sensenova/SenseNova-U1-8B-MoT");
+    // sc-8775: _fast now points at its OWN SceneWorks MLX quant-matrix re-host (q4/q8/bf16 packed
+    // tiers with the 8-step distill LoRA pre-merged at convert time), distinct from the base re-host.
+    assert_eq!(fast.default_repo(), "SceneWorks/sensenova-u1-8b-fast-mlx");
     assert_eq!(fast.default_steps(), 8);
     assert_eq!(fast.default_guidance(), 1.0);
     assert_eq!(fast.adapter_label(), "mlx_sensenova");

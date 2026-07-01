@@ -988,19 +988,45 @@
       // base model is recommended for max-quality reference work.
       "capabilities": ["text_to_image", "edit_image", "character_image"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8775, epic 8506): the DISTILLED variant's
+        // own re-host, distinct from the base sensenova-u1-8b-mlx. The 8-step distill LoRA is
+        // PRE-MERGED into the generation path at convert time, then the backbone is packed — so each
+        // per-tier subdir (q4/ default, q8/, bf16/) is a self-contained tree (packed/merged backbone +
+        // tokenizer + config + a `distill_merged.json` marker). The engine's `load_fast` loads the
+        // chosen tier directly and skips the load-time merge (the marker signals it is already baked
+        // in; a packed base cannot re-merge). Per-tier variants (sc-8508): each tier is a SEPARATE
+        // installable artifact with a required `footprint.diskSizeBytes` (EXACT on-disk bytes measured
+        // from the hosted repo per subdir). `default: true` marks q4 as the default tier.
         {
-          // Shares the SenseNova-U1 8B base weights; the ~0.4GB 8-step distill
-          // LoRA is fetched on demand at load time and merged in-process.
           "provider": "huggingface",
-          "repo": "sensenova/SenseNova-U1-8B-MoT",
-          "files": [],
+          "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+          "variant": "q4",
           "default": true,
-          "estimatedSizeBytes": 35200000000
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 11824473055,
+          "footprint": { "diskSizeBytes": 11824473055, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19927870497,
+          "footprint": { "diskSizeBytes": 19927870497, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 35121579949,
+          "footprint": { "diskSizeBytes": 35121579949, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/sensenova/SenseNova-U1-8B-MoT"
+        "model": "${HF_CACHE}/SceneWorks/sensenova-u1-8b-fast-mlx"
       },
+      "gated": false,
       "defaults": {
         "resolution": "2048x2048",
         // 8-step distill LoRA: cfg 1.0 / 8 steps (vs base 4.0 / 50).
@@ -1027,9 +1053,18 @@
         "families": ["sensenova-u1"],
         "types": []
       },
+      "mlx": {
+        // q4/ is the shipped default tier (sc-8775); q8/ + bf16/ are hosted and selectable via
+        // advanced.mlxQuantize (standard_tier_subdir resolves the flat unified tier subdir). Same
+        // unified-MoT packed layout as the base — the WHOLE (pre-merged) backbone packs, no separate
+        // TE, so NO denseTextEncoderTier. The distill LoRA is baked in at convert time (sc-8775), so
+        // load is via the engine's `load_fast` marker-skip path, not a load-time merge.
+        "quantize": 4,
+        "standardTierLayout": true
+      },
       "ui": {
         "label": "SenseNova-U1 8B Fast",
-        "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image, editing, and Character Studio reference (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base SenseNova-U1 8B (carries outfit + accessories + tattoos across new scenes, face may drift — pick InstantID or PuLID-FLUX for face-locked identity). Shares the SenseNova-U1 8B base weights (~35GB); a ~0.4GB distill LoRA downloads automatically on first use. Distilled editing is experimental — use the base SenseNova-U1 8B for max-quality reference work.",
+        "description": "8-step distilled SenseNova-U1 — ~5–6× faster text-to-image, editing, and Character Studio reference (~50s/image on MPS vs ~4.6 min) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base SenseNova-U1 8B (carries outfit + accessories + tattoos across new scenes, face may drift — pick InstantID or PuLID-FLUX for face-locked identity). Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Distilled editing is experimental — use the base SenseNova-U1 8B for max-quality reference work.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         // Edit-style variation knob (imageGuidanceScale); see SenseNova-U1 8B
         // for context. The fast variant defaults match the base variant.

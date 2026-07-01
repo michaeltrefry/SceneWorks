@@ -353,7 +353,12 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     ModelRow {
         sceneworks_id: "sensenova_u1_8b_fast",
         engine_id: "sensenova_u1_8b_fast",
-        default_repo: "sensenova/SenseNova-U1-8B-MoT",
+        // sc-8775: SceneWorks MLX quant-matrix re-host of the *distilled* variant — q4/q8/bf16 packed
+        // tiers with the 8-step distill LoRA PRE-MERGED into the generation path at convert time (a
+        // distinct checkpoint from the base re-host). Each tier carries a `distill_merged.json` marker
+        // so the engine's `load_fast` loads it directly without re-merging (a packed base can't
+        // re-merge). Replaces the old dense-base + distill-LoRA-at-load path.
+        default_repo: "SceneWorks/sensenova-u1-8b-fast-mlx",
         default_steps: 8,
         default_guidance: 1.0,
         adapter_label: "mlx_sensenova",
