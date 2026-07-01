@@ -640,6 +640,51 @@ describe("SceneWorks app shell", () => {
     expect(queueChip()?.textContent).toContain("Queue 2");
   });
 
+  // sc-8811 regression (F-009): appContextValue must keep its identity across an App
+  // re-render that touches none of its entries. Before the fix, refreshData /
+  // refreshDataWithLoraOverlay were plain per-render declarations passed into
+  // useModelsAndLoras, so deleteModel/deleteLora — and therefore the whole memoized
+  // context value — got a fresh identity on EVERY App render (each SSE tick, each
+  // keystroke), silently defeating the sc-4194 memoization and re-rendering every
+  // useAppContext consumer. A queue.updated event only changes queueSummary, which is
+  // not part of the context value, so the provider value identity must survive it.
+  it("keeps appContextValue identity stable across an unrelated re-render (sc-8811)", async () => {
+    const providedValues = [];
+    const OriginalProvider = AppContext.Provider;
+    // Swap in a recording pass-through provider so the test can observe the exact
+    // value identities App feeds the context on each committed render.
+    AppContext.Provider = function RecordingProvider({ value, children }) {
+      providedValues.push(value);
+      return <OriginalProvider value={value}>{children}</OriginalProvider>;
+    };
+    try {
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      const before = providedValues[providedValues.length - 1];
+      const countBefore = providedValues.length;
+      expect(before).toBeTruthy();
+
+      // Pure queue.updated (no workers array, no job.updated): re-renders App via
+      // setQueueSummary without changing anything appContextValue depends on.
+      await act(async () => {
+        FakeEventSource.instances[0].listeners["queue.updated"]({
+          data: JSON.stringify({ counts: { active: 2, queued: 2 }, activeJobs: [{ id: "job-a" }] }),
+        });
+      });
+      await settle();
+
+      const after = providedValues[providedValues.length - 1];
+      expect(providedValues.length).toBeGreaterThan(countBefore); // the event really re-rendered App
+      expect(after).toBe(before); // identity preserved → consumer tree memoization holds
+    } finally {
+      AppContext.Provider = OriginalProvider;
+    }
+  });
+
   // sc-4168 regression: App must provide `token` through AppContext. Screens that
   // call apiFetch directly (Logs, Image Editor, Pose Library, useUserPoseLoader)
   // read it from context; before the fix they got `undefined` and never sent the

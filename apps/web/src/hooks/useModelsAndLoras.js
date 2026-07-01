@@ -15,7 +15,11 @@ function uploadLimitLabel(bytes) {
 // import re-pulls both via the lora overlay), so they share one hook. App keeps the
 // cross-cutting orchestrators — refreshData (bulk loader; seeds models+loras through
 // the returned setters) and refreshDataWithLoraOverlay (refreshData + refreshLoras,
-// also called by the SSE handler) — and passes them in.
+// also called by the SSE handler) — and passes them in. Both props MUST be
+// identity-stable (sc-8811): they are useCallback deps of deleteModel/deleteLora,
+// which sit in appContextValue's dependency array, so an unstable prop rebuilds the
+// context value every App render and defeats the sc-4194 memoization. App passes
+// ref-delegating useCallbacks for both.
 export function useModelsAndLoras({
   token,
   activeProject,
