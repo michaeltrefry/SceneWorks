@@ -53,6 +53,10 @@ fn main() {
             settings::set_data_dir,
             settings::choose_data_dir,
             settings::reveal_in_os,
+            // Save an asset to a user-chosen destination + resolve an asset's
+            // project-relative path to its absolute on-disk path (sc-8726).
+            settings::save_asset_as,
+            settings::resolve_asset_path,
             settings::list_credentials,
             settings::set_credential,
             settings::delete_credential,
