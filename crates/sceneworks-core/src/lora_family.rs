@@ -1022,7 +1022,26 @@ fn parse_block_index(key: &str) -> Option<usize> {
 
 fn detect_metadata_family(header: &Value) -> Option<String> {
     let metadata = header.get("__metadata__")?.as_object()?;
+    // SceneWorks-native provenance first: our own trainers stamp the adapter header with a canonical
+    // `family` token (`krea_2`, `z-image`, …) and a `baseModel` training-base id (`krea_2_raw`, …),
+    // specifically so import reconciliation can validate it (see the candle/MLX Krea trainers' `save`).
+    // These keys are NOT part of the kohya (`ss_base_model_version`) or diffusers (`modelspec.*`)
+    // conventions checked below, so without reading them a SceneWorks-created LoRA whose tensor keys
+    // match no bucket signature is left undetected — e.g. a default Krea LoRA, whose bare
+    // `transformer_blocks.<n>.attn.to_{q,k,v}` keys hit no bucket and carry no `text_fusion`/`to_gate`
+    // unique key. The `family` stamp is already the canonical token, so trust it directly; `baseModel`
+    // is a model id, so map it through the architecture matcher alongside the kohya/diffusers keys.
+    if let Some(family) = metadata
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(canonical_lora_family(family));
+    }
     for key in [
+        "baseModel",
+        "base_model",
         "ss_base_model_version",
         "modelspec.architecture",
         "modelspec.implementation",
@@ -1860,6 +1879,50 @@ mod tests {
         let header = Value::Object(object);
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("krea_2"));
+    }
+
+    #[test]
+    fn detects_sceneworks_trained_krea_lora_by_family_stamp() {
+        // A LoRA trained IN SceneWorks by the (candle/MLX) Krea trainer. Verified against real
+        // on-disk output: the header stamps `family: krea_2` + `baseModel: krea_2_raw`, and the
+        // default target set (`to_q`/`to_k`/`to_v`/`to_out.0`) produces bare `transformer_blocks.
+        // <n>.attn.*` keys. Those keys hit NO bucket signature (bare `transformer_blocks.`, not the
+        // dotted `transformer.transformer_blocks.` the buckets require) and carry no `text_fusion`/
+        // `to_gate` unique key, so before this fix the LoRA was left undetected. The `family` stamp is
+        // now the authoritative signal.
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "__metadata__".to_owned(),
+            json!({
+                "family": "krea_2",
+                "baseModel": "krea_2_raw",
+                "networkType": "lora",
+                "rank": "8",
+                "alpha": "8",
+            }),
+        );
+        for block in 0..28 {
+            for module in ["to_q", "to_k", "to_v", "to_out.0"] {
+                for role in ["lora_A.weight", "lora_B.weight"] {
+                    object.insert(
+                        format!("transformer_blocks.{block}.attn.{module}.{role}"),
+                        json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+                    );
+                }
+            }
+        }
+        let header = Value::Object(object);
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("krea_2"));
+
+        // The `baseModel` id alone (no `family` stamp) also resolves via the architecture matcher —
+        // covers older/third-party SceneWorks-lineage files that recorded only the trained base.
+        let base_only = json!({
+            "__metadata__": { "baseModel": "krea_2_raw" },
+            "transformer_blocks.0.attn.to_q.lora_A.weight":
+                {"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]},
+        });
+        assert_eq!(detect_lora_family(&base_only).as_deref(), Some("krea_2"));
     }
 
     /// kohya / musubi-tuner / LyCORIS export of a dual-stream MMDiT (Qwen-Image /
