@@ -321,6 +321,33 @@ fn detail_result(
     .expect("json! object literal")
 }
 
+/// Acknowledge a user cancel mid-refine: trip the engine flag and show a NON-terminal
+/// "Cancelling…" (indeterminate bar). The terminal Canceled is deferred to after the
+/// blocking refinement actually stops so the worker row isn't freed while it's still
+/// grinding the current tile (sc-5516; mirrors the image path's `begin_image_cancel`,
+/// sc-5515). Best-effort update.
+pub(crate) async fn begin_detail_cancel(
+    api: &ApiClient,
+    job_id: &str,
+    cancel: &CancelFlag,
+    backend: &str,
+) {
+    cancel.cancel();
+    let _ = update_job(
+        api,
+        job_id,
+        image_progress(
+            JobStatus::Running,
+            ProgressStage::Generating,
+            0.0,
+            "Cancelling — stopping the current tile…",
+            None,
+            backend,
+        ),
+    )
+    .await;
+}
+
 /// Native MLX tile-ControlNet detail refine (`JobType::ImageDetail`) on the macOS engine.
 pub(crate) async fn run_image_detail_job(
     api: &ApiClient,
@@ -436,49 +463,59 @@ pub(crate) async fn run_image_detail_job(
 
     let mut last_cancel_check = Instant::now();
     let mut canceled = false;
-    while let Some((done, total)) = rx.recv().await {
-        if canceled {
-            continue; // drain so the blocking sender never blocks; terminal posts after stop.
-        }
-        if last_cancel_check.elapsed() >= Duration::from_secs(2) {
-            last_cancel_check = Instant::now();
-            if cancel_requested_peek(api, &job.id).await {
-                // Trip the engine flag and show a NON-terminal "Cancelling…" (indeterminate bar);
-                // the terminal Canceled is deferred to after the blocking refinement actually
-                // stops so the worker row isn't freed while it's still grinding the current tile
-                // (sc-5516; mirrors the image path sc-5515). Best-effort update.
-                cancel.cancel();
-                let _ = update_job(
+    // Heartbeat + cancel-poll on a fixed interval, not only when the blocking thread
+    // finishes a tile. The cold SDXL+tile-ControlNet load and each full multi-step tile
+    // refine emit nothing, so without an interval arm the worker posts no Busy heartbeat
+    // (the API's staleness sweep would falsely mark the job `interrupted` — sc-4276 /
+    // sc-8390) and a user cancel would only be seen at a tile boundary. Mirrors
+    // `consume_gen_events` (base.rs); the shared `CancelFlag` is also inside the engine's
+    // `GenerationRequest`, so tripping it here interrupts the in-flight tile promptly
+    // rather than waiting for the tile-loop boundary check.
+    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            maybe_tile = rx.recv() => {
+                let Some((done, total)) = maybe_tile else {
+                    break;
+                };
+                if canceled {
+                    continue; // drain so the blocking sender never blocks; terminal posts after stop.
+                }
+                if last_cancel_check.elapsed() >= Duration::from_secs(2) {
+                    last_cancel_check = Instant::now();
+                    if cancel_requested_peek(api, &job.id).await {
+                        begin_detail_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
+                        continue;
+                    }
+                }
+                update_job(
                     api,
                     &job.id,
                     image_progress(
                         JobStatus::Running,
                         ProgressStage::Generating,
-                        0.0,
-                        "Cancelling — finishing the current tile…",
+                        0.45 + 0.5 * (done as f64 / total.max(1) as f64),
+                        &format!("Refining detail tile {done}/{total}."),
                         None,
                         backend,
                     ),
                 )
-                .await;
-                canceled = true;
-                continue;
+                .await?;
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+            }
+            _ = interval.tick() => {
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                if !canceled && last_cancel_check.elapsed() >= Duration::from_secs(2) {
+                    last_cancel_check = Instant::now();
+                    if cancel_requested_peek(api, &job.id).await {
+                        begin_detail_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
+                    }
+                }
             }
         }
-        update_job(
-            api,
-            &job.id,
-            image_progress(
-                JobStatus::Running,
-                ProgressStage::Generating,
-                0.45 + 0.5 * (done as f64 / total.max(1) as f64),
-                &format!("Refining detail tile {done}/{total}."),
-                None,
-                backend,
-            ),
-        )
-        .await?;
-        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
 
     let join = blocking

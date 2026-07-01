@@ -3690,6 +3690,44 @@ async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
     );
 }
 
+/// sc-5516 / sc-8805 — the detail sibling: `begin_detail_cancel` trips the engine flag
+/// (which the interval-armed detail event loop now reaches within one ~2s poll even while
+/// the model is cold-loading or a tile is mid-refine) and acknowledges with a NON-terminal
+/// `running` update; the terminal `Canceled` is posted by `run_image_detail_job` only after
+/// the blocking refinement actually stops. macOS-only because `image_jobs/detail.rs` is the
+/// macOS MLX route (off-Mac `run_image_detail_job` is a hard error stub).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn begin_detail_cancel_trips_flag_and_stays_non_terminal() {
+    let (base_url, posts) = spawn_progress_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    crate::image_jobs::begin_detail_cancel(&api, "job-1", &cancel, "mlx").await;
+    assert!(
+        cancel.is_cancelled(),
+        "begin_detail_cancel must trip the engine cancel flag"
+    );
+    let posts = posts.lock().expect("posts lock");
+    assert_eq!(
+        posts.len(),
+        1,
+        "exactly one acknowledgement update is posted"
+    );
+    assert_eq!(
+        posts[0]["status"], "running",
+        "the cancel acknowledgement must stay NON-terminal (sc-5516)"
+    );
+    assert!(
+        posts[0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cancelling"),
+        "the acknowledgement message should read as Cancelling…"
+    );
+}
+
 /// sc-4176 — on macOS an MLX-routed model whose weights don't resolve must
 /// fail loudly with a precise re-download error instead of silently completing
 /// with procedural stub output; non-engine model ids keep the stub path.
