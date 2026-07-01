@@ -7283,7 +7283,10 @@ fn candle_control_providers_resolve_models_and_repos() {
 
     // sc-8680 — base-mode real-CFG guidance: defaults to 4.0 (the base card / `z_image` manifest), an
     // `advanced.guidanceScale` override wins and is clamped. Consumed only in base mode (Turbo ignores it).
-    assert_eq!(zimage_control_guidance(&base), ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE);
+    assert_eq!(
+        zimage_control_guidance(&base),
+        ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE
+    );
     assert_eq!(ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE, 4.0);
     let base_g = request(json!({
         "projectId": "p", "model": "z_image", "advanced": { "guidanceScale": 6.5 }
