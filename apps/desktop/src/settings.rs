@@ -1065,6 +1065,33 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// sc-8753: the asset Save As / Reveal commands are invoked from the API-served UI
+    /// at the remote (`http://127.0.0.1:*`) origin, so each must be granted an
+    /// `allow-<kebab-command>` permission in `capabilities/default.json` or the Tauri
+    /// ACL silently rejects the invoke in the real app (the unit tests mock `invoke`, so
+    /// they can't catch a missing grant). Guards against future command↔ACL drift for
+    /// the asset commands specifically: `resolve_asset_path` (Reveal + Save As both call
+    /// it first) and `save_asset_as`.
+    #[test]
+    fn asset_commands_are_granted_in_the_remote_capability() {
+        let capability = include_str!("../capabilities/default.json");
+        let manifest: serde_json::Value =
+            serde_json::from_str(capability).expect("capabilities/default.json parses");
+        let permissions = manifest["permissions"]
+            .as_array()
+            .expect("permissions is an array")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        for permission in ["allow-resolve-asset-path", "allow-save-asset-as"] {
+            assert!(
+                permissions.contains(&permission),
+                "capabilities/default.json is missing `{permission}` — the command would \
+                 be rejected by the ACL at the remote UI origin"
+            );
+        }
+    }
+
     /// sc-8737: the save dialog's initial-directory hint is applied only when it names
     /// an existing directory; empty/whitespace, missing, and non-directory paths are all
     /// skipped (returning `None`) so a stale/bad hint never errors the save — it just

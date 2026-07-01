@@ -12,6 +12,8 @@ fn main() {
             "set_data_dir",
             "choose_data_dir",
             "reveal_in_os",
+            "resolve_asset_path",
+            "save_asset_as",
             "list_credentials",
             "set_credential",
             "delete_credential",

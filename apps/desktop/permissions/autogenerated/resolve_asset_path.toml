@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resolve-asset-path"
+description = "Enables the resolve_asset_path command without any pre-configured scope."
+commands.allow = ["resolve_asset_path"]
+
+[[permission]]
+identifier = "deny-resolve-asset-path"
+description = "Denies the resolve_asset_path command without any pre-configured scope."
+commands.deny = ["resolve_asset_path"]

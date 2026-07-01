@@ -18,6 +18,8 @@
     "allow-set-data-dir",
     "allow-choose-data-dir",
     "allow-reveal-in-os",
+    "allow-resolve-asset-path",
+    "allow-save-asset-as",
     "allow-list-credentials",
     "allow-set-credential",
     "allow-delete-credential",

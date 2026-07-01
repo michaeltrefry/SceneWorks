@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-asset-as"
+description = "Enables the save_asset_as command without any pre-configured scope."
+commands.allow = ["save_asset_as"]
+
+[[permission]]
+identifier = "deny-save-asset-as"
+description = "Denies the save_asset_as command without any pre-configured scope."
+commands.deny = ["save_asset_as"]
