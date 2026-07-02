@@ -894,85 +894,106 @@ pub(crate) async fn run_pose_detect_job(
         .join(&job.id);
     tokio::fs::create_dir_all(&out_dir).await?;
 
-    let mut out_sources: Vec<Value> = Vec::new();
-    for (src, raw_src) in resolved.iter().zip(raw) {
-        let stem = src
-            .path
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "source".to_owned());
-        let source_path_str = src.path.as_ref().map(|p| p.to_string_lossy().into_owned());
-        let Some(raw_src) = raw_src else {
-            out_sources.push(json!({
-                "sourceAssetId": src.asset_id,
-                "sourcePath": source_path_str,
-                "error": "unreadable image",
-                "poses": [],
-            }));
-            continue;
-        };
-        let (w, h) = (raw_src.width as f32, raw_src.height as f32);
+    // The post-inference render loop is itself CPU-heavy blocking work: `draw_wholebody` rasters a
+    // `max(w,h)²` RGB canvas per person (~108 MB at 6000²) and `skeleton.save()` synchronously PNG-
+    // encodes it. Running that inline on the async fn (no heartbeat arm live) blocks a tokio runtime
+    // thread and grows the silent window toward the 90s stale-sweep on large multi-person high-res
+    // batches — the same failure class sc-8390 fixed for the inference half. Fold it into a
+    // `spawn_blocking` under `run_blocking_with_heartbeat` so it's both off-thread AND heartbeat-
+    // covered (sc-8848). `resolved` is moved in for the render and handed back out so the subsequent
+    // `cleanup_temp_sources` still sees it.
+    let (out_sources, resolved) = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "pose skeleton render task",
+        tokio::task::spawn_blocking(move || {
+            let mut out_sources: Vec<Value> = Vec::new();
+            for (src, raw_src) in resolved.iter().zip(raw) {
+                let stem = src
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "source".to_owned());
+                let source_path_str = src.path.as_ref().map(|p| p.to_string_lossy().into_owned());
+                let Some(raw_src) = raw_src else {
+                    out_sources.push(json!({
+                        "sourceAssetId": src.asset_id,
+                        "sourcePath": source_path_str,
+                        "error": "unreadable image",
+                        "poses": [],
+                    }));
+                    continue;
+                };
+                let (w, h) = (raw_src.width as f32, raw_src.height as f32);
 
-        // convert + squareify + order largest-person-area first
-        let mut ordered: Vec<(f32, PoseRecord, Option<[f32; 4]>)> = raw_src
-            .people
-            .iter()
-            .map(|kps| {
-                let rec = squareify(&wholebody_to_openpose(kps, w, h), w, h);
-                let bb = bbox(
-                    &[&rec.keypoints, &rec.hands[0], &rec.hands[1], &rec.face],
-                    min_conf,
-                );
-                let area = bb.map_or(0.0, |b| (b[2] - b[0]) * (b[3] - b[1]));
-                (area, rec, bb)
-            })
-            .collect();
-        ordered.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                // convert + squareify + order largest-person-area first
+                let mut ordered: Vec<(f32, PoseRecord, Option<[f32; 4]>)> = raw_src
+                    .people
+                    .iter()
+                    .map(|kps| {
+                        let rec = squareify(&wholebody_to_openpose(kps, w, h), w, h);
+                        let bb = bbox(
+                            &[&rec.keypoints, &rec.hands[0], &rec.hands[1], &rec.face],
+                            min_conf,
+                        );
+                        let area = bb.map_or(0.0, |b| (b[2] - b[0]) * (b[3] - b[1]));
+                        (area, rec, bb)
+                    })
+                    .collect();
+                ordered
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let side = raw_src.width.max(raw_src.height);
-        let stick = body_stickwidth(side, side);
-        let mut poses: Vec<Value> = Vec::new();
-        for (person_index, (_area, rec, bb)) in ordered.iter().enumerate() {
-            let body_t = thresholded(&rec.keypoints, min_conf);
-            let hands_t = [
-                thresholded(&rec.hands[0], min_conf),
-                thresholded(&rec.hands[1], min_conf),
-            ];
-            let face_t = thresholded(&rec.face, min_conf);
-            let skeleton =
-                draw_wholebody(side, side, &body_t, Some(&hands_t), Some(&face_t), stick);
-            let preview = out_dir.join(format!("{stem}_p{person_index}_skel.png"));
-            skeleton
-                .save(&preview)
-                .map_err(|e| WorkerError::InvalidPayload(format!("pose preview write: {e}")))?;
+                let side = raw_src.width.max(raw_src.height);
+                let stick = body_stickwidth(side, side);
+                let mut poses: Vec<Value> = Vec::new();
+                for (person_index, (_area, rec, bb)) in ordered.iter().enumerate() {
+                    let body_t = thresholded(&rec.keypoints, min_conf);
+                    let hands_t = [
+                        thresholded(&rec.hands[0], min_conf),
+                        thresholded(&rec.hands[1], min_conf),
+                    ];
+                    let face_t = thresholded(&rec.face, min_conf);
+                    let skeleton =
+                        draw_wholebody(side, side, &body_t, Some(&hands_t), Some(&face_t), stick);
+                    let preview = out_dir.join(format!("{stem}_p{person_index}_skel.png"));
+                    skeleton.save(&preview).map_err(|e| {
+                        WorkerError::InvalidPayload(format!("pose preview write: {e}"))
+                    })?;
 
-            poses.push(json!({
-                "personIndex": person_index,
-                "bbox": bb,
-                "facing": facing(&rec.keypoints, min_conf),
-                "meanConf": {
-                    "body": mean_conf(&rec.keypoints),
-                    "hands": ((mean_conf(&rec.hands[0]) + mean_conf(&rec.hands[1])) / 2.0 * 1000.0).round() / 1000.0,
-                    "face": mean_conf(&rec.face),
-                },
-                "keypoints": record_to_json(&rec.keypoints),
-                "hands": [record_to_json(&rec.hands[0]), record_to_json(&rec.hands[1])],
-                "face": record_to_json(&rec.face),
-                "skeletonPreview": preview.to_string_lossy(),
-            }));
-        }
+                    poses.push(json!({
+                        "personIndex": person_index,
+                        "bbox": bb,
+                        "facing": facing(&rec.keypoints, min_conf),
+                        "meanConf": {
+                            "body": mean_conf(&rec.keypoints),
+                            "hands": ((mean_conf(&rec.hands[0]) + mean_conf(&rec.hands[1])) / 2.0 * 1000.0).round() / 1000.0,
+                            "face": mean_conf(&rec.face),
+                        },
+                        "keypoints": record_to_json(&rec.keypoints),
+                        "hands": [record_to_json(&rec.hands[0]), record_to_json(&rec.hands[1])],
+                        "face": record_to_json(&rec.face),
+                        "skeletonPreview": preview.to_string_lossy(),
+                    }));
+                }
 
-        out_sources.push(json!({
-            "sourceAssetId": src.asset_id,
-            "sourcePath": source_path_str,
-            "displayName": src.display_name.clone().unwrap_or_else(|| stem.clone()),
-            "sourceWidth": raw_src.width,
-            "sourceHeight": raw_src.height,
-            "sourceAspect": (w / h * 10000.0).round() / 10000.0,
-            "poses": poses,
-        }));
-    }
+                out_sources.push(json!({
+                    "sourceAssetId": src.asset_id,
+                    "sourcePath": source_path_str,
+                    "displayName": src.display_name.clone().unwrap_or_else(|| stem.clone()),
+                    "sourceWidth": raw_src.width,
+                    "sourceHeight": raw_src.height,
+                    "sourceAspect": (w / h * 10000.0).round() / 10000.0,
+                    "poses": poses,
+                }));
+            }
+            Ok((out_sources, resolved))
+        }),
+    )
+    .await?;
 
     // Delete File-Upload temp sources now detection is done (guarded to the
     // pose-uploads cache so a project asset resolved by id is never removed).
