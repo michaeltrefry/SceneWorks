@@ -18,6 +18,10 @@
 use serde_json::Value;
 
 use crate::contracts::JsonObject;
+use crate::payload_util::{
+    array_or_empty, clamped_u32, nonempty_string_or, object_or_empty, optional_i64, optional_id,
+    string_list,
+};
 
 /// Defaults matching the Python `video_request_from_job` (`.get(key, default)`).
 const DEFAULT_MODE: &str = "image_to_video";
@@ -91,16 +95,16 @@ impl VideoRequest {
     pub fn from_payload(payload: &JsonObject) -> Self {
         let (width, height) = normalized_dimensions(payload.get("width"), payload.get("height"));
         Self {
-            project_id: string_or(payload, "projectId", ""),
-            mode: string_or(payload, "mode", DEFAULT_MODE),
-            prompt: string_or(payload, "prompt", ""),
-            negative_prompt: string_or(payload, "negativePrompt", ""),
-            model: string_or(payload, "model", DEFAULT_MODEL),
+            project_id: nonempty_string_or(payload, "projectId", ""),
+            mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
+            prompt: nonempty_string_or(payload, "prompt", ""),
+            negative_prompt: nonempty_string_or(payload, "negativePrompt", ""),
+            model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
             duration: safe_float(payload.get("duration"), 6.0, 1.0, 30.0),
-            fps: safe_int(payload.get("fps"), 25, 1, 60),
+            fps: clamped_u32(payload.get("fps"), 25, 1, 60),
             width,
             height,
-            quality: string_or(payload, "quality", DEFAULT_QUALITY),
+            quality: nonempty_string_or(payload, "quality", DEFAULT_QUALITY),
             seed: optional_i64(payload, "seed"),
             loras: array_or_empty(payload, "loras"),
             character_id: optional_id(payload, "characterId"),
@@ -110,7 +114,11 @@ impl VideoRequest {
                 payload.get("fitMode").and_then(Value::as_str),
             ),
             person_track_id: optional_id(payload, "personTrackId"),
-            replacement_mode: string_or(payload, "replacementMode", DEFAULT_REPLACEMENT_MODE),
+            replacement_mode: nonempty_string_or(
+                payload,
+                "replacementMode",
+                DEFAULT_REPLACEMENT_MODE,
+            ),
             last_frame_asset_id: optional_id(payload, "lastFrameAssetId"),
             source_clip_asset_id: optional_id(payload, "sourceClipAssetId"),
             source_clip_asset_ids: string_list(payload, "sourceClipAssetIds"),
@@ -186,8 +194,8 @@ pub fn is_wan_model(model: &str) -> bool {
 /// Clamp + floor dimensions exactly like the Python `normalized_dimensions`: parse
 /// (default 768x512), clamp to 256..=1920, floor to a multiple of 32, floor of 256.
 fn normalized_dimensions(width: Option<&Value>, height: Option<&Value>) -> (u32, u32) {
-    let w = floor_to_32(safe_int(width, 768, 256, 1920));
-    let h = floor_to_32(safe_int(height, 512, 256, 1920));
+    let w = floor_to_32(clamped_u32(width, 768, 256, 1920));
+    let h = floor_to_32(clamped_u32(height, 512, 256, 1920));
     (w, h)
 }
 
@@ -195,49 +203,9 @@ fn floor_to_32(value: u32) -> u32 {
     (value - (value % 32)).max(256)
 }
 
-fn string_or(payload: &JsonObject, key: &str, default: &str) -> String {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default)
-        .to_owned()
-}
-
-fn optional_id(payload: &JsonObject, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-fn optional_i64(payload: &JsonObject, key: &str) -> Option<i64> {
-    payload.get(key).and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    })
-}
-
-/// Parse an int (JSON number or numeric string), clamp to `[min, max]`, default
-/// when absent/unparseable — the `safe_int` contract.
-fn safe_int(value: Option<&Value>, default: u32, min: u32, max: u32) -> u32 {
-    value
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(default)
-        .clamp(min, max)
-}
-
 /// Parse a float (JSON number or numeric string), clamp to `[min, max]`, default
-/// when absent/unparseable — the `safe_float` contract.
+/// when absent/unparseable — the `safe_float` contract. Video-specific (image has no
+/// float payload field), so it stays local rather than moving into `payload_util`.
 fn safe_float(value: Option<&Value>, default: f32, min: f32, max: f32) -> f32 {
     value
         .and_then(|value| {
@@ -249,40 +217,6 @@ fn safe_float(value: Option<&Value>, default: f32, min: f32, max: f32) -> f32 {
         .filter(|value| value.is_finite())
         .unwrap_or(default)
         .clamp(min, max)
-}
-
-/// Parse a list of non-empty trimmed string ids (e.g. `referenceAssetIds`); blanks
-/// and non-strings are dropped, so the worker only ever sees real asset ids.
-fn string_list(payload: &JsonObject, key: &str) -> Vec<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn array_or_empty(payload: &JsonObject, key: &str) -> Vec<Value> {
-    payload
-        .get(key)
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn object_or_empty(payload: &JsonObject, key: &str) -> JsonObject {
-    payload
-        .get(key)
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

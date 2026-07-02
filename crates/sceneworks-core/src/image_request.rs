@@ -10,6 +10,10 @@
 use serde_json::Value;
 
 use crate::contracts::{ImageUpscaleRequest, JsonObject};
+use crate::payload_util::{
+    array_or_empty, clamped_u32, int_array, nonempty_string_or, object_or_empty, optional_i64,
+    optional_id, string_list, string_or,
+};
 
 /// Default model when the payload omits one (matches the Python worker).
 const DEFAULT_MODEL: &str = "z_image_turbo";
@@ -72,11 +76,11 @@ impl ImageRequest {
             prompt: string_or(payload, "prompt", ""),
             negative_prompt: string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
-            count: clamped_u32(payload, "count", 4, 1, 8),
+            count: clamped_u32(payload.get("count"), 4, 1, 8),
             seed: optional_i64(payload, "seed"),
             seeds: int_array(payload, "seeds"),
-            width: clamped_u32(payload, "width", 1024, 256, 4096),
-            height: clamped_u32(payload, "height", 1024, 256, 4096),
+            width: clamped_u32(payload.get("width"), 1024, 256, 4096),
+            height: clamped_u32(payload.get("height"), 1024, 256, 4096),
             style_preset: nonempty_string_or(payload, "stylePreset", DEFAULT_STYLE_PRESET),
             loras: array_or_empty(payload, "loras"),
             character_id: optional_id(payload, "characterId"),
@@ -111,109 +115,6 @@ fn parse_upscale(payload: &JsonObject) -> ImageUpscaleRequest {
         .get("upscale")
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
-}
-
-fn string_or(payload: &JsonObject, key: &str, default: &str) -> String {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or(default)
-        .to_owned()
-}
-
-/// Like `string_or` but a present-but-empty value also falls back to the default
-/// (matches the Python `.get(key, default)` where the UI never sends an empty model).
-fn nonempty_string_or(payload: &JsonObject, key: &str, default: &str) -> String {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default)
-        .to_owned()
-}
-
-fn optional_id(payload: &JsonObject, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-/// Read an int that may arrive as a JSON number or a numeric string, clamp to
-/// `[min, max]`, default when absent/unparseable.
-fn clamped_u32(payload: &JsonObject, key: &str, default: u32, min: u32, max: u32) -> u32 {
-    payload
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(default)
-        .clamp(min, max)
-}
-
-fn optional_i64(payload: &JsonObject, key: &str) -> Option<i64> {
-    payload.get(key).and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    })
-}
-
-fn int_array(payload: &JsonObject, key: &str) -> Vec<i64> {
-    payload
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| {
-                    value
-                        .as_i64()
-                        .or_else(|| value.as_str()?.trim().parse().ok())
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Collect a JSON string array into trimmed, non-empty owned strings (sc-6211, mirrors the video
-/// request's `referenceAssetIds` parsing). Absent / non-array / all-blank → empty.
-fn string_list(payload: &JsonObject, key: &str) -> Vec<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn array_or_empty(payload: &JsonObject, key: &str) -> Vec<Value> {
-    payload
-        .get(key)
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn object_or_empty(payload: &JsonObject, key: &str) -> JsonObject {
-    payload
-        .get(key)
-        .and_then(Value::as_object)
-        .cloned()
         .unwrap_or_default()
 }
 
