@@ -72,6 +72,7 @@ import {
   MASK_PREVIEW_RGBA,
   editReferenceIds,
   MAX_EDIT_REFERENCES,
+  leaveGuardMessage,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 
@@ -91,7 +92,10 @@ function baseContext(overrides = {}) {
     jobs: [],
     importAsset: vi.fn(),
     purgeAsset: vi.fn(),
-    registerLeaveGuard: vi.fn(),
+    registerLeaveGuard: vi.fn(() => () => {}),
+    trackEditorScratchOp: vi.fn(),
+    releaseEditorScratchOp: vi.fn(),
+    registerEditorScratchClaim: vi.fn(() => () => {}),
     imageModels: [],
     ...overrides,
   };
@@ -262,6 +266,60 @@ describe("ImageEditor scaffold", () => {
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(clearEditorLaunch).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+// sc-8850: an in-flight AI op imports the working bitmap as a real "scratch" asset and
+// (on success) loads the result back, then purges both. Navigating away mid-op unmounts
+// the editor, so its in-component purge never fires. Two halves guard against orphans:
+// (a) the leave guard fires while an AI op is pending — even though starting one does NOT
+// set `dirty` — so the user is warned before abandoning it; and (b) App owns a scratch
+// registry that survives the unmount and purges the scratch/result via the claim it
+// registers. These tests cover both halves at the editor seam.
+describe("in-flight AI-op scratch survival (sc-8850)", () => {
+  it("leaveGuardMessage warns while an AI op is pending even when NOT dirty", () => {
+    // The regression: the guard was gated only on `dirty`, so a running AI op (which never
+    // sets dirty) left the editor unguarded and silently abandonable.
+    expect(leaveGuardMessage({ dirty: false, aiOpPending: false })).toBeNull();
+    expect(leaveGuardMessage({ dirty: false, aiOpPending: true })).toBe(
+      "An image edit is still running. Leave and abandon it?",
+    );
+    // Unsaved edits still take precedence over the AI-op wording.
+    expect(leaveGuardMessage({ dirty: true, aiOpPending: false })).toContain("unsaved edits");
+    expect(leaveGuardMessage({ dirty: true, aiOpPending: true })).toContain("unsaved edits");
+  });
+
+  it("registers a survivor claim with App on mount and drops it on unmount", async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    const unregister = vi.fn();
+    const registerEditorScratchClaim = vi.fn(() => unregister);
+    const context = baseContext({ registerEditorScratchClaim });
+
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageEditor />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+
+    // The editor claims its in-flight ops with App so the survivor sweep knows it is the
+    // owner while mounted. The claim is a getter; with no op pending it reports an empty set.
+    expect(registerEditorScratchClaim).toHaveBeenCalledTimes(1);
+    const claimGetter = registerEditorScratchClaim.mock.calls[0][0];
+    expect(typeof claimGetter).toBe("function");
+    expect([...claimGetter()]).toEqual([]);
+
+    // Unmounting (the App-mounts-only-active navigation, which caused the orphan bug)
+    // releases the claim so App can sweep any op the editor left behind.
+    await act(async () => root.unmount());
+    expect(unregister).toHaveBeenCalledTimes(1);
+    container.remove();
   });
 });
 

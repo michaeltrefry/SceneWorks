@@ -125,6 +125,17 @@ const UPCOMING_TOOLS = [];
 // (image_jobs/flux2.rs). The working image takes one slot, so the editor allows up to 3 user refs.
 export const MAX_EDIT_REFERENCES = 4;
 
+// The leave-guard prompt shown before navigating away from the editor, or null when it's
+// safe to leave silently (sc-2434 / sc-8850). Unsaved edits win the message. Crucially the
+// guard also fires while an AI op is in flight — starting one does NOT set `dirty` (its
+// result only lands on success), so without this branch the user could silently abandon a
+// running edit (losing the result and, before the App survivor sweep, orphaning scratch).
+export function leaveGuardMessage({ dirty, aiOpPending }) {
+  if (dirty) return "You have unsaved edits in the Image Editor. Leave and discard them?";
+  if (aiOpPending) return "An image edit is still running. Leave and abandon it?";
+  return null;
+}
+
 // Compose the multi-reference edit's `referenceAssetIds`: the working image (staged as the scratch
 // source) FIRST so it anchors the edit, then the user's reference images — trimmed, de-duped, and
 // capped at `max` total. The worker prefers a non-empty `referenceAssetIds` list over `sourceAssetId`
@@ -761,6 +772,12 @@ export function ImageEditor() {
     importAsset,
     purgeAsset,
     registerLeaveGuard,
+    // App-level scratch-op survivor coordination (sc-8850). The editor stages an ephemeral
+    // scratch asset per AI op; these let App purge it (and the result) even if the user
+    // navigates away mid-job and this component unmounts before its own watcher can run.
+    trackEditorScratchOp,
+    releaseEditorScratchOp,
+    registerEditorScratchClaim,
     imageModels,
     editorLaunch = null,
     clearEditorLaunch,
@@ -2318,6 +2335,10 @@ export function ImageEditor() {
           body: JSON.stringify(buildBody(scratch, maskScratch)),
         });
         if (!job?.id) throw new Error("The job was not created.");
+        // Register the scratch op with App so its scratch/mask (and later result) assets
+        // are purged even if the user navigates away mid-job and this editor unmounts
+        // before the completion watcher below runs (sc-8850).
+        trackEditorScratchOp?.(job.id, [scratch, maskScratch]);
         setAiOp({
           jobId: job.id,
           scratch,
@@ -2338,7 +2359,7 @@ export function ImageEditor() {
         setStatus({ loading: false, error: `Could not start ${label}: ${err.message || err}` });
       }
     },
-    [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, token, purgeAsset],
+    [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, token, purgeAsset, trackEditorScratchOp],
   );
 
   function runUpscale() {
@@ -2533,7 +2554,7 @@ export function ImageEditor() {
     if (!aiOp?.jobId) return;
     const job = jobs?.find((item) => item.id === aiOp.jobId);
     if (!job || !terminalStatuses.has(job.status)) return;
-    const { scratch, maskScratch, source, edit, onComplete, writeBack, targetLayerId } = aiOp;
+    const { jobId, source, edit, onComplete, writeBack, targetLayerId } = aiOp;
     setAiOp(null); // stop tracking immediately so this can't re-enter on the next jobs tick
     const resultAsset = job.status === "completed" ? job.result?.assets?.[0] ?? null : null;
     (async () => {
@@ -2567,12 +2588,14 @@ export function ImageEditor() {
       } catch (err) {
         setStatus({ loading: false, error: err.message || "The operation failed." });
       } finally {
-        if (scratch) purgeAsset(scratch).catch(() => {});
-        if (maskScratch) purgeAsset(maskScratch).catch(() => {});
-        if (resultAsset) purgeAsset(resultAsset).catch(() => {});
+        // Hand the purge to App (sc-8850): it owns the scratch registry, so it purges the
+        // scratch + mask + result assets through the single survivor path. This also drops
+        // the registry entry so the App-level sweep won't double-purge. The result is
+        // loaded into the canvas above BEFORE this releases it — intermediates never persist.
+        releaseEditorScratchOp?.(jobId, job);
       }
     })();
-  }, [aiOp, jobs, installWorkingImage, replaceLayerImage, purgeAsset, checkpoint]);
+  }, [aiOp, jobs, installWorkingImage, replaceLayerImage, releaseEditorScratchOp, checkpoint]);
 
   // ── Save / export (sc-2434) ───────────────────────────────────────────────
   // Persist the working image as a NEW Library asset, never overwriting the
@@ -2632,25 +2655,42 @@ export function ImageEditor() {
     );
   }
 
-  // Warn before leaving with unsaved edits: a browser unload (close/refresh) and an
-  // in-app navigation away (the App nav consults this guard, sc-2434).
+  // Warn before leaving with unsaved edits OR an in-flight AI op (sc-2434 / sc-8850): a
+  // browser unload (close/refresh) and an in-app navigation away (the App nav consults
+  // this guard). Starting an AI op does NOT set `dirty` — its result only lands on
+  // success — so the guard must also fire while `aiOp` is non-null, otherwise the user
+  // can silently navigate away and abandon the running op (losing the result and, before
+  // the App-level survivor sweep, orphaning the scratch upload).
+  const aiOpPending = Boolean(aiOp);
   useEffect(() => {
-    if (!dirty) return undefined;
+    const message = leaveGuardMessage({ dirty, aiOpPending });
+    if (!message) return undefined;
     const onBeforeUnload = (event) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     const unregister = registerLeaveGuard?.(
-      () =>
-        typeof window.confirm !== "function" ||
-        window.confirm("You have unsaved edits in the Image Editor. Leave and discard them?"),
+      () => typeof window.confirm !== "function" || window.confirm(message),
     );
     return () => {
       window.removeEventListener("beforeunload", onBeforeUnload);
       if (typeof unregister === "function") unregister();
     };
-  }, [dirty, registerLeaveGuard]);
+  }, [dirty, aiOpPending, registerLeaveGuard]);
+
+  // Claim the in-flight AI op's jobId with App so its survivor sweep (sc-8850) knows this
+  // editor is alive and owns loading the result back before the scratch/result assets are
+  // purged. The getter reads live `aiOp` via the ref, so the claim registration itself is
+  // stable — it only unregisters (and triggers App's post-unmount sweep) when this editor
+  // unmounts. An op that completes after this unmount is then purged by App, not lost here.
+  useEffect(() => {
+    if (!registerEditorScratchClaim) return undefined;
+    return registerEditorScratchClaim(() => {
+      const id = aiOpRef.current?.jobId;
+      return id ? new Set([id]) : new Set();
+    });
+  }, [registerEditorScratchClaim]);
 
   const activeAiJob = aiOp ? jobs?.find((item) => item.id === aiOp.jobId) : null;
 
