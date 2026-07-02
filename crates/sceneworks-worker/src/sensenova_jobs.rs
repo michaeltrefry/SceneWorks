@@ -647,25 +647,43 @@ pub(crate) async fn run_interleave_job(
     )
     .await?;
 
-    let result = write_interleaved_document(
-        &request,
-        job,
-        &project_path,
-        &prompt,
-        &model_id,
-        seed,
-        max_images,
-        width,
-        height,
-        steps,
-        cfg_scale,
-        img_cfg_scale,
-        timestep_shift,
-        max_new_tokens,
-        think_mode,
-        &generated_text,
-        images,
-    )?;
+    // The document assembly synchronously PNG-encodes up to `max_images` multi-megapixel images
+    // (`write_image_asset`) and does the document `fs::write`/`rename` — multi-second work that must
+    // not run on the async runtime thread. Move it onto the blocking pool under the heartbeat wrapper
+    // so the in-flight job keeps beating across the encode + IO and is never falsely swept as
+    // `interrupted` during those seconds (sc-8838, sc-8390). Ownership is moved into the closure.
+    let job_owned = job.clone();
+    let write_task = tokio::task::spawn_blocking(move || {
+        write_interleaved_document(
+            request,
+            job_owned,
+            project_path,
+            prompt,
+            model_id,
+            seed,
+            max_images,
+            width,
+            height,
+            steps,
+            cfg_scale,
+            img_cfg_scale,
+            timestep_shift,
+            max_new_tokens,
+            think_mode,
+            &generated_text,
+            images,
+        )
+    });
+    let result = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "interleave document write join",
+        write_task,
+    )
+    .await?;
 
     update_job(
         api,
@@ -896,25 +914,43 @@ pub(crate) async fn run_interleave_job(
     )
     .await?;
 
-    let result = write_interleaved_document(
-        &request,
-        job,
-        &project_path,
-        &prompt,
-        &model_id,
-        seed,
-        max_images,
-        width,
-        height,
-        steps,
-        cfg_scale,
-        img_cfg_scale,
-        timestep_shift,
-        max_new_tokens,
-        think_mode,
-        &generated_text,
-        images,
-    )?;
+    // The document assembly synchronously PNG-encodes up to `max_images` multi-megapixel images
+    // (`write_image_asset`) and does the document `fs::write`/`rename` — multi-second work that must
+    // not run on the async runtime thread. Move it onto the blocking pool under the heartbeat wrapper
+    // so the in-flight job keeps beating across the encode + IO and is never falsely swept as
+    // `interrupted` during those seconds (sc-8838, sc-8390). Ownership is moved into the closure.
+    let job_owned = job.clone();
+    let write_task = tokio::task::spawn_blocking(move || {
+        write_interleaved_document(
+            request,
+            job_owned,
+            project_path,
+            prompt,
+            model_id,
+            seed,
+            max_images,
+            width,
+            height,
+            steps,
+            cfg_scale,
+            img_cfg_scale,
+            timestep_shift,
+            max_new_tokens,
+            think_mode,
+            &generated_text,
+            images,
+        )
+    });
+    let result = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        "",
+        "interleave document write join",
+        write_task,
+    )
+    .await?;
 
     update_job(
         api,
@@ -952,14 +988,18 @@ pub(crate) async fn run_interleave_job(
 // `document` asset fact. Mirrors the Python `_write_interleaved_document` / `_build_interleaved_segments`.
 // ---------------------------------------------------------------------------
 
+// Runs the sync PNG encodes (up to 10 multi-megapixel images via `write_image_asset`) plus the
+// document `fs::write`/`rename`; all call sites hand it to `spawn_blocking` under
+// `run_blocking_with_heartbeat`, so it must own its inputs (no borrows into the async frame) and
+// never touch the runtime thread itself (sc-8838).
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 fn write_interleaved_document(
-    request: &ImageRequest,
-    job: &JobSnapshot,
-    project_path: &Path,
-    prompt: &str,
-    model_id: &str,
+    request: ImageRequest,
+    job: JobSnapshot,
+    project_path: PathBuf,
+    prompt: String,
+    model_id: String,
     seed: i64,
     max_images: usize,
     width: i32,
@@ -977,7 +1017,7 @@ fn write_interleaved_document(
     // Flat telemetry mirroring the Python `raw_settings` (advanced overlay + resolved knobs).
     let mut raw_settings = request.advanced.clone();
     raw_settings.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw_settings.insert("repo".to_owned(), Value::String(model_repo_for(request)));
+    raw_settings.insert("repo".to_owned(), Value::String(model_repo_for(&request)));
     raw_settings.insert("numInferenceSteps".to_owned(), json!(steps));
     raw_settings.insert("guidanceScale".to_owned(), json!(cfg_scale));
     raw_settings.insert("imageGuidanceScale".to_owned(), json!(img_cfg_scale));
@@ -989,7 +1029,7 @@ fn write_interleaved_document(
 
     // Generated images persist as ordinary image assets — the worker saves the PNG + reports facts,
     // and the Rust API builds + indexes their sidecars. The document references them in order.
-    let plan = ImagePlan::with_count(request, images.len() as u32);
+    let plan = ImagePlan::with_count(&request, images.len() as u32);
     let mut image_raw_settings = raw_settings.clone();
     image_raw_settings.insert("interleaved".to_owned(), Value::Bool(true));
     let mut image_writes: Vec<Value> = Vec::with_capacity(images.len());
@@ -1003,7 +1043,7 @@ fn write_interleaved_document(
             image.pixels,
             SENSENOVA_ADAPTER,
             image_raw_settings.clone(),
-            project_path,
+            &project_path,
         )?;
         image_writes.push(Value::Object(fact));
     }
