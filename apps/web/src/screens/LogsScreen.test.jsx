@@ -169,6 +169,47 @@ describe("LogsScreen", () => {
     }
   });
 
+  it("fetches the full server buffer (limit=5000) for the snapshot, not a 1000-row tail (sc-8849)", async () => {
+    await render();
+    // The initial snapshot request must ask for the entire server buffer so
+    // client-side search can reach the oldest rows. A regression back to
+    // limit=1000 (or any value < the server DEFAULT_CAPACITY) fails here.
+    const snapshotPaths = apiFetch.mock.calls
+      .map((call) => call[0])
+      .filter((path) => !path.includes("afterSeq="));
+    expect(snapshotPaths.length).toBeGreaterThan(0);
+    expect(snapshotPaths.every((path) => path.includes("limit=5000"))).toBe(true);
+    expect(snapshotPaths.some((path) => path.includes("limit=1000"))).toBe(false);
+  });
+
+  it("finds a match beyond the first 1000 held rows (sc-8849)", async () => {
+    vi.useFakeTimers();
+    try {
+      // Simulate a full server buffer: 5000 rows, with the unique needle living
+      // deep in the tail (row 4200) — well past the old 1000-row snapshot window.
+      logRows = [];
+      for (let seq = 0; seq < 5000; seq += 1) {
+        const message = seq === 4200 ? "needle_deep_in_buffer marker" : "routine heartbeat tick";
+        logRows.push(row(seq, "api", "info", message, { event: "tick" }));
+      }
+      await render();
+      // Snapshot fetched all 5000, so the deep row is actually held in memory.
+      expect(container.querySelectorAll(".logs-row").length).toBe(5000);
+
+      const input = container.querySelector("input.logs-search");
+      await typeSearch(input, "needle_deep_in_buffer");
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      const rows = container.querySelectorAll(".logs-row");
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain("needle_deep_in_buffer");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("clears the search filter and restores all rows (sc-8849)", async () => {
     vi.useFakeTimers();
     try {
