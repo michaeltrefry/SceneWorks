@@ -16,7 +16,10 @@ fn credential_store(state: &AppState) -> CredentialFileStore {
 pub(crate) async fn list_credentials(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CredentialStatus>>, ApiError> {
-    Ok(Json(credential_store(&state).list()))
+    let list = credential_store(&state)
+        .list()
+        .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))?;
+    Ok(Json(list))
 }
 
 #[derive(serde::Deserialize)]
@@ -51,7 +54,10 @@ pub(crate) async fn set_credential(
     store
         .set(&host, &payload.label, &payload.scheme, &payload.token)
         .map_err(|error| ApiError::internal(format!("Failed to save credential: {error}")))?;
-    Ok(Json(store.list()))
+    let list = store
+        .list()
+        .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))?;
+    Ok(Json(list))
 }
 
 /// Remove a host's credential, returning the updated redacted listing. Removing an
@@ -64,5 +70,8 @@ pub(crate) async fn delete_credential(
     store
         .delete(&host)
         .map_err(|error| ApiError::internal(format!("Failed to delete credential: {error}")))?;
-    Ok(Json(store.list()))
+    let list = store
+        .list()
+        .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))?;
+    Ok(Json(list))
 }

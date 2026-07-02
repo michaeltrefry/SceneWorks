@@ -58,17 +58,57 @@ impl CredentialFileStore {
         &self.path
     }
 
-    /// Load the stored map, or an empty map when the file is absent or unreadable.
-    pub fn load(&self) -> BTreeMap<String, CredentialEntry> {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|body| serde_json::from_str(&body).ok())
-            .unwrap_or_default()
+    /// Load the stored map.
+    ///
+    /// An absent file is the legitimate first-run case and yields an empty map.
+    /// A file that is present but unreadable or unparseable is *not* treated as
+    /// empty: it propagates an error (and logs a warning), so that a subsequent
+    /// destructive `save` in `set`/`delete` refuses to overwrite corrupt-but-real
+    /// data with an empty map (sc-8814 / F-012). One malformed byte (partial
+    /// disk write, a botched manual edit) must never silently wipe every stored
+    /// credential on the next write.
+    pub fn load(&self) -> io::Result<BTreeMap<String, CredentialEntry>> {
+        let body = match std::fs::read_to_string(&self.path) {
+            Ok(body) => body,
+            // Absent file: nothing stored yet — the legitimate empty-map case.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            // Present but unreadable (permissions, I/O error, etc.): surface it
+            // rather than pretend the store is empty.
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "failed to read credential store; refusing to treat it as empty",
+                );
+                return Err(error);
+            }
+        };
+        serde_json::from_str(&body).map_err(|error| {
+            tracing::warn!(
+                path = %self.path.display(),
+                error = %error,
+                "credential store is present but unparseable; refusing to treat it as empty \
+                 (fix or remove the file to recover)",
+            );
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "credential store {} is corrupt: {error}",
+                    self.path.display()
+                ),
+            )
+        })
     }
 
     /// Redacted listing (host/label/scheme/present), sorted by host. No tokens.
-    pub fn list(&self) -> Vec<CredentialStatus> {
-        self.load()
+    ///
+    /// Propagates a load error (corrupt/unreadable file) rather than reporting an
+    /// empty list that would hide the corruption from the operator (sc-8814).
+    pub fn list(&self) -> io::Result<Vec<CredentialStatus>> {
+        Ok(self
+            .load()?
             .into_iter()
             .map(|(host, entry)| CredentialStatus {
                 present: !entry.token.trim().is_empty(),
@@ -76,7 +116,7 @@ impl CredentialFileStore {
                 label: entry.label.trim().to_owned(),
                 host,
             })
-            .collect()
+            .collect())
     }
 
     /// Upsert a host's credential. Returns the normalized host key.
@@ -87,10 +127,15 @@ impl CredentialFileStore {
     /// In-process only — sufficient because the rust-api is the file's sole
     /// writer; the worker only reads it, which the atomic rename in `save`
     /// already keeps consistent.
+    ///
+    /// If the existing store is present but corrupt, `load` errors and the write
+    /// is refused rather than overwriting real credentials with an empty map
+    /// (sc-8814 / F-012). The load happens under the same guard as the save, so
+    /// the read-modify-write stays atomic (sc-8813).
     pub fn set(&self, host: &str, label: &str, scheme: &str, token: &str) -> io::Result<String> {
         let host = normalize_host(host);
         let _guard = lock_store_path(&self.path);
-        let mut map = self.load();
+        let mut map = self.load()?;
         map.insert(
             host.clone(),
             CredentialEntry {
@@ -105,10 +150,12 @@ impl CredentialFileStore {
 
     /// Remove a host's credential. Returns whether anything was removed.
     /// Serialized against concurrent `set`/`delete` like [`Self::set`] (sc-8813).
+    /// A corrupt existing store errors instead of being silently replaced by an
+    /// empty map (sc-8814 / F-012).
     pub fn delete(&self, host: &str) -> io::Result<bool> {
         let host = normalize_host(host);
         let _guard = lock_store_path(&self.path);
-        let mut map = self.load();
+        let mut map = self.load()?;
         let removed = map.remove(&host).is_some();
         if removed {
             self.save(&map)?;
@@ -227,14 +274,14 @@ mod tests {
     fn set_list_delete_round_trip_redacts_token() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = CredentialFileStore::new(dir.path());
-        assert!(store.list().is_empty());
+        assert!(store.list().expect("list").is_empty());
 
         let host = store
             .set("https://Civitai.com", "Civit.ai", "query", " key ")
             .expect("set");
         assert_eq!(host, "civitai.com");
 
-        let list = store.list();
+        let list = store.list().expect("list");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].host, "civitai.com");
         assert_eq!(list[0].label, "Civit.ai");
@@ -244,11 +291,11 @@ mod tests {
         let serialized = serde_json::to_string(&list).expect("serialize");
         assert!(!serialized.contains("key"), "listing leaked the token");
         // ...but it is persisted (trimmed) for the worker to read.
-        assert_eq!(store.load()["civitai.com"].token, "key");
+        assert_eq!(store.load().expect("load")["civitai.com"].token, "key");
 
         assert!(store.delete("civitai.com").expect("delete"));
         assert!(!store.delete("civitai.com").expect("delete again"));
-        assert!(store.list().is_empty());
+        assert!(store.list().expect("list").is_empty());
     }
 
     #[test]
@@ -256,7 +303,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = CredentialFileStore::new(dir.path());
         store.set("huggingface.co", "", "weird", "hf").expect("set");
-        assert_eq!(store.list()[0].scheme, "bearer");
+        assert_eq!(store.list().expect("list")[0].scheme, "bearer");
     }
 
     /// sc-4268 / F-CORE-8: the secrets file is written via a 0600 staging temp +
@@ -286,7 +333,7 @@ mod tests {
             "staging temp must be renamed away, not left behind"
         );
         // Content round-trips through the atomic write.
-        assert_eq!(store.load()["example.com"].token, "tok");
+        assert_eq!(store.load().expect("load")["example.com"].token, "tok");
     }
 
     #[cfg(unix)]
@@ -343,7 +390,7 @@ mod tests {
             handle.join().expect("thread");
         }
 
-        let map = CredentialFileStore::new(&config_dir).load();
+        let map = CredentialFileStore::new(&config_dir).load().expect("load");
         assert_eq!(
             map.len(),
             THREADS * HOSTS_PER_THREAD,
@@ -398,7 +445,7 @@ mod tests {
             handle.join().expect("thread");
         }
 
-        let map = CredentialFileStore::new(&config_dir).load();
+        let map = CredentialFileStore::new(&config_dir).load().expect("load");
         let expected: Vec<String> = (0..PAIRS)
             .map(|index| format!("new-{index}.example.com"))
             .collect();
@@ -443,5 +490,76 @@ mod tests {
         std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o644))
             .expect("loosen");
         assert_eq!(loose_credentials_mode(store.path()), Some(0o644));
+    }
+
+    /// sc-8814 / F-012: an absent file is the legitimate first-run case — `load`
+    /// yields an empty map and a `set` creates the store from scratch.
+    #[test]
+    fn absent_file_loads_empty_and_first_set_creates_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialFileStore::new(dir.path());
+        assert!(!store.path().exists(), "no file should exist yet");
+        assert!(
+            store.load().expect("absent file loads as empty").is_empty(),
+            "an absent file must load as an empty map, not error",
+        );
+
+        store
+            .set("huggingface.co", "HF", "bearer", "hf-token")
+            .expect("first set must create the store");
+        assert!(store.path().exists(), "set must have created the file");
+        assert_eq!(
+            store.load().expect("load")["huggingface.co"].token,
+            "hf-token",
+        );
+    }
+
+    /// sc-8814 / F-012: a present-but-corrupt file must NOT be treated as empty.
+    /// `load`/`list` error, and a subsequent `set`/`delete` refuses to persist —
+    /// the corrupt bytes are left on disk rather than clobbered with an empty map.
+    #[test]
+    fn corrupt_file_errors_and_write_refuses_to_wipe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialFileStore::new(dir.path());
+
+        // A single malformed edit: valid JSON prefix, then garbage.
+        let garbage = "{ \"huggingface.co\": { \"token\": \"real-secret\" ";
+        std::fs::write(store.path(), garbage).expect("seed corrupt file");
+
+        // load / list surface the corruption instead of pretending it is empty.
+        let load_err = store.load().expect_err("corrupt file must error");
+        assert_eq!(load_err.kind(), io::ErrorKind::InvalidData);
+        assert!(store.list().is_err(), "list must propagate the corruption");
+
+        // A write must NOT overwrite the corrupt-but-real data with an empty map.
+        assert!(
+            store.set("civitai.com", "", "bearer", "new").is_err(),
+            "set over a corrupt store must refuse rather than wipe",
+        );
+        assert!(
+            store.delete("huggingface.co").is_err(),
+            "delete over a corrupt store must refuse rather than wipe",
+        );
+
+        // The original bytes are still on disk — nothing was destroyed.
+        assert_eq!(
+            std::fs::read_to_string(store.path()).expect("read back"),
+            garbage,
+            "the corrupt file must be preserved verbatim, not overwritten",
+        );
+    }
+
+    /// sc-8814 / F-012: an *empty* file (0 bytes) is not valid JSON, so it is
+    /// treated as corrupt rather than silently empty — a truncated write must not
+    /// look like "no credentials".
+    #[test]
+    fn empty_file_is_treated_as_corrupt_not_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialFileStore::new(dir.path());
+        std::fs::write(store.path(), "").expect("seed empty file");
+        assert!(
+            store.load().is_err(),
+            "a zero-byte file is a truncated write, not an empty store",
+        );
     }
 }
