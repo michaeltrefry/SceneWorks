@@ -5733,6 +5733,7 @@ dependencies = [
  "candle-gen-wan",
  "candle-gen-z-image",
  "candle-llm",
+ "fs2",
  "futures-util",
  "glob",
  "image",

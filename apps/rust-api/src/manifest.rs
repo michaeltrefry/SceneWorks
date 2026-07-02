@@ -1,6 +1,87 @@
 use super::*;
 
+use fs2::FileExt as _;
+
 const MANIFEST_CACHE_LIMIT: usize = 16;
+/// Max time to block on the cross-process manifest lock before erroring. Mirrors the
+/// worker's `MANIFEST_LOCK_TIMEOUT` (sc-8843): the API and the utility-worker pool
+/// (separate processes) write the SAME `user.*.jsonc` files, so both take the same
+/// `<manifest>.lock` sibling to serialize cross-writer read→merge→rename.
+const MANIFEST_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MANIFEST_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// RAII holder for the cross-process advisory exclusive lock on a `<manifest>.lock`
+/// sibling. Released when the file handle drops. Acquired on a blocking thread since
+/// flock is synchronous (see [`acquire_manifest_file_lock`]).
+struct ManifestFileLock {
+    _file: std::fs::File,
+}
+
+fn manifest_lock_path(manifest_path: &FsPath) -> PathBuf {
+    let mut name = manifest_path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".lock");
+    manifest_path.with_file_name(name)
+}
+
+/// Acquire the cross-process manifest lock, off the async runtime (flock blocks).
+async fn acquire_manifest_file_lock(path: &FsPath) -> Result<ManifestFileLock, ApiError> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            ApiError::internal(format!(
+                "Failed to create manifest directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let lock_path = manifest_lock_path(path);
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| {
+                ApiError::internal(format!(
+                    "Failed to open manifest lock {}: {error}",
+                    lock_path.display()
+                ))
+            })?;
+        let deadline = std::time::Instant::now() + MANIFEST_LOCK_TIMEOUT;
+        // fs2 signals lock contention with a platform-specific error: `EWOULDBLOCK`
+        // (`ErrorKind::WouldBlock`) on Unix, but `ERROR_LOCK_VIOLATION` (raw OS 33,
+        // `ErrorKind::Uncategorized`) on Windows. Matching on `ErrorKind` misses the
+        // Windows case and would mis-propagate a real, retryable contention as a hard
+        // error (sc-8843). Compare by RAW OS CODE against fs2's own contention error,
+        // which is correct on every platform.
+        let contended = fs2::lock_contended_error().raw_os_error();
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(ManifestFileLock { _file: file }),
+                Err(error) if error.raw_os_error() == contended => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(ApiError::internal(format!(
+                            "Timed out after {MANIFEST_LOCK_TIMEOUT:?} waiting for manifest lock {}",
+                            lock_path.display()
+                        )));
+                    }
+                    std::thread::sleep(MANIFEST_LOCK_POLL);
+                }
+                Err(error) => {
+                    return Err(ApiError::internal(format!(
+                        "Failed to acquire manifest lock {}: {error}",
+                        lock_path.display()
+                    )))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Manifest lock task failed: {error}")))?
+}
 pub(crate) const API_MANAGED_MANIFEST_HEADER: &str = "// This file is rewritten by the SceneWorks API. Inline JSONC comments are not preserved across writes.";
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -53,6 +134,10 @@ where
 {
     let lock = manifest_write_lock(state, path);
     let _guard = lock.lock().await;
+    // Cross-process lock (sc-8843): the utility-worker pool writes the same
+    // `user.*.jsonc` files from separate processes, so the in-process mutex above is
+    // not enough — hold the shared `<manifest>.lock` across the whole read→merge→save.
+    let _file_lock = acquire_manifest_file_lock(path).await?;
     let entries = load_manifest_entries(state, path, field).await?;
     let (entries, result) = operation(entries)?;
     save_manifest_entries(path, field, entries).await?;

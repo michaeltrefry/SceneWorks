@@ -6,6 +6,11 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+# Cross-process advisory file lock (flock) serializing the manifest read→merge→write
+# in manifest.rs. The default utility pool is 4 SEPARATE PROCESSES, so an in-process
+# mutex can't stop two parallel installs from clobbering each other's manifest entry
+# (F-041 / sc-8843). Already the workspace's file-lock choice (apps/rust-api).
+fs2 = "0.4"
 futures-util = "0.3"
 glob = "0.3"
 # PNG encoding for generated image assets (epic 3018, sc-3020). png-only keeps the
