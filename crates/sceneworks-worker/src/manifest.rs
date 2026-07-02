@@ -130,12 +130,17 @@ impl ManifestLock {
             .truncate(false)
             .open(&lock_path)?;
         let deadline = std::time::Instant::now() + MANIFEST_LOCK_TIMEOUT;
+        // fs2 signals lock contention with a platform-specific error: `EWOULDBLOCK`
+        // (`ErrorKind::WouldBlock`) on Unix, but `ERROR_LOCK_VIOLATION` (raw OS 33,
+        // `ErrorKind::Uncategorized`) on Windows. Matching on `ErrorKind` misses the
+        // Windows case and would mis-propagate a real, retryable contention as a hard
+        // error (sc-8843). Compare by RAW OS CODE against fs2's own contention error,
+        // which is correct on every platform.
+        let contended = fs2::lock_contended_error().raw_os_error();
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(Self { _file: file }),
-                // fs2 surfaces contention as `EWOULDBLOCK`, which maps to
-                // `ErrorKind::WouldBlock`; retry until the deadline.
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if error.raw_os_error() == contended => {
                     if std::time::Instant::now() >= deadline {
                         return Err(WorkerError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
