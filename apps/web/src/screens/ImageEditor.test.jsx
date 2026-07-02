@@ -66,6 +66,7 @@ import {
   historyRedo,
   canUndo,
   canRedo,
+  runGuardedRestore,
   buildSegmentJobBody,
   rectToSegmentBox,
   tintMaskRgbaInPlace,
@@ -1137,6 +1138,188 @@ describe("undo/redo history (sc-6106)", () => {
     const after = historyCheckpoint(h, A);
     expect(h).toEqual({ past: [], future: [] });
     expect(after).not.toBe(h);
+  });
+});
+
+// Serialized undo/redo restore guard (sc-8852). A restore is async (it decodes
+// changed layers via blobToImage before re-installing the working stack), so a
+// rapid second Cmd-Z must not race the in-flight restore and corrupt the redo
+// branch. These drive runGuardedRestore exactly as undo()/redo() wire it: a
+// mutable `historyRef` + a "present" marker that the (deferred) restore updates,
+// so a second call landing mid-restore would — without the guard — capture the
+// stale present and push a duplicate onto `future`.
+describe("serialized undo/redo restore (sc-8852)", () => {
+  const A = { id: "A" };
+  const B = { id: "B" };
+  const C = { id: "C" };
+
+  // Build a harness mirroring the component: undo()/redo() route through
+  // runGuardedRestore with a shared guard ref, a synchronous historyRef, a live
+  // "present" marker, and a controllable async restore whose promise resolution
+  // is deferred until the test releases it.
+  function makeHarness(initialHistory, initialPresent) {
+    const guardRef = { current: false };
+    const historyRef = { current: initialHistory };
+    const present = { current: initialPresent };
+    const restores = []; // { snapshot, resolve } for every restore that actually ran
+    let pending = null; // the deferred controller for the in-flight restore
+
+    const restore = (snapshot) =>
+      new Promise((resolve) => {
+        pending = {
+          snapshot,
+          resolve: () => {
+            // Mirror restoreSnapshot's effect: the restored snapshot becomes the
+            // new live "present" once the async work settles.
+            present.current = snapshot;
+            resolve();
+          },
+        };
+        restores.push(pending);
+      });
+
+    const undo = () =>
+      runGuardedRestore({
+        guardRef,
+        step: () => historyUndo(historyRef.current, present.current),
+        commitHistory: (next) => {
+          historyRef.current = next;
+        },
+        restore,
+      });
+
+    const redo = () =>
+      runGuardedRestore({
+        guardRef,
+        step: () => historyRedo(historyRef.current, present.current),
+        commitHistory: (next) => {
+          historyRef.current = next;
+        },
+        restore,
+      });
+
+    return {
+      guardRef,
+      historyRef,
+      present,
+      restores,
+      undo,
+      redo,
+      // Release the single in-flight restore (there is at most one under the guard).
+      releasePending: async () => {
+        const p = pending;
+        pending = null;
+        p.resolve();
+        // Let the awaiting runGuardedRestore run its finally + return.
+        await Promise.resolve();
+        await Promise.resolve();
+      },
+    };
+  }
+
+  it("two rapid undos step back exactly once — the second is ignored mid-restore", async () => {
+    // present is C, past=[A,B]; an undo→undo chain should land on B, not corrupt future.
+    const h = makeHarness({ past: [A, B], future: [] }, C);
+
+    const first = h.undo(); // starts restoring B, guard is now held
+    const second = h.undo(); // lands mid-restore → ignored, no second step()
+
+    // Exactly one restore was dispatched (the second call never ran step()).
+    expect(h.restores).toHaveLength(1);
+    expect(h.restores[0].snapshot).toBe(B);
+    // History advanced exactly one step: C parked on future, B popped from past.
+    expect(h.historyRef.current).toEqual({ past: [A], future: [C] });
+    expect(await second).toBe(false); // ignored invocation reports "no step ran"
+
+    await h.releasePending();
+    expect(await first).toBe(true);
+    // Guard released; no duplicate C pushed onto future.
+    expect(h.guardRef.current).toBe(false);
+    expect(h.historyRef.current).toEqual({ past: [A], future: [C] });
+    expect(h.present.current).toBe(B);
+  });
+
+  it("undo then redo returns to the same present", async () => {
+    const h = makeHarness({ past: [A, B], future: [] }, C);
+
+    const undoDone = h.undo();
+    await h.releasePending(); // restore B settles → present is B
+    await undoDone;
+    expect(h.present.current).toBe(B);
+    expect(h.historyRef.current).toEqual({ past: [A], future: [C] });
+
+    const redoDone = h.redo();
+    await h.releasePending(); // restore C settles → present is C again
+    await redoDone;
+    expect(h.present.current).toBe(C);
+    expect(h.historyRef.current).toEqual({ past: [A, B], future: [] });
+  });
+
+  it("clears the guard after a successful restore so the next undo runs", async () => {
+    const h = makeHarness({ past: [A, B], future: [] }, C);
+
+    const first = h.undo();
+    await h.releasePending();
+    await first;
+    expect(h.guardRef.current).toBe(false);
+
+    // A second, non-overlapping undo now proceeds (guard was released).
+    const second = h.undo();
+    expect(h.restores).toHaveLength(2);
+    expect(h.restores[1].snapshot).toBe(A);
+    await h.releasePending();
+    await second;
+    expect(h.present.current).toBe(A);
+    expect(h.historyRef.current).toEqual({ past: [], future: [B, C] });
+  });
+
+  it("clears the guard even when a restore throws so undo is not wedged forever", async () => {
+    const guardRef = { current: false };
+    const historyRef = { current: { past: [A, B], future: [] } };
+    let calls = 0;
+    const failingRestore = async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("decode failed");
+    };
+    const undo = () =>
+      runGuardedRestore({
+        guardRef,
+        step: () => historyUndo(historyRef.current, C),
+        commitHistory: (next) => {
+          historyRef.current = next;
+        },
+        restore: failingRestore,
+      });
+
+    await expect(undo()).rejects.toThrow("decode failed");
+    // finally released the guard despite the throw.
+    expect(guardRef.current).toBe(false);
+    // A subsequent undo works — history is not wedged.
+    const ran = await undo();
+    expect(ran).toBe(true);
+    expect(calls).toBe(2);
+    expect(guardRef.current).toBe(false);
+  });
+
+  it("normal single undo/redo is unchanged and reports it ran", async () => {
+    const h = makeHarness({ past: [A], future: [] }, B);
+    const done = h.undo();
+    expect(h.restores).toHaveLength(1);
+    expect(h.restores[0].snapshot).toBe(A);
+    await h.releasePending();
+    expect(await done).toBe(true);
+    expect(h.historyRef.current).toEqual({ past: [], future: [B] });
+    expect(h.present.current).toBe(A);
+  });
+
+  it("a no-op undo on an exhausted stack releases the guard and reports false", async () => {
+    const h = makeHarness({ past: [], future: [] }, A);
+    expect(await h.undo()).toBe(false);
+    expect(h.restores).toHaveLength(0);
+    expect(h.guardRef.current).toBe(false);
+    // Redo likewise no-ops cleanly and leaves the guard free.
+    expect(await h.redo()).toBe(false);
+    expect(h.guardRef.current).toBe(false);
   });
 });
 
