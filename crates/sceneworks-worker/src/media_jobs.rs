@@ -345,6 +345,19 @@ pub(crate) async fn run_person_detect_job(
     Ok(())
 }
 
+/// The largest seek (seconds) a person-detect frame extraction will ever accept.
+const PERSON_DETECT_MAX_TIMESTAMP_SECONDS: f64 = 3600.0;
+
+/// Clamp the requested `sourceTimestamp` into a seek that lands inside the source clip.
+///
+/// The upper bound is `min(duration, 3600)`, not `max(duration, 3600)`: a timestamp past the
+/// end of a short clip is pulled back to the clip's duration so `ffmpeg -ss` still produces a
+/// frame, instead of sailing past the end and failing with a generic "no frame output" error
+/// (sc-8831). The 3600s ceiling only ever tightens the bound for absurdly long clips.
+fn person_detect_source_timestamp(timestamp: f64, duration: f64) -> f64 {
+    timestamp.clamp(0.0, duration.min(PERSON_DETECT_MAX_TIMESTAMP_SECONDS))
+}
+
 pub(crate) async fn run_person_detect(
     api: &ApiClient,
     settings: &Settings,
@@ -373,12 +386,14 @@ pub(crate) async fn run_person_detect(
         .get("duration")
         .map_or(6.0, |value| value_f64(value, 6.0))
         .clamp(0.0, 3600.0);
-    let timestamp = payload_f64(
-        &job.payload,
-        "sourceTimestamp",
-        if duration > 0.0 { duration * 0.25 } else { 0.0 },
-    )
-    .clamp(0.0, duration.max(3600.0));
+    let timestamp = person_detect_source_timestamp(
+        payload_f64(
+            &job.payload,
+            "sourceTimestamp",
+            if duration > 0.0 { duration * 0.25 } else { 0.0 },
+        ),
+        duration,
+    );
 
     let frames_dir = project_path.join("assets").join("frames");
     tokio::fs::create_dir_all(&frames_dir).await?;
@@ -2680,6 +2695,48 @@ mod frame_seek_tests {
         // A clip shorter than the guard clamps to 0 rather than a negative seek.
         assert_eq!(frame_seek_timestamp(0.1, 0.1), 0.0);
         assert_eq!(frame_seek_timestamp(0.0, 0.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod person_detect_timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_past_short_clip_end_is_clamped_to_duration_not_3600() {
+        // sc-8831: a request past the end of a 5s clip must land at the clip's duration so
+        // ffmpeg -ss still pulls a frame — the old `duration.max(3600.0)` upper bound left
+        // this at 999.0 (>=3600 ceiling), which produced a generic "no frame output" failure.
+        let clamped = person_detect_source_timestamp(999.0, 5.0);
+        assert_eq!(
+            clamped, 5.0,
+            "out-of-range seek clamps to the clip duration"
+        );
+        assert!(
+            clamped < PERSON_DETECT_MAX_TIMESTAMP_SECONDS,
+            "clamp must not float up to the 3600s ceiling for a short clip"
+        );
+    }
+
+    #[test]
+    fn in_range_timestamp_passes_through_unchanged() {
+        assert_eq!(person_detect_source_timestamp(2.5, 5.0), 2.5);
+        assert_eq!(person_detect_source_timestamp(0.0, 5.0), 0.0);
+        assert_eq!(person_detect_source_timestamp(5.0, 5.0), 5.0);
+    }
+
+    #[test]
+    fn negative_timestamp_clamps_to_zero() {
+        assert_eq!(person_detect_source_timestamp(-3.0, 5.0), 0.0);
+    }
+
+    #[test]
+    fn very_long_clip_is_capped_at_the_3600s_ceiling() {
+        // The 3600s ceiling only tightens the bound for absurdly long clips.
+        assert_eq!(
+            person_detect_source_timestamp(5000.0, 7200.0),
+            PERSON_DETECT_MAX_TIMESTAMP_SECONDS
+        );
     }
 }
 
