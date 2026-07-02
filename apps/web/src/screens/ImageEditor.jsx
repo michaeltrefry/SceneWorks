@@ -750,6 +750,36 @@ export function historyRedo(history, present, limit = HISTORY_LIMIT) {
 export const canUndo = (history) => history.past.length > 0;
 export const canRedo = (history) => history.future.length > 0;
 
+// Serialize a single undo/redo step so a rapid second invocation can't race a
+// restore that is still in flight (sc-8852). Restoring is async — each changed
+// layer is decoded via `blobToImage` before the working stack is re-installed —
+// so without a guard a key-repeat Cmd-Z would run `step()` again while the first
+// restore is mid-flight, capturing the STALE working state as "present" and
+// pushing a duplicate onto the redo (`future`) branch. Both undo AND redo route
+// through here and share one `guardRef`: while a restore is in flight, any
+// further undo/redo is ignored (the finding's simplest fix — holding Cmd-Z steps
+// back predictably rather than dropping-then-jumping). The guard is set BEFORE
+// the reducer step runs and cleared in a `finally`, so a mid-restore error can't
+// wedge undo/redo forever. Returns true when a step actually ran.
+//   - guardRef:     a mutable ref-like `{ current: boolean }` shared by undo/redo.
+//   - step:         () => ({ history, restore }) — the pure reducer step, called
+//                   only once we hold the guard, capturing the live "present".
+//   - commitHistory:(nextHistory) => void — install the new history + sync flags.
+//   - restore:      async (snapshot) => void — the async snapshot re-install.
+export async function runGuardedRestore({ guardRef, step, commitHistory, restore }) {
+  if (guardRef.current) return false;
+  guardRef.current = true;
+  try {
+    const { history: next, restore: target } = step();
+    if (!target) return false;
+    commitHistory(next);
+    await restore(target);
+    return true;
+  } finally {
+    guardRef.current = false;
+  }
+}
+
 // Revoke the object URLs of a set of live layers (sc-6117). Undo snapshots hold
 // only blobs (no URLs), so the only URLs that ever need revoking are the live
 // ones, when their layer is evicted — on delete, on a session replace, and on
@@ -973,6 +1003,12 @@ export function ImageEditor() {
   // The stacks live in a ref for synchronous reads inside the commit handlers; the
   // can-undo/redo flags are mirrored into state so the toolbar buttons re-render.
   const historyRef = useRef(emptyHistory());
+  // Serializes undo/redo (sc-8852): a restore is async (it decodes changed layers
+  // via blobToImage before re-installing the stack), so a rapid second Cmd-Z would
+  // otherwise race the in-flight restore and corrupt the redo branch. Shared by
+  // both undo() and redo() via runGuardedRestore — set while restoring, cleared in
+  // a finally so a mid-restore error can't wedge history forever.
+  const isRestoringRef = useRef(false);
   const [historyFlags, setHistoryFlags] = useState({ canUndo: false, canRedo: false });
   // Live mirror of the working document for synchronous reads inside the commit
   // handlers (a checkpoint captures the pre-operation stack; restore reuses the
@@ -1217,20 +1253,28 @@ export function ImageEditor() {
 
   const undo = useCallback(async () => {
     if (aiOpRef.current || !workingRef.current) return;
-    const { history: next, restore } = historyUndo(historyRef.current, captureSnapshot());
-    if (!restore) return;
-    historyRef.current = next;
-    syncHistoryFlags();
-    await restoreSnapshot(restore);
+    await runGuardedRestore({
+      guardRef: isRestoringRef,
+      step: () => historyUndo(historyRef.current, captureSnapshot()),
+      commitHistory: (next) => {
+        historyRef.current = next;
+        syncHistoryFlags();
+      },
+      restore: restoreSnapshot,
+    });
   }, [captureSnapshot, restoreSnapshot, syncHistoryFlags]);
 
   const redo = useCallback(async () => {
     if (aiOpRef.current || !workingRef.current) return;
-    const { history: next, restore } = historyRedo(historyRef.current, captureSnapshot());
-    if (!restore) return;
-    historyRef.current = next;
-    syncHistoryFlags();
-    await restoreSnapshot(restore);
+    await runGuardedRestore({
+      guardRef: isRestoringRef,
+      step: () => historyRedo(historyRef.current, captureSnapshot()),
+      commitHistory: (next) => {
+        historyRef.current = next;
+        syncHistoryFlags();
+      },
+      restore: restoreSnapshot,
+    });
   }, [captureSnapshot, restoreSnapshot, syncHistoryFlags]);
 
   // ── Keyboard shortcuts (sc-6111) ───────────────────────────────────────────
