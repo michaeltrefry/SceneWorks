@@ -486,7 +486,7 @@ export function CharacterTest({
 // CharacterGenerationPanel, parameterized by a `mode` describing the labels, the
 // reference role, the job predicate, the prompt seed, and a mode-controller hook that
 // owns the mode-specific controls + the advanced payload it contributes.
-function CharacterGenerationPanel({
+export function CharacterGenerationPanel({
   mode,
   selectedCharacter,
   model,
@@ -540,9 +540,19 @@ function CharacterGenerationPanel({
   // Mode-specific controls (JSX) + advanced payload + readiness/labels.
   const controller = mode.useController({ activeModel, loraSelection });
 
+  // Keep the picked reference valid without clobbering the user's choice. A refetch
+  // (e.g. the panel's own upload flow via addCharacterReference) hands a fresh
+  // `approvedReferences` identity with the same contents; unconditionally snapping to
+  // [0] would undo the id we just set. Mirror ImageStudio's guard (ImageStudio.jsx):
+  // keep the current id while it's still an approved reference, and only fall back to
+  // [0] when it's absent/invalid — which also covers a genuine character switch, since
+  // the new character's references won't contain the previous id (sc-8851).
   React.useEffect(() => {
+    if (approvedReferences.some((reference) => reference.assetId === referenceAssetId)) {
+      return;
+    }
     setReferenceAssetId(approvedReferences[0]?.assetId ?? "");
-  }, [characterId, approvedReferences]);
+  }, [characterId, approvedReferences, referenceAssetId]);
   React.useEffect(() => {
     setPrompt(mode.seedPrompt(selectedCharacter));
     setStatus("");
@@ -579,8 +589,13 @@ function CharacterGenerationPanel({
     setStatus("Uploading reference…");
     const asset = await importAsset(file, { throwOnError: false });
     if (asset?.id) {
-      setReferenceAssetId(asset.id);
+      // Approve the reference first, THEN select it (sc-8851). addCharacterReference
+      // triggers a characters refetch that folds the new asset into approvedReferences;
+      // selecting only after it lands means the reference-selection guard sees a valid
+      // id and keeps it, instead of the id being set while it's still absent from
+      // approvedReferences (which the guard would immediately snap back to [0]).
       await addCharacterReference(characterId, { assetId: asset.id, approved: true, role: mode.referenceRole });
+      setReferenceAssetId(asset.id);
       setStatus("");
     } else {
       setStatus("Upload failed — try another image.");
