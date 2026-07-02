@@ -10214,3 +10214,94 @@ async fn smart_crop_and_strip_exif_rewrite_and_repoint_items() {
     assert_eq!(stripped["applied"], 1);
     assert_eq!(stripped["dataset"]["version"], 3);
 }
+
+// sc-8812 (F-010): the router-wide default body limit is the small JSON cap
+// (`MAX_JSON_BODY_BYTES`, 10 MiB). A JSON route must reject a body over that cap with
+// 413 *before* buffering/parsing it, so a runaway/malicious caller can't drive a
+// multi-GiB memory spike per request.
+#[tokio::test]
+async fn oversized_json_body_is_rejected_before_parsing() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // 11 MiB of bytes — over the 10 MiB JSON cap. Content need not be valid JSON:
+    // the `DefaultBodyLimit` layer trips first, so we never reach the parser.
+    let oversized = vec![b'a'; 11 * 1024 * 1024];
+    let (status, _headers, _body) = request_raw(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        oversized,
+        &[("content-type", "application/json")],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "JSON route must 413 a body over the small router-wide cap"
+    );
+}
+
+// sc-8812 (F-010): a JSON body *under* the small cap is still handled normally (proves
+// the tightened cap didn't shrink legitimate JSON traffic below a usable size).
+#[tokio::test]
+async fn under_cap_json_body_is_accepted() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Well under 10 MiB, but not empty — routed to the handler (400/validation, not 413).
+    let (status, _) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "definitely_not_a_real_job_type" }),
+    )
+    .await;
+
+    assert_ne!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a small JSON body must reach the handler, not be size-rejected"
+    );
+}
+
+// sc-8812 (F-010): multipart/upload routes re-attach the large per-route limit, so a
+// body far larger than the small JSON cap is still accepted. This guards against the
+// tightened router-wide default accidentally shrinking an upload route's ceiling.
+#[tokio::test]
+async fn upload_route_accepts_body_larger_than_json_cap() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Large Upload Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // 12 MiB PNG payload — over the 10 MiB JSON cap, under the 2 GiB upload cap.
+    let large_png = vec![0u8; 12 * 1024 * 1024];
+    let (status, upload) = request_multipart_upload(
+        app,
+        &format!("/api/v1/projects/{project_id}/training/uploads"),
+        "large.png",
+        "image/png",
+        &large_png,
+    )
+    .await;
+
+    assert_ne!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "upload route must accept a body larger than the JSON cap"
+    );
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "large upload should be staged successfully (got {status}: {upload})"
+    );
+}
