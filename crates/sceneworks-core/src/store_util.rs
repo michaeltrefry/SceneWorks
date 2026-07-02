@@ -74,8 +74,17 @@ fn project_locks() -> &'static [ReentrantMutex<()>] {
 }
 
 pub(crate) fn lock_project_files(project_path: &Path) -> ReentrantMutexGuard<'static, ()> {
+    lock_store_path(project_path)
+}
+
+/// Same striped process-wide lock, keyed on an arbitrary store file/dir path
+/// rather than a project dir — for stores that live outside a project (e.g. the
+/// config-dir credential file, sc-8813). Hold the guard across the whole
+/// read -> mutate -> write. Same scope caveat as [`lock_project_files`]: it
+/// serializes threads within one process, not separate OS processes.
+pub(crate) fn lock_store_path(path: &Path) -> ReentrantMutexGuard<'static, ()> {
     let mut hasher = DefaultHasher::new();
-    project_path.hash(&mut hasher);
+    path.hash(&mut hasher);
     let index = (hasher.finish() as usize) % PROJECT_LOCK_STRIPES;
     project_locks()[index].lock()
 }

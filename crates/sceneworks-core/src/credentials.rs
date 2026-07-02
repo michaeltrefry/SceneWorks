@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store_util::random_hex;
+use crate::store_util::{lock_store_path, random_hex};
 
 /// Filename of the credential store within the config dir. Shared so the rust-api
 /// (writer) and the worker (reader) never drift.
@@ -80,8 +80,16 @@ impl CredentialFileStore {
     }
 
     /// Upsert a host's credential. Returns the normalized host key.
+    ///
+    /// The whole read-modify-write is serialized under a process-wide lock keyed
+    /// on the file path, so concurrent `set`/`delete` calls (rust-api builds a
+    /// fresh store per request) can't clobber each other's entries (sc-8813).
+    /// In-process only — sufficient because the rust-api is the file's sole
+    /// writer; the worker only reads it, which the atomic rename in `save`
+    /// already keeps consistent.
     pub fn set(&self, host: &str, label: &str, scheme: &str, token: &str) -> io::Result<String> {
         let host = normalize_host(host);
+        let _guard = lock_store_path(&self.path);
         let mut map = self.load();
         map.insert(
             host.clone(),
@@ -96,8 +104,10 @@ impl CredentialFileStore {
     }
 
     /// Remove a host's credential. Returns whether anything was removed.
+    /// Serialized against concurrent `set`/`delete` like [`Self::set`] (sc-8813).
     pub fn delete(&self, host: &str) -> io::Result<bool> {
         let host = normalize_host(host);
+        let _guard = lock_store_path(&self.path);
         let mut map = self.load();
         let removed = map.remove(&host).is_some();
         if removed {
@@ -291,6 +301,112 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// sc-8813 / F-011: `set`/`delete` are read-modify-write over the whole file,
+    /// so unsynchronized concurrent calls silently drop each other's entries.
+    /// Hammer the store from many threads (fresh store instances, like the
+    /// per-request stores in rust-api) and assert no update is lost.
+    #[test]
+    fn concurrent_sets_do_not_lose_updates() {
+        use std::sync::Barrier;
+
+        const THREADS: usize = 8;
+        const HOSTS_PER_THREAD: usize = 8;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = dir.path().to_path_buf();
+        let barrier = std::sync::Arc::new(Barrier::new(THREADS));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|thread| {
+                let config_dir = config_dir.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    // Fresh store per thread, mirroring rust-api's per-request stores.
+                    let store = CredentialFileStore::new(&config_dir);
+                    barrier.wait();
+                    for index in 0..HOSTS_PER_THREAD {
+                        store
+                            .set(
+                                &format!("host-{thread}-{index}.example.com"),
+                                "",
+                                "bearer",
+                                &format!("tok-{thread}-{index}"),
+                            )
+                            .expect("set");
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread");
+        }
+
+        let map = CredentialFileStore::new(&config_dir).load();
+        assert_eq!(
+            map.len(),
+            THREADS * HOSTS_PER_THREAD,
+            "a concurrent set lost another thread's credential"
+        );
+    }
+
+    /// sc-8813 / F-011: interleave `set` (new hosts) with `delete` (seeded hosts)
+    /// and assert the final file is exactly the surviving set — no deleted host
+    /// resurrected, no newly-set host lost.
+    #[test]
+    fn concurrent_set_and_delete_do_not_lose_updates() {
+        use std::sync::Barrier;
+
+        const PAIRS: usize = 8;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = dir.path().to_path_buf();
+        let seed_store = CredentialFileStore::new(&config_dir);
+        for index in 0..PAIRS {
+            seed_store
+                .set(&format!("old-{index}.example.com"), "", "bearer", "tok")
+                .expect("seed");
+        }
+
+        let barrier = std::sync::Arc::new(Barrier::new(PAIRS * 2));
+        let mut handles = Vec::new();
+        for index in 0..PAIRS {
+            let config_dir_set = config_dir.clone();
+            let barrier_set = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let store = CredentialFileStore::new(&config_dir_set);
+                barrier_set.wait();
+                store
+                    .set(&format!("new-{index}.example.com"), "", "bearer", "tok")
+                    .expect("set");
+            }));
+            let config_dir_delete = config_dir.clone();
+            let barrier_delete = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let store = CredentialFileStore::new(&config_dir_delete);
+                barrier_delete.wait();
+                assert!(
+                    store
+                        .delete(&format!("old-{index}.example.com"))
+                        .expect("delete"),
+                    "seeded host was already gone — a concurrent write clobbered it"
+                );
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread");
+        }
+
+        let map = CredentialFileStore::new(&config_dir).load();
+        let expected: Vec<String> = (0..PAIRS)
+            .map(|index| format!("new-{index}.example.com"))
+            .collect();
+        let actual: Vec<String> = map.keys().cloned().collect();
+        assert_eq!(
+            actual, expected,
+            "set/delete interleaving lost or resurrected an entry"
+        );
     }
 
     #[test]
