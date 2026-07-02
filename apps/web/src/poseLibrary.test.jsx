@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { API_BASE_URL, setMediaTicket } from "./api.js";
 import { loadBuiltinPoses, loadPoseLibrary, poseAssetToRecord } from "./poseLibrary.js";
 
 const BUILTIN = {
@@ -14,6 +15,7 @@ function mockBuiltinFetch() {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  setMediaTicket("");
 });
 
 describe("poseLibrary", () => {
@@ -28,7 +30,9 @@ describe("poseLibrary", () => {
     const record = poseAssetToRecord({
       id: "asset_pose_1",
       displayName: "Arm Raised",
+      projectId: "project_global_poses",
       url: "/api/v1/projects/project_global_poses/files/assets/poses/asset_pose_1.png",
+      file: { path: "assets/poses/asset_pose_1.png", mimeType: "image/png" },
       tags: ["dynamic"],
       pose: { category: "dance", keypoints: [[0.4, 0.2]], hands: [[], []], face: [] },
     });
@@ -41,6 +45,46 @@ describe("poseLibrary", () => {
     });
     expect(record.keypoints).toEqual([[0.4, 0.2]]);
     expect(record.previewUrl).toContain("/files/assets/poses/");
+  });
+
+  // sc-8859 (F-057): the preview must be built through the shared assetUrl helper so
+  // it carries the API_BASE_URL prefix — bare `asset.url` 404s under Vite dev / any
+  // split-origin (VITE_API_BASE_URL) deployment, and the old raw-path fallback omitted
+  // the /api/v1/projects/:id/files/ route entirely.
+  it("builds previewUrl through assetUrl (API_BASE_URL-prefixed, not a bare relative path)", () => {
+    const record = poseAssetToRecord({
+      id: "asset_pose_1",
+      displayName: "Arm Raised",
+      projectId: "project_global_poses",
+      url: "/api/v1/projects/project_global_poses/files/assets/poses/asset_pose_1.png",
+      file: { path: "assets/poses/asset_pose_1.png", mimeType: "image/png" },
+      pose: { category: "dance", keypoints: [[0.4, 0.2]] },
+    });
+    expect(record.previewUrl).toBe(
+      `${API_BASE_URL}/api/v1/projects/project_global_poses/files/assets/poses/asset_pose_1.png`,
+    );
+    // API_BASE_URL is non-empty under the test/dev config, so the URL is absolute
+    // rather than a bare relative path that would resolve against the dev origin.
+    expect(API_BASE_URL).not.toBe("");
+    expect(record.previewUrl.startsWith(API_BASE_URL)).toBe(true);
+  });
+
+  // sc-8859: in remote-auth mode assetUrl (sc-8810) appends a short-lived media
+  // ticket so the element-driven <img> preview authenticates. The pose preview must
+  // inherit that ticket by riding the shared helper.
+  it("carries the media ticket in remote-auth mode (sc-8810)", () => {
+    setMediaTicket("t0ken");
+    const record = poseAssetToRecord({
+      id: "asset_pose_1",
+      displayName: "Arm Raised",
+      projectId: "project_global_poses",
+      url: "/api/v1/projects/project_global_poses/files/assets/poses/asset_pose_1.png",
+      file: { path: "assets/poses/asset_pose_1.png", mimeType: "image/png" },
+      pose: { category: "dance", keypoints: [[0.4, 0.2]] },
+    });
+    expect(record.previewUrl).toBe(
+      `${API_BASE_URL}/api/v1/projects/project_global_poses/files/assets/poses/asset_pose_1.png?ticket=t0ken`,
+    );
   });
 
   it("merges built-in + injected user poses (categories + byId)", async () => {
