@@ -7390,6 +7390,74 @@ fn candle_strict_control_trait_routes_each_provider() {
     assert_eq!(qwen.engine_id(), QWEN_CONTROL_ENGINE_ID);
     assert_eq!(qwen.engine_label(), QWEN_CONTROL_ENGINE);
     assert_eq!(qwen.stream_tag(), "qwen_control");
+
+    // Kolors control (sc-8823) routes via the `KolorsStrictControl` provider — pose-only, real CFG +
+    // curated sampler/scheduler carried through to the request.
+    let kolors = KolorsStrictControl {
+        kolors_base: dummy.clone(),
+        controlnet: dummy.clone(),
+        prompt: "p".to_owned(),
+        negative: "n".to_owned(),
+        width: 512,
+        height: 512,
+        steps: 50,
+        guidance: 5.0,
+        control_scale: 1.0,
+        sampler: None,
+        scheduler: None,
+    };
+    assert_eq!(kolors.engine_id(), KOLORS_CONTROL_ENGINE_ID);
+    assert_eq!(kolors.engine_label(), KOLORS_CONTROL_ENGINE);
+    assert_eq!(kolors.stream_tag(), "kolors_control");
+}
+
+/// sc-8823: the candle Kolors strict-control lane is POSE-ONLY. Its `kolors_control` catalog row accepts
+/// `Pose` but REJECTS `canny` / `depth` (the Kolors-ControlNet-Pose branch is a DWPose-skeleton
+/// ControlNet, not an input-agnostic Fun-Union VACE engine). This is the gate that turns a
+/// `controlMode = canny | depth` job into a loud `InvalidPayload` instead of a silently-wrong pose render.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_kolors_control_is_pose_only() {
+    // The engine id resolves to a catalog row whose supported_kinds is exactly {Pose}.
+    let row = strict_control_engine(KOLORS_CONTROL_ENGINE_ID)
+        .unwrap_or_else(|| panic!("no catalog row for {KOLORS_CONTROL_ENGINE_ID}"));
+    assert_eq!(row.supported_kinds, &[ControlKind::Pose]);
+    assert_eq!(KOLORS_CONTROL_ENGINE_ID, "kolors_control");
+
+    // Pose is accepted; canny + depth are rejected with a clear InvalidPayload.
+    assert!(validate_control_kind(KOLORS_CONTROL_ENGINE_ID, &ControlKind::Pose).is_ok());
+    for kind in [ControlKind::Canny, ControlKind::Depth] {
+        let err = validate_control_kind(KOLORS_CONTROL_ENGINE_ID, &kind)
+            .expect_err("Kolors is pose-only; canny/depth must be rejected");
+        assert!(
+            matches!(err, WorkerError::InvalidPayload(_)),
+            "{kind:?}: {err}"
+        );
+    }
+
+    // End-to-end request parse: a Kolors control job with `controlMode = canny` (or depth) resolves the
+    // Canny/Depth kind, which the pose-only row then rejects — the exact silent-wrong-conditioning path
+    // sc-8823 closes.
+    for mode in ["canny", "depth"] {
+        let req = request(json!({
+            "projectId": "p", "model": "kolors",
+            "advanced": { "poses": [{ "keypoints": [[0.5, 0.5]] }], "controlMode": mode }
+        }));
+        let kind = requested_control_kind(&req).expect("known controlMode parses");
+        assert!(
+            validate_control_kind(KOLORS_CONTROL_ENGINE_ID, &kind).is_err(),
+            "controlMode={mode} must be rejected on the pose-only Kolors lane"
+        );
+    }
+
+    // A pose job (no controlMode) still resolves Pose and passes validation — byte-preserved.
+    let pose_req = request(json!({
+        "projectId": "p", "model": "kolors",
+        "advanced": { "poses": [{ "keypoints": [[0.5, 0.5]] }] }
+    }));
+    let pose_kind = requested_control_kind(&pose_req).expect("default pose");
+    assert_eq!(pose_kind, ControlKind::Pose);
+    assert!(validate_control_kind(KOLORS_CONTROL_ENGINE_ID, &pose_kind).is_ok());
 }
 
 /// `preprocess_control_entry` produces the RIGHT control map per kind off-Mac (the shared driver the

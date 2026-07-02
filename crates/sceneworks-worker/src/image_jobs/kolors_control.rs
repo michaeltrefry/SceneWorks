@@ -1,9 +1,17 @@
-// Candle (Windows/CUDA) Kolors ControlNet (strict pose) route (sc-5489, epic 5480) — `kolors` +
-// `advanced.poses` off-Mac via `candle_gen_kolors::KolorsControl`. The Kolors sibling of the candle Qwen
-// strict-pose path (qwen_control.rs): one image per pose, each conditioned on a full DWPose skeleton
-// (rendered cross-platform by `openpose_skeleton::draw_wholebody`) fed to the
+// Candle (Windows/CUDA) Kolors ControlNet (strict pose) route (sc-5489, epic 5480; sc-8823 driver route)
+// — `kolors` + `advanced.poses` off-Mac via `candle_gen_kolors::KolorsControl`. The Kolors sibling of the
+// candle Qwen strict-control path (qwen_control.rs): one image per pose, each conditioned on a full DWPose
+// skeleton (rendered cross-platform by `openpose_skeleton::draw_wholebody`) fed to the
 // `Kwai-Kolors/Kolors-ControlNet-Pose` branch, whose residuals are added into the vendored SDXL UNet the
 // Kolors IP-Adapter lane (kolors_ipadapter.rs) already stands on.
+//
+// **Pose-only, routed through the shared driver (sc-8823).** Like the qwen/zimage/flux2/flux1 candle
+// lanes, this lane implements [`CandleStrictControl`] and hands off to [`run_candle_strict_control`], so
+// it inherits the SAME `advanced.controlMode` validation against [`STRICT_CONTROL_ENGINES`]. The Kolors
+// `kolors_control` row lists `{Pose}` ONLY (the Kolors-ControlNet-Pose branch is a DWPose-skeleton
+// ControlNet, not an input-agnostic Fun-Union VACE engine), so a `controlMode = canny | depth` job is
+// REJECTED with a clear error instead of silently rendering a pose skeleton (the old bespoke scaffold
+// never validated the mode). The pose path (no `controlMode`) is byte-preserved.
 //
 // **Candle-only.** macOS keeps the MLX Kolors ControlNet path; the candle `KolorsControl` is a bespoke
 // provider, so this whole file is gated to the Windows/CUDA candle build (the `include!` in image_jobs.rs
@@ -187,11 +195,92 @@ fn kolors_control_raw_settings(
     raw
 }
 
+/// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against —
+/// the `kolors_control` row, whose `supported_kinds` is `{Pose}` ONLY (sc-8823). The Kolors lane rides the
+/// `Kwai-Kolors/Kolors-ControlNet-Pose` DWPose-skeleton branch (NOT a Fun-Union input-agnostic VACE
+/// engine), so a `controlMode = canny | depth` request is REJECTED by the shared driver rather than
+/// silently rendered as a pose skeleton.
+const KOLORS_CONTROL_ENGINE_ID: &str = "kolors_control";
+
+/// The per-lane half of the candle Kolors strict-control [`CandleStrictControl`] driver (sc-8304 /
+/// sc-8823): the resolved base + Kolors-ControlNet-Pose weight paths + the request numerics (Kolors runs
+/// true CFG, so it carries a negative prompt + guidance, plus the curated unified-sampler selection). It
+/// is moved onto the blocking thread, loaded once, and drives every pose. `KolorsControl::generate` takes
+/// `&self`, so `generate_one` borrows the model immutably.
+struct KolorsStrictControl {
+    kolors_base: PathBuf,
+    controlnet: PathBuf,
+    prompt: String,
+    negative: String,
+    width: u32,
+    height: u32,
+    steps: u32,
+    guidance: f32,
+    control_scale: f32,
+    /// Curated unified-sampler selection (epic 7114). Already normalized against the curated menu in the
+    /// async preamble; `None` keeps the native leading-Euler default byte-exact.
+    sampler: Option<String>,
+    scheduler: Option<String>,
+}
+
+impl CandleStrictControl for KolorsStrictControl {
+    type Model = KolorsControl;
+
+    fn engine_id(&self) -> &'static str {
+        KOLORS_CONTROL_ENGINE_ID
+    }
+
+    fn engine_label(&self) -> &'static str {
+        KOLORS_CONTROL_ENGINE
+    }
+
+    fn stream_tag(&self) -> &'static str {
+        "kolors_control"
+    }
+
+    fn load(&self) -> WorkerResult<Self::Model> {
+        let paths = KolorsControlPaths {
+            kolors_base: self.kolors_base.clone(),
+            controlnet: self.controlnet.clone(),
+        };
+        KolorsControl::load(&paths).map_err(|error| {
+            WorkerError::Engine(format!("Kolors strict-pose control load failed: {error}"))
+        })
+    }
+
+    fn generate_one(
+        &self,
+        model: &Self::Model,
+        control: &Image,
+        seed: u64,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Image> {
+        let req = KolorsControlRequest {
+            prompt: self.prompt.clone(),
+            negative: self.negative.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            guidance: self.guidance,
+            control_scale: self.control_scale,
+            seed,
+            sampler: self.sampler.clone(),
+            scheduler: self.scheduler.clone(),
+            cancel: cancel.clone(),
+        };
+        model.generate(&req, control, on_progress).map_err(|error| {
+            WorkerError::Engine(format!("Kolors strict-pose generation failed: {error}"))
+        })
+    }
+}
+
 /// Real candle Kolors strict-pose generation: one image per pose, each conditioned on a full DWPose
-/// skeleton. The provider loads once on the blocking thread; each pose renders its skeleton + generates.
-/// `generate` takes the per-job `CancelFlag` + a `Progress` callback (per-step streaming + mid-denoise
-/// cancel), the same contract as the IP-Adapter lanes. (`KolorsControl::generate` takes `&self` — no IP
-/// context to set — so the per-item closure does not need `&mut`.)
+/// skeleton. Resolves the Kolors base + Kolors-ControlNet-Pose weights, then hands a [`KolorsStrictControl`]
+/// to the shared [`run_candle_strict_control`] driver (validation against the `kolors_control` pose-only
+/// `supported_kinds`, per-pose preprocessing, identity-likeness scoring, streaming). A `controlMode =
+/// canny | depth` request is REJECTED by the driver (Kolors is pose-only) instead of silently rendering a
+/// pose skeleton (sc-8823). The pose path is byte-preserved.
 async fn generate_candle_kolors_control_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -246,128 +335,33 @@ async fn generate_candle_kolors_control_stream(
         .unwrap_or(KOLORS_CONTROL_DEFAULT_REPO)
         .to_owned();
 
-    let poses = parse_poses(request);
-    let pose_count = poses.len();
+    let pose_count = pose_entries(request).len();
     let raw_settings =
         kolors_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
 
-    let (width, height) = (request.width, request.height);
-    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-    // One shared seed across the pose set (the MLX `_generate_pose_set` convention).
-    let seed = resolve_seed(request, 0);
-    let prompt = request.prompt.clone();
-    let negative = request.negative_prompt.clone();
-
-    // Identity-likeness scoring (epic 4406, sc-4410): when this candle Kolors strict-pose set carries a
-    // character identity `referenceAssetId`, score every finished pose against that source identity face
-    // through the SHARED seam. Source decode + face-stack staging are non-fatal; the `!Send` scorer is
-    // built ONCE in the load closure (source embedded once, reused across all poses).
-    let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
+    let provider = KolorsStrictControl {
+        kolors_base,
+        controlnet,
+        prompt: request.prompt.clone(),
+        negative: request.negative_prompt.clone(),
+        width: request.width,
+        height: request.height,
+        steps,
+        guidance,
+        control_scale,
+        sampler,
+        scheduler,
     };
-    let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
 
-    let (cancel, rx, blocking) = start_gen_stream(
-        job.id.clone(),
-        "kolors_control",
-        0,
-        move || {
-            let paths = KolorsControlPaths {
-                kolors_base,
-                controlnet,
-            };
-            let model = KolorsControl::load(&paths).map_err(|error| {
-                WorkerError::Engine(format!("Kolors strict-pose control load failed: {error}"))
-            })?;
-            let scorer = match (&face_stack_dir, &likeness_source) {
-                (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
-                }
-                _ => None,
-            };
-            Ok((model, poses, scorer))
-        },
-        move |(model, poses, scorer), tx, cancel| {
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let skeleton = crate::openpose_skeleton::draw_wholebody(
-                    width,
-                    height,
-                    &pose.keypoints,
-                    pose.hands.as_deref(),
-                    pose.face.as_deref(),
-                    stickwidth,
-                );
-                let control = Image {
-                    width,
-                    height,
-                    pixels: skeleton.into_raw(),
-                };
-                let req = KolorsControlRequest {
-                    prompt: prompt.clone(),
-                    negative: negative.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    control_scale,
-                    seed: seed as u64,
-                    sampler: sampler.clone(),
-                    scheduler: scheduler.clone(),
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &control, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Kolors strict-pose generation failed: {error}"
-                        )));
-                    }
-                };
-                // Score this finished pose against the cached source embedding (sc-4410). FINAL image
-                // (no face-restore pass on this lane). Clone paid ONLY when a scorer exists; a full-body
-                // / turned pose with no reliable frontal face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
-            })
-        },
-    );
-
-    consume_gen_events(
+    run_candle_strict_control(
         api,
         settings,
         job,
         plan,
         project_path,
         backend,
-        KOLORS_CONTROL_ENGINE,
-        &raw_settings,
-        pose_count,
-        rx,
-        cancel,
-        blocking,
+        provider,
+        raw_settings,
         asset_writes,
     )
     .await

@@ -42,6 +42,11 @@ struct StrictControlEngine {
 /// - `z_image_turbo_control` — `{Pose, Canny, Depth}`
 /// - `z_image_control` — `{Pose, Canny, Depth}` (base, full-CFG; alibaba-pai Z-Image-Fun-Union; sc-8251)
 /// - `qwen_image_control` — `{Pose, Canny, Depth}` (alibaba-pai 2512-Fun-Union; sc-8267 source swap / sc-8250 exposure)
+/// - `kolors_control` — `{Pose}` ONLY (sc-8823): the Kolors candle strict-control lane rides the
+///   `Kwai-Kolors/Kolors-ControlNet-Pose` branch, a pose-only ControlNet (NOT a Fun-Union input-agnostic
+///   VACE engine). It is listed here so the candle lane can route through the SHARED
+///   [`run_candle_strict_control`] driver and REJECT a `controlMode = canny | depth` request instead of
+///   silently rendering a pose skeleton anyway.
 ///
 /// The SDXL tile detail-upscale path (`ControlKind::Other("tile")`, `image_jobs/detail.rs`) is OUTSIDE
 /// this family and is deliberately NOT listed.
@@ -73,6 +78,17 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
         engine_id: "qwen_image_control",
         repo: "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union",
         supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
+    },
+    StrictControlEngine {
+        // Pose-ONLY (sc-8823). The Kolors candle strict-control lane rides the
+        // `Kwai-Kolors/Kolors-ControlNet-Pose` branch, a DWPose-skeleton ControlNet — unlike the
+        // input-agnostic Fun-Union VACE engines above, it has no canny/depth conditioning. Listed here so
+        // the candle lane routes through `run_candle_strict_control` and a `controlMode = canny | depth`
+        // request is REJECTED (not silently rendered as pose). Off-Mac candle-only lane; the candle lane
+        // keeps its own default-repo constant (`KOLORS_CONTROL_REPO`), so `repo` here is informational.
+        engine_id: "kolors_control",
+        repo: "Kwai-Kolors/Kolors-ControlNet-Pose",
+        supported_kinds: &[ControlKind::Pose],
     },
 ];
 
