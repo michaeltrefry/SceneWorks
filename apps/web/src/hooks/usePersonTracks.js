@@ -6,7 +6,7 @@ import { apiFetch, isAbortError } from "../api.js";
 // (loaded by the project-load effect, not the bulk refreshData), so the hook just
 // takes the shared concerns it needs; detection/track jobs surface live via the SSE
 // job stream (the create endpoints publish job.updated), so no post-create refetch.
-export function usePersonTracks({ token, activeProject, setError, requestedGpu, setActiveView }) {
+export function usePersonTracks({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView }) {
   const [personTracks, setPersonTracks] = useState([]);
 
   // sc-4194: every action is wrapped in useCallback so its identity is stable
@@ -18,6 +18,13 @@ export function usePersonTracks({ token, activeProject, setError, requestedGpu, 
       }
       try {
         const items = await apiFetch(`/api/v1/projects/${projectId}/person-tracks`, token, { signal });
+        // sc-8858: an SSE-triggered refresh for the just-active project can resolve
+        // after the user switches away; committing then would clobber the new
+        // project's tracks with the old one's. Drop the stale response — mirrors
+        // refreshTimelines' guard (useTimelines.js).
+        if (activeProjectRef?.current?.id && activeProjectRef.current.id !== projectId) {
+          return;
+        }
         setPersonTracks(items);
         setError("");
       } catch (err) {
@@ -25,7 +32,7 @@ export function usePersonTracks({ token, activeProject, setError, requestedGpu, 
         setError(err.message);
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, activeProjectRef, setError],
   );
 
   const createPersonDetectionJob = useCallback(

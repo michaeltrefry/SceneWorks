@@ -10,7 +10,7 @@ import { apiFetch, isAbortError } from "../api.js";
 // sc-4194: every returned action is wrapped in useCallback so its identity is stable
 // across App's SSE-driven re-renders, which lets appContextValue memoize instead of
 // rebuilding (and changing identity) on every job.updated tick.
-export function useCharacters({ token, activeProject, setError, requestedGpu, setActiveView }) {
+export function useCharacters({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView }) {
   const [characters, setCharacters] = useState([]);
 
   const refreshCharacters = useCallback(
@@ -20,6 +20,13 @@ export function useCharacters({ token, activeProject, setError, requestedGpu, se
       }
       try {
         const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token, { signal });
+        // sc-8858: an SSE-triggered refresh for the just-active project can resolve
+        // after the user switches away; committing then would clobber the new
+        // project's roster with the old one's. Drop the stale response — mirrors
+        // refreshTimelines' guard (useTimelines.js).
+        if (activeProjectRef?.current?.id && activeProjectRef.current.id !== projectId) {
+          return;
+        }
         setCharacters(items);
         setError("");
       } catch (err) {
@@ -27,7 +34,7 @@ export function useCharacters({ token, activeProject, setError, requestedGpu, se
         setError(err.message);
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, activeProjectRef, setError],
   );
 
   const withCharacterApi = useCallback(

@@ -696,7 +696,7 @@ export function App() {
     updateCharacterLora,
     detachCharacterLora,
     createCharacterTestJob,
-  } = useCharacters({ token, activeProject, setError, requestedGpu, setActiveView });
+  } = useCharacters({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView });
 
   const {
     presets,
@@ -765,6 +765,7 @@ export function App() {
   } = useModelsAndLoras({
     token,
     activeProject,
+    activeProjectRef,
     setError,
     setJobs,
     setActiveView,
@@ -779,7 +780,7 @@ export function App() {
     createPersonDetectionJob,
     createPersonTrackJob,
     saveTrackCorrections,
-  } = usePersonTracks({ token, activeProject, setError, requestedGpu, setActiveView });
+  } = usePersonTracks({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView });
 
   const {
     timelines,
@@ -1454,6 +1455,13 @@ export function App() {
     }
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token, { signal });
+      // sc-8858: an SSE-triggered refresh for the just-active project can resolve
+      // after the user switches away; committing then would clobber the new
+      // project's assets with the old one's. Drop the stale response — mirrors
+      // refreshTimelines' guard (useTimelines.js).
+      if (activeProjectRef.current?.id && activeProjectRef.current.id !== projectId) {
+        return;
+      }
       setAssets(items);
       const defaultAsset = items.find((asset) => !asset.status?.trashed && !asset.status?.rejected) ?? items[0] ?? null;
       setSelectedAssetId((current) => current ?? defaultAsset?.id ?? null);

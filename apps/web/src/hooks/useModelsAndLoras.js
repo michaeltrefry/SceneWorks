@@ -23,6 +23,7 @@ function uploadLimitLabel(bytes) {
 export function useModelsAndLoras({
   token,
   activeProject,
+  activeProjectRef,
   setError,
   setJobs,
   setActiveView,
@@ -39,6 +40,14 @@ export function useModelsAndLoras({
       try {
         const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
         const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
+        // sc-8858: an SSE-triggered refresh for a specific project can resolve after
+        // the user switches away; committing then would clobber the new project's
+        // LoRA overlay with the old one's. Drop the stale response — mirrors
+        // refreshTimelines' guard (useTimelines.js). Only project-scoped refreshes
+        // are guarded; a global refresh (projectId undefined) still commits.
+        if (projectId && activeProjectRef?.current?.id && activeProjectRef.current.id !== projectId) {
+          return;
+        }
         setLoras(items);
         setError("");
       } catch (err) {
@@ -46,7 +55,7 @@ export function useModelsAndLoras({
         setError(err.message);
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, activeProjectRef, setError],
   );
 
   const deleteModel = useCallback(
